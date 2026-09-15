@@ -33,13 +33,6 @@
 > 如需桌面阅读器，请访问原项目。感谢原作者 [GuangChen2333](https://github.com/GuangChen2333) 与
 > [Untitled-Story](https://github.com/Untitled-Story) 组织。
 
-> [!CAUTION]
-> **本项目目前处于初期开发阶段** —— 接口、配置项与故事格式均可能随时变动，
-> **不保证大部分功能的可用性与稳定性**。核心导出链路已在 Windows（核显）与
-> Linux（NVIDIA）上验证；其它组合请以 `/api/v1/health` 里的 WebGL renderer
-> 与导出日志中的编码器为准。
-> 使用中遇到问题欢迎提交 [Issue](https://github.com/yonglanws/MySekaiStoryteller-API/issues)。
-
 ## 项目简介
 
 接收 `*.sekai-story.json` 故事剧本，用 Live2D（Project SEKAI 风格）渲染并导出为 MP4 视频，
