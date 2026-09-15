@@ -7,7 +7,7 @@ Type=simple
 User=YOUR_USER
 Group=YOUR_GROUP
 WorkingDirectory=/opt/MySekaiStoryteller-API
-# 编码器：auto 自动探测 nvenc/amf/qsv（NVIDIA 服务器推荐 auto 或 nvenc）
+# 编码器：auto 自动探测 nvidia/amd/intel（h264_nvenc / h264_amf / h264_qsv），失败回退 libx264
 Environment=MSS_FFMPEG_ENCODER=auto
 # 渲染工作进程数（每 worker 约 300-500MB 内存）
 Environment=MSS_WORKERS=2

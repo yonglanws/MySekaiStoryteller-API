@@ -1,8 +1,19 @@
 # MySekaiStoryteller-API 纯 API 渲染宿主 — 部署指南
 
-本项目已从 Electron 桌面应用重构为**无头纯 API 渲染框架**：Live2D 渲染跑在无头 Chrome
-（Playwright 驱动）里，Node 宿主提供 HTTP API、静态资源托管与 ffmpeg 编码。无需桌面环境、
-无需 Xorg/Xvfb，Linux 服务器 + NVIDIA 驱动即可获得硬件加速渲染与 NVENC 编码。
+本项目已从 Electron 桌面应用重构为**无头纯 API 渲染框架**：Live2D 渲染跑在无头
+Chrome / Edge（Playwright 驱动）里，Node 宿主提供 HTTP API、静态资源托管与
+ffmpeg 编码。Windows / Linux / macOS 都可以部署；Linux 服务器不需要桌面环境、
+不需要 Xorg / Xvfb。
+
+硬件加速分两条独立路径（渲染 GPU ≠ 编码 GPU）：
+
+| 路径       | 组件                             | 成功标志                                                     | 失败时                                      |
+| ---------- | -------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| WebGL 渲染 | 无头 Chrome / Edge               | `GET /api/v1/health` 的 `webglRenderers[].renderer` 含真实 GPU 名 | `SwiftShader` / `llvmpipe`，导出慢 5–10 倍 |
+| 视频编码   | ffmpeg                           | 导出日志出现 `using encoder: h264_nvenc` / `h264_amf` / `h264_qsv` | 自动回退 `libx264`                          |
+
+`health` 里的 `host.ffmpegEncoder` 是配置值（`auto` / `nvidia` / `amd` / `intel` /
+`libx264`），不是 ffmpeg 实际选中的编码器。
 
 ## 架构
 
@@ -27,19 +38,45 @@ AstrBot 插件（[astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plug
 | Node.js ≥ 20             | 推荐 22 LTS                                                                                                                                       |
 | Chrome / Edge / Chromium | 渲染工作进程。自动按 `render.browserChannels` 顺序探测（默认 msedge → chrome → chromium）；无系统浏览器时先执行 `npx playwright install chromium` |
 | ffmpeg                   | 编码器。优先 `MSS_FFMPEG_PATH`，其次 npm 包 `ffmpeg-static`（安装时自动下载），最后 PATH                                                          |
-| NVIDIA 驱动（服务器）    | `nvidia-smi` 可用即可，**不需要 Xorg / Xvfb / 桌面环境**                                                                                          |
+| GPU 驱动（可选）         | 有独显 / 核显时安装对应驱动即可。Linux NVIDIA 只需 `nvidia-smi` 可用，**不需要 Xorg / Xvfb / 桌面**                                               |
+
+无独立 GPU 也能跑：WebGL 走核显或软件渲染，编码设 `video.encoder: libx264`。
+
+不要用 Docker 跑渲染宿主——无头 Chrome 的 GPU 透传收益差，排障更麻烦。
+
+## 按平台
+
+| 平台    | 浏览器                                        | WebGL                                                        | 编码（`video.encoder`，默认 `auto`）                         |
+| ------- | --------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| Windows | 系统 Edge（默认探测顺序第一项）               | 独显 / 核显通常开箱即用                                      | NVIDIA→`h264_nvenc`，AMD→`h264_amf`，Intel→`h264_qsv`        |
+| Linux   | 系统 Chrome / Chromium；没有再 `playwright install` | 无桌面也可以。NVIDIA **无 X** 时不要用 `--use-angle=gl`（会去开默认 X，失败掉 SwiftShader），改为 `linuxGpuAngle: false` 且 `extraChromeArgs: "--use-angle=vulkan"` | 同上；ffmpeg 需带对应硬件编码器（`ffmpeg-static` 未必带 NVENC/AMF/QSV，生产建议系统 ffmpeg） |
+| macOS   | 系统 Chrome / Edge                            | 走 Apple GPU / AMD 即可                                      | 当前不探测 VideoToolbox，`auto` 会落到 `libx264`             |
+
+`auto` 的探测顺序是 NVIDIA → AMD → Intel，全部失败回退 CPU。取值与配置字段对应：
+
+| `video.encoder` | ffmpeg 编码器 |
+| --------------- | ------------- |
+| `auto`          | 按上表探测    |
+| `nvidia`        | `h264_nvenc`  |
+| `amd`           | `h264_amf`    |
+| `intel`         | `h264_qsv`    |
+| `libx264` / `cpu` | `libx264`   |
+
+配置里写 `nvenc` **不会**被识别成 NVIDIA 编码器。
 
 ## 构建与启动
 
 ```bash
 git clone <repo> && cd MySekaiStoryteller-API
 npm ci
-npx playwright install chromium   # 服务器上没有 Edge/Chrome 时需要
+npx playwright install chromium   # 没有系统 Edge/Chrome 时需要
 cp config.example.yaml config.yaml
-vim config.yaml                   # 至少看一下 server/video/render 节
+# 编辑 config.yaml：至少看 server / video / render 节
 npm run build                     # typecheck + vite(webrenderer) + tsc(host)
-npm start                         # node out-host/host/main.js
+npm start                         # node out-host/host/main.js，工作目录必须是仓库根
 ```
+
+Windows 没有 `cp` 时用资源管理器复制，或 `copy config.example.yaml config.yaml`。
 
 ### 资源准备
 
@@ -52,16 +89,16 @@ npm start                         # node out-host/host/main.js
 所有配置集中在仓库根的 `config.yaml`（从 `config.example.yaml` 复制，每个字段都有中文注释）。
 **`config.yaml` 不入库**，升级代码不会覆盖你的配置。
 
-| 节       | 内容                                                                                |
-| -------- | ----------------------------------------------------------------------------------- |
-| `server` | 端口、监听地址                                                                      |
-| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto/nvenc/amf/intel/libx264） |
-| `render` | worker 数、页面回收周期、浏览器探测顺序、附加 Chrome 参数、Linux GPU 开关           |
-| `paths`  | 输出目录（apifile）、资源根（resources）、webrenderer 产物目录                      |
-| `tts`    | GPT-SoVITS 地址、启停、全局/角色参考音频与权重                                      |
-| `bgm`    | 启停、BGM 路径（相对资源根，如 `audio/bgm/bg1.mp3`）、音量                          |
+| 节       | 内容                                                                                         |
+| -------- | -------------------------------------------------------------------------------------------- |
+| `server` | 端口、监听地址                                                                               |
+| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto / nvidia / amd / intel / libx264） |
+| `render` | worker 数、页面回收周期、浏览器探测顺序、附加 Chrome 参数、Linux ANGLE 开关                  |
+| `paths`  | 输出目录（apifile）、资源根（resources）、webrenderer 产物目录                               |
+| `tts`    | GPT-SoVITS 地址、启停、全局/角色参考音频与权重                                               |
+| `bgm`    | 启停、BGM 路径（相对资源根，如 `audio/bgm/bg1.mp3`）、音量                                   |
 
-环境变量可覆盖同名配置（适合 systemd/容器注入），见下表。
+环境变量可覆盖同名配置（适合 systemd / 任务计划 / launchd 注入），见下表。
 
 ### 环境变量
 
@@ -69,7 +106,7 @@ npm start                         # node out-host/host/main.js
 | --------------------------------------------------------------------------------------------- | ----------------------------- | --------------------------------------- |
 | `MSS_PORT` / `MSS_HOST`                                                                       | `server.port` / `server.host` | 监听                                    |
 | `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                    | `video.*`                     | 输出参数                                |
-| `MSS_FFMPEG_ENCODER`                                                                          | `video.encoder`               | auto/nvenc/amf/intel/libx264            |
+| `MSS_FFMPEG_ENCODER`                                                                          | `video.encoder`               | auto / nvidia / amd / intel / libx264   |
 | `MSS_WORKERS` / `MSS_WORKER_RECYCLE_EXPORTS`                                                  | `render.*`                    | 渲染池                                  |
 | `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS` / `MSS_LINUX_GPU_ANGLE` | `render.*`                    | 浏览器                                  |
 | `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                | `paths.*`                     | 路径                                    |
@@ -88,14 +125,14 @@ curl http://127.0.0.1:9881/api/v1/health
 {
   "renderPool": {
     "readyWorkers": 1,
-    "webglRenderers": [{ "workerId": "w1", "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX ...)" }]
+    "webglRenderers": [{ "workerId": "w1", "renderer": "ANGLE (NVIDIA, Vulkan 1.4.312 (NVIDIA ...), NVIDIA)" }]
   }
 }
 ```
 
-**`renderer` 必须是真实 GPU**（如 `ANGLE (NVIDIA ...)`）。若出现 `SwiftShader` / `llvmpipe`
-字样说明 WebGL 落到了软件渲染，导出会慢 5-10 倍——此时调整浏览器启动参数（见下方
-`MSS_CHROME_ARGS`）。
+**`renderer` 必须是真实 GPU**（NVIDIA / AMD / Intel / Apple）。若出现 `SwiftShader` /
+`llvmpipe` 字样说明 WebGL 落到了软件渲染——此时调整浏览器启动参数（见下方
+「WebGL 硬件加速」）。
 
 ## 端到端测试
 
@@ -107,7 +144,11 @@ node scripts/test-parallel.mjs 2   # 双任务并发导出验证
 E2E 默认使用 `resources/stories/multi-character-demo.sekai-story.json`（随资源包提供，
 见上方「资源准备」），并会把故事中缺失的模型变体自动替换为本机实际存在的资源。
 
-## systemd 部署（Linux 裸机 + NVIDIA）
+## 常驻运行
+
+工作目录必须是仓库根（配置、资源、`out-host/` 都相对仓库根解析）。
+
+### Linux：systemd
 
 `deploy/mysekai-host.service`：
 
@@ -131,31 +172,76 @@ WantedBy=multi-user.target
 ```
 
 注意与旧版 Electron 部署的差异：**不再需要** ExecStartPre 启动 Xorg、不再需要
-`DISPLAY` / `__GLX_VENDOR_LIBRARY_NAME` 等环境变量。
+`DISPLAY` / `__GLX_VENDOR_LIBRARY_NAME` 等环境变量。NVIDIA 无头机器请在
+`config.yaml` 里关 `linuxGpuAngle` 并加 `--use-angle=vulkan`（见下节），不要依赖
+默认的 `--use-angle=gl`。
 
-### NVENC 验证三步
+### Windows
 
-```bash
-# 1. ffmpeg 有 nvenc 编码器
-ffmpeg -hide_banner -encoders | grep nvenc
-
-# 2. health 返回的 WebGL renderer 是 NVIDIA（非 SwiftShader）
-curl -s http://127.0.0.1:9881/api/v1/health | grep -o '"renderer":"[^"]*"'
-
-# 3. 导出期间 GPU 在跑
-nvidia-smi dmon -s um      # sm/mem 占用应随导出波动；日志可见 "using encoder: h264_nvenc"
-```
-
-### 无 GPU WebGL 时的参数调优
-
-若 health 显示 SwiftShader，按顺序尝试（写进 config.yaml 的
-`render.extraChromeArgs`，或用 `MSS_CHROME_ARGS` 注入）：
+用任务计划程序（开机启动、登录与否均可）或 [NSSM](https://nssm.cc/) 跑：
 
 ```text
---use-angle=gl            # 方案 A（Linux NVIDIA 常用）
---use-angle=vulkan        # 方案 B（较新驱动）
+程序: node
+参数: out-host/host/main.js
+起始于: <仓库根>
+```
+
+也可用 `npm start`。停宿主后 9881 端口偶发残留僵尸 node：`netstat -ano | findstr 9881`
+找到 PID 后 `taskkill /PID <pid> /F`。
+
+### macOS
+
+launchd plist、tmux / screen，或前台 `npm start` 均可。编码目前走 CPU。
+
+### 升级代码
+
+```bash
+git pull
+# 仅当 package-lock.json 有变时需要
+npm ci
+npm run build
+# 然后重启对应的 systemd / NSSM / launchd / 前台进程
+```
+
+`config.yaml` 与 `resources/` 不入库。升级后 `diff config.yaml config.example.yaml`
+看有没有新增字段要补。
+
+## WebGL 硬件加速
+
+若 health 显示 SwiftShader / llvmpipe，按环境改 `render.extraChromeArgs`
+（或 `MSS_CHROME_ARGS`），一次只改一项：
+
+```text
+--use-angle=vulkan        # Linux + NVIDIA 无桌面 / 无 X（推荐先试）
+--use-angle=gl            # Linux 有可用的 X11/GLX 时（linuxGpuAngle: true 会自动追加）
 --use-angle=swiftshader   # 仅用于确认软件渲染症状
 ```
+
+Linux 上 `linuxGpuAngle: true`（默认）会自动追加 `--use-angle=gl`。这在无 X 的
+NVIDIA 机器上会失败并掉进 SwiftShader，此时应设 `linuxGpuAngle: false` 再显式写
+`--use-angle=vulkan`。Windows / macOS 不受该开关影响。
+
+确认走的是系统 Chrome / Edge，而不是 Playwright 的 `chrome-headless-shell`
+（后者更容易落到软件渲染）。可用 `render.browserExecutablePath` 或调整
+`render.browserChannels`。
+
+### 编码侧验证
+
+```bash
+# 1. 当前 ffmpeg 编了哪些硬件编码器
+ffmpeg -hide_banner -encoders | grep -E 'nvenc|amf|qsv|libx264'
+
+# 2. health 的 WebGL renderer 是真实 GPU
+curl -s http://127.0.0.1:9881/api/v1/health
+
+# 3. 导出期间 GPU 在跑（按厂商选一条）
+nvidia-smi dmon -s um          # NVIDIA：sm/mem 应随导出波动
+# AMD: radeontop / 任务管理器 GPU 引擎
+# Intel: intel_gpu_top / 任务管理器 GPU 引擎
+```
+
+日志中应出现 `using encoder: h264_nvenc`（或 `h264_amf` / `h264_qsv`）。
+若只有 `libx264`，检查系统 ffmpeg 是否带对应编码器；`ffmpeg-static` 经常没有 NVENC。
 
 ## 安全提示
 

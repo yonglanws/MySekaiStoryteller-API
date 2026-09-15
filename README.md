@@ -35,15 +35,17 @@
 
 > [!CAUTION]
 > **本项目目前处于初期开发阶段** —— 接口、配置项与故事格式均可能随时变动，
-> **不保证大部分功能的可用性与稳定性**。当前仅核心导出链路在有限环境下验证通过，Linux + NVIDIA 生产环境尚待实测。
+> **不保证大部分功能的可用性与稳定性**。核心导出链路已在 Windows（核显）与
+> Linux（NVIDIA）上验证；其它组合请以 `/api/v1/health` 里的 WebGL renderer
+> 与导出日志中的编码器为准。
 > 使用中遇到问题欢迎提交 [Issue](https://github.com/yonglanws/MySekaiStoryteller-API/issues)。
 
 ## 项目简介
 
 接收 `*.sekai-story.json` 故事剧本，用 Live2D（Project SEKAI 风格）渲染并导出为 MP4 视频，
-通过 HTTP API 对外提供服务。典型用法：部署在一台带 GPU 的服务器上，配合官方
-[AstrBot 插件](https://github.com/yonglanws/astrbot_plugin_msst) 实现 QQ/Telegram 机器人的
-AI 剧本生成与视频自动发送。
+通过 HTTP API 对外提供服务。典型用法：部署在本机或任意一台能跑无头 Chrome 的机器上，
+配合官方 [AstrBot 插件](https://github.com/yonglanws/astrbot_plugin_msst) 实现
+QQ/Telegram 机器人的 AI 剧本生成与视频自动发送。
 
 | 特性     | 说明                                                                       |
 | -------- | -------------------------------------------------------------------------- |
@@ -62,7 +64,8 @@ cd MySekaiStoryteller-API
 # 1. 安装依赖（ffmpeg 无需手动装，npm 包 ffmpeg-static 会自动带上）
 npm ci
 
-# 2. 无 Edge/Chrome 的机器需要装一个浏览器（Windows 一般自带 Edge，可跳过）
+# 2. 无系统浏览器时再装 Playwright 自带的 Chromium
+#    Windows 一般自带 Edge，macOS/Linux 有 Chrome/Edge 也可跳过
 npx playwright install chromium
 
 # 3. 生成配置文件（每项都有中文注释，按需修改）
@@ -198,13 +201,40 @@ curl -X POST http://127.0.0.1:9881/api/v1/export \
 
 ## 部署
 
-一台 Linux + NVIDIA 驱动的服务器即可获得硬件加速渲染与 NVENC 编码，**无需桌面环境、
-无需 Xorg/Xvfb**。完整指南见 **[docs/host-deployment.md](docs/host-deployment.md)**：
+宿主是普通 Node 进程，**Windows / Linux / macOS 都可以跑**，不依赖 Electron，也不强制要桌面环境。
+字段说明、环境变量与 Linux systemd 单元见 **[docs/host-deployment.md](docs/host-deployment.md)**。
 
-- 裸机依赖与资源准备
-- `config.yaml` 字段说明与 `MSS_*` 环境变量对照表
-- systemd 单元（`deploy/mysekai-host.service`）
-- NVENC 验证三步与无 GPU 时的 Chrome 参数调优
+Live2D 渲染和 MP4 编码是两条独立的 GPU 路径，可以分别成功或失败：
+
+| 路径       | 谁在干活                         | 成功标志                                                     | 失败时                                      |
+| ---------- | -------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
+| WebGL 渲染 | 无头 Chrome / Edge（Playwright） | `GET /api/v1/health` 的 `webglRenderers[].renderer` 含真实 GPU 名 | `SwiftShader` / `llvmpipe`，导出慢 5–10 倍 |
+| 视频编码   | ffmpeg                           | 导出日志出现 `using encoder: h264_nvenc` / `h264_amf` / `h264_qsv` | 自动回退 `libx264`（CPU）                   |
+
+`health` 里的 `ffmpegEncoder` 是**配置值**（`auto` / `nvidia` / `amd` / `intel` / `libx264`），不是 ffmpeg 实际选中的编码器。
+
+### 按平台
+
+| 平台    | 浏览器                                         | WebGL                                                        | 编码（`video.encoder`，默认 `auto`）            |
+| ------- | ---------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
+| Windows | 系统 Edge（默认探测 `msedge` → `chrome`）      | 独显 / 核显通常开箱即用                                      | NVIDIA→`h264_nvenc`，AMD→`h264_amf`，Intel→`h264_qsv` |
+| Linux   | 系统 Chrome / Chromium；没有再 `playwright install` | 无桌面也可以。NVIDIA **无 X** 时不要用 `--use-angle=gl`（会去开 X，失败掉 SwiftShader），改为 `linuxGpuAngle: false` 且 `extraChromeArgs: "--use-angle=vulkan"` | 同上；ffmpeg 需带对应硬件编码器                 |
+| macOS   | 系统 Chrome / Edge                             | 走 Apple GPU / AMD 即可                                      | 当前不探测 VideoToolbox，`auto` 会落到 `libx264` |
+
+无独立 GPU 时：渲染走核显即可，编码显式设 `video.encoder: libx264`。
+
+### 常驻运行
+
+```bash
+npm run build
+npm start          # node out-host/host/main.js，工作目录必须是仓库根
+```
+
+Linux 可用 `deploy/mysekai-host.service` 交给 systemd（改 `User` / `WorkingDirectory` 后 `daemon-reload`）。
+Windows 用任务计划程序或 [NSSM](https://nssm.cc/) 跑同一条命令；macOS 用 launchd / tmux 即可。
+不要用 Docker 跑渲染宿主（无头 Chrome 的 GPU 透传收益差，还多一层排障）。
+
+升级代码：`git pull` → 依赖变了再 `npm ci` → `npm run build` → 重启进程。`config.yaml` 与 `resources/` 不入库，不会被覆盖。
 
 ## 项目结构
 
@@ -229,14 +259,19 @@ docs/                 部署文档；deploy/ systemd 单元；scripts/ 测试与
 
 **Q: health 里 WebGL renderer 显示 SwiftShader / llvmpipe**
 
-WebGL 落到了软件渲染，导出会慢 5-10 倍，并且可能会遇到音画不同步等问题。
-Linux + NVIDIA 下尝试 `MSS_CHROME_ARGS="--use-angle=gl"`，详见部署文档的参数调优章节。
+WebGL 落到了软件渲染，导出会慢 5–10 倍，并可能音画不同步。按平台改 `render.extraChromeArgs`
+（或 `MSS_CHROME_ARGS`），详见 [docs/host-deployment.md](docs/host-deployment.md)：
+
+- Linux + NVIDIA、无桌面 / 无 X：`linuxGpuAngle: false`，`extraChromeArgs: "--use-angle=vulkan"`
+- Linux 有可用的 X11 / GLX：可试 `--use-angle=gl`（这也是 `linuxGpuAngle: true` 的默认追加项）
+- Windows / macOS：一般不用额外参数；确认走的是系统 Edge/Chrome，而不是 Playwright 的 headless-shell
 
 **Q: 视频导出失败或卡住**
 
 - 查看宿主日志中的 ffmpeg / 渲染错误
 - 尝试降低 `render.workers`（显存/内存不足时）
-- 确认 `video.encoder` 对应的硬件在当前机器可用（失败会自动回退 CPU）
+- 确认 `video.encoder` 对应的硬件在当前机器可用（失败会自动回退 CPU）。
+  取值是 `auto` / `nvidia` / `amd` / `intel` / `libx264`，不是 ffmpeg 的 `nvenc` 字符串
 
 ## 相关项目
 

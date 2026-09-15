@@ -24,9 +24,10 @@ video:
   crf: 28             # 质量因子（越小质量越高、体积越大）
   renderScale: 1    # 渲染超采样倍率（1 = 1:1，1.5 = 抗锯齿更好、更吃性能）
   audioBitrate: 128k  # 音频码率
-  encoder: auto       # 视频编码器：auto | nvenc | amd | intel | libx264
+  encoder: auto       # 视频编码器：auto | nvidia | amd | intel | libx264
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264
-                      # NVIDIA 服务器推荐 auto 或 nvenc（env: MSS_FFMPEG_ENCODER）
+                      # 对应 ffmpeg：nvidia=h264_nvenc，amd=h264_amf，intel=h264_qsv
+                      # 无独显或只要 CPU 编码时写 libx264（env: MSS_FFMPEG_ENCODER）
 
 # ---------------------------------------------------------------------------
 # 渲染池（无头浏览器工作进程）
@@ -41,8 +42,8 @@ render:
     - chromium
   browserExecutablePath: ""       # 显式指定浏览器可执行文件，优先于 channels（env: MSS_BROWSER_EXECUTABLE）
   extraChromeArgs: ""             # 附加 Chrome 启动参数，空格分隔（env: MSS_CHROME_ARGS）
-                                  # NVIDIA 无头 WebGL 调优示例: "--use-angle=gl"
-  linuxGpuAngle: true             # Linux 上自动追加 --use-angle=gl（NVIDIA 硬件 WebGL 关键参数）（env: MSS_LINUX_GPU_ANGLE）
+                                  # Linux NVIDIA 无桌面示例: "--use-angle=vulkan"（同时把 linuxGpuAngle 设 false）
+  linuxGpuAngle: true             # Linux 上自动追加 --use-angle=gl；无 X 的 NVIDIA 机器请设 false（env: MSS_LINUX_GPU_ANGLE）
 
 # ---------------------------------------------------------------------------
 # 路径（相对仓库根，也可写绝对路径）
