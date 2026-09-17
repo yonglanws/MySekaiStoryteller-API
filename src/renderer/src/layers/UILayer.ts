@@ -8,6 +8,7 @@ import UITextUnderline from '../components/UITextUnderline'
 import UIText from '../components/UIText'
 import UISpeakerText from '../components/UISpeakerText'
 import UITelop from '../components/UITelop'
+import UIWatermark from '../components/UIWatermark'
 import AnimationManager from '../managers/AnimationManager'
 
 export default class UILayer extends BaseLayer {
@@ -16,6 +17,7 @@ export default class UILayer extends BaseLayer {
   private readonly textSprite!: UIText
   private readonly textSpeakerSprite!: UISpeakerText
   private readonly telopContainer!: UITelop
+  private readonly watermarkSprite!: UIWatermark
 
   private _UITalkShowed: boolean = false
 
@@ -42,12 +44,20 @@ export default class UILayer extends BaseLayer {
       this.textUnderlineSprite.y - this.app.screen.width / 37
     )
     this.telopContainer = new UITelop(telopTexture, this.app.screen.width, this.app.screen.height)
+    this.watermarkSprite = new UIWatermark(this.app.screen.width, this.app.screen.height)
+    this.watermarkSprite.visible = false
+    this.watermarkSprite.zIndex = 4
 
     this.layerContainer.addChild(this.textBackgroundSprite)
     this.layerContainer.addChild(this.textUnderlineSprite)
     this.layerContainer.addChild(this.textSprite)
     this.layerContainer.addChild(this.textSpeakerSprite)
     this.layerContainer.addChild(this.telopContainer)
+    this.app.stage.addChild(this.watermarkSprite)
+  }
+
+  public setWatermarkVisible(visible: boolean): void {
+    this.watermarkSprite.visible = visible
   }
 
   public async telop(text: string): Promise<void> {

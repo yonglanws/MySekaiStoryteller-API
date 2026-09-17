@@ -31,7 +31,8 @@ const VideoSchema = z.object({
   crf: z.number().default(28),
   renderScale: z.number().default(1.5),
   audioBitrate: z.string().default('128k'),
-  encoder: z.string().default('auto')
+  encoder: z.string().default('auto'),
+  watermark: z.boolean().default(true)
 })
 
 const RenderSchema = z.object({
@@ -141,6 +142,11 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_VIDEO_CRF) {
     const v = parseInt(env.MSS_VIDEO_CRF, 10)
     if (Number.isFinite(v)) config.video.crf = v
+  }
+  if (env.MSS_VIDEO_WATERMARK !== undefined) {
+    config.video.watermark = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_VIDEO_WATERMARK.toLowerCase()
+    )
   }
 
   // render

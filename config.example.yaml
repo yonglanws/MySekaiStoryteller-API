@@ -28,6 +28,9 @@ video:
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264
                       # 对应 ffmpeg：nvidia=h264_nvenc，amd=h264_amf，intel=h264_qsv
                       # 无独显或只要 CPU 编码时写 libx264（env: MSS_FFMPEG_ENCODER）
+  watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
+                      # 本视频由 MySekaiStoryteller-API 生成
+                      # Designed by GuangChen2333 & 慵懒午睡
 
 # ---------------------------------------------------------------------------
 # 渲染池（无头浏览器工作进程）

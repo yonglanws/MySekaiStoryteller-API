@@ -216,6 +216,7 @@ export class App {
             codec: string
             crf: number
             audioBitrate: string
+            watermark?: boolean
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -281,6 +282,7 @@ export class App {
       codec: string
       crf: number
       audioBitrate: string
+      watermark?: boolean
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig
@@ -306,6 +308,7 @@ export class App {
 
     await this.preloadStoryAssets()
     this.initializeLayers()
+    this.layerUI.setWatermarkVisible(videoConfig.watermark !== false)
     await new Promise<void>((resolve) => setTimeout(resolve, 100))
 
     this.videoExportManager = new VideoExportManager(this)
