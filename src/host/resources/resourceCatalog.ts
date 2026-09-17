@@ -17,9 +17,17 @@ export interface CatalogModel {
   defaultFacial: string
 }
 
+export interface CatalogImage {
+  file: string
+  name: string
+  description: string
+}
+
 export interface ResourceCatalogData {
   models: CatalogModel[]
   images: string[]
+  /** 带描述的背景清单（有登记表时供 AI 选图；无登记时为空） */
+  imageDetails: CatalogImage[]
   voices: string[]
   bgm: string[]
 }
@@ -30,6 +38,14 @@ interface ModelManifest {
     name: string
     shortName?: string
     path: string
+  }>
+}
+
+interface ImageManifest {
+  images?: Array<{
+    file?: string
+    name?: string
+    description?: string
   }>
 }
 
@@ -50,6 +66,7 @@ function pickPreferred(names: string[], preferences: string[]): string {
  * 资源目录：从 resources/ 构建模型/背景/语音/BGM 的全量清单。
  *
  * - models/models.yaml 为用户维护的角色登记表
+ * - images/images.yaml 为用户维护的背景描述表（AI 按 description 选图）
  * - 每个模型的动作/表情从 model3.json 的 FileReferences.Motions 自动解析
  * - 30 秒内存缓存；构建失败时沿用上一次成功结果
  */
@@ -80,7 +97,7 @@ export class ResourceCatalog {
       if (this.cache) {
         return this.cache
       }
-      return { models: [], images: [], voices: [], bgm: [] }
+      return { models: [], images: [], imageDetails: [], voices: [], bgm: [] }
     }
   }
 
@@ -147,11 +164,47 @@ export class ResourceCatalog {
         .sort()
     }
 
+    const imageFiles = listFiles('images', IMAGE_EXTENSIONS)
+    const imageDetails = this.loadImageDetails(resourcesDir, imageFiles)
+
     return {
       models,
-      images: listFiles('images', IMAGE_EXTENSIONS),
+      images: imageFiles,
+      imageDetails,
       voices: listFiles('voices', AUDIO_EXTENSIONS),
       bgm: listFiles('audio/bgm', AUDIO_EXTENSIONS)
     }
+  }
+
+  private loadImageDetails(resourcesDir: string, imageFiles: string[]): CatalogImage[] {
+    const manifestPath = path.join(resourcesDir, 'images', 'images.yaml')
+    if (!fs.existsSync(manifestPath)) {
+      return []
+    }
+
+    let manifest: ImageManifest
+    try {
+      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as ImageManifest
+    } catch (err) {
+      this.logger.warn('[Catalog] Failed to parse images.yaml', err)
+      return []
+    }
+
+    const known = new Set(imageFiles)
+    const details: CatalogImage[] = []
+    for (const entry of manifest.images ?? []) {
+      const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
+      if (!file) continue
+      if (!known.has(file)) {
+        this.logger.warn(`[Catalog] images.yaml entry missing on disk, skipped: ${file}`)
+        continue
+      }
+      details.push({
+        file,
+        name: (entry.name || file).trim(),
+        description: (entry.description || '').trim()
+      })
+    }
+    return details
   }
 }

@@ -95,7 +95,7 @@ node scripts/test-parallel.mjs 2   # 并发导出验证
 ```
 resources/
 ├─ models/       Live2D 模型包（<角色>/<变体>/，含 model3.json；根下 models.yaml 为登记表）
-├─ images/       背景图 / 卡面
+├─ images/       背景图 / 卡面（根下 images.yaml 为画面描述表，供 AI 选图）
 ├─ voices/       故事语音（.wav，故事 JSON 按文件名引用）
 ├─ audio/bgm/    BGM
 └─ stories/      *.sekai-story.json 剧本
@@ -169,11 +169,17 @@ curl -X POST http://127.0.0.1:9881/api/v1/export \
 3. 完成。宿主 30 秒内自动识别，提示词中的角色对照表、动作/表情清单、校验白名单
    **全部自动更新，无需改任何代码**；AstrBot 插件 5 分钟内自动感知（可发 `/mssadmin resources` 确认）
 
-### 背景图 / 语音 / BGM
+### 新增背景图
+
+1. 把图片放到 `resources/images/`（jpg / jpeg / png / webp）
+2. 在 `resources/images/images.yaml` 登记一行（`file` 与磁盘文件名一致、`name` 短名、`description` 画面内容与适用场景）
+3. 完成。宿主 30 秒内自动识别，AstrBot 插件提示词会带上描述，由 AI 按剧情自行选图
+
+### 语音 / BGM
 
 | 资源   | 存放位置               | 如何生效                                                    |
 | ------ | ---------------------- | ----------------------------------------------------------- |
-| 背景图 | `resources/images/`    | 自动进入目录，插件提示词与校验即时可用                      |
+| 背景图 | `resources/images/`    | 放入图片后在 `images.yaml` 写 name/description，AI 按描述选图 |
 | 故事语音 | `resources/voices/`  | 故事 JSON 的 `voice` 字段按文件名引用                       |
 | BGM    | `resources/audio/bgm/` | 在宿主 `config.yaml` 的 `bgm.path` 指定（如 `audio/bgm/bg1.mp3`） |
 
