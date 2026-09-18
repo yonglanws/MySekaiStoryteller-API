@@ -205,6 +205,36 @@ export async function runFfmpegWithProgress(
 
   const timeoutMs = Math.max(totalDuration * 3, 120) * 1000
 
+  // 并发 spawn 同一 ffmpeg 二进制在 Node posix_spawn 下偶发 ETXTBSY/EAGAIN
+  // （负载高时更频繁），小间隔重试即可恢复
+  const maxAttempts = 3
+  let lastError: Error | null = null
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await spawnFfmpegOnce(ffmpegArgs, totalDuration, timeoutMs, onProgress)
+      return
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      const retriable =
+        lastError.message.includes('ETXTBSY') || lastError.message.includes('EAGAIN')
+      if (retriable && attempt < maxAttempts) {
+        const delay = attempt * 500
+        logger.warn(`FFmpeg spawn failed (${lastError.message}), retrying in ${delay}ms`)
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        continue
+      }
+      throw lastError
+    }
+  }
+  throw lastError ?? new Error('FFmpeg failed')
+}
+
+function spawnFfmpegOnce(
+  ffmpegArgs: string[],
+  totalDuration: number,
+  timeoutMs: number,
+  onProgress?: (percent: number, message: string) => void
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const ffmpegProcess: ChildProcess = spawn(ffmpegPath(), ffmpegArgs)
 
@@ -256,6 +286,14 @@ export async function runFfmpegWithProgress(
   })
 }
 
+/** 输出缩放滤镜：按配置分辨率归一，异形输入等比缩放并居中 pad */
+function outputScaleFilter(width: number, height: number): string {
+  return (
+    `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`
+  )
+}
+
 /**
  * API 导出收尾：视频（无音轨）转码压缩为 MP4。
  * 与旧版 IpcHandler 行为一致（1280x720 pad、-r fps），仅编码器改为可选。
@@ -265,12 +303,14 @@ export async function apiConvertVideoWithCompression(
   outputPath: string,
   crf: number = 23,
   fps: number = 30,
-  encoder: VideoEncoderChoice = 'libx264'
+  encoder: VideoEncoderChoice = 'libx264',
+  width: number = 1280,
+  height: number = 720
 ): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
   const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
 
-  const scaleFilter = `scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2`
+  const scale = outputScaleFilter(width, height)
 
   const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
   logger.info(`API video conversion using encoder: ${encoderArgs.codec} (${encoder}), CRF=${crf}`)
@@ -285,7 +325,7 @@ export async function apiConvertVideoWithCompression(
     '-i',
     inputPath,
     '-vf',
-    `${qsvVfPrefix}${scaleFilter}`,
+    `${qsvVfPrefix}${scale}`,
     '-c:v',
     encoderArgs.codec,
     '-preset',
@@ -314,7 +354,7 @@ export async function apiConvertVideoWithCompression(
         '-i',
         inputPath,
         '-vf',
-        scaleFilter,
+        scale,
         '-c:v',
         'libx264',
         '-preset',
@@ -340,14 +380,14 @@ export async function apiConvertVideoWithCompression(
         `API video conversion failed with ${encoderArgs.codec}, falling back to CPU:`,
         error
       )
-      await apiConvertVideoWithCompression(inputPath, outputPath, crf, fps, 'libx264')
+      await apiConvertVideoWithCompression(inputPath, outputPath, crf, fps, 'libx264', width, height)
     }
   }
 }
 
 /**
  * API 导出收尾：视频 + 音频合流压缩为 MP4。
- * 与旧版 IpcHandler 行为一致（1280x720 pad、-shortest），仅编码器改为可选。
+ * 输出分辨率由 width/height 决定（等比缩放 + pad），仅编码器可选。
  */
 export async function apiMergeVideoAudioWithCompression(
   videoPath: string,
@@ -356,12 +396,14 @@ export async function apiMergeVideoAudioWithCompression(
   crf: number = 23,
   audioBitrate: string = '128k',
   fps: number = 30,
-  encoder: VideoEncoderChoice = 'libx264'
+  encoder: VideoEncoderChoice = 'libx264',
+  width: number = 1280,
+  height: number = 720
 ): Promise<void> {
   const videoStat = await fs.promises.stat(videoPath)
   const estimatedDuration = Math.max(videoStat.size / (8000000 / 8), 10)
 
-  const scaleFilter = `scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2`
+  const scale = outputScaleFilter(width, height)
 
   const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
   logger.info(`API video-audio merge using encoder: ${encoderArgs.codec} (${encoder}), CRF=${crf}`)
@@ -378,7 +420,7 @@ export async function apiMergeVideoAudioWithCompression(
     '-i',
     audioPath,
     '-vf',
-    `${qsvVfPrefix}${scaleFilter}`,
+    `${qsvVfPrefix}${scale}`,
     '-c:v',
     encoderArgs.codec,
     '-preset',
@@ -416,7 +458,7 @@ export async function apiMergeVideoAudioWithCompression(
         '-i',
         audioPath,
         '-vf',
-        scaleFilter,
+        scale,
         '-c:v',
         'libx264',
         '-preset',
@@ -451,7 +493,9 @@ export async function apiMergeVideoAudioWithCompression(
         crf,
         audioBitrate,
         fps,
-        'libx264'
+        'libx264',
+        width,
+        height
       )
     }
   }
@@ -508,13 +552,16 @@ export async function apiCopyVideo(inputPath: string, outputPath: string): Promi
 }
 
 /**
- * 帧序列合成 MP4（帧捕获回退路径使用，无对话框依赖）。
+ * 帧序列合成 MP4（fast 导出 JPEG 帧路径使用）。
+ * 画布可能大于目标分辨率（renderScale 超采样），统一等比缩放 + pad。
  */
 export async function encodeFramesToVideo(
   fps: number,
   framesDir: string,
   outputPath: string,
-  encoder: VideoEncoderChoice = 'auto'
+  encoder: VideoEncoderChoice = 'auto',
+  width: number = 1280,
+  height: number = 720
 ): Promise<void> {
   let framePattern = 'frame-%06d.png'
   const sampleFiles = fs.readdirSync(framesDir).filter((f) => f.startsWith('frame-'))
@@ -526,6 +573,7 @@ export async function encodeFramesToVideo(
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []
+  const qsvVfPrefix = encoderArgs.needsQsvInit ? 'hw_upload,' : ''
 
   const ffmpegArgs = [
     ...qsvInitArgs,
@@ -533,6 +581,8 @@ export async function encodeFramesToVideo(
     String(fps),
     '-i',
     framesDir + '/' + framePattern,
+    '-vf',
+    `${qsvVfPrefix}${outputScaleFilter(width, height)}`,
     '-c:v',
     encoderArgs.codec,
     '-preset',

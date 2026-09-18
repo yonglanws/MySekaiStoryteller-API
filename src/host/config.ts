@@ -34,7 +34,8 @@ const VideoSchema = z.object({
   encoder: z.string().default('auto'),
   watermark: z.boolean().default(true),
   exportMode: z.enum(['record', 'fast']).default('record'),
-  exportBitrate: z.number().default(12_000_000)
+  exportBitrate: z.number().default(12_000_000),
+  exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto')
 })
 
 const RenderSchema = z.object({
@@ -157,6 +158,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_EXPORT_BITRATE) {
     const v = parseInt(env.MSS_EXPORT_BITRATE, 10)
     if (Number.isFinite(v) && v > 0) config.video.exportBitrate = v
+  }
+  if (env.MSS_EXPORT_FAST_ENCODER) {
+    const v = env.MSS_EXPORT_FAST_ENCODER.toLowerCase()
+    if (v === 'auto' || v === 'webcodecs' || v === 'frames') config.video.exportFastEncoder = v
   }
 
   // render

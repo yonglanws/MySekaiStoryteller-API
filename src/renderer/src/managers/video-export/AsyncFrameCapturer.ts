@@ -177,13 +177,28 @@ export class AsyncFrameCapturer {
     this.writeQueue = []
 
     try {
-      const batchData = framesToWrite.map((f) => ({
-        path: f.path,
-        data: f.data.buffer
-      }))
-
-      await window.electron.ipcRenderer.invoke('electron:write-frame-batch', batchData)
-      this.totalWritten += framesToWrite.length
+      // 逐帧二进制写（write-frame 通道每帧一个裸 body）。
+      // 旧实现把多帧塞进一个 JSON invoke，桥接层只会透传最后一个
+      // ArrayBuffer，其余帧全部丢失——帧序列路径必须走逐帧通道。
+      const CONCURRENCY = 4
+      let cursor = 0
+      const workers: Promise<void>[] = []
+      const worker = async (): Promise<void> => {
+        while (cursor < framesToWrite.length) {
+          const frame = framesToWrite[cursor++]
+          try {
+            await window.electron.ipcRenderer.invoke('electron:write-frame', {
+              path: frame.path,
+              data: frame.data
+            })
+            this.totalWritten++
+          } catch (error) {
+            this.logger.warn(`Frame ${frame.index} write failed:`, error)
+          }
+        }
+      }
+      for (let i = 0; i < CONCURRENCY; i++) workers.push(worker())
+      await Promise.all(workers)
 
       framesToWrite.length = 0
     } catch (error) {

@@ -219,6 +219,7 @@ export class App {
             watermark?: boolean
             exportMode?: 'record' | 'fast'
             exportBitrate?: number
+            exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -287,6 +288,7 @@ export class App {
       watermark?: boolean
       exportMode?: 'record' | 'fast'
       exportBitrate?: number
+      exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig
@@ -329,6 +331,7 @@ export class App {
       gpuRenderer: 'auto',
       exportMode: videoConfig.exportMode === 'fast' ? 'fast' : 'stream',
       exportBitrate: videoConfig.exportBitrate,
+      exportFastEncoder: videoConfig.exportFastEncoder,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

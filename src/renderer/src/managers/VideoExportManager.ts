@@ -744,6 +744,49 @@ export default class VideoExportManager {
   }
 
   /**
+   * fast 模式页内编码路径选择：
+   * - 'frames'：直接走 JPEG 帧序列
+   * - 'webcodecs'：只要 WebCodecs 可用就用
+   * - 'auto'：WebCodecs 可用，但 Linux+NVIDIA（软编 OpenH264，极慢）时改走帧序列
+   */
+  private async resolveFastUseWebCodecs(
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    fps: number,
+    bitrate: number,
+    choice: 'auto' | 'webcodecs' | 'frames'
+  ): Promise<boolean> {
+    if (choice === 'frames') return false
+    const available = (await WebCodecsMp4Encoder.resolveConfig(width, height, fps, bitrate)) !== null
+    if (!available) return false
+    if (choice === 'webcodecs') return true
+
+    try {
+      const gl =
+        canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+        canvas.getContext('webgl', { preserveDrawingBuffer: true })
+      if (!gl) return true
+      const dbg = (gl as WebGLRenderingContext).getExtension('WEBGL_debug_renderer_info')
+      const renderer = dbg
+        ? String((gl as WebGLRenderingContext).getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+        : ''
+      const isLinux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
+      const isNvidia = /nvidia|geforce|quadro/i.test(renderer)
+      if (isLinux && isNvidia) {
+        this.logger.warn(
+          `Fast export: Linux+NVIDIA detected (${renderer}); ` +
+            `WebCodecs would use software OpenH264, using JPEG frames + ffmpeg HW encoder instead`
+        )
+        return false
+      }
+    } catch {
+      // 探测失败按原样用 WebCodecs
+    }
+    return true
+  }
+
+  /**
    * fast 导出模式：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编。
    *
    * 与 stream/record 的差异：
@@ -826,7 +869,7 @@ export default class VideoExportManager {
       }
     >()
 
-    let timeline: SnippetTimelineEntry[] = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
+    const timeline: SnippetTimelineEntry[] = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
     this.app.ttsManager.setTimeline(timeline)
 
     const virtualClock = new VirtualClockController()
@@ -850,8 +893,18 @@ export default class VideoExportManager {
       )
     }
 
-    const useWebCodecs =
-      (await WebCodecsMp4Encoder.resolveConfig(outW, outH, encodeFps, bitrate)) !== null
+    // ---- 帧接收器：优先 WebCodecs 直编 MP4，回退 JPEG 帧序列 ----
+    // Linux + NVIDIA 的 Chromium 没有 NVENC/VAAPI，WebCodecs 只会落到
+    // OpenH264 纯软编（~200ms/帧@1080p），远慢于「JPEG 帧序列 + ffmpeg
+    // NVENC」。这类环境自动改走帧序列路径；可用 exportFastEncoder 强制。
+    const useWebCodecs = await this.resolveFastUseWebCodecs(
+      canvas,
+      outW,
+      outH,
+      encodeFps,
+      bitrate,
+      options.exportFastEncoder ?? 'auto'
+    )
 
     let encoder: WebCodecsMp4Encoder | null = null
     let jpegSink: JpegFrameSink | null = null

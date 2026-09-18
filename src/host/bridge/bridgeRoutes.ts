@@ -92,7 +92,9 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               payload.crf,
               payload.audioBitrate,
               payload.fps,
-              encoder
+              encoder,
+              config.video.width,
+              config.video.height
             )
           } else {
             await apiConvertVideoWithCompression(
@@ -100,7 +102,9 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               payload.outputPath,
               payload.crf,
               payload.fps,
-              encoder
+              encoder,
+              config.video.width,
+              config.video.height
             )
           }
 
@@ -223,7 +227,14 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             ? path.join(outputDir, `.mss-frames-video-${Date.now()}.mp4`)
             : payload.outputPath
 
-          await encodeFramesToVideo(payload.fps, payload.framesDir, intermediatePath, encoder)
+          await encodeFramesToVideo(
+            payload.fps,
+            payload.framesDir,
+            intermediatePath,
+            encoder,
+            config.video.width,
+            config.video.height
+          )
 
           if (payload.audioPath && fs.existsSync(payload.audioPath)) {
             await apiMuxVideoAudioCopy(

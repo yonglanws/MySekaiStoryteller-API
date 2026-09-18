@@ -16,6 +16,10 @@ export interface VideoExportOptions {
   exportMode?: 'frames' | 'stream' | 'fast'
   /** fast 模式视频码率（bps），缺省 12Mbps */
   exportBitrate?: number
+  /**
+   * fast 模式页内编码路径：auto（默认，按 GPU/平台探测）| webcodecs | frames（JPEG 帧序列交 ffmpeg）
+   */
+  exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

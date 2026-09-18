@@ -30,6 +30,7 @@ export interface VideoConfig {
   watermark: boolean
   exportMode: 'record' | 'fast'
   exportBitrate: number
+  exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
 }
 
 export interface ExportTask {
@@ -56,7 +57,7 @@ interface PendingExport {
   timeoutMs: number
 }
 
-const DEFAULT_EXPORT_TIMEOUT_MS = 600000
+const DEFAULT_EXPORT_TIMEOUT_MS = 1_800_000
 const DEFAULT_MAX_CONCURRENT_EXPORTS = 2
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const DEFAULT_FILE_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -513,7 +514,8 @@ export class VideoApiServer {
       audioBitrate: this.video.audioBitrate,
       watermark: this.video.watermark,
       exportMode: this.video.exportMode,
-      exportBitrate: this.video.exportBitrate
+      exportBitrate: this.video.exportBitrate,
+      exportFastEncoder: this.video.exportFastEncoder
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {
