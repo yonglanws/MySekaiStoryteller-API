@@ -15,20 +15,35 @@ const logger: Logger<ILogObj> = new Logger({
  * 1. MSS_FFMPEG_PATH 环境变量
  * 2. ffmpeg-static npm 包（如已安装）
  * 3. PATH 上的 ffmpeg / ffmpeg.exe
+ *
+ * 候选二进制必须真实存在且有执行位——ffmpeg-static 下载中断/被杀时
+ * 会留下一个无执行位的半截文件（还被打开写入时 spawn 直接 ETXTBSY），
+ * 此时必须回退系统 ffmpeg，而不是让整个宿主的导出全挂。
  */
 export function ffmpegPath(): string {
+  const candidates: string[] = []
   if (process.env.MSS_FFMPEG_PATH) {
-    return process.env.MSS_FFMPEG_PATH
+    candidates.push(process.env.MSS_FFMPEG_PATH)
   }
-
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const ffmpegStatic = require('ffmpeg-static') as string | null
     if (ffmpegStatic) {
-      return ffmpegStatic
+      candidates.push(ffmpegStatic)
     }
   } catch {
     // ffmpeg-static 未安装，回退到 PATH
+  }
+
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK)
+      return candidate
+    } catch {
+      logger.warn(
+        `ffmpeg candidate not usable (missing or not executable): ${candidate}, trying next`
+      )
+    }
   }
 
   return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
