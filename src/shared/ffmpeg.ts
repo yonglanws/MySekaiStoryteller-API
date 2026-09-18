@@ -576,6 +576,7 @@ export async function apiCopyVideo(inputPath: string, outputPath: string): Promi
 /**
  * 帧序列合成 MP4（fast 导出 JPEG 帧路径使用）。
  * 画布可能大于目标分辨率（renderScale 超采样），统一等比缩放 + pad。
+ * 质量因子与 record 管线共用配置的 video.crf（此前硬编码 18，体积偏大）。
  */
 export async function encodeFramesToVideo(
   fps: number,
@@ -583,7 +584,8 @@ export async function encodeFramesToVideo(
   outputPath: string,
   encoder: VideoEncoderChoice = 'auto',
   width: number = 1280,
-  height: number = 720
+  height: number = 720,
+  crf: number = 23
 ): Promise<void> {
   let framePattern = 'frame-%06d.png'
   const sampleFiles = fs.readdirSync(framesDir).filter((f) => f.startsWith('frame-'))
@@ -591,7 +593,7 @@ export async function encodeFramesToVideo(
     framePattern = 'frame-%06d.jpg'
   }
 
-  const encoderArgs = await resolveVideoEncoderArgs(encoder, 18)
+  const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []

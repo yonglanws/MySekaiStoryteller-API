@@ -923,10 +923,12 @@ export default class VideoExportManager {
       this.logger.warn('WebCodecs unavailable, falling back to JPEG frame sink')
       const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
       framesDir = dir
+      // 中间帧用高质量 JPEG：块噪声更少，成品码率更低、画质更好；
+      // 帧只临时落盘，不占成品体积
       jpegSink = new JpegFrameSink({
         width: outW,
         height: outH,
-        quality: this.getJpegQuality(options.quality),
+        quality: Math.max(this.getJpegQuality(options.quality), 0.92),
         framesDir: dir
       })
       await jpegSink.initialize(canvas)

@@ -233,7 +233,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             intermediatePath,
             encoder,
             config.video.width,
-            config.video.height
+            config.video.height,
+            config.video.crf
           )
 
           if (payload.audioPath && fs.existsSync(payload.audioPath)) {
