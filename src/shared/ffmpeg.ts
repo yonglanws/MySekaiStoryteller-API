@@ -37,8 +37,15 @@ export function ffmpegPath(): string {
 
   for (const candidate of candidates) {
     try {
-      fs.accessSync(candidate, fs.constants.X_OK)
-      return candidate
+      const stat = fs.statSync(candidate)
+      // 注意：root 下 access(X_OK) 对任何存在的文件都成功，
+      // 必须显式检查执行位（截断的 ffmpeg-static 下载是 644 且会段错误）
+      if (stat.isFile() && (stat.mode & 0o111) !== 0) {
+        return candidate
+      }
+      logger.warn(
+        `ffmpeg candidate not usable (missing or not executable): ${candidate}, trying next`
+      )
     } catch {
       logger.warn(
         `ffmpeg candidate not usable (missing or not executable): ${candidate}, trying next`
