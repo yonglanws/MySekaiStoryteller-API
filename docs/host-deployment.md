@@ -26,7 +26,7 @@ Node 20 宿主（单进程 + N 个无头浏览器渲染工作进程）
 ```
 
 导出数据流（与旧版语义一致）：
-`POST /api/v1/export` → 队列（≤2 并发）→ 渲染页面 MediaRecorder 录 WebM（分块回传写盘）
+`POST /api/v1/export` → 队列（并发上限 = `render.workers`，默认 2）→ 渲染页面 MediaRecorder 录 WebM（分块回传写盘）
 → Web Audio 混音 WAV → ffmpeg 转码/合流 MP4 → `downloadUrl` 供下载。
 AstrBot 插件（[astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst)，
 独立仓库）**零改动兼容**。
@@ -124,8 +124,11 @@ curl http://127.0.0.1:9881/api/v1/health
 ```json
 {
   "renderPool": {
-    "readyWorkers": 1,
-    "webglRenderers": [{ "workerId": "w1", "renderer": "ANGLE (NVIDIA, Vulkan 1.4.312 (NVIDIA ...), NVIDIA)" }]
+    "readyWorkers": 2,
+    "webglRenderers": [
+      { "workerId": "w1", "renderer": "ANGLE (NVIDIA, Vulkan 1.4.312 (NVIDIA ...), NVIDIA)" },
+      { "workerId": "w2", "renderer": "ANGLE (NVIDIA, Vulkan 1.4.312 (NVIDIA ...), NVIDIA)" }
+    ]
   }
 }
 ```

@@ -70,6 +70,12 @@ const CHAR_READ_SPEED_MS = 80
 const CHAR_TELOP_SPEED_MS = 90
 const MIN_DURATION_MS = 500
 const MAX_DURATION_MS = 30000
+// 无 TTS 时 Talk 时长的校准参数：
+// 正常日语台词约 7 字/秒（≈143ms/字），用它折算"这句话如果配音会念多久"，
+// 再叠加阅读停留，避免无配音时估算明显短于真实说话节奏
+const SPEECH_EQUIVALENT_MS_PER_CHAR = 143
+const TALK_READING_LINGER_MS = 1200
+const MIN_TALK_DURATION_MS = 1800
 const CROSS_VALIDATION_TOLERANCE_MS = 500
 const EMERGENCY_FALLBACK_MS = 600
 
@@ -112,15 +118,22 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'Talk': {
       const content = getSnippetDataField(snippet, 'content') || ''
       const charCount = content.length
-      // 优化: 进一步降低基础值，使用更紧凑的估算公式
-      // 打字机时间(80ms/字符) + 阅读停留(800ms)，确保文字能完整显示
-      const typewriterMs = charCount * 80
-      const readingLingerMs = 800
-      const estimated = Math.max(typewriterMs + readingLingerMs, 1200)
+      // 无 TTS 时的台词时长拆三段，向真实语音节奏对齐：
+      //   1) 打字机时间（逐字出现）
+      //   2) 等效语音时长——按正常日语语速 ~7 字/秒 折算，避免估算远短于
+      //      真人说话的时长，否则整段对话会显得"没说完就跳"
+      //   3) 阅读停留，给观众读完句子的余量
+      const typewriterMs = charCount * CHAR_READ_SPEED_MS
+      const speechEquivalentMs = charCount * SPEECH_EQUIVALENT_MS_PER_CHAR
+      const readingLingerMs = TALK_READING_LINGER_MS
+      const estimated = Math.max(
+        typewriterMs + speechEquivalentMs * 0.5 + readingLingerMs,
+        MIN_TALK_DURATION_MS
+      )
       return {
         durationMs: estimated,
         source: 'content_estimation',
-        detail: `Talk: ${charCount} chars, base+${CHAR_READ_SPEED_MS}ms = ${estimated}ms`
+        detail: `Talk: ${charCount} chars, typewriter ${typewriterMs} + speech~${Math.round(speechEquivalentMs)} + linger ${readingLingerMs} = ${estimated}ms`
       }
     }
     case 'Telop': {

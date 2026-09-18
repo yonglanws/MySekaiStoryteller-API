@@ -36,8 +36,8 @@ video:
 # 渲染池（无头浏览器工作进程）
 # ---------------------------------------------------------------------------
 render:
-  workers: 1                      # 并行渲染 worker 数（每 worker 独立 WebGL 上下文，
-                                  # 约占 300-500MB 内存；按显存/内存调整）（env: MSS_WORKERS）
+  workers: 2                      # 并行渲染 worker 数（每 worker 独立 WebGL 上下文，
+                                  # 约占 300-500MB 内存；与导出并发上限对齐）（env: MSS_WORKERS）
   workerRecycleExports: 5         # 每个页面完成 N 次导出后回收重建，防止 Live2D 内存累积（0 = 不回收）
   browserChannels:                # 浏览器探测顺序，依次回退（env: MSS_BROWSER_CHANNELS）
     - msedge

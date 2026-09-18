@@ -55,7 +55,7 @@ interface PendingExport {
 }
 
 const DEFAULT_EXPORT_TIMEOUT_MS = 600000
-const MAX_CONCURRENT_EXPORTS = 2
+const DEFAULT_MAX_CONCURRENT_EXPORTS = 2
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const DEFAULT_FILE_RETENTION_MS = 24 * 60 * 60 * 1000
 const RATE_LIMIT_WINDOW_MS = 60 * 1000
@@ -89,6 +89,7 @@ export class VideoApiServer {
   private readonly host: string
   private readonly outputDir: string
   private readonly video: VideoSettings
+  private readonly maxConcurrentExports: number
   private readonly fileRetentionMs: number
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
   private lastCleanup: number | null = null
@@ -103,6 +104,8 @@ export class VideoApiServer {
       host: string
       outputDir: string
       video: VideoSettings
+      /** 同时渲染的导出任务上限，应与 render.workers 对齐 */
+      maxConcurrentExports?: number
       /** 在 API 路由之后挂载额外路由（静态资源、桥接层等），共享同一端口 */
       registerExtraRoutes?: (app: express.Application) => void
     }
@@ -112,6 +115,10 @@ export class VideoApiServer {
     this.host = options.host
     this.outputDir = options.outputDir
     this.video = options.video
+    this.maxConcurrentExports = Math.max(
+      1,
+      options.maxConcurrentExports ?? DEFAULT_MAX_CONCURRENT_EXPORTS
+    )
     this.fileRetentionMs = DEFAULT_FILE_RETENTION_MS
     this.ensureOutputDir()
     this.app = express()
@@ -284,7 +291,7 @@ export class VideoApiServer {
         activeExports: this.activeExports.size,
         queuedExports: this.exportQueue.length,
         pendingExports: this.pendingExports.size,
-        maxConcurrent: MAX_CONCURRENT_EXPORTS,
+        maxConcurrent: this.maxConcurrentExports,
         activeTaskIds: Array.from(this.activeExports),
         queuedTaskIds: this.exportQueue.map((t) => t.taskId)
       })
@@ -599,22 +606,23 @@ export class VideoApiServer {
   }
 
   private processQueue(): void {
-    if (this.activeExports.size >= MAX_CONCURRENT_EXPORTS || this.exportQueue.length === 0) {
-      return
+    while (this.activeExports.size < this.maxConcurrentExports && this.exportQueue.length > 0) {
+      const task = this.exportQueue.shift()
+      if (!task) break
+
+      this.activeExports.add(task.taskId)
+
+      if (!this.dispatcher) {
+        const pending = this.pendingExports.get(task.taskId)
+        this.activeExports.delete(task.taskId)
+        this.pendingExports.delete(task.taskId)
+        pending?.reject(new Error('No render worker available'))
+        continue
+      }
+
+      this.logger.info(`[API] Starting export task: ${task.taskId}`)
+      this.dispatcher.dispatch(task)
     }
-
-    const task = this.exportQueue.shift()
-    if (!task) return
-
-    this.activeExports.add(task.taskId)
-
-    if (!this.dispatcher) {
-      this.rejectExport(task.taskId, new Error('No render worker available'))
-      return
-    }
-
-    this.logger.info(`[API] Starting export task: ${task.taskId}`)
-    this.dispatcher.dispatch(task)
   }
 
   private cancelExport(taskId: string): boolean {

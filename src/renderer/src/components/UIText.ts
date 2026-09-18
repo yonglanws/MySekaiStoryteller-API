@@ -10,7 +10,7 @@ export default class UIText extends Text {
     const style = new TextStyle({
       align: 'left',
       fill: '#FFFFFFF5',
-      fontFamily: 'Source Han Sans SC',
+      fontFamily: 'FOT Rodin NTLG Pro',
       fontSize: screen_height / 26,
       lineHeight: screen_height / 19,
       stroke: '#4A4968D9',

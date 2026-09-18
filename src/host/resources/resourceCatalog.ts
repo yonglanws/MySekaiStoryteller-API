@@ -121,10 +121,7 @@ export class ResourceCatalog {
       let facials: string[] = []
 
       try {
-        const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
-          FileReferences?: { Motions?: Record<string, unknown> }
-        }
-        const names = Object.keys(model3.FileReferences?.Motions ?? {})
+        const names = this.readMotionNames(modelJsonPath)
         motions = names.filter((n) => !n.startsWith('face_')).sort()
         facials = names.filter((n) => n.startsWith('face_')).sort()
       } catch (err) {
@@ -174,6 +171,57 @@ export class ResourceCatalog {
       voices: listFiles('voices', AUDIO_EXTENSIONS),
       bgm: listFiles('audio/bgm', AUDIO_EXTENSIONS)
     }
+  }
+
+  /**
+   * 读取 model3.json 登记的动作/表情 key。
+   *
+   * 上游"裸包"经常缺 FileReferences.Motions 索引（motions/ 文件在但没登记），
+   * 而渲染端加载动作也是按这份索引取文件的，不补就既枚举不到也播不了。
+   * 这里发现索引缺失时用 motions/ 目录实际文件补齐并回写 model3.json，
+   * 对 catalog 枚举和渲染端加载同时生效。
+   */
+  private readMotionNames(modelJsonPath: string): string[] {
+    interface MotionEntry { File?: string; FadeInTime?: number; FadeOutTime?: number }
+    const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
+      FileReferences?: { Motions?: Record<string, MotionEntry[]> }
+    }
+    if (!model3.FileReferences) model3.FileReferences = {}
+    const indexed = model3.FileReferences.Motions ?? {}
+
+    const motionsDir = path.join(path.dirname(modelJsonPath), 'motions')
+    if (!fs.existsSync(motionsDir)) {
+      return Object.keys(indexed)
+    }
+
+    const files = fs
+      .readdirSync(motionsDir)
+      .filter((f) => f.endsWith('.motion3.json'))
+      .sort()
+
+    let dirty = false
+    for (const file of files) {
+      const key = file.slice(0, -'.motion3.json'.length)
+      if (!indexed[key]) {
+        indexed[key] = [{ FadeInTime: 0.5, FadeOutTime: 0.5, File: `motions/${file}` }]
+        dirty = true
+      }
+    }
+
+    if (dirty) {
+      model3.FileReferences.Motions = indexed
+      try {
+        fs.writeFileSync(modelJsonPath, JSON.stringify(model3, null, 2))
+        this.logger.info(
+          `[Catalog] Backfilled ${files.length} motion entries into ${modelJsonPath}`
+        )
+      } catch (err) {
+        // 写不回也不致命：catalog 用内存里的索引，渲染端沿用旧行为
+        this.logger.warn(`[Catalog] Failed to write back Motions index to ${modelJsonPath}`, err)
+      }
+    }
+
+    return Object.keys(indexed)
   }
 
   private loadImageDetails(resourcesDir: string, imageFiles: string[]): CatalogImage[] {

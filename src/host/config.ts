@@ -36,7 +36,7 @@ const VideoSchema = z.object({
 })
 
 const RenderSchema = z.object({
-  workers: z.number().default(1),
+  workers: z.number().default(2),
   workerRecycleExports: z.number().default(5),
   browserChannels: z.array(z.string()).default(['msedge', 'chrome', 'chromium']),
   browserExecutablePath: z.string().default(''),

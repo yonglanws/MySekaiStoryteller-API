@@ -8,7 +8,7 @@ export default class UISpeakerText extends Text {
     const style = new TextStyle({
       align: 'left',
       fill: '#FFFFFFF5',
-      fontFamily: 'Source Han Sans SC',
+      fontFamily: 'FOT Rodin NTLG Pro',
       fontSize: screen_height / 25,
       fontWeight: '600',
       stroke: '#4A4968D9',

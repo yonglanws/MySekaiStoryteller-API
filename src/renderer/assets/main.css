@@ -1,8 +1,8 @@
 @import 'base.css';
 
 @font-face {
-  font-family: 'Source Han Sans SC';
-  src: url('fonts/SourceHanSansSC.otf') format('opentype');
+  font-family: 'FOT Rodin NTLG Pro';
+  src: url('fonts/FOT-RodinNTLGPro-DB.otf') format('opentype');
 }
 
 /* ========== CSS Variables (macOS System Colors) ========== */
@@ -39,8 +39,8 @@
 
 body {
   font-family:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue',
-    'Source Han Sans SC', sans-serif;
+    'FOT Rodin NTLG Pro', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+    'Helvetica Neue', sans-serif;
   background-color: #1a1a2e;
   background-size: cover;
   background-position: center;

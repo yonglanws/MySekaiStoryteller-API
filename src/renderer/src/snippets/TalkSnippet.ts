@@ -163,8 +163,8 @@ export default class TalkSnippet extends BaseSnippet {
 
   /**
    * 导出时台词的目标时长：时间轴给定值与"按字数下限"取较大者。
-   * 下限 = 打字机(80ms/字) + 800ms 阅读停留——TTS 未接入/失败时，
-   * 时间轴上游值可能偏小，此下限保证台词完整显示且句间有呼吸间隔。
+   * 下限与 TimelineCalculator 的无 TTS 估算对齐（打字机 + 等效语音时长/2 +
+   * 阅读停留），保证无配音时台词不会显得"没说完就跳"。
    */
   private resolveExportTalkDurationMs(originalDelayMs: number): number {
     const timelineMs =
@@ -173,7 +173,10 @@ export default class TalkSnippet extends BaseSnippet {
         : originalDelayMs
     const talkData = this.data as unknown as TalkData
     const contentLength = talkData.data?.content?.length ?? 0
-    const charBasedMinMs = Math.max(contentLength * 80 + 800, 1200)
+    const charBasedMinMs = Math.max(
+      contentLength * 80 + (contentLength * 143) / 2 + 1200,
+      1800
+    )
     return Math.max(timelineMs, charBasedMinMs)
   }
 

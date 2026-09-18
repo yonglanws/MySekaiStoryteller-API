@@ -59,6 +59,7 @@ async function bootstrap(): Promise<void> {
     host: config.server.host,
     outputDir: config.paths.output,
     video: config.video,
+    maxConcurrentExports: config.render.workers,
     registerExtraRoutes: (app) => {
       app.use('/bridge', createBridgeRouter({ logger, config }))
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单

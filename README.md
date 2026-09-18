@@ -45,7 +45,7 @@ QQ/Telegram 机器人的 AI 剧本生成与视频自动发送。
 | 渲染引擎 | PixiJS + Live2D 跑在无头 Chrome 里（Playwright 渲染池，每页独立 WebGL 上下文） |
 | 视频编码 | ffmpeg 自动探测 NVENC / AMF / QSV 硬件编码，失败自动回退 CPU                 |
 | 音频     | 内置 BGM + GPT-SoVITS 语音合成（无 TTS 时自动跳过配音，导出不受影响）        |
-| 队列管理 | 任务排队、并发导出、IP 限流、过期文件自动清理                                |
+| 队列管理 | 任务排队、默认 2 路并发导出、IP 限流、过期文件自动清理                       |
 | 统一配置 | 单个 `config.yaml`，全字段中文注释，`MSS_*` 环境变量可覆盖                   |
 
 ## 快速开始
