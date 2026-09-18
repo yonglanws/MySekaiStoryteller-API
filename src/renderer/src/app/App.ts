@@ -217,6 +217,8 @@ export class App {
             crf: number
             audioBitrate: string
             watermark?: boolean
+            exportMode?: 'record' | 'fast'
+            exportBitrate?: number
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -283,6 +285,8 @@ export class App {
       crf: number
       audioBitrate: string
       watermark?: boolean
+      exportMode?: 'record' | 'fast'
+      exportBitrate?: number
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig
@@ -323,7 +327,8 @@ export class App {
       crf: videoConfig.crf,
       useGpu: true,
       gpuRenderer: 'auto',
-      exportMode: 'stream',
+      exportMode: videoConfig.exportMode === 'fast' ? 'fast' : 'stream',
+      exportBitrate: videoConfig.exportBitrate,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

@@ -31,6 +31,12 @@ video:
   watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
                       # 本视频由 MySekaiStoryteller-API 生成
                       # Designed by GuangChen2333 & 慵懒午睡
+  exportMode: record  # 导出管线：record | fast（env: MSS_EXPORT_MODE）
+                      # record = 实时录制（MediaRecorder 墙钟录制，慢但最保守）
+                      # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4，
+                      #          导出耗时不再随视频时长线性增长；
+                      #          运行环境不支持时自动回退 record
+  exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
 
 # ---------------------------------------------------------------------------
 # 渲染池（无头浏览器工作进程）

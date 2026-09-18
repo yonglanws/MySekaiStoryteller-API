@@ -13,7 +13,9 @@ export interface VideoExportOptions {
   batchSize?: number
   maxRetries?: number
   enableResumable?: boolean
-  exportMode?: 'frames' | 'stream'
+  exportMode?: 'frames' | 'stream' | 'fast'
+  /** fast 模式视频码率（bps），缺省 12Mbps */
+  exportBitrate?: number
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

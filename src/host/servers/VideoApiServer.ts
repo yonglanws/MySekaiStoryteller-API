@@ -28,6 +28,8 @@ export interface VideoConfig {
   crf: number
   audioBitrate: string
   watermark: boolean
+  exportMode: 'record' | 'fast'
+  exportBitrate: number
 }
 
 export interface ExportTask {
@@ -509,7 +511,9 @@ export class VideoApiServer {
       codec: 'h264',
       crf: this.video.crf,
       audioBitrate: this.video.audioBitrate,
-      watermark: this.video.watermark
+      watermark: this.video.watermark,
+      exportMode: this.video.exportMode,
+      exportBitrate: this.video.exportBitrate
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {

@@ -7,6 +7,9 @@ import type { HostConfig } from '../config'
 import {
   apiConvertVideoWithCompression,
   apiMergeVideoAudioWithCompression,
+  apiMuxVideoAudioCopy,
+  apiCopyVideo,
+  encodeFramesToVideo,
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
@@ -134,6 +137,133 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         }
       }
 
+      case 'electron:api-remux-video-from-files': {
+        // fast 导出收尾：页内 WebCodecs 已产出 H.264 MP4，仅 remux/合流，不重编码
+        const payload = args[0] as {
+          videoPath: string
+          audioPath?: string
+          outputPath: string
+          audioBitrate: string
+        }
+        logger.info(
+          `[Bridge] API remux: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
+        )
+
+        try {
+          const outputDir = path.dirname(payload.outputPath)
+          if (!fs.existsSync(outputDir)) {
+            await fs.promises.mkdir(outputDir, { recursive: true })
+          }
+
+          if (payload.audioPath && fs.existsSync(payload.audioPath)) {
+            await apiMuxVideoAudioCopy(
+              payload.videoPath,
+              payload.audioPath,
+              payload.outputPath,
+              payload.audioBitrate
+            )
+          } else {
+            await apiCopyVideo(payload.videoPath, payload.outputPath)
+          }
+
+          if (!fs.existsSync(payload.outputPath)) {
+            logger.error(`[Bridge] API remux: Output file NOT found at: ${payload.outputPath}`)
+            return {
+              success: false,
+              error: 'Video remux completed but output file not found'
+            }
+          }
+
+          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          logger.info(
+            `[Bridge] API remux: Video exported successfully: ${payload.outputPath}, size=${(outputSize / 1024 / 1024).toFixed(2)} MB`
+          )
+          return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
+        } catch (error) {
+          logger.error('[Bridge] API remux: Failed to remux video from files', error)
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          }
+        } finally {
+          try {
+            if (payload.videoPath) await fs.promises.unlink(payload.videoPath)
+          } catch {
+            /* cleanup */
+          }
+          try {
+            if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+          } catch {
+            /* cleanup */
+          }
+        }
+      }
+
+      case 'electron:api-encode-frames-video': {
+        // fast 导出 JPEG 兜底收尾：帧序列 → ffmpeg 编码 → 可选音频合流
+        const payload = args[0] as {
+          framesDir: string
+          audioPath?: string
+          outputPath: string
+          fps: number
+          audioBitrate: string
+        }
+        logger.info(
+          `[Bridge] API frames-encode: framesDir=${payload.framesDir}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
+        )
+
+        try {
+          const outputDir = path.dirname(payload.outputPath)
+          if (!fs.existsSync(outputDir)) {
+            await fs.promises.mkdir(outputDir, { recursive: true })
+          }
+
+          const encoder = config.video.encoder as VideoEncoderChoice
+          const intermediatePath = payload.audioPath
+            ? path.join(outputDir, `.mss-frames-video-${Date.now()}.mp4`)
+            : payload.outputPath
+
+          await encodeFramesToVideo(payload.fps, payload.framesDir, intermediatePath, encoder)
+
+          if (payload.audioPath && fs.existsSync(payload.audioPath)) {
+            await apiMuxVideoAudioCopy(
+              intermediatePath,
+              payload.audioPath,
+              payload.outputPath,
+              payload.audioBitrate
+            )
+          }
+
+          if (!fs.existsSync(payload.outputPath)) {
+            logger.error(
+              `[Bridge] API frames-encode: Output file NOT found at: ${payload.outputPath}`
+            )
+            return {
+              success: false,
+              error: 'Frame encoding completed but output file not found'
+            }
+          }
+
+          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          logger.info(
+            `[Bridge] API frames-encode: Video exported successfully: ${payload.outputPath}, size=${(outputSize / 1024 / 1024).toFixed(2)} MB`
+          )
+          return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
+        } catch (error) {
+          logger.error('[Bridge] API frames-encode failed', error)
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          }
+        } finally {
+          try {
+            if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+          } catch {
+            /* cleanup */
+          }
+        }
+      }
+
       case 'electron:write-frame-batch': {
         // 帧捕获回退路径：批量 base64 帧写盘
         const batch = args[0] as Array<{ path: string; data: string }>
@@ -192,6 +322,19 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return null
       }
 
+      case 'electron:write-file-at': {
+        // mp4-muxer StreamTarget 的定位写：fastStart 需要在文件头部回写 moov
+        const payload = args[0] as { filePath: string; position: number }
+        await fs.promises.mkdir(path.dirname(payload.filePath), { recursive: true })
+        const handle = await fs.promises.open(payload.filePath, 'r+')
+        try {
+          await handle.write(body, 0, body.length, payload.position)
+        } finally {
+          await handle.close()
+        }
+        return null
+      }
+
       case 'electron:write-frame': {
         const payload = args[0] as { path: string }
         await fs.promises.writeFile(payload.path, body)
@@ -232,10 +375,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           method: payload.method,
           headers: payload.headers,
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
-          body:
-            payload.method !== 'GET' && payload.method !== 'HEAD'
-              ? payload.body
-              : undefined,
+          body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined,
           signal: AbortSignal.timeout(30000)
         })
         const arrayBuffer = await response.arrayBuffer()
@@ -268,10 +408,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           method: payload.method,
           headers: payload.headers,
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
-          body:
-            payload.method !== 'GET' && payload.method !== 'HEAD'
-              ? payload.body
-              : undefined
+          body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined
         })
         const text = await response.text()
         res.setHeader('x-mss-status', String(response.status))

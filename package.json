@@ -23,6 +23,7 @@
     "@pixi/canvas-renderer": "^7.4.3",
     "@pixi/sound": "^5.2.3",
     "@pixi/unsafe-eval": "^7.4.3",
+    "@sinonjs/fake-timers": "^15.4.0",
     "express": "^5.2.1",
     "ffmpeg-static": "^5.2.0",
     "fontfaceobserver": "^2.3.0",

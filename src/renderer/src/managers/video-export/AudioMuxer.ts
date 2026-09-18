@@ -11,6 +11,8 @@ export interface AudioTrackData {
   endTime: number
   characterName: string
   text: string
+  /** 预合成路径记录的所属片段索引（并发合成时用于精确归属音轨） */
+  snippetIndex?: number
 }
 
 export interface BGMConfig {

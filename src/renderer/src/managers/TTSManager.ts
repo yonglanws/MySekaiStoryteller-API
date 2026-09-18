@@ -361,10 +361,14 @@ export class TTSManager {
     try {
       this.currentTimeMs = this.calculateCurrentTimeMsFromIndex(talk.index)
       if (talk.ttsText) {
-        const result = await this.synthesizeWithText(talk.ttsText, talk.speaker)
+        const result = await this.synthesizeWithText(talk.ttsText, talk.speaker, talk.index)
         return { ...result, index: talk.index }
       }
-      const result = await this.translateAndSynthesizeWithPrefetch(talk.content, talk.speaker)
+      const result = await this.translateAndSynthesizeWithPrefetch(
+        talk.content,
+        talk.speaker,
+        talk.index
+      )
       return { ...result, index: talk.index }
     } catch (error) {
       this.logger.error(
@@ -376,7 +380,8 @@ export class TTSManager {
 
   async synthesizeWithText(
     text: string,
-    characterName: string
+    characterName: string,
+    snippetIndex?: number
   ): Promise<{ success: boolean; duration: number }> {
     if (!this.ttsService) {
       this.initialize()
@@ -394,7 +399,8 @@ export class TTSManager {
         startTime: this.currentTimeMs,
         endTime: this.currentTimeMs + ttsResult.duration,
         characterName,
-        text
+        text,
+        snippetIndex
       }
       this.audioTracks.push(audioTrack)
       return { success: true, duration: ttsResult.duration }
@@ -414,7 +420,8 @@ export class TTSManager {
 
   private async translateAndSynthesizeWithPrefetch(
     text: string,
-    characterName: string
+    characterName: string,
+    snippetIndex?: number
   ): Promise<{ success: boolean; duration: number }> {
     // 使用纯文本内容作为缓存键，与预取时保持一致
     const cacheKey = text
@@ -458,7 +465,8 @@ export class TTSManager {
         startTime: this.currentTimeMs,
         endTime: this.currentTimeMs + ttsResult.duration,
         characterName,
-        text: translatedText
+        text: translatedText,
+        snippetIndex
       }
       this.audioTracks.push(audioTrack)
       return { success: true, duration: ttsResult.duration }
@@ -556,10 +564,11 @@ export class TTSManager {
 
   async translateAndSynthesize(
     text: string,
-    characterName: string
+    characterName: string,
+    snippetIndex?: number
   ): Promise<{ success: boolean; duration: number }> {
     // 不清空缓存，允许复用预取结果
-    return this.translateAndSynthesizeWithPrefetch(text, characterName)
+    return this.translateAndSynthesizeWithPrefetch(text, characterName, snippetIndex)
   }
 
   getService(): TTSService | null {
@@ -590,6 +599,8 @@ export class TTSManager {
   }
 
   getAudioBufferForSnippet(snippetIndex: number): ArrayBuffer | null {
+    const byIndex = this.audioTracks.find((t) => t.snippetIndex === snippetIndex)
+    if (byIndex) return byIndex.audioBuffer
     const track = this.audioTracks.find(
       (t) =>
         t.startTime >= 0 && this.audioTracks.indexOf(t) === this.getTalkTrackIndex(snippetIndex)

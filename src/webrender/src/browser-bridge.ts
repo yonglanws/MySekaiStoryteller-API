@@ -15,11 +15,14 @@ type IpcListener = (event: unknown, ...args: unknown[]) => void
 const JSON_INVOKE_CHANNELS = new Set([
   'electron:get-temp-dir',
   'electron:get-temp-base-dir',
-  'electron:api-export-video-from-files'
+  'electron:api-export-video-from-files',
+  'electron:api-remux-video-from-files',
+  'electron:api-encode-frames-video'
 ])
 
 const BINARY_INVOKE_CHANNELS = new Set([
   'electron:append-to-file',
+  'electron:write-file-at',
   'electron:write-frame',
   'electron:write-frame-batch',
   'electron:write-temp-file'

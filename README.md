@@ -20,6 +20,7 @@
   <a href="#故事文件格式">故事文件格式</a> ·
   <a href="#资源导入指南">资源导入</a> ·
   <a href="#tts--bgm-配置">TTS / BGM</a> ·
+  <a href="#导出模式">导出模式</a> ·
   <a href="#部署">部署</a> ·
   <a href="#项目结构">项目结构</a> ·
   <a href="#故障排除">故障排除</a> ·
@@ -43,7 +44,8 @@ QQ/Telegram 机器人的 AI 剧本生成与视频自动发送。
 | 特性     | 说明                                                                       |
 | -------- | -------------------------------------------------------------------------- |
 | 渲染引擎 | PixiJS + Live2D 跑在无头 Chrome 里（Playwright 渲染池，每页独立 WebGL 上下文） |
-| 视频编码 | ffmpeg 自动探测 NVENC / AMF / QSV 硬件编码，失败自动回退 CPU                 |
+| 导出管线 | `record`（默认，MediaRecorder 墙钟录制）或 `fast`（虚拟时钟逐帧渲染 + WebCodecs 直编） |
+| 视频编码 | ffmpeg 自动探测 NVENC / AMF / QSV 硬件编码，失败自动回退 CPU；fast 模式页内直编后仅 remux |
 | 音频     | 内置 BGM + GPT-SoVITS 语音合成（无 TTS 时自动跳过配音，导出不受影响）        |
 | 队列管理 | 任务排队、默认 2 路并发导出、IP 限流、过期文件自动清理                       |
 | 统一配置 | 单个 `config.yaml`，全字段中文注释，`MSS_*` 环境变量可覆盖                   |
@@ -194,6 +196,35 @@ curl -X POST http://127.0.0.1:9881/api/v1/export \
 3. BGM 放在 `resources/audio/bgm/` 下，`bgm.path` 填相对资源根的路径（如 `audio/bgm/bg1.mp3`）
 4. `tts.enabled: false` 可整体关闭配音；无 TTS 时导出仍会成功，只是没有角色配音
 
+## 导出模式
+
+`config.yaml` 的 `video.exportMode`（环境变量 `MSS_EXPORT_MODE`）在两条管线间切换，默认 `record`。
+
+| 模式     | 怎么出片 | 耗时怎么涨 | 输出分辨率 | 适用 |
+| -------- | -------- | ---------- | ---------- | ---- |
+| `record` | 无头页用 MediaRecorder 墙钟录制画布，ffmpeg 二次转码合流 | 至少等于视频时长 + 转码 | ffmpeg 会把画面缩到 1280x720（历史行为） | 短片、核显、要最保守的路径 |
+| `fast`   | 虚拟时钟按时间轴逐帧推进动画，页内 WebCodecs 直编 H.264，ffmpeg 只做 `-c:v copy` remux | 跟「帧数 x 每帧 GPU 读回」成正比，不再跟视频时长 1:1 | 按 `video.width` / `video.height` 直出 | 长片、独显；WebCodecs 不可用时自动回退 `record` |
+
+`fast` 的时间轴、TTS 落点和 `record` 同一套：台词时长仍按 TTS 波形 + 尾垫，音频离线混进 WAV 后再 mux。编码帧率封顶 30fps（时间轴仍按 `video.fps` 走，片子时长不变），用来砍掉 WebGL 画布读回次数。
+
+切换方式：
+
+```yaml
+video:
+  exportMode: fast          # record | fast（env: MSS_EXPORT_MODE）
+  exportBitrate: 12000000   # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
+```
+
+改完重启宿主。不配这两项时行为与原来完全一致。
+
+**什么时候 fast 会更快**
+
+- 3 分钟级剧本：`record` 至少要等满墙钟；`fast` 只付「画一帧 + 读回一帧」的成本
+- 独显（如 NVIDIA）：读回比核显便宜，导出时间会接近 TTS + GPU 绘制，而不是视频时长
+- 短片 + 核显 + `renderScale: 1.5`：读回税可能比「等墙钟」还贵，这时继续用 `record`
+
+WebCodecs 探测失败或 fast 整条失败时，会自动回退 `record`，导出仍会成功。
+
 ## 部署
 
 宿主是普通 Node 进程，**Windows / Linux / macOS 都可以跑**，不依赖 Electron，也不强制要桌面环境。
@@ -267,6 +298,11 @@ WebGL 落到了软件渲染，导出会慢 5–10 倍，并可能音画不同步
 - 尝试降低 `render.workers`（显存/内存不足时）
 - 确认 `video.encoder` 对应的硬件在当前机器可用（失败会自动回退 CPU）。
   取值是 `auto` / `nvidia` / `amd` / `intel` / `libx264`，不是 ffmpeg 的 `nvenc` 字符串
+- `exportMode: fast` 失败时会自动回退 `record`；日志里会出现 `Fast export failed ... falling back to record mode`
+
+**Q: 开了 fast，短片反而更慢**
+
+fast 每一帧都要把 WebGL 画布读回给编码器，核显上这一步可能比「等墙钟录完」还贵。短片继续用 `record`；长片或独显再开 `fast`。也可把 `renderScale` 从 `1.5` 降到 `1.0` 减轻读回。
 
 ## 相关项目
 

@@ -7,6 +7,10 @@ export interface ConcurrentPipelineConfig {
   ttsTimeoutMs: number
   targetFps: number
   maxConcurrentTts: number
+  /** 等待函数；fast 模式下必须用真实时钟 sleep，否则虚拟时钟会把等待编进视频 */
+  waitMs?: (ms: number) => Promise<void>
+  /** 真实墙钟 now；fast 模式下 performance.now 是虚拟时间 */
+  nowMs?: () => number
 }
 
 export interface PipelineTTSResult {
@@ -61,7 +65,9 @@ export class ConcurrentExportPipeline {
       ttsLookahead: config?.ttsLookahead ?? 3,
       ttsTimeoutMs: config?.ttsTimeoutMs ?? 30000,
       targetFps: config?.targetFps ?? 30,
-      maxConcurrentTts: 1
+      maxConcurrentTts: 1,
+      waitMs: config?.waitMs,
+      nowMs: config?.nowMs
     }
     this.metrics = this.createInitialMetrics()
   }
@@ -172,9 +178,9 @@ export class ConcurrentExportPipeline {
         let result: { success: boolean; duration: number }
 
         if (talk.ttsText) {
-          result = await ttsManager.synthesizeWithText(talk.ttsText, talk.speaker)
+          result = await ttsManager.synthesizeWithText(talk.ttsText, talk.speaker, talk.index)
         } else {
-          result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker)
+          result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker, talk.index)
         }
 
         const latency = performance.now() - startTime
@@ -223,7 +229,7 @@ export class ConcurrentExportPipeline {
       onProgress?.(completed, total, `正在合成语音 ${completed}/${total}: ${talk.speaker}`)
 
       if (completed % 5 === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 0))
+        await this.wait(0)
       }
     }
 
@@ -243,17 +249,16 @@ export class ConcurrentExportPipeline {
     }
 
     // 使用更高效的轮询+事件混合机制
-    const startTime = performance.now()
+    const startTime = this.now()
     const checkInterval = 10 // 10ms检查一次
     const maxWaitTime = this.config.ttsTimeoutMs
 
-    while (performance.now() - startTime < maxWaitTime) {
+    while (this.now() - startTime < maxWaitTime) {
       if (this.ttsReadyFlags.get(snippetIndex)) {
         return this.ttsResults.get(snippetIndex) ?? null
       }
 
-      // 使用Promise让出事件循环，但保持快速响应
-      await new Promise((resolve) => setTimeout(resolve, checkInterval))
+      await this.wait(checkInterval)
 
       if (this.isAborted) {
         return { success: false, duration: 0 }
@@ -266,6 +271,15 @@ export class ConcurrentExportPipeline {
     this.ttsReadyFlags.set(snippetIndex, true)
     this.ttsResults.set(snippetIndex, { success: false, duration: 0 })
     return { success: false, duration: 0 }
+  }
+
+  private wait(ms: number): Promise<void> {
+    if (this.config.waitMs) return this.config.waitMs(ms)
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  private now(): number {
+    return this.config.nowMs ? this.config.nowMs() : performance.now()
   }
 
   isTTSReady(snippetIndex: number): boolean {

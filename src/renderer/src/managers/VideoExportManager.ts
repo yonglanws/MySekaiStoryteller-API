@@ -15,6 +15,9 @@ import {
   SnippetTimestampRecorder,
   AsyncFrameCapturer
 } from './video-export'
+import { VirtualClockController } from './video-export/VirtualClockController'
+import { WebCodecsMp4Encoder } from './video-export/WebCodecsMp4Encoder'
+import { JpegFrameSink } from './video-export/JpegFrameSink'
 import type { VideoExportOptions } from './video-export'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
@@ -210,6 +213,29 @@ export default class VideoExportManager {
           }
         }
         throw lastError
+      }
+
+      if (options.exportMode === 'fast') {
+        try {
+          return await this.exportVideoFast(options, progressFill, exportStatus, progressCallback)
+        } catch (error) {
+          // 取消不重试；其余失败整体回退实时录制模式，保证导出一定成功
+          if (error instanceof ExportError && error.code === ExportErrorCode.CANCELLED) {
+            throw error
+          }
+          this.logger.warn(
+            `Fast export failed (${error instanceof Error ? error.message : error}), ` +
+              `falling back to record mode`
+          )
+          this.app.lastSnippetActualDurationMs = 0
+          this.app.ttsManager?.clearAudioTracks()
+          return await this.exportVideoStream(
+            { ...options, exportMode: 'stream' },
+            progressFill,
+            exportStatus,
+            progressCallback
+          )
+        }
       }
 
       const { canvas, framesDir, totalSnippets, startSnippetIndex, startFrameIndex } =
@@ -717,6 +743,414 @@ export default class VideoExportManager {
     }
   }
 
+  /**
+   * fast 导出模式：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编。
+   *
+   * 与 stream/record 的差异：
+   * - 时间由 VirtualClockController.tickAsync 推进，不再等墙钟。
+   * - TTS 与渲染重叠；等 TTS 时暂停帧泵，等待走真实时钟，
+   *   不把等待时间编进视频。
+   * - 抓帧用 VideoFrame(canvas)：不受显示器 vsync 限制，才能快于墙钟。
+   *   captureStream+requestFrame 受真实 vsync 约束，虚拟时钟下会和片段
+   *   setTimeout 死锁，因此不用。
+   */
+  private async exportVideoFast(
+    options: VideoExportOptions,
+    progressFill: HTMLDivElement | null,
+    exportStatus: HTMLElement | null,
+    onProgress: InternalProgressCallback
+  ): Promise<ExportResult> {
+    const { canvas, snippets } = await this.prepareStreamRecording(
+      options,
+      progressFill,
+      exportStatus,
+      onProgress
+    )
+    this.checkAborted()
+
+    const fps = options.fps
+    const outW = options.width
+    const outH = options.height
+    const bitrate = options.exportBitrate ?? 12_000_000
+    // 编码帧率独立于时间轴：动画仍按 options.fps 的虚拟时间推进，
+    // 但每帧 GPU 读回很贵。把编码 fps 封顶到 30，时长不变、吞吐翻倍。
+    const encodeFps = Math.min(fps, 30)
+    const frameMs = 1000 / encodeFps
+
+    this.logger.info('Starting fast export (virtual clock)', {
+      fps,
+      encodeFps,
+      width: outW,
+      height: outH,
+      bitrate,
+      snippetCount: snippets.length
+    })
+
+    let ttsEnabled = this.app.ttsManager?.isTTSEnabled() ?? false
+    if (ttsEnabled) {
+      this.logger.info('Checking TTS service availability...')
+      const available = await this.app.ttsManager!.checkTTSAvailability()
+      if (!available) {
+        this.logger.warn('TTS service not available. Disabling TTS for this export.')
+        ttsEnabled = false
+      }
+    }
+
+    const bgmConfig = this.app.ttsManager?.getBGMConfig()
+    const bgmEnabled = bgmConfig?.enabled ?? false
+    const audioMuxer = new AudioMuxer()
+    if (ttsEnabled || bgmEnabled) {
+      await audioMuxer.initialize()
+    }
+
+    let bgmBuffer: AudioBuffer | null = null
+    if (bgmEnabled && bgmConfig) {
+      audioMuxer.setBGMConfig(bgmConfig)
+      try {
+        const bgmPath = resolveBgmUrl(bgmConfig.path)
+        bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
+      } catch (error) {
+        this.logger.warn(`Failed to load BGM: ${error}`)
+      }
+    }
+
+    const ttsAudioResults = new Map<
+      number,
+      {
+        audioBuffer: ArrayBuffer
+        pcmData?: { channel0: Float32Array; channel1: Float32Array; sampleRate: number }
+        durationMs: number
+        characterName: string
+        text: string
+        preDecoded: boolean
+      }
+    >()
+
+    let timeline: SnippetTimelineEntry[] = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
+    this.app.ttsManager.setTimeline(timeline)
+
+    const virtualClock = new VirtualClockController()
+    const timestampRecorder = new SnippetTimestampRecorder()
+    const concurrentPipeline = new ConcurrentExportPipeline({
+      ttsLookahead: 3,
+      ttsTimeoutMs: 15000,
+      targetFps: fps,
+      waitMs: (ms) => virtualClock.realSleep(ms),
+      nowMs: () => virtualClock.realTimeMs()
+    })
+
+    if (ttsEnabled) {
+      this.logger.info('Concurrent mode: Starting TTS pipeline in background')
+      concurrentPipeline.startTTSPipeline(
+        snippets,
+        this.app.ttsManager,
+        (current, total, message) => {
+          this.logger.info(`[TTS Pipeline] ${current}/${total}: ${message}`)
+        }
+      )
+    }
+
+    const useWebCodecs =
+      (await WebCodecsMp4Encoder.resolveConfig(outW, outH, encodeFps, bitrate)) !== null
+
+    let encoder: WebCodecsMp4Encoder | null = null
+    let jpegSink: JpegFrameSink | null = null
+    let framesDir: string | null = null
+
+    if (useWebCodecs) {
+      const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
+      const videoFilePath = `${tempDir}/mss-fast-${Date.now()}.mp4`
+      encoder = new WebCodecsMp4Encoder({ width: outW, height: outH, fps: encodeFps, bitrate })
+      await encoder.initialize(videoFilePath)
+      this.logger.info(
+        `Fast export: WebCodecs MP4 → ${videoFilePath} ` +
+          `(canvas ${canvas.width}x${canvas.height} → ${outW}x${outH})`
+      )
+    } else {
+      this.logger.warn('WebCodecs unavailable, falling back to JPEG frame sink')
+      const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
+      framesDir = dir
+      jpegSink = new JpegFrameSink({
+        width: outW,
+        height: outH,
+        quality: this.getJpegQuality(options.quality),
+        framesDir: dir
+      })
+      await jpegSink.initialize(canvas)
+    }
+
+    const realStart = virtualClock.realTimeMs()
+    virtualClock.install()
+    timestampRecorder.markRenderStart()
+    concurrentPipeline.markRenderStart()
+
+    let pumpPaused = false
+    let pumpDone = false
+    let pumpError: Error | null = null
+    let blackFrameValidationCount = 0
+    frameValidator.reset()
+    let frameIndex = 0
+
+    const framePump = (async (): Promise<void> => {
+      try {
+        while (!pumpDone) {
+          this.checkAborted()
+          if (pumpPaused) {
+            await virtualClock.realSleep(4)
+            continue
+          }
+          await virtualClock.tick(frameMs)
+
+          const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
+          const durationUs = Math.round(1_000_000 / encodeFps)
+          const keyFrame = frameIndex % (encodeFps * 4) === 0
+
+          if (encoder) {
+            await encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
+          } else if (jpegSink) {
+            await jpegSink.captureFrame(canvas)
+          }
+
+          if (frameIndex % (encodeFps * 5) === 0) {
+            const v = frameValidator.validateFrame(canvas, frameIndex)
+            if (!v.isValid && v.error) {
+              throw new Error(
+                `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
+                  `Brightness: ${v.brightness.toFixed(2)}%`
+              )
+            }
+            if (v.isBlackScreen) {
+              blackFrameValidationCount++
+              if (blackFrameValidationCount >= 5) {
+                throw new Error(
+                  `Detected ${blackFrameValidationCount} black frames during fast export. ` +
+                    `Models are not rendering.`
+                )
+              }
+            } else {
+              blackFrameValidationCount = 0
+            }
+          }
+
+          frameIndex++
+        }
+      } catch (e) {
+        pumpError = e instanceof Error ? e : new Error(String(e))
+      }
+    })()
+
+    try {
+      const totalSnippets = snippets.length
+
+      for (let i = 0; i < totalSnippets; i++) {
+        this.checkAborted()
+        if (pumpError) throw pumpError
+
+        const snippet = snippets[i]
+        const isTalk = snippet.type === 'Talk'
+        const talkData = isTalk
+          ? (snippet as { data?: { speaker?: string; content?: string } }).data
+          : undefined
+
+        if (ttsEnabled && isTalk) {
+          pumpPaused = true
+          const ttsResult = await concurrentPipeline.waitForTTSReady(i)
+          pumpPaused = false
+          if (pumpError) throw pumpError
+
+          const timelineEntry = timeline[i]
+          if (ttsResult && ttsResult.success && ttsResult.duration > 0) {
+            const oldDurationMs = timelineEntry?.durationMs ?? 0
+            const newDurationMs = Math.max(oldDurationMs, ttsResult.duration + TTS_TAIL_SILENCE_MS)
+            const durationDelta = newDurationMs - oldDurationMs
+            timeline[i] = {
+              ...timelineEntry,
+              ttsDurationMs: ttsResult.duration,
+              hasTTS: true,
+              durationMs: newDurationMs,
+              endTimeMs: (timelineEntry?.startTimeMs ?? 0) + newDurationMs
+            }
+            if (durationDelta > 0) {
+              for (let j = i + 1; j < timeline.length; j++) {
+                timeline[j] = {
+                  ...timeline[j],
+                  startTimeMs: (timeline[j]?.startTimeMs ?? 0) + durationDelta,
+                  endTimeMs: (timeline[j]?.endTimeMs ?? 0) + durationDelta
+                }
+              }
+            }
+            const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
+            if (rawAudioBuffer) {
+              ttsAudioResults.set(i, {
+                audioBuffer: rawAudioBuffer,
+                durationMs: ttsResult.duration,
+                characterName: talkData?.speaker ?? '',
+                text: talkData?.content ?? '',
+                preDecoded: false
+              })
+            }
+          } else if (timelineEntry) {
+            const fallbackMs = estimateSnippetDuration(snippet)
+            if (timelineEntry.durationMs < fallbackMs) {
+              const durationDelta = fallbackMs - timelineEntry.durationMs
+              timeline[i] = {
+                ...timelineEntry,
+                durationMs: fallbackMs,
+                endTimeMs: timelineEntry.startTimeMs + fallbackMs
+              }
+              for (let j = i + 1; j < timeline.length; j++) {
+                timeline[j] = {
+                  ...timeline[j],
+                  startTimeMs: timeline[j].startTimeMs + durationDelta,
+                  endTimeMs: timeline[j].endTimeMs + durationDelta
+                }
+              }
+            }
+          }
+          this.app.ttsManager.setTimeline(timeline)
+        }
+
+        const timelineEntry = timeline[i]
+        const pct = 30 + Math.round(((i + 1) / totalSnippets) * 60)
+        if (progressFill) progressFill.style.width = `${pct}%`
+        onProgress({
+          stage: 'capturing',
+          current: i + 1,
+          total: totalSnippets,
+          message: `处理片段 ${i + 1}/${totalSnippets}`,
+          percentage: pct
+        })
+
+        this.app.lastSnippetActualDurationMs =
+          timelineEntry?.durationMs ??
+          Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet))
+
+        timestampRecorder.markSnippetStart(i, snippet.type, {
+          speaker: talkData?.speaker,
+          content: talkData?.content
+        })
+
+        await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
+
+        const ttsDur = ttsAudioResults.get(i)?.durationMs
+        timestampRecorder.markSnippetEnd(ttsDur)
+      }
+
+      pumpDone = true
+      await framePump
+      if (pumpError) throw pumpError
+
+      concurrentPipeline.markRenderEnd()
+      timestampRecorder.logSummary()
+
+      let videoFilePath: string
+      if (encoder) {
+        videoFilePath = await encoder.finish()
+      } else {
+        videoFilePath = await jpegSink!.finish()
+      }
+
+      virtualClock.uninstall()
+
+      const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
+      const totalDurationMs = actualVideoDurationMs + 500
+      const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
+
+      let audioFilePath: string | undefined
+      if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+        if (hasTtsTracks) {
+          const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
+          for (const placement of audioPlacements) {
+            audioMuxer.addAudioTrack({
+              audioBuffer: placement.audioBuffer,
+              pcmData: placement.pcmData,
+              startTime: placement.startTimeMs,
+              endTime: placement.endTimeMs,
+              characterName: placement.characterName,
+              text: placement.text
+            })
+          }
+        }
+
+        const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
+          totalDurationMs,
+          bgmBuffer || undefined
+        )
+        const wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
+        audioFilePath = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
+          data: wavBuffer,
+          prefix: 'mss-audio',
+          extension: 'wav'
+        })
+      }
+
+      if (exportStatus) exportStatus.textContent = '正在合成视频…'
+      onProgress({
+        stage: 'saving',
+        current: 1,
+        total: 1,
+        message: '正在合成视频...',
+        percentage: 95
+      })
+
+      const outputPath = options.apiOutputPath ?? ''
+      const audioBitrate = options.apiAudioBitrate ?? '128k'
+
+      let saveResult: { success: boolean; error?: string; fileSize?: number }
+      if (encoder) {
+        saveResult = await window.electron.ipcRenderer.invoke(
+          'electron:api-remux-video-from-files',
+          {
+            videoPath: videoFilePath,
+            audioPath: audioFilePath,
+            outputPath,
+            audioBitrate
+          }
+        )
+      } else {
+        if (!framesDir) throw new Error('JPEG frame sink produced no frames directory')
+        saveResult = await window.electron.ipcRenderer.invoke('electron:api-encode-frames-video', {
+          framesDir,
+          audioPath: audioFilePath,
+          outputPath,
+          fps: encodeFps,
+          audioBitrate
+        })
+      }
+
+      if (!saveResult?.success) {
+        throw new Error(saveResult?.error || 'Video assembly failed on host')
+      }
+
+      const result = {
+        success: true,
+        duration: (virtualClock.realTimeMs() - realStart) / 1000,
+        frameCount: Math.round((totalDurationMs / 1000) * encodeFps),
+        outputSize: saveResult.fileSize
+      }
+
+      this.logger.info('Fast export completed', result)
+      return result
+    } catch (error) {
+      pumpDone = true
+      pumpPaused = false
+      await framePump.catch(() => undefined)
+      this.logger.error('Fast export failed', error)
+      throw error
+    } finally {
+      try {
+        virtualClock.uninstall()
+      } catch {
+        /* already uninstalled */
+      }
+      encoder?.dispose()
+      if (jpegSink) await jpegSink.dispose()
+      await concurrentPipeline.dispose()
+      audioMuxer.dispose()
+      this.app.ttsManager?.clearAudioTracks()
+    }
+  }
+
   private async prepareStreamRecording(
     options: VideoExportOptions,
     _progressFill: HTMLDivElement | null,
@@ -727,7 +1161,11 @@ export default class VideoExportManager {
 
     AnimationManager.setExportMode(true)
     AnimationManager.exportSpeedMultiplier = 1
-    AnimationManager.exportTargetFPS = options.fps
+    AnimationManager.exportTargetFPS =
+      options.exportMode === 'fast' ? Math.min(options.fps, 30) : options.fps
+    if (options.exportMode === 'fast') {
+      Ticker.shared.maxFPS = Math.min(options.fps, 30)
+    }
 
     if (isApiMode) {
       this.logger.info('API mode: skipping story reload, using pre-initialized story data')

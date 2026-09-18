@@ -19,6 +19,11 @@ const STORY_FILE =
   process.env.MSS_E2E_STORY ||
   path.resolve('resources/stories/multi-character-demo.sekai-story.json')
 
+// record 模式的 ffmpeg 管线历史上把输出 scale 到 1280x720；
+// fast 模式按 video.width/height 输出。断言最低可接受分辨率。
+const MIN_WIDTH = 1280
+const MIN_HEIGHT = 720
+
 let failures = 0
 function check(name, ok, detail = '') {
   const status = ok ? 'PASS' : 'FAIL'
@@ -111,8 +116,8 @@ async function main() {
       const a = (probe.streams || []).find((s) => s.codec_type === 'audio')
       check('video stream present', !!v, v ? `${v.codec_name} ${v.width}x${v.height}` : 'missing')
       check(
-        'resolution 1280x720',
-        v && v.width === 1280 && v.height === 720,
+        `resolution >= ${MIN_WIDTH}x${MIN_HEIGHT}`,
+        v && v.width >= MIN_WIDTH && v.height >= MIN_HEIGHT,
         v ? `${v.width}x${v.height}` : ''
       )
       check('duration > 0', Number(probe.format?.duration) > 0, `${probe.format?.duration}s`)

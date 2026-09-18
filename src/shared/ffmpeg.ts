@@ -458,6 +458,56 @@ export async function apiMergeVideoAudioWithCompression(
 }
 
 /**
+ * fast 导出收尾：已编码的 MP4（WebCodecs 页内编码）与 WAV 音频 remux。
+ * 视频流直接 copy 不再二次编码，仅音频转 AAC；耗时为秒级。
+ */
+export async function apiMuxVideoAudioCopy(
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+  audioBitrate: string = '128k'
+): Promise<void> {
+  const stat = await fs.promises.stat(videoPath)
+  const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
+
+  const ffmpegArgs = [
+    '-i',
+    videoPath,
+    '-i',
+    audioPath,
+    '-map',
+    '0:v:0',
+    '-map',
+    '1:a:0',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-b:a',
+    audioBitrate,
+    '-shortest',
+    '-movflags',
+    '+faststart',
+    '-y',
+    outputPath
+  ]
+
+  await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
+}
+
+/**
+ * fast 导出收尾：无音轨时仅重写容器（加 faststart），视频流 copy。
+ */
+export async function apiCopyVideo(inputPath: string, outputPath: string): Promise<void> {
+  const stat = await fs.promises.stat(inputPath)
+  const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
+
+  const ffmpegArgs = ['-i', inputPath, '-c:v', 'copy', '-movflags', '+faststart', '-y', outputPath]
+
+  await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
+}
+
+/**
  * 帧序列合成 MP4（帧捕获回退路径使用，无对话框依赖）。
  */
 export async function encodeFramesToVideo(

@@ -25,9 +25,12 @@ Node 20 宿主（单进程 + N 个无头浏览器渲染工作进程）
 └─ RenderPool             N 个无头 Chrome 页面（每页独立 WebGL 上下文）
 ```
 
-导出数据流（与旧版语义一致）：
-`POST /api/v1/export` → 队列（并发上限 = `render.workers`，默认 2）→ 渲染页面 MediaRecorder 录 WebM（分块回传写盘）
-→ Web Audio 混音 WAV → ffmpeg 转码/合流 MP4 → `downloadUrl` 供下载。
+导出数据流：
+`POST /api/v1/export` → 队列（并发上限 = `render.workers`，默认 2）→ 渲染页面按 `video.exportMode` 出片
+→ Web Audio 混音 WAV → ffmpeg 合流 MP4 → `downloadUrl` 供下载。
+
+- `record`（默认）：MediaRecorder 墙钟录 WebM（分块回传写盘）→ ffmpeg 二次转码/合流
+- `fast`：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编 H.264 → ffmpeg `-c:v copy` 仅 remux；失败自动回退 `record`
 AstrBot 插件（[astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst)，
 独立仓库）**零改动兼容**。
 
@@ -92,7 +95,7 @@ Windows 没有 `cp` 时用资源管理器复制，或 `copy config.example.yaml 
 | 节       | 内容                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------- |
 | `server` | 端口、监听地址                                                                               |
-| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto / nvidia / amd / intel / libx264） |
+| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto / nvidia / amd / intel / libx264）、**导出管线**（`exportMode`: record / fast） |
 | `render` | worker 数、页面回收周期、浏览器探测顺序、附加 Chrome 参数、Linux ANGLE 开关                  |
 | `paths`  | 输出目录（apifile）、资源根（resources）、webrenderer 产物目录                               |
 | `tts`    | GPT-SoVITS 地址、启停、全局/角色参考音频与权重                                               |
@@ -107,6 +110,7 @@ Windows 没有 `cp` 时用资源管理器复制，或 `copy config.example.yaml 
 | `MSS_PORT` / `MSS_HOST`                                                                       | `server.port` / `server.host` | 监听                                    |
 | `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                    | `video.*`                     | 输出参数                                |
 | `MSS_FFMPEG_ENCODER`                                                                          | `video.encoder`               | auto / nvidia / amd / intel / libx264   |
+| `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                                      | `video.exportMode` / `video.exportBitrate` | record / fast；fast 模式码率（bps） |
 | `MSS_WORKERS` / `MSS_WORKER_RECYCLE_EXPORTS`                                                  | `render.*`                    | 渲染池                                  |
 | `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS` / `MSS_LINUX_GPU_ANGLE` | `render.*`                    | 浏览器                                  |
 | `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                | `paths.*`                     | 路径                                    |
