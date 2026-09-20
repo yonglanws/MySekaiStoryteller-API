@@ -68,6 +68,8 @@ export interface ExportResult {
   duration: number
   frameCount: number
   outputSize?: number
+  /** 分段时间统计（毫秒）：pump/ttsWait/encode/audio/invoke/avgPumpFps/frames */
+  timings?: Record<string, number>
   error?: string
   performanceMetrics?: ExportPerformanceMetrics
 }

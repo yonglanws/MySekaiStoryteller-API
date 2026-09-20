@@ -254,6 +254,8 @@ export class App {
             videoPath: result.videoPath,
             duration: result.duration,
             frameCount: result.frameCount,
+            outputSize: result.outputSize,
+            timings: result.timings,
             error: result.error
           })
           this.logger.info(`api:export-result sent for taskId=${payload.taskId}`)
@@ -303,6 +305,8 @@ export class App {
     videoPath?: string
     duration?: number
     frameCount?: number
+    outputSize?: number
+    timings?: Record<string, number>
     error?: string
   }> {
     const startTime = performance.now()
@@ -362,7 +366,9 @@ export class App {
         success: true,
         videoPath: outputPath,
         duration: (performance.now() - startTime) / 1000,
-        frameCount: result.frameCount
+        frameCount: result.frameCount,
+        outputSize: result.outputSize,
+        timings: result.timings
       }
     } catch (error) {
       this.logger.error('API export failed during rendering', error)

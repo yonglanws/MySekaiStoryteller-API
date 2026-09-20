@@ -79,7 +79,9 @@ async function bootstrap(): Promise<void> {
         success: true,
         videoPath: result.videoPath,
         duration: result.duration,
-        frameCount: result.frameCount
+        frameCount: result.frameCount,
+        outputSize: result.outputSize,
+        timings: result.timings
       })
     } else {
       apiServer.rejectExport(taskId, new Error(result.error || 'Export failed'))

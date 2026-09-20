@@ -77,6 +77,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         )
 
         try {
+          const channelStart = Date.now()
           const outputDir = path.dirname(payload.outputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
@@ -118,7 +119,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
           const outputSize = (await fs.promises.stat(payload.outputPath)).size
           logger.info(
-            `[Bridge] API: Video exported successfully: ${payload.outputPath}, size=${(outputSize / 1024 / 1024).toFixed(2)} MB`
+            `[Bridge] API: Video exported successfully: ${payload.outputPath}, ` +
+              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
           return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
         } catch (error) {
@@ -154,6 +156,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         )
 
         try {
+          const channelStart = Date.now()
           const outputDir = path.dirname(payload.outputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
@@ -180,7 +183,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
           const outputSize = (await fs.promises.stat(payload.outputPath)).size
           logger.info(
-            `[Bridge] API remux: Video exported successfully: ${payload.outputPath}, size=${(outputSize / 1024 / 1024).toFixed(2)} MB`
+            `[Bridge] API remux: Video exported successfully: ${payload.outputPath}, ` +
+              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
           return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
         } catch (error) {
@@ -217,6 +221,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         )
 
         try {
+          const channelStart = Date.now()
           const outputDir = path.dirname(payload.outputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
@@ -258,7 +263,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
           const outputSize = (await fs.promises.stat(payload.outputPath)).size
           logger.info(
-            `[Bridge] API frames-encode: Video exported successfully: ${payload.outputPath}, size=${(outputSize / 1024 / 1024).toFixed(2)} MB`
+            `[Bridge] API frames-encode: Video exported successfully: ${payload.outputPath}, ` +
+              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
           return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
         } catch (error) {

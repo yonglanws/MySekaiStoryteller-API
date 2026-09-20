@@ -10,6 +10,9 @@ export interface ExportResultPayload {
   videoPath?: string
   duration?: number
   frameCount?: number
+  outputSize?: number
+  /** 分段时间统计（页内埋点，毫秒） */
+  timings?: Record<string, number>
   error?: string
 }
 

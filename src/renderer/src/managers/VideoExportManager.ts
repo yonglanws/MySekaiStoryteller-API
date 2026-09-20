@@ -415,6 +415,7 @@ export default class VideoExportManager {
     canvas.addEventListener('webglcontextrestored', handleContextRestored)
 
     try {
+      const recordStart = performance.now()
       videoFilePath = await recorder.startRecordingToDisk(canvas)
       concurrentPipeline.markRenderStart()
       timestampRecorder.markRenderStart()
@@ -609,7 +610,8 @@ export default class VideoExportManager {
       timestampRecorder.logSummary()
 
       videoFilePath = await recorder.stopRecordingToDisk()
-      this.logger.info(`Video recorded to disk: ${videoFilePath}`)
+      const recordMs = performance.now() - recordStart
+      this.logger.info(`Video recorded to disk: ${videoFilePath} (recordMs=${recordMs.toFixed(0)})`)
 
       onProgress({
         stage: 'saving',
@@ -636,6 +638,7 @@ export default class VideoExportManager {
         if (!videoFilePath) {
           throw new Error('Video file path is not available after recording')
         }
+        const mergeStart = performance.now()
         await this.saveApiVideoFromDisk(
           options,
           videoFilePath,
@@ -648,6 +651,11 @@ export default class VideoExportManager {
           onProgress,
           ttsAudioResults,
           timestampRecorder
+        )
+        this.logger.info(
+          `Record export phase timings: record=${recordMs.toFixed(0)}ms ` +
+            `merge=${(performance.now() - mergeStart).toFixed(0)}ms ` +
+            `videoDuration=${(totalDurationMs / 1000).toFixed(1)}s`
         )
       } else if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
         if (hasTtsTracks) {
@@ -939,6 +947,13 @@ export default class VideoExportManager {
     timestampRecorder.markRenderStart()
     concurrentPipeline.markRenderStart()
 
+    // 分段计时（真实墙钟；虚拟时钟下 performance.now 是虚拟时间）
+    let pumpMs = 0
+    let ttsWaitMs = 0
+    let encodeMs = 0
+    let audioMs = 0
+    let invokeMs = 0
+
     let pumpPaused = false
     let pumpDone = false
     let pumpError: Error | null = null
@@ -954,6 +969,7 @@ export default class VideoExportManager {
             await virtualClock.realSleep(4)
             continue
           }
+          const frameStart = virtualClock.realTimeMs()
           await virtualClock.tick(frameMs)
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
@@ -988,6 +1004,7 @@ export default class VideoExportManager {
           }
 
           frameIndex++
+          pumpMs += virtualClock.realTimeMs() - frameStart
         }
       } catch (e) {
         pumpError = e instanceof Error ? e : new Error(String(e))
@@ -1009,7 +1026,9 @@ export default class VideoExportManager {
 
         if (ttsEnabled && isTalk) {
           pumpPaused = true
+          const ttsWaitStart = virtualClock.realTimeMs()
           const ttsResult = await concurrentPipeline.waitForTTSReady(i)
+          ttsWaitMs += virtualClock.realTimeMs() - ttsWaitStart
           pumpPaused = false
           if (pumpError) throw pumpError
 
@@ -1099,11 +1118,13 @@ export default class VideoExportManager {
       timestampRecorder.logSummary()
 
       let videoFilePath: string
+      const encodeStart = virtualClock.realTimeMs()
       if (encoder) {
         videoFilePath = await encoder.finish()
       } else {
         videoFilePath = await jpegSink!.finish()
       }
+      encodeMs = virtualClock.realTimeMs() - encodeStart
 
       virtualClock.uninstall()
 
@@ -1113,6 +1134,7 @@ export default class VideoExportManager {
 
       let audioFilePath: string | undefined
       if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+        const audioStart = virtualClock.realTimeMs()
         if (hasTtsTracks) {
           const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
           for (const placement of audioPlacements) {
@@ -1137,6 +1159,7 @@ export default class VideoExportManager {
           prefix: 'mss-audio',
           extension: 'wav'
         })
+        audioMs = virtualClock.realTimeMs() - audioStart
       }
 
       if (exportStatus) exportStatus.textContent = '正在合成视频…'
@@ -1152,6 +1175,7 @@ export default class VideoExportManager {
       const audioBitrate = options.apiAudioBitrate ?? '128k'
 
       let saveResult: { success: boolean; error?: string; fileSize?: number }
+      const invokeStart = virtualClock.realTimeMs()
       if (encoder) {
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
@@ -1172,18 +1196,37 @@ export default class VideoExportManager {
           audioBitrate
         })
       }
+      invokeMs = virtualClock.realTimeMs() - invokeStart
 
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Video assembly failed on host')
+      }
+
+      const timings: Record<string, number> = {
+        pumpMs: Math.round(pumpMs),
+        ttsWaitMs: Math.round(ttsWaitMs),
+        encodeMs: Math.round(encodeMs),
+        audioMs: Math.round(audioMs),
+        invokeMs: Math.round(invokeMs),
+        frames: frameIndex,
+        avgPumpFps: pumpMs > 0 ? Math.round((frameIndex / (pumpMs / 1000)) * 10) / 10 : 0
       }
 
       const result = {
         success: true,
         duration: (virtualClock.realTimeMs() - realStart) / 1000,
         frameCount: Math.round((totalDurationMs / 1000) * encodeFps),
-        outputSize: saveResult.fileSize
+        outputSize: saveResult.fileSize,
+        timings
       }
 
+      this.logger.info(
+        `Fast export phase timings: pump=${pumpMs.toFixed(0)}ms ` +
+          `ttsWait=${ttsWaitMs.toFixed(0)}ms encode=${encodeMs.toFixed(0)}ms ` +
+          `audio=${audioMs.toFixed(0)}ms invoke=${invokeMs.toFixed(0)}ms ` +
+          `frames=${frameIndex} ` +
+          `avgPumpFps=${pumpMs > 0 ? (frameIndex / (pumpMs / 1000)).toFixed(1) : '0'}`
+      )
       this.logger.info('Fast export completed', result)
       return result
     } catch (error) {

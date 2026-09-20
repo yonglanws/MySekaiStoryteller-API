@@ -17,6 +17,7 @@ export interface ApiExportResponse {
   fileSize?: number
   duration?: number
   frameCount?: number
+  timings?: Record<string, number>
 }
 
 export interface VideoConfig {
@@ -658,7 +659,14 @@ export class VideoApiServer {
 
   resolveExport(
     taskId: string,
-    result: { success: boolean; videoPath?: string; duration?: number; frameCount?: number }
+    result: {
+      success: boolean
+      videoPath?: string
+      duration?: number
+      frameCount?: number
+      outputSize?: number
+      timings?: Record<string, number>
+    }
   ): void {
     const pending = this.pendingExports.get(taskId)
     if (pending) {
@@ -669,8 +677,10 @@ export class VideoApiServer {
         success: result.success,
         message: result.success ? 'Export completed' : 'Export failed',
         videoPath: result.videoPath,
+        fileSize: result.outputSize,
         duration: result.duration,
-        frameCount: result.frameCount
+        frameCount: result.frameCount,
+        timings: result.timings
       })
       this.activeExports.delete(taskId)
       this.processQueue()
