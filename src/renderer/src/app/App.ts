@@ -202,8 +202,7 @@ export class App {
   private setupApiExportListener(): void {
     window.electron.ipcRenderer.on(
       'api:start-export',
-      async (
-        _event,
+      async (        _event,
         payload: {
           taskId: string
           story: StoryData
@@ -270,6 +269,13 @@ export class App {
         }
       }
     )
+
+    // 宿主取消（HTTP 超时等）：中止正在进行的导出，让 worker 尽快回收。
+    // 否则取消只影响 HTTP 等待，渲染仍会跑完并写盘，持续占用 worker。
+    window.electron.ipcRenderer.on('api:abort-export', () => {
+      this.logger.info('Abort requested by host, aborting in-flight export')
+      this.videoExportManager?.abort()
+    })
 
     this.logger.info('API export listener registered')
   }

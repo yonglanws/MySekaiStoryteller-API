@@ -397,8 +397,22 @@ export class RenderPool implements ExportDispatcher {
   }
 
   cancel(taskId: string): void {
-    // 与原实现一致：取消只影响等待中的 HTTP 响应，渲染侧自然完成
-    this.logger.info(`[Pool] Cancel requested for task ${taskId}`)
+    // 通知渲染页中止当前导出。worker 保持 busy 直到收到 export-result，
+    // 不会被派新任务；否则 HTTP 超时只取消等待，渲染还会跑完并写盘，
+    // 白白阻塞下一个排队的任务（单 worker 时直接卡死）。
+    let workerId: string | null = null
+    for (const [id, worker] of this.workers.entries()) {
+      if (worker.busyTaskId === taskId) {
+        workerId = id
+        break
+      }
+    }
+    if (!workerId) {
+      this.logger.info(`[Pool] Cancel requested for task ${taskId} (no busy worker)`)
+      return
+    }
+    const sent = this.hub.send(workerId, { type: 'api:abort-export', args: [taskId] })
+    this.logger.info(`[Pool] Abort sent to ${workerId} for task ${taskId} (sent=${sent})`)
   }
 
   /**
