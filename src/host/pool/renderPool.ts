@@ -295,6 +295,9 @@ export class RenderPool implements ExportDispatcher {
   handleWorkerMessage(workerId: string, message: WorkerMessage): void {
     if (message.type === 'api:export-result') {
       const result = message.args[0] as ExportResultPayload
+      this.logger.info(
+        `[Pool] export-result fields: ${Object.keys(result || {}).join(',')} timings=${JSON.stringify(result?.timings ?? null)}`
+      )
       const worker = this.workers.get(workerId)
 
       if (worker && worker.busyTaskId === result.taskId) {

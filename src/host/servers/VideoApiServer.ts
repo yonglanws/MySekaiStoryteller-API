@@ -575,6 +575,7 @@ export class VideoApiServer {
             fileSize: stat.size,
             duration: result.duration,
             frameCount: result.frameCount,
+            timings: result.timings,
             downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
           })
         } else {

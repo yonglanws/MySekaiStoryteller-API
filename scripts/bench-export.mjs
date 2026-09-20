@@ -7,6 +7,40 @@
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
+import http from 'node:http'
+
+// 用原生 http 请求：长故事导出数分钟，避免 undici 默认 headers 超时
+function postExport(apiUrl, body, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${apiUrl}/api/v1/export`)
+    const payload = JSON.stringify(body)
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+        timeout: timeoutMs
+      },
+      (res) => {
+        let data = ''
+        res.on('data', (c) => (data += c))
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, json: JSON.parse(data) })
+          } catch {
+            resolve({ status: res.statusCode, json: { success: false, message: data.slice(0, 200) } })
+          }
+        })
+      }
+    )
+    req.on('timeout', () => req.destroy(new Error('client timeout')))
+    req.on('error', reject)
+    req.write(payload)
+    req.end()
+  })
+}
 
 const API_URL = process.argv[2] || 'http://127.0.0.1:9881'
 const STORY = process.argv[3]
@@ -39,18 +73,13 @@ function ffprobe(file) {
 }
 
 const startedAt = Date.now()
-const res = await fetch(`${API_URL}/api/v1/export`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ story, timeout: TIMEOUT_MS })
-})
+const { status, json: result } = await postExport(API_URL, { story, timeout: TIMEOUT_MS }, TIMEOUT_MS)
 const elapsedMs = Date.now() - startedAt
-const result = await res.json()
 
 const line = {
   label: LABEL,
   ok: result.success === true,
-  httpStatus: res.status,
+  httpStatus: status,
   snippets: snippetCount,
   wallMs: elapsedMs,
   videoDuration: result.duration,

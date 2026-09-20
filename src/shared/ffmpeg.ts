@@ -38,9 +38,12 @@ export function ffmpegPath(): string {
   for (const candidate of candidates) {
     try {
       const stat = fs.statSync(candidate)
-      // 注意：root 下 access(X_OK) 对任何存在的文件都成功，
-      // 必须显式检查执行位（截断的 ffmpeg-static 下载是 644 且会段错误）
-      if (stat.isFile() && (stat.mode & 0o111) !== 0) {
+      // Windows 上 Node 的 stat 不反映 POSIX 执行位（mode 恒为 666/444），
+      // 存在即可用；POSIX 上必须显式检查执行位——root 下 access(X_OK)
+      // 对任何存在的文件都成功，而截断的 ffmpeg-static 下载正是 644 且会段错误
+      const executable =
+        process.platform === 'win32' ? stat.isFile() : stat.isFile() && (stat.mode & 0o111) !== 0
+      if (executable) {
         return candidate
       }
       logger.warn(
