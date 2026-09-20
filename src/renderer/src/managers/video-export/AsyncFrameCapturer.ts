@@ -1,5 +1,13 @@
 import type { ExportLogger } from './ExportLogger'
 
+/**
+ * 真实 setTimeout（模块加载时捕获），供内部轮询等待使用。
+ * fast 导出模式下全局 setTimeout 被虚拟时钟接管：虚拟定时器只有帧泵
+ * tick 才会推进，而帧泵又可能正卡在本类的背压等待上——用虚拟定时器
+ * 会死锁。构造/加载时机在任何 install() 之前，拿到的必是原生实现。
+ */
+const nativeSetTimeout: typeof setTimeout = globalThis.setTimeout.bind(globalThis)
+
 export interface AsyncFrameCapturerOptions {
   width: number
   height: number
@@ -110,7 +118,8 @@ export class AsyncFrameCapturer {
           if (this.collectQueue.length < this.maxQueueSize) {
             this.doCaptureFrameAsync(canvas, frameIndex).then(resolve).catch(reject)
           } else {
-            setTimeout(checkQueue, 5)
+            // 必须用真实定时器：虚拟时钟下帧泵正卡在这里等它
+            nativeSetTimeout(checkQueue, 5)
           }
         }
         checkQueue()
@@ -213,7 +222,7 @@ export class AsyncFrameCapturer {
 
   async flushAll(): Promise<void> {
     while (this.isWriting) {
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise((resolve) => nativeSetTimeout(resolve, 10))
     }
 
     if (this.collectQueue.length > 0) {
@@ -223,7 +232,7 @@ export class AsyncFrameCapturer {
     }
 
     while (this.isWriting) {
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      await new Promise((resolve) => nativeSetTimeout(resolve, 10))
     }
   }
 
