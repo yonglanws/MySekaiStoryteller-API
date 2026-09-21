@@ -32,7 +32,6 @@ export interface VideoConfig {
   exportMode: 'record' | 'fast'
   exportBitrate: number
   exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
-  fastSegments: number
 }
 
 export interface ExportTask {
@@ -48,8 +47,6 @@ export interface ExportTask {
  */
 export interface ExportDispatcher {
   dispatch(task: ExportTask): void
-  /** parallel 模式：派发一个分段渲染子任务 */
-  dispatchSegment(task: import('../pool/renderPool').SegmentTask): void
   cancel(taskId: string): void
 }
 
@@ -103,23 +100,6 @@ export class VideoApiServer {
   private totalFilesCleaned: number = 0
   private rateLimitMap: Map<string, RateLimitEntry> = new Map()
   private extraHealthProvider: (() => Record<string, unknown>) | null = null
-  /** parallel 编排状态：parentTaskId → 段进度 */
-  private parallelJobs: Map<
-    string,
-    {
-      segments: import('../pool/renderPool').SegmentTask[]
-      results: Map<number, NonNullable<import('../pool/renderPool').ExportResultPayload['segmentResult']>>
-      totalDurationMs: number
-      startedAt: number
-      /** 每段已重试次数，防止无限重试 */
-      attempts: Map<number, number>
-      /** 已终结（成功或失败），避免重复收尾 */
-      finalized: boolean
-      /** 编排页 workerId，段结果就绪后通过它回传 */
-      orchestratorWorkerId: string | null
-    }
-  > = new Map()
-
   constructor(
     logger: Logger<ILogObj>,
     options: {
@@ -536,7 +516,6 @@ export class VideoApiServer {
       exportMode: this.video.exportMode,
       exportBitrate: this.video.exportBitrate,
       exportFastEncoder: this.video.exportFastEncoder,
-      fastSegments: this.video.fastSegments
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {
@@ -677,193 +656,6 @@ export class VideoApiServer {
 
     return false
   }
-
-  // ----- parallel 编排 -----
-
-  /**
-   * 编排页上报分段计划：为每段建子任务并立即派发给空闲 worker。
-   * 段 taskId = `<parentTaskId>#seg<index>`。
-   */
-  startParallelSegments(
-    parentTaskId: string,
-    plan: {
-      segments: Array<{ index: number; fromSnippet: number; toSnippet: number; startTimeMs: number }>
-      timeline: Array<{
-        snippetIndex: number
-        snippetType: string
-        startTimeMs: number
-        durationMs: number
-        endTimeMs: number
-        ttsDurationMs: number
-        hasTTS: boolean
-      }>
-      totalDurationMs: number
-      outputPath: string
-      workerId?: string | null
-      story?: import('../../common/types/Story').StoryData
-      videoConfig: {
-        width: number
-        height: number
-        renderScale: number
-        fps: number
-        codec: string
-        crf: number
-        audioBitrate: string
-        watermark?: boolean
-        exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
-        exportBitrate?: number
-      }
-    }
-  ): void {
-    if (!this.dispatcher) {
-      this.logger.error('[API] Parallel plan received but no dispatcher')
-      return
-    }
-    if (this.parallelJobs.has(parentTaskId)) {
-      this.logger.warn(`[API] Duplicate parallel plan for ${parentTaskId}, ignoring`)
-      return
-    }
-
-    const segments: import('../pool/renderPool').SegmentTask[] = plan.segments.map((seg) => ({
-      taskId: `${parentTaskId}#seg${seg.index}`,
-      segment: seg,
-      timeline: plan.timeline,
-      outputPath: plan.outputPath,
-      story: plan.story as import('../../common/types/Story').StoryData,
-      videoConfig: plan.videoConfig
-    }))
-
-    this.parallelJobs.set(parentTaskId, {
-      segments,
-      results: new Map(),
-      totalDurationMs: plan.totalDurationMs,
-      startedAt: Date.now(),
-      attempts: new Map(segments.map((s) => [s.segment.index, 0])),
-      finalized: false,
-      orchestratorWorkerId: plan.workerId ?? null
-    })
-
-    this.logger.info(
-      `[API] Parallel plan for ${parentTaskId}: ${segments.length} segment(s), ` +
-        `totalDuration=${plan.totalDurationMs}ms, orchestrator=${plan.workerId ?? 'unknown'}`
-    )
-
-    // 段 0 由编排页自己渲染：它已加载好场景/模型，且不额外占用 worker。
-    // 只有 1 个 worker 时这是唯一能让两段真正并行的办法（编排页 + worker）。
-    const [first, ...rest] = segments
-    if (first) {
-      this.logger.info(
-        `[API] Segment 0 of ${parentTaskId} assigned to orchestrator ${plan.workerId ?? 'unknown'}`
-      )
-      const sent = this.hubSendSegment?.(first, plan.workerId ?? null) ?? false
-      if (!sent) {
-        // 编排页不可达：回退为普通 worker 派发（串行也能出片）
-        this.logger.warn(
-          `[API] Failed to hand segment 0 to orchestrator, dispatching to worker instead`
-        )
-        this.dispatcher.dispatchSegment(first)
-      }
-    }
-    for (const seg of rest) {
-      this.dispatcher.dispatchSegment(seg)
-    }
-  }
-
-  /**
-   * 段结果回收（由 onExportResult 调用方转进来）。
-   * 收齐且全部成功 → 通知编排页可以混音拼接；
-   * 有段失败 → 重试一次，仍失败则让整任务失败（编排页/调用方回退）。
-   */
-  handleSegmentResult(
-    parentTaskId: string,
-    segmentIndex: number,
-    result: { success: boolean; segmentResult?: NonNullable<import('../pool/renderPool').ExportResultPayload['segmentResult']>; error?: string }
-  ): void {
-    const job = this.parallelJobs.get(parentTaskId)
-    if (!job || job.finalized) return
-
-    if (result.success && result.segmentResult) {
-      job.results.set(segmentIndex, result.segmentResult)
-      this.logger.info(
-        `[API] Segment ${segmentIndex} of ${parentTaskId} done ` +
-          `(${job.results.size}/${job.segments.length})`
-      )
-    } else {
-      const attempts = job.attempts.get(segmentIndex) ?? 0
-      const failed = job.segments.find((s) => s.segment.index === segmentIndex)
-      if (failed && attempts < 1) {
-        job.attempts.set(segmentIndex, attempts + 1)
-        this.logger.warn(
-          `[API] Segment ${segmentIndex} of ${parentTaskId} failed (${result.error}), retrying once`
-        )
-        if (this.dispatcher) this.dispatcher.dispatchSegment(failed)
-        return
-      }
-      this.logger.error(
-        `[API] Segment ${segmentIndex} of ${parentTaskId} failed permanently: ${result.error}`
-      )
-      this.failParallelJob(parentTaskId, result.error || 'Segment rendering failed')
-      return
-    }
-
-    if (job.results.size === job.segments.length) {
-      this.finalizeParallelJob(parentTaskId)
-    }
-  }
-
-  /** 全部段成功：把段结果交给编排页（混音 + concat 由编排页发起） */
-  private finalizeParallelJob(parentTaskId: string): void {
-    const job = this.parallelJobs.get(parentTaskId)
-    if (!job || job.finalized) return
-    job.finalized = true
-
-    const segments = [...job.results.values()].sort((a, b) => a.index - b.index)
-    this.logger.info(
-      `[API] All segments of ${parentTaskId} done in ${((Date.now() - job.startedAt) / 1000).toFixed(1)}s, ` +
-        `handing back to orchestrator`
-    )
-    this.onParallelSegmentsDone?.(
-      parentTaskId,
-      {
-        taskId: parentTaskId,
-        segments,
-        totalDurationMs: job.totalDurationMs
-      },
-      job.orchestratorWorkerId
-    )
-  }
-
-  /** 段级失败且重试用尽：整体任务失败 */
-  private failParallelJob(parentTaskId: string, error: string): void {
-    const job = this.parallelJobs.get(parentTaskId)
-    if (!job || job.finalized) return
-    job.finalized = true
-    this.parallelJobs.delete(parentTaskId)
-    this.rejectExport(parentTaskId, new Error(error))
-  }
-
-  /** 编排页完成混音拼接后调用：清理状态并 resolve 任务 */
-  completeParallelJob(parentTaskId: string): void {
-    this.parallelJobs.delete(parentTaskId)
-  }
-
-  /** 把段渲染任务直接发给编排页自己渲染（段 0 复用已加载场景，省一个 worker） */
-  hubSendSegment:
-    | ((task: import('../pool/renderPool').SegmentTask, workerId: string | null) => boolean)
-    | null = null
-
-  /** 段结果全部就绪时通知编排页 */
-  onParallelSegmentsDone:
-    | ((
-        taskId: string,
-        payload: {
-          taskId: string
-          segments: NonNullable<import('../pool/renderPool').ExportResultPayload['segmentResult']>[]
-          totalDurationMs: number
-        },
-        orchestratorWorkerId: string | null
-      ) => void)
-    | null = null
 
   resolveExport(
     taskId: string,

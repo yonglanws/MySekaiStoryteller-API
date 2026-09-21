@@ -3,7 +3,6 @@ import { ILogObj, Logger } from 'tslog'
 import type { HostConfig, TtsCharacter } from '../config'
 import type { WsHub, WorkerMessage } from '../bridge/wsHub'
 import type { ExportDispatcher, ExportTask } from '../servers/VideoApiServer'
-import type { SegmentResult } from '../../renderer/src/managers/video-export/segmentTypes'
 
 export interface ExportResultPayload {
   taskId: string
@@ -14,66 +13,7 @@ export interface ExportResultPayload {
   outputSize?: number
   /** 分段时间统计（页内埋点，毫秒） */
   timings?: Record<string, number>
-  /** 分段渲染结果（parallel 模式） */
-  segmentResult?: {
-    index: number
-    success: boolean
-    videoPath?: string
-    actualStartMs: number
-    talkPlacements: Array<{
-      snippetIndex: number
-      startMs: number
-      endMs: number
-      speaker?: string
-      content?: string
-      ttsDurationMs?: number
-    }>
-    frameCount: number
-    error?: string
-  }
   error?: string
-}
-
-/** 分段渲染任务（parallel 模式的子任务） */
-export interface SegmentTask {
-  taskId: string
-  segment: {
-    index: number
-    fromSnippet: number
-    toSnippet: number
-    startTimeMs: number
-  }
-  timeline: Array<{
-    snippetIndex: number
-    snippetType: string
-    startTimeMs: number
-    durationMs: number
-    endTimeMs: number
-    ttsDurationMs: number
-    hasTTS: boolean
-  }>
-  outputPath: string
-  /** 完整故事数据：段 worker 需要它重建场景（模型/背景/片段） */
-  story: import('../../common/types/Story').StoryData
-  videoConfig: {
-    width: number
-    height: number
-    renderScale: number
-    fps: number
-    codec: string
-    crf: number
-    audioBitrate: string
-    watermark?: boolean
-    exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
-    exportBitrate?: number
-  }
-}
-
-/** 缓冲任务：整体导出任务或分段渲染任务 */
-type BufferedTask = ExportTask | SegmentTask
-
-function isSegmentTask(task: BufferedTask): task is SegmentTask {
-  return (task as SegmentTask).segment !== undefined
 }
 
 interface WorkerState {
@@ -127,7 +67,7 @@ export class RenderPool implements ExportDispatcher {
   private readonly hub: WsHub
   private readonly workers = new Map<string, WorkerState>()
   private readonly readyWaiters = new Map<string, Array<() => void>>()
-  private readonly bufferedTasks: BufferedTask[] = []
+  private readonly bufferedTasks: ExportTask[] = []
   private stopping = false
 
   onExportResult: ((taskId: string, result: ExportResultPayload) => void) | null = null
@@ -371,54 +311,6 @@ export class RenderPool implements ExportDispatcher {
       return
     }
 
-    if (message.type === 'api:segment-result') {
-      // 段渲染结果：taskId 形如 `<parentTaskId>#seg<index>`
-      const result = message.args[0] as {
-        taskId: string
-        success: boolean
-        segmentIndex: number
-        videoPath?: string
-        actualStartMs?: number
-        talkPlacements?: SegmentResult['talkPlacements']
-        frameCount?: number
-        error?: string
-      }
-      const worker = this.workers.get(workerId)
-      // busyTaskId 匹配两种情况：
-      // 1. 普通 worker 派段：busyTaskId === `<parent>#seg<n>`
-      // 2. 编排页自渲染段 0：busyTaskId === `<parent>`（段任务 ID 带 #seg 后缀）
-      const parentTaskId = result.taskId.slice(0, result.taskId.indexOf('#seg'))
-      const isOwnTask =
-        worker &&
-        (worker.busyTaskId === result.taskId || worker.busyTaskId === parentTaskId)
-      if (worker && isOwnTask) {
-        // 编排页自渲染的段不能 releaseWorker（它还占着 parent 任务），只上报结果
-        if (worker.busyTaskId === result.taskId) {
-          this.releaseWorker(worker)
-        }
-        this.onExportResult?.(result.taskId, {
-          taskId: result.taskId,
-          success: result.success,
-          videoPath: result.videoPath,
-          error: result.error,
-          segmentResult: {
-            index: result.segmentIndex,
-            success: result.success,
-            videoPath: result.videoPath,
-            actualStartMs: result.actualStartMs ?? 0,
-            talkPlacements: result.talkPlacements ?? [],
-            frameCount: result.frameCount ?? 0,
-            error: result.error
-          }
-        })
-      } else {
-        this.logger.warn(
-          `[Pool] Segment-result for unknown/mismatched task: worker=${workerId}, taskId=${result?.taskId}`
-        )
-      }
-      return
-    }
-
     if (message.type === 'electron:on-error') {
       this.logger.error(`[Pool] Worker ${workerId} reported error`, message.args[0])
     }
@@ -475,49 +367,6 @@ export class RenderPool implements ExportDispatcher {
     }
 
     this.flushBufferedTasks()
-  }
-
-  /**
-   * 派发一个分段渲染任务（parallel 模式）。
-   * taskId 约定为 `<parentTaskId>#seg<index>`，段结果经 onExportResult 原样上报。
-   */
-  dispatchSegment(task: SegmentTask): void {
-    const worker = this.pickIdleWorker()
-    if (!worker) {
-      this.bufferedTasks.push(task)
-      this.logger.warn(
-        `[Pool] No idle worker for segment ${task.taskId}, buffered (buffered=${this.bufferedTasks.length})`
-      )
-      return
-    }
-
-    worker.busy = true
-    worker.busyTaskId = task.taskId
-
-    const payload = {
-      taskId: task.taskId,
-      segmentIndex: task.segment.index,
-      fromSnippet: task.segment.fromSnippet,
-      toSnippet: task.segment.toSnippet,
-      startTimeMs: task.segment.startTimeMs,
-      timeline: task.timeline,
-      outputPath: task.outputPath,
-      story: task.story,
-      videoConfig: task.videoConfig,
-      tts: { ...this.config.tts, characters: this.expandTtsCharacterAliases() },
-      bgm: { ...this.config.bgm }
-    }
-
-    const sent = this.hub.send(worker.workerId, { type: 'api:render-segment', args: [payload] })
-    if (!sent) {
-      worker.busy = false
-      worker.busyTaskId = null
-      this.onExportResult?.(task.taskId, {
-        taskId: task.taskId,
-        success: false,
-        error: `Failed to send segment task to worker ${worker.workerId}`
-      })
-    }
   }
 
   dispatch(task: ExportTask): void {
@@ -627,11 +476,7 @@ export class RenderPool implements ExportDispatcher {
       const worker = this.pickIdleWorker()
       if (!worker) return
       const task = this.bufferedTasks.shift()!
-      if (isSegmentTask(task)) {
-        this.dispatchSegment(task)
-      } else {
-        this.dispatch(task)
-      }
+      this.dispatch(task)
     }
   }
 }
