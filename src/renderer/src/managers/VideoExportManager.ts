@@ -1252,15 +1252,41 @@ export default class VideoExportManager {
       timestampRecorder.logSummary()
 
       let videoFilePath: string
+      let framesDirForEncode: string | null = null
       const encodeStart = virtualClock.realTimeMs()
       if (sinks.encoder) {
         videoFilePath = await sinks.encoder.finish()
       } else if (sinks.jpegSink) {
-        videoFilePath = await sinks.jpegSink.finish()
+        // JPEG 帧路径：finish() 返回的是帧目录，需宿主编码成 mp4 才是段文件
+        framesDirForEncode = await sinks.jpegSink.finish()
+        videoFilePath = ''
       } else {
         videoFilePath = sinks.segmentVideoPath ?? ''
       }
       encodeMs = virtualClock.realTimeMs() - encodeStart
+
+      // 段模式 + JPEG 帧路径：立即让宿主把帧编码为段 mp4（复用现有通道）
+      if (isSegment && framesDirForEncode) {
+        const segTempDir = (await window.electron.ipcRenderer.invoke(
+          'electron:get-temp-base-dir'
+        )) as string
+        const segVideoPath = `${segTempDir}/mss-seg-${segment.index}.mp4`
+        const encodeResult = (await window.electron.ipcRenderer.invoke(
+          'electron:api-encode-frames-video',
+          {
+            framesDir: framesDirForEncode,
+            outputPath: segVideoPath,
+            fps: encodeFps,
+            audioBitrate: options.apiAudioBitrate ?? '128k'
+          }
+        )) as { success: boolean; error?: string; outputPath?: string }
+        if (!encodeResult.success) {
+          throw new Error(
+            `Segment ${segment.index} frame encoding failed: ${encodeResult.error ?? 'unknown'}`
+          )
+        }
+        videoFilePath = encodeResult.outputPath ?? segVideoPath
+      }
 
       // ---- 段模式：只回传段画面路径与台词时间，音频/拼接由编排页+宿主负责 ----
       if (isSegment) {
