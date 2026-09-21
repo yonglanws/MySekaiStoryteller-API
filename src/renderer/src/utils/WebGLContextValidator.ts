@@ -52,7 +52,7 @@ export class WebGLContextValidator {
     this.checkContextStatus(gl, result)
     this.getGPUInfo(gl, result)
     this.testShaderCompilation(gl, result)
-    this.testBasicRenderPipeline(gl, result)
+    this.testBasicRenderPipeline(result)
 
     result.success =
       result.errors.length === 0 &&
@@ -252,10 +252,22 @@ export class WebGLContextValidator {
     gl.deleteShader(fragmentShader)
   }
 
-  private testBasicRenderPipeline(
-    gl: WebGL2RenderingContext | WebGLRenderingContext,
-    result: WebGLValidationResult
-  ): void {
+  /**
+   * 基础渲染管线测试（clear + readPixels）。
+   * 在一次性离屏画布上执行：此前直接清空共享的活动画布，既可能把红色
+   * 带进录制首帧，也会让「模型不渲染时画布残留红色」通过黑屏亮度校验。
+   */
+  private testBasicRenderPipeline(result: WebGLValidationResult): void {
+    const canvas = document.createElement('canvas')
+    canvas.width = 64
+    canvas.height = 64
+
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl')
+    if (!gl) {
+      result.warnings.push('Offscreen GL context creation failed for render pipeline test')
+      return
+    }
+
     try {
       gl.clearColor(1, 0, 0, 1)
       gl.clear(gl.COLOR_BUFFER_BIT)
@@ -274,6 +286,9 @@ export class WebGLContextValidator {
       result.errors.push(
         `Render pipeline test failed: ${e instanceof Error ? e.message : String(e)}`
       )
+    } finally {
+      const loseExt = gl.getExtension('WEBGL_lose_context')
+      loseExt?.loseContext()
     }
   }
 

@@ -58,6 +58,10 @@ export class ConcurrentExportPipeline {
   private renderPipelineStartTime: number = 0
   private renderPipelineEndTime: number = 0
 
+  /** currentTimeMs 增量游标：Talk 按索引升序处理，无需每条重算全部前序片段 */
+  private timeCursorIndex: number = 0
+  private timeCursorMs: number = 0
+
   private metrics: PipelineMetrics
 
   constructor(config?: Partial<ConcurrentPipelineConfig>) {
@@ -105,6 +109,8 @@ export class ConcurrentExportPipeline {
     this.metrics = this.createInitialMetrics()
     this.metrics.pipelineStartTime = performance.now()
     this.ttsPipelineStartTime = performance.now()
+    this.timeCursorIndex = 0
+    this.timeCursorMs = 0
 
     for (let i = 0; i < snippets.length; i++) {
       if (snippets[i].type === 'Talk') {
@@ -160,17 +166,19 @@ export class ConcurrentExportPipeline {
 
       const talk = talkSnippets[i]
 
-      let currentTimeMs = 0
-      for (let j = 0; j < talk.index; j++) {
-        const snippet = snippets[j]
+      // 游标推进到当前 Talk：与原先「每条重算全部前序」等价
+      // （前序片段的 TTS 时长在更早的迭代中已全部确定），但从 O(n²) 降为 O(n)
+      while (this.timeCursorIndex < talk.index) {
+        const snippet = snippets[this.timeCursorIndex]
         const baseDelayMs = Math.max((snippet.delay || 0) * 1000, 200)
-        const ttsDurationMs = synthesizedDurations.get(j) ?? 0
+        const ttsDurationMs = synthesizedDurations.get(this.timeCursorIndex) ?? 0
         const durationMs =
           ttsDurationMs > 0 ? Math.max(baseDelayMs, ttsDurationMs + 80) : baseDelayMs
-        currentTimeMs += durationMs
+        this.timeCursorMs += durationMs
+        this.timeCursorIndex++
       }
 
-      ttsManager.setCurrentTime(currentTimeMs)
+      ttsManager.setCurrentTime(this.timeCursorMs)
 
       const startTime = performance.now()
 
@@ -248,29 +256,62 @@ export class ConcurrentExportPipeline {
       return this.ttsResults.get(snippetIndex) ?? null
     }
 
-    // 使用更高效的轮询+事件混合机制
-    const startTime = this.now()
-    const checkInterval = 10 // 10ms检查一次
-    const maxWaitTime = this.config.ttsTimeoutMs
+    // 事件驱动：合成完成时 runTTSPipeline 调用 ttsWaitResolvers 里注册的
+    // resolver 立即唤醒。此前这里是 10ms 轮询且从未注册 resolver（死代码），
+    // 每条 Talk 等待会把录制主线程唤醒约 100 次/秒。
+    return new Promise<PipelineTTSResult | null>((resolve) => {
+      const startTime = this.now()
+      const maxWaitTime = this.config.ttsTimeoutMs
+      let settled = false
 
-    while (this.now() - startTime < maxWaitTime) {
+      const finish = (result: PipelineTTSResult | null): void => {
+        if (settled) return
+        settled = true
+        this.ttsWaitResolvers.delete(snippetIndex)
+        resolve(result)
+      }
+
+      const onReady = (): void => {
+        finish(this.ttsResults.get(snippetIndex) ?? { success: false, duration: 0 })
+      }
+
+      this.ttsWaitResolvers.set(snippetIndex, onReady)
+
+      // 注册与合成完成存在竞态：JS 单线程下注册后的同步复检可覆盖
+      // 「先置 ready 标志、后找到 resolver」的交替顺序
       if (this.ttsReadyFlags.get(snippetIndex)) {
-        return this.ttsResults.get(snippetIndex) ?? null
+        onReady()
+        return
       }
 
-      await this.wait(checkInterval)
-
-      if (this.isAborted) {
-        return { success: false, duration: 0 }
-      }
-    }
-
-    // 超时处理
-    this.metrics.ttsTimeoutCount++
-    this.logger.warn(`TTS wait timeout for snippet ${snippetIndex} (${this.config.ttsTimeoutMs}ms)`)
-    this.ttsReadyFlags.set(snippetIndex, true)
-    this.ttsResults.set(snippetIndex, { success: false, duration: 0 })
-    return { success: false, duration: 0 }
+      // 低频兜底轮询：fast 模式下 this.wait 走真实时钟（虚拟时钟不会推进它），
+      // 覆盖 resolver 丢失/中止/超时三类情况
+      void (async () => {
+        while (!settled) {
+          await this.wait(250)
+          if (settled) return
+          if (this.isAborted) {
+            finish({ success: false, duration: 0 })
+            return
+          }
+          if (this.ttsReadyFlags.get(snippetIndex)) {
+            onReady()
+            return
+          }
+          if (this.now() - startTime >= maxWaitTime) {
+            // 超时处理
+            this.metrics.ttsTimeoutCount++
+            this.logger.warn(
+              `TTS wait timeout for snippet ${snippetIndex} (${this.config.ttsTimeoutMs}ms)`
+            )
+            this.ttsReadyFlags.set(snippetIndex, true)
+            this.ttsResults.set(snippetIndex, { success: false, duration: 0 })
+            finish({ success: false, duration: 0 })
+            return
+          }
+        }
+      })()
+    })
   }
 
   private wait(ms: number): Promise<void> {

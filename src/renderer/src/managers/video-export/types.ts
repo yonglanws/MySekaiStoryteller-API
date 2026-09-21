@@ -22,6 +22,10 @@ export interface VideoExportOptions {
    * fast 模式页内编码路径：auto（默认，按 GPU/平台探测）| webcodecs | frames（JPEG 帧序列交 ffmpeg）
    */
   exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+  /** record 模式 MediaRecorder 视频码率（bps），缺省 8Mbps */
+  recordBitrate?: number
+  /** record 模式收尾：off（默认，webm + 全量重编码）| auto/on（h264/mp4 直录 + 流拷贝，失败回退重编码） */
+  recordStreamCopy?: 'auto' | 'on' | 'off'
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

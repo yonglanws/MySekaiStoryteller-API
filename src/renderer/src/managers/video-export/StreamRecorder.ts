@@ -9,6 +9,8 @@ export interface StreamRecorderConfig {
   mimeType?: string
   timeslice?: number
   estimatedDurationMs?: number
+  /** 优先尝试 h264/mp4 录制（流拷贝合流路径）；不支持时自动回退 webm */
+  preferMp4?: boolean
 }
 
 export type StreamRecorderProgressCallback = (progress: ExportProgress) => void
@@ -18,8 +20,16 @@ export interface StreamRecorderMetrics {
   totalBytes: number
   averageChunkSize: number
   recordingDurationMs: number
-  actualFPS: number
   droppedFrames: number
+}
+
+/** 临时文件随机后缀：避免同毫秒并发导出共用同一路径 */
+function randomId(): string {
+  const cryptoObj = globalThis.crypto
+  if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+    return cryptoObj.randomUUID().replace(/-/g, '').slice(0, 12)
+  }
+  return Math.random().toString(36).slice(2, 10)
 }
 
 export class StreamRecorder {
@@ -39,7 +49,10 @@ export class StreamRecorder {
   private streamingToDisk: boolean = false
   private tempFilePath: string | null = null
   private pendingWritePromises: Promise<void>[] = []
+  /** 分块写盘串行链：并发 appendFile 的完成顺序不保证，乱序会静默损坏 webm */
+  private writeChain: Promise<void> = Promise.resolve()
   private totalBytesWritten: number = 0
+  private lastMimeType: string | null = null
 
   constructor(config: StreamRecorderConfig) {
     this.config = config
@@ -51,14 +64,16 @@ export class StreamRecorder {
   }
 
   private getSupportedMimeType(): string {
-    // 优先使用高性能编码器
-    const types = [
+    // 优先使用高性能编码器。mp4/h264 仅在 preferMp4 时前置——
+    // Chrome 的 MediaRecorder 对 webm 容器不支持 h264，该类型通常不可用。
+    const mp4Types = ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1.640028', 'video/mp4']
+    const webmTypes = [
       'video/webm;codecs=h264',
       'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
-      'video/webm',
-      'video/mp4'
+      'video/webm'
     ]
+    const types = this.config.preferMp4 ? [...mp4Types, ...webmTypes] : [...webmTypes, ...mp4Types]
 
     for (const type of types) {
       if (MediaRecorder.isTypeSupported(type)) {
@@ -103,6 +118,7 @@ export class StreamRecorder {
 
     const mimeType = this.config.mimeType || this.getSupportedMimeType()
     const timeslice = this.config.timeslice || 100
+    this.lastMimeType = mimeType
 
     const initialCapacity = this.estimatedChunkCount > 0 ? this.estimatedChunkCount : 300
     this.recordedChunks = new Array<Blob>(initialCapacity)
@@ -177,7 +193,6 @@ export class StreamRecorder {
       totalBytes: 0,
       averageChunkSize: 0,
       recordingDurationMs: 0,
-      actualFPS: 0,
       droppedFrames: 0
     }
     this.logger.info('Recording started', {
@@ -202,73 +217,72 @@ export class StreamRecorder {
     const targetPath = this.tempFilePath
     if (!targetPath) return
 
-    const writePromise = chunk
-      .arrayBuffer()
-      .then((buffer) => {
-        const data = new Uint8Array(buffer)
-        return window.electron.ipcRenderer
-          .invoke('electron:append-to-file', {
-            filePath: targetPath,
-            data: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-          })
-          .then(() => {
-            this.totalBytesWritten += buffer.byteLength
-            this.chunkIndex++
-          })
-          .catch((error) => {
-            this.logger.error('Failed to write chunk to disk', error)
-            this.hasRecordingError = true
-            this.recordingError = new Error(
-              `Disk write failed: ${error instanceof Error ? error.message : String(error)}`
-            )
-          })
-      })
-      .catch((error) => {
-        this.logger.warn('Failed to read chunk for disk write, falling back to reader', error)
-        const reader = new FileReader()
-        reader.onload = () => {
-          if (reader.result && targetPath) {
-            const data = new Uint8Array(reader.result as ArrayBuffer)
-            window.electron.ipcRenderer
-              .invoke('electron:append-to-file', {
-                filePath: targetPath,
-                data: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-              })
-              .then(() => {
-                this.totalBytesWritten += data.byteLength
-                this.chunkIndex++
-              })
-              .catch((err) => {
-                this.logger.error('Fallback disk write also failed', err)
-              })
-          }
-        }
-        reader.onerror = () => {
-          this.logger.error('FileReader also failed for chunk')
-        }
-        reader.readAsArrayBuffer(chunk)
-      })
-
-    this.pendingWritePromises.push(writePromise)
-    writePromise.then(
-      () => {
-        const idx = this.pendingWritePromises.indexOf(writePromise)
-        if (idx > -1) this.pendingWritePromises.splice(idx, 1)
-      },
-      () => {
-        const idx = this.pendingWritePromises.indexOf(writePromise)
-        if (idx > -1) this.pendingWritePromises.splice(idx, 1)
-      }
+    // 串行链：分块必须按 ondataavailable 的顺序落盘。并发 appendFile 的完成
+    // 顺序不保证（本地磁盘通常有序，但没有机制强制），乱序会静默损坏 webm。
+    // 链上永不抛出（失败在 flushChunk 内部消化并标记 recordingError），
+    // 因此单块写失败不会中断后续分块。
+    const writePromise = this.writeChain.then(() => this.flushChunk(chunk, targetPath))
+    this.writeChain = writePromise.then(
+      () => undefined,
+      () => undefined
     )
+    this.pendingWritePromises.push(writePromise)
+    const removeFromPending = (): void => {
+      const idx = this.pendingWritePromises.indexOf(writePromise)
+      if (idx > -1) this.pendingWritePromises.splice(idx, 1)
+    }
+    writePromise.then(removeFromPending, removeFromPending)
+  }
+
+  private async flushChunk(chunk: Blob, targetPath: string): Promise<void> {
+    try {
+      let buffer: ArrayBuffer
+      try {
+        buffer = await chunk.arrayBuffer()
+      } catch (readError) {
+        this.logger.warn('Failed to read chunk for disk write, falling back to reader', readError)
+        buffer = await this.readChunkWithFileReader(chunk)
+      }
+
+      const data = new Uint8Array(buffer)
+      await window.electron.ipcRenderer.invoke('electron:append-to-file', {
+        filePath: targetPath,
+        data: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+      })
+      this.totalBytesWritten += buffer.byteLength
+      this.chunkIndex++
+    } catch (error) {
+      this.logger.error('Failed to write chunk to disk', error)
+      this.hasRecordingError = true
+      this.recordingError = new Error(
+        `Disk write failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  private readChunkWithFileReader(chunk: Blob): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        if (reader.result) {
+          resolve(reader.result as ArrayBuffer)
+        } else {
+          reject(new Error('FileReader returned empty result'))
+        }
+      }
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader failed to read chunk'))
+      reader.readAsArrayBuffer(chunk)
+    })
   }
 
   async startRecordingToDisk(canvas: HTMLCanvasElement): Promise<string> {
     this.streamingToDisk = true
     this.totalBytesWritten = 0
     this.pendingWritePromises = []
+    this.writeChain = Promise.resolve()
 
     const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
-    this.tempFilePath = `${tempDir}/mss-stream-${Date.now()}.webm`
+    this.tempFilePath = `${tempDir}/mss-stream-${Date.now()}-${randomId()}.webm`
     this.logger.info(`Streaming recording to disk: ${this.tempFilePath}`)
 
     this.startRecording(canvas)
@@ -328,6 +342,9 @@ export class StreamRecorder {
       await Promise.allSettled(this.pendingWritePromises)
       this.pendingWritePromises = []
     }
+
+    // 串行链尾部：确保最后一个分块也已落盘
+    await this.writeChain
 
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop())
@@ -503,10 +520,11 @@ export class StreamRecorder {
     this.metrics.averageChunkSize =
       this.metrics.totalChunks > 0 ? this.metrics.totalBytes / this.metrics.totalChunks : 0
     this.metrics.recordingDurationMs = recordingDuration
-    this.metrics.actualFPS =
-      recordingDuration > 0
-        ? (this.config.fps * (recordingDuration / 1000)) / (recordingDuration / 1000)
-        : 0
+  }
+
+  /** 最近一次录制实际使用的 MIME 类型（决定宿主收尾能否走流拷贝） */
+  getLastMimeType(): string | null {
+    return this.lastMimeType
   }
 
   getMetrics(): StreamRecorderMetrics | null {
@@ -641,6 +659,7 @@ export class StreamRecorder {
     this.streamingToDisk = false
     this.tempFilePath = null
     this.pendingWritePromises = []
+    this.writeChain = Promise.resolve()
     this.totalBytesWritten = 0
   }
 }

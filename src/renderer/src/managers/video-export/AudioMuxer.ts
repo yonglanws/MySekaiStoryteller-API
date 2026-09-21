@@ -354,10 +354,118 @@ export class AudioMuxer {
     }
   }
 
+  /**
+   * 混音直出 Int16 交错 PCM（48kHz 立体声）。
+   * 与 mixAudioTracks + audioBufferToWav 的数学完全一致（BGM 循环、TTS 0.5 缩放、
+   * clamp、×0x8000/×0x7fff、L/R 交错），省去全时长 Float32Array 对、AudioBuffer
+   * 拷贝与逐样本 DataView.setInt16——3 分钟立体声从千万次调用降为一次遍历。
+   */
+  async mixToInt16Interleaved(
+    outputDuration: number,
+    bgmBuffer?: AudioBuffer
+  ): Promise<Int16Array> {
+    if (!this.audioContext || this.audioContext.state === 'closed') {
+      await this.initialize()
+    }
+
+    if (this.audioContext!.state === 'suspended') {
+      this.logger.info('AudioContext suspended before mixing, resuming...')
+      await this.audioContext!.resume()
+      await new Promise((r) => setTimeout(r, 100))
+    }
+
+    this.logger.info(
+      `Mixing audio (int16 direct): outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}`
+    )
+
+    const sampleRate = 48000
+    const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
+
+    const leftBuffer = new Float32Array(totalSamples)
+    const rightBuffer = new Float32Array(totalSamples)
+
+    if (bgmBuffer && this.bgmConfig?.enabled) {
+      this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+    }
+
+    await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
+
+    const pcm = new Int16Array(totalSamples * 2)
+    for (let i = 0; i < totalSamples; i++) {
+      let left = leftBuffer[i]
+      let right = rightBuffer[i]
+      left = left < -1 ? -1 : left > 1 ? 1 : left
+      right = right < -1 ? -1 : right > 1 ? 1 : right
+      pcm[i * 2] = left < 0 ? left * 0x8000 : left * 0x7fff
+      pcm[i * 2 + 1] = right < 0 ? right * 0x8000 : right * 0x7fff
+    }
+
+    this.logger.info(`Int16 interleaved PCM: samples=${totalSamples}, bytes=${pcm.byteLength}`)
+    return pcm
+  }
+
+  /** 把 Int16 交错 PCM 包装成 16bit WAV（44 字节头 + 数据） */
+  encodeWavFromInt16(pcm: Int16Array, sampleRate = 48000, numChannels = 2): ArrayBuffer {
+    const bitDepth = 16
+    const bytesPerSample = bitDepth / 8
+    const blockAlign = numChannels * bytesPerSample
+    const dataSize = pcm.byteLength
+    const headerSize = 44
+    const totalSize = headerSize + dataSize
+
+    const arrayBuffer = new ArrayBuffer(totalSize)
+    const view = new DataView(arrayBuffer)
+    this.writeWavHeader(view, totalSize, sampleRate, numChannels, blockAlign, bitDepth, dataSize)
+    new Uint8Array(arrayBuffer, headerSize).set(
+      new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+    )
+    return arrayBuffer
+  }
+
+  private writeWavHeader(
+    view: DataView,
+    totalSize: number,
+    sampleRate: number,
+    numChannels: number,
+    blockAlign: number,
+    bitDepth: number,
+    dataSize: number
+  ): void {
+    let offset = 0
+
+    view.setUint32(offset, 0x46464952, true) // "RIFF"
+    offset += 4
+    view.setUint32(offset, totalSize - 8, true)
+    offset += 4
+    view.setUint32(offset, 0x45564157, true) // "WAVE"
+    offset += 4
+
+    view.setUint32(offset, 0x20746d66, true) // "fmt "
+    offset += 4
+    view.setUint32(offset, 16, true)
+    offset += 4
+    view.setUint16(offset, 1, true) // PCM
+    offset += 2
+    view.setUint16(offset, numChannels, true)
+    offset += 2
+    view.setUint32(offset, sampleRate, true)
+    offset += 4
+    view.setUint32(offset, sampleRate * blockAlign, true)
+    offset += 4
+    view.setUint16(offset, blockAlign, true)
+    offset += 2
+    view.setUint16(offset, bitDepth, true)
+    offset += 2
+
+    view.setUint32(offset, 0x61746164, true) // "data"
+    offset += 4
+    view.setUint32(offset, dataSize, true)
+    offset += 4
+  }
+
   async audioBufferToWav(audioBuffer: AudioBuffer): Promise<ArrayBuffer> {
     const numChannels = audioBuffer.numberOfChannels
     const sampleRate = audioBuffer.sampleRate
-    const format = 1
     const bitDepth = 16
 
     const length = audioBuffer.length
@@ -375,36 +483,9 @@ export class AudioMuxer {
       const arrayBuffer = new ArrayBuffer(totalSize)
       const view = new DataView(arrayBuffer)
 
-      let offset = 0
+      this.writeWavHeader(view, totalSize, sampleRate, numChannels, blockAlign, bitDepth, dataSize)
 
-      view.setUint32(offset, 0x46464952, true)
-      offset += 4
-      view.setUint32(offset, totalSize - 8, true)
-      offset += 4
-      view.setUint32(offset, 0x45564157, true)
-      offset += 4
-
-      view.setUint32(offset, 0x20746d66, true)
-      offset += 4
-      view.setUint32(offset, 16, true)
-      offset += 4
-      view.setUint16(offset, format, true)
-      offset += 2
-      view.setUint16(offset, numChannels, true)
-      offset += 2
-      view.setUint32(offset, sampleRate, true)
-      offset += 4
-      view.setUint32(offset, sampleRate * blockAlign, true)
-      offset += 4
-      view.setUint16(offset, blockAlign, true)
-      offset += 2
-      view.setUint16(offset, bitDepth, true)
-      offset += 2
-
-      view.setUint32(offset, 0x61746164, true)
-      offset += 4
-      view.setUint32(offset, dataSize, true)
-      offset += 4
+      let offset = headerSize
 
       const channelData: Float32Array[] = []
       for (let ch = 0; ch < numChannels; ch++) {

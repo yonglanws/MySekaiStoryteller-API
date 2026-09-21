@@ -73,6 +73,11 @@ export class App {
   public exporting: boolean = false
   public lastSnippetActualDurationMs: number = 0
   private apiExportInProgress: boolean = false
+  /**
+   * 宿主取消闩锁：abort 可能在资产预热阶段到达（此时新的 VideoExportManager
+   * 尚未创建），先按 taskId 记住，manager 创建后立即应用，避免取消被吞掉。
+   */
+  private pendingAbortTaskId: string | null = null
 
   public async initializeManagers(storyData: StoryData): Promise<void> {
     this.storyManager = new StoryManager(storyData)
@@ -244,6 +249,8 @@ export class App {
             exportBitrate?: number
             exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
             fastFps?: number
+            recordBitrate?: number
+            recordStreamCopy?: 'auto' | 'on' | 'off'
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -268,7 +275,8 @@ export class App {
             payload.outputPath,
             payload.videoConfig,
             payload.tts,
-            payload.bgm
+            payload.bgm,
+            payload.taskId
           )
           this.logger.info(
             `API export result: success=${result.success}, videoPath=${result.videoPath}`
@@ -293,14 +301,17 @@ export class App {
           })
         } finally {
           this.apiExportInProgress = false
+          this.pendingAbortTaskId = null
         }
       }
     )
 
     // 宿主取消（HTTP 超时等）：中止正在进行的导出，让 worker 尽快回收。
     // 否则取消只影响 HTTP 等待，渲染仍会跑完并写盘，持续占用 worker。
-    window.electron.ipcRenderer.on('api:abort-export', () => {
-      this.logger.info('Abort requested by host, aborting in-flight export')
+    window.electron.ipcRenderer.on('api:abort-export', (_event, taskId: string) => {
+      this.logger.info(`Abort requested by host, aborting in-flight export: ${taskId}`)
+      // 预热阶段（manager 尚未创建）abort 会丢失：按 taskId 闩锁，稍后应用
+      this.pendingAbortTaskId = taskId
       this.videoExportManager?.abort()
     })
 
@@ -323,9 +334,12 @@ export class App {
       exportBitrate?: number
       exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
       fastFps?: number
+      recordBitrate?: number
+      recordStreamCopy?: 'auto' | 'on' | 'off'
     },
     ttsConfig?: ApiExportTtsConfig,
-    bgmConfig?: ApiExportBgmConfig
+    bgmConfig?: ApiExportBgmConfig,
+    taskId?: string
   ): Promise<{
     success: boolean
     videoPath?: string
@@ -355,6 +369,13 @@ export class App {
 
     this.videoExportManager = new VideoExportManager(this)
 
+    // 预热期间到达的取消：此时旧 manager 已销毁、新 manager 刚创建，
+    // resetState 会清除 isAborted，必须在此按 taskId 重新应用
+    if (taskId && this.pendingAbortTaskId === taskId) {
+      this.logger.info(`Applying pending abort for taskId=${taskId} before export start`)
+      this.videoExportManager.abort()
+    }
+
     const exportOptions: VideoExportOptions = {
       fps: videoConfig.fps,
       width: videoConfig.width,
@@ -369,6 +390,8 @@ export class App {
       exportBitrate: videoConfig.exportBitrate,
       exportFastEncoder: videoConfig.exportFastEncoder,
       fastFps: videoConfig.fastFps,
+      recordBitrate: videoConfig.recordBitrate,
+      recordStreamCopy: videoConfig.recordStreamCopy,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

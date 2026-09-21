@@ -313,9 +313,11 @@ export default class VideoExportManager {
       fps: options.fps,
       width: options.width,
       height: options.height,
-      bitrate: 8000000,
+      bitrate: options.recordBitrate ?? 8_000_000,
       timeslice: 100,
-      estimatedDurationMs: undefined
+      estimatedDurationMs: undefined,
+      // 流拷贝合流路径需要 h264/mp4 录制；off 时保持 webm + 全量重编码
+      preferMp4: options.recordStreamCopy !== undefined && options.recordStreamCopy !== 'off'
     })
 
     recorder.setOnErrorCallback((error) => {
@@ -323,6 +325,11 @@ export default class VideoExportManager {
     })
 
     let videoFilePath: string | null = null
+    // 宿主收尾（桥接层 finally）会删除输入文件；未走到那一步时由下方兜底删除
+    const apiTempFiles: { audioPath: string | null; invoked: boolean } = {
+      audioPath: null,
+      invoked: false
+    }
 
     let ttsEnabled = this.app.ttsManager?.isTTSEnabled() ?? false
     if (ttsEnabled) {
@@ -502,12 +509,12 @@ export default class VideoExportManager {
             }
 
             if (durationDelta > 0) {
+              // 原地累加后续条目：保持数组与对象标识不变（ttsManager 持有同一数组），
+              // 同时避免每条 TTS 都重建整条时间轴
               for (let j = i + 1; j < timeline.length; j++) {
-                timeline[j] = {
-                  ...timeline[j],
-                  startTimeMs: (timeline[j]?.startTimeMs ?? 0) + durationDelta,
-                  endTimeMs: (timeline[j]?.endTimeMs ?? 0) + durationDelta
-                }
+                const later = timeline[j]
+                later.startTimeMs += durationDelta
+                later.endTimeMs += durationDelta
               }
             }
 
@@ -533,11 +540,9 @@ export default class VideoExportManager {
                 endTimeMs: timelineEntry.startTimeMs + fallbackMs
               }
               for (let j = i + 1; j < timeline.length; j++) {
-                timeline[j] = {
-                  ...timeline[j],
-                  startTimeMs: (timeline[j]?.startTimeMs ?? 0) + durationDelta,
-                  endTimeMs: (timeline[j]?.endTimeMs ?? 0) + durationDelta
-                }
+                const later = timeline[j]
+                later.startTimeMs += durationDelta
+                later.endTimeMs += durationDelta
               }
             }
           }
@@ -642,6 +647,7 @@ export default class VideoExportManager {
         `Audio check: ttsEnabled=${ttsEnabled}, ttsAudioResults=${ttsAudioResults.size}, hasTtsTracks=${hasTtsTracks}`
       )
 
+      let mergeMs = 0
       if (isApiMode) {
         if (!videoFilePath) {
           throw new Error('Video file path is not available after recording')
@@ -658,11 +664,19 @@ export default class VideoExportManager {
           exportStatus,
           onProgress,
           ttsAudioResults,
-          timestampRecorder
+          timestampRecorder,
+          {
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+            recordedBitrate: options.recordBitrate ?? 8_000_000,
+            recordedMimeType: recorder.getLastMimeType(),
+            tempFiles: apiTempFiles
+          }
         )
+        mergeMs = performance.now() - mergeStart
         this.logger.info(
           `Record export phase timings: record=${recordMs.toFixed(0)}ms ` +
-            `merge=${(performance.now() - mergeStart).toFixed(0)}ms ` +
+            `merge=${mergeMs.toFixed(0)}ms ` +
             `videoDuration=${(totalDurationMs / 1000).toFixed(1)}s`
         )
       } else if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
@@ -736,7 +750,14 @@ export default class VideoExportManager {
       const result = {
         success: true,
         duration: (performance.now() - startTime) / 1000,
-        frameCount: Math.round((totalDurationMs / 1000) * options.fps)
+        frameCount: Math.round((totalDurationMs / 1000) * options.fps),
+        timings: isApiMode
+          ? {
+              recordMs: Math.round(recordMs),
+              mergeMs: Math.round(mergeMs),
+              videoDurationMs: Math.round(totalDurationMs)
+            }
+          : undefined
       }
 
       this.logger.info('Concurrent stream recording completed successfully', result)
@@ -752,10 +773,30 @@ export default class VideoExportManager {
     } finally {
       canvas.removeEventListener('webglcontextlost', handleContextLost)
       canvas.removeEventListener('webglcontextrestored', handleContextRestored)
+      // 未进入宿主收尾时，录制文件与混音 WAV 不会桥接层删除，在此兜底。
+      // 重试循环的每次 attempt 都有独立的 recorder 与临时文件，同样被覆盖。
+      if (!apiTempFiles.invoked) {
+        const webmDir = videoFilePath ? videoFilePath.replace(/\/[^/]*$/, '') : null
+        await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
+      }
       await concurrentPipeline.dispose()
       recorder.dispose()
       audioMuxer.dispose()
       this.app.ttsManager?.clearAudioTracks()
+    }
+  }
+
+  /** best-effort 删除导出临时文件/目录（不存在时静默） */
+  private async removeTempPaths(paths: Array<string | null | undefined>): Promise<void> {
+    for (const target of paths) {
+      if (!target) continue
+      try {
+        await window.electron.ipcRenderer.invoke('electron:delete-temp-file', {
+          filePath: target
+        })
+      } catch (error) {
+        this.logger.warn(`Failed to remove temp path: ${target}`, error)
+      }
     }
   }
 
@@ -1893,14 +1934,27 @@ export default class VideoExportManager {
         preDecoded: boolean
       }
     >,
-    timestampRecorder: SnippetTimestampRecorder
+    timestampRecorder: SnippetTimestampRecorder,
+    finalizeInfo: {
+      /** 录制文件的实际像素尺寸（画布后备存储） */
+      canvasWidth: number
+      canvasHeight: number
+      /** 录制时使用的视频码率（bps） */
+      recordedBitrate: number
+      /** 录制实际使用的 MIME 类型 */
+      recordedMimeType: string | null
+      /** 临时文件追踪：invoked 置位后由桥接层或本方法负责删除 */
+      tempFiles: { audioPath: string | null; invoked: boolean }
+    }
   ): Promise<void> {
     const crf = options.apiCrf ?? 23
     const audioBitrate = options.apiAudioBitrate ?? '128k'
     const outputPath = options.apiOutputPath ?? ''
+    const { canvasWidth, canvasHeight, recordedBitrate, recordedMimeType, tempFiles } = finalizeInfo
 
     this.logger.info(
-      `API save from disk: videoPath=${videoFilePath}, outputPath=${outputPath}, crf=${crf}`
+      `API save from disk: videoPath=${videoFilePath}, outputPath=${outputPath}, crf=${crf}, ` +
+        `input=${canvasWidth}x${canvasHeight}, mime=${recordedMimeType ?? 'unknown'}`
     )
 
     let audioFilePath: string | undefined
@@ -1936,11 +1990,13 @@ export default class VideoExportManager {
         }
       }
 
-      const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
+      // 混音直出 Int16 交错 PCM（与旧 Float32→WAV 路径数学一致），
+      // 避免全时长双 Float32Array + AudioBuffer 拷贝 + 逐样本 setInt16
+      const pcm = await audioMuxer.mixToInt16Interleaved(
         totalDurationMs,
         bgmBuffer || undefined
       )
-      const wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
+      const wavBuffer = audioMuxer.encodeWavFromInt16(pcm)
 
       this.logger.info(`API: Audio mixed, size=${(wavBuffer.byteLength / 1024).toFixed(1)} KB`)
 
@@ -1949,6 +2005,7 @@ export default class VideoExportManager {
         prefix: 'mss-api-audio',
         extension: 'wav'
       })
+      tempFiles.audioPath = audioFilePath ?? null
       this.logger.info(`API: Audio temp file: ${audioFilePath}`)
     }
 
@@ -1961,6 +2018,47 @@ export default class VideoExportManager {
       percentage: 98
     })
 
+    // 已中止则不进入宿主编码：渲染结果直接丢弃，worker 立即释放。
+    // 中止时 audioFilePath 尚未被桥接层管理，由 exportVideoStream 的 finally 兜底删除。
+    this.checkAborted()
+
+    // h264/mp4 直录时走流拷贝合流（-c:v copy），省掉整个宿主重编码；
+    // 任一环节失败都保留输入并回退下方的全量重编码路径
+    const canStreamCopy =
+      options.recordStreamCopy !== undefined &&
+      options.recordStreamCopy !== 'off' &&
+      (recordedMimeType ?? '').includes('mp4')
+
+    if (canStreamCopy) {
+      try {
+        tempFiles.invoked = true
+        const copyResult = await window.electron.ipcRenderer.invoke(
+          'electron:api-remux-video-from-files',
+          {
+            videoPath: videoFilePath,
+            audioPath: audioFilePath,
+            outputPath,
+            audioBitrate,
+            keepInputs: true
+          }
+        )
+        if (copyResult?.success) {
+          await this.removeTempPaths([videoFilePath, audioFilePath])
+          this.logger.info(
+            `API: Video stream-copied to ${copyResult.outputPath}, ` +
+              `size=${((copyResult.fileSize || 0) / 1024 / 1024).toFixed(2)} MB`
+          )
+          return
+        }
+        this.logger.warn(
+          `API: Stream copy failed (${copyResult?.error || 'unknown'}), falling back to re-encode`
+        )
+      } catch (copyError) {
+        this.logger.warn('API: Stream copy invoke failed, falling back to re-encode', copyError)
+      }
+    }
+
+    tempFiles.invoked = true
     const apiResult = await window.electron.ipcRenderer.invoke(
       'electron:api-export-video-from-files',
       {
@@ -1971,7 +2069,10 @@ export default class VideoExportManager {
         width: options.width,
         height: options.height,
         crf,
-        audioBitrate
+        audioBitrate,
+        inputWidth: canvasWidth,
+        inputHeight: canvasHeight,
+        recordedBitrate
       }
     )
 
