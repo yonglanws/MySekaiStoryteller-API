@@ -773,12 +773,11 @@ export default class VideoExportManager {
     } finally {
       canvas.removeEventListener('webglcontextlost', handleContextLost)
       canvas.removeEventListener('webglcontextrestored', handleContextRestored)
-      // 未进入宿主收尾时，录制文件与混音 WAV 不会桥接层删除，在此兜底。
-      // 重试循环的每次 attempt 都有独立的 recorder 与临时文件，同样被覆盖。
-      if (!apiTempFiles.invoked) {
-        const webmDir = videoFilePath ? videoFilePath.replace(/\/[^/]*$/, '') : null
-        await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
-      }
+      // 临时文件兜底清理：未进入宿主收尾时（取消/异常/重试）桥接层不会删除输入；
+      // 成功路径下桥接层只删文件不删目录，这里统一 rm -rf 整个 per-export 目录
+      // （force 语义：已删除的路径静默跳过）。重试循环每次 attempt 独立目录，同样覆盖。
+      const webmDir = videoFilePath ? videoFilePath.replace(/\/[^/]*$/, '') : null
+      await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
       await concurrentPipeline.dispose()
       recorder.dispose()
       audioMuxer.dispose()
