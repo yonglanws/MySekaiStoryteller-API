@@ -202,7 +202,7 @@ curl -X POST http://127.0.0.1:9881/api/v1/export \
 
 | 模式     | 怎么出片 | 耗时怎么涨 | 输出分辨率 | 适用 |
 | -------- | -------- | ---------- | ---------- | ---- |
-| `record` | 无头页用 MediaRecorder 墙钟录制画布，ffmpeg 二次转码合流 | 至少等于视频时长 + 转码 | ffmpeg 会把画面缩到 1280x720（历史行为） | 短片、核显、要最保守的路径 |
+| `record` | 无头页用 MediaRecorder 墙钟录制画布，ffmpeg 二次转码合流 | 至少等于视频时长 + 转码 | 按 `video.width` / `video.height` 输出；录制尺寸与输出一致（`renderScale: 1`）时跳过缩放滤镜 | 短片、核显、要最保守的路径 |
 | `fast`   | 虚拟时钟按时间轴逐帧推进动画，页内 WebCodecs 直编 H.264，ffmpeg 只做 `-c:v copy` remux | 跟「帧数 x 每帧 GPU 读回」成正比，不再跟视频时长 1:1 | 按 `video.width` / `video.height` 直出 | 长片、独显；WebCodecs 不可用时自动回退 `record` |
 
 `fast` 的时间轴、TTS 落点和 `record` 同一套：台词时长仍按 TTS 波形 + 尾垫，音频离线混进 WAV 后再 mux。编码帧率封顶 30fps（时间轴仍按 `video.fps` 走，片子时长不变），用来砍掉 WebGL 画布读回次数。
