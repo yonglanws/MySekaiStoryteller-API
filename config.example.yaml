@@ -37,6 +37,12 @@ video:
                       #          导出耗时不再随视频时长线性增长；
                       #          运行环境不支持时自动回退 record
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
+  exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
+                      # auto：Linux+NVIDIA 时 WebCodecs 只有软编（慢），自动改走
+                      #       JPEG 帧序列 + ffmpeg 硬件编码；其余平台优先 WebCodecs
+  fastSegments: 2     # fast 模式分段并行渲染的段数上限（env: MSS_FAST_SEGMENTS）
+                      # 0 或 1 = 关闭分段，整片顺序渲染；>1 时按片段边界拆分，
+                      # 多 worker 并行渲染后无损拼接。切点优先黑场，其次安静边界
 
 # ---------------------------------------------------------------------------
 # 渲染池（无头浏览器工作进程）

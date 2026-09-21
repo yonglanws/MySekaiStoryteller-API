@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { ILogObj, Logger } from 'tslog'
 import type { HostConfig } from '../config'
 import {
+  concatSegmentsWithAudio,
   apiConvertVideoWithCompression,
   apiMergeVideoAudioWithCompression,
   apiMuxVideoAudioCopy,
@@ -13,9 +14,22 @@ import {
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
+/** parallel 编排回调（宿主在 apiServer 就绪后注入） */
+export interface ParallelBridgeHooks {
+  /** 编排页上报分段计划 */
+  startParallelSegments: (
+    taskId: string,
+    plan: Parameters<import('../servers/VideoApiServer').VideoApiServer['startParallelSegments']>[1]
+  ) => void
+  /** 编排页完成混音拼接 */
+  completeParallelJob: (taskId: string) => void
+}
+
 interface BridgeDeps {
   logger: Logger<ILogObj>
   config: HostConfig
+  /** parallel 编排钩子；宿主构造时序原因，晚于本 router 注入 */
+  parallelHooks?: ParallelBridgeHooks
 }
 
 /**
@@ -28,6 +42,7 @@ interface BridgeDeps {
 export function createBridgeRouter(deps: BridgeDeps): Router {
   const { logger, config } = deps
   const router = Router()
+  const parallelHooks = deps.parallelHooks
 
   // ----- JSON invoke 通道 -----
 
@@ -278,6 +293,96 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
           } catch {
             /* cleanup */
+          }
+        }
+      }
+
+      case 'electron:parallel-plan': {
+        // parallel 编排页上报分段计划：宿主为每段建子任务并派发给空闲 worker
+        const payload = args[0] as {
+          taskId: string
+          segments: Array<{ index: number; fromSnippet: number; toSnippet: number; startTimeMs: number }>
+          timeline: Array<{
+            snippetIndex: number
+            snippetType: string
+            startTimeMs: number
+            durationMs: number
+            endTimeMs: number
+            ttsDurationMs: number
+            hasTTS: boolean
+          }>
+          totalDurationMs: number
+          outputPath: string
+          workerId?: string | null
+          videoConfig: {
+            width: number
+            height: number
+            renderScale: number
+            fps: number
+            codec: string
+            crf: number
+            audioBitrate: string
+            watermark?: boolean
+            exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+            exportBitrate?: number
+          }
+        }
+        if (!parallelHooks) {
+          throw new Error('Parallel hooks not available on this host')
+        }
+        if (!payload.taskId) {
+          throw new Error('electron:parallel-plan requires taskId')
+        }
+        logger.info(
+          `[Bridge] Parallel plan: taskId=${payload.taskId}, segments=${payload.segments.length}, ` +
+            `worker=${payload.workerId ?? 'unknown'}`
+        )
+        parallelHooks.startParallelSegments(payload.taskId, payload)
+        return { success: true }
+      }
+
+      case 'electron:parallel-finalize': {
+        // parallel 收尾：多段 mp4 无损 concat + 音频合流
+        const payload = args[0] as {
+          taskId: string
+          segmentPaths: string[]
+          audioPath?: string
+          outputPath: string
+          audioBitrate: string
+          fps?: number
+        }
+        const startedAt = Date.now()
+        logger.info(
+          `[Bridge] Parallel finalize: taskId=${payload.taskId}, ` +
+            `segments=${payload.segmentPaths.length}, outputPath=${payload.outputPath}`
+        )
+        try {
+          const outputDir = path.dirname(payload.outputPath)
+          if (!fs.existsSync(outputDir)) {
+            await fs.promises.mkdir(outputDir, { recursive: true })
+          }
+          await concatSegmentsWithAudio(
+            payload.segmentPaths,
+            payload.audioPath,
+            payload.outputPath,
+            payload.audioBitrate,
+            payload.fps ?? 30
+          )
+          if (!fs.existsSync(payload.outputPath)) {
+            return { success: false, error: 'Parallel finalize produced no output file' }
+          }
+          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          logger.info(
+            `[Bridge] Parallel finalize: Video exported successfully: ${payload.outputPath}, ` +
+              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - startedAt}`
+          )
+          parallelHooks?.completeParallelJob(payload.taskId)
+          return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
+        } catch (error) {
+          logger.error('[Bridge] Parallel finalize failed', error)
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
           }
         }
       }

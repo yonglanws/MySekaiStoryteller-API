@@ -18,6 +18,21 @@ import { ResourceCatalog } from './resources/resourceCatalog'
  *
  * 配置来源：config.yaml（样例 config.example.yaml），MSS_* 环境变量可覆盖。
  */
+/**
+ * 宿主级异常兜底：渲染宿主是长驻服务，任何单点异常（Playwright CDP 管道
+ * 溢出、段渲染偶发错误、未处理的 Promise 拒绝）都不应该让整个进程退出——
+ * 那会同时打死所有在途导出。这里记录后继续运行，任务级失败由各管线的
+ * 重试/回退链负责。
+ */
+function installProcessGuards(logger: Logger<ILogObj>): void {
+  process.on('uncaughtException', (err) => {
+    logger.error('[Host] Uncaught exception (kept alive):', err)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logger.error('[Host] Unhandled rejection (kept alive):', reason)
+  })
+}
+
 async function bootstrap(): Promise<void> {
   const config = loadHostConfig()
 
@@ -40,6 +55,8 @@ async function bootstrap(): Promise<void> {
     prettyLogTimeZone: 'local'
   })
 
+  installProcessGuards(logger)
+
   logger.info(
     `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder}`
   )
@@ -61,7 +78,18 @@ async function bootstrap(): Promise<void> {
     video: config.video,
     maxConcurrentExports: config.render.workers,
     registerExtraRoutes: (app) => {
-      app.use('/bridge', createBridgeRouter({ logger, config }))
+      app.use(
+        '/bridge',
+        createBridgeRouter({
+          logger,
+          config,
+          parallelHooks: {
+            startParallelSegments: (taskId, plan) =>
+              apiServer.startParallelSegments(taskId, plan),
+            completeParallelJob: (taskId) => apiServer.completeParallelJob(taskId)
+          }
+        })
+      )
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单
       app.get('/api/v1/resources', (_req, res) => {
         res.json({ success: true, ...resourceCatalog.get() })
@@ -73,7 +101,52 @@ async function bootstrap(): Promise<void> {
 
   apiServer.setDispatcher(pool)
 
+  // 段 0 直接派给编排页自己渲染（它已加载场景，且不占 worker 名额）
+  apiServer.hubSendSegment = (task, workerId) => {
+    if (!workerId) return false
+    const payload = {
+      taskId: task.taskId,
+      segmentIndex: task.segment.index,
+      fromSnippet: task.segment.fromSnippet,
+      toSnippet: task.segment.toSnippet,
+      startTimeMs: task.segment.startTimeMs,
+      timeline: task.timeline,
+      outputPath: task.outputPath,
+      story: task.story,
+      videoConfig: task.videoConfig,
+      tts: { ...config.tts, characters: [] },
+      bgm: { ...config.bgm }
+    }
+    const sent = hub.send(workerId, { type: 'api:render-segment', args: [payload] })
+    logger.info(
+      `[Host] Segment 0 handed to orchestrator ${workerId} for ${task.taskId} (sent=${sent})`
+    )
+    return sent
+  }
+
+  // 段全部就绪 → 通过 WS 把段结果发回编排页（plan 里带了它的 workerId）
+  apiServer.onParallelSegmentsDone = (taskId, payload, orchestratorWorkerId) => {
+    if (!orchestratorWorkerId) {
+      logger.error(`[Host] No orchestrator worker id for task ${taskId}`)
+      apiServer.rejectExport(taskId, new Error('Orchestrator worker not found for parallel plan'))
+      return
+    }
+    const sent = hub.send(orchestratorWorkerId, { type: 'api:parallel-segments-done', args: [payload] })
+    if (!sent) {
+      logger.error(`[Host] Failed to notify orchestrator ${orchestratorWorkerId} for ${taskId}`)
+      apiServer.rejectExport(taskId, new Error('Orchestrator worker unreachable'))
+      return
+    }
+    logger.info(`[Host] Parallel segments done notified to ${orchestratorWorkerId} for ${taskId}`)
+  }
+
   pool.onExportResult = (taskId, result) => {
+    // parallel 段结果：taskId = `<parentTaskId>#seg<index>`
+    const segMarker = taskId.indexOf('#seg')
+    if (segMarker > -1 && result.segmentResult) {
+      apiServer.handleSegmentResult(taskId.slice(0, segMarker), result.segmentResult.index, result)
+      return
+    }
     if (result.success) {
       apiServer.resolveExport(taskId, {
         success: true,

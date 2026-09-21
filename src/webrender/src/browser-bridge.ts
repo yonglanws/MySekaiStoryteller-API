@@ -17,7 +17,9 @@ const JSON_INVOKE_CHANNELS = new Set([
   'electron:get-temp-base-dir',
   'electron:api-export-video-from-files',
   'electron:api-remux-video-from-files',
-  'electron:api-encode-frames-video'
+  'electron:api-encode-frames-video',
+  'electron:parallel-plan',
+  'electron:parallel-finalize'
 ])
 
 const BINARY_INVOKE_CHANNELS = new Set([

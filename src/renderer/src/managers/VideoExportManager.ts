@@ -18,6 +18,11 @@ import {
 import { VirtualClockController } from './video-export/VirtualClockController'
 import { WebCodecsMp4Encoder } from './video-export/WebCodecsMp4Encoder'
 import { JpegFrameSink } from './video-export/JpegFrameSink'
+import type {
+  SegmentResult,
+  SegmentSpec
+} from './video-export/segmentTypes'
+import { planSegments, applyTalkPatch } from './video-export/segmentTypes'
 import type { VideoExportOptions } from './video-export'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
@@ -142,6 +147,80 @@ export default class VideoExportManager {
     }
 
     return targetFrameCount
+  }
+
+  /**
+   * 渲染单个分段（parallel 模式的 worker 页入口）。
+   * 与 exportVideo 的区别：不做整体 reset/overlay，只跑 [fromSnippet, toSnippet)，
+   * 前缀段以 11fps 快进把场景状态推到切点；音频与拼接由编排页+宿主负责。
+   */
+  async exportSegment(params: {
+    index: number
+    fromSnippet: number
+    toSnippet: number
+    startTimeMs: number
+    timeline: SnippetTimelineEntry[]
+    outputPath: string
+    videoConfig: {
+      width: number
+      height: number
+      renderScale: number
+      fps: number
+      crf: number
+      audioBitrate: string
+      watermark?: boolean
+      exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+      exportBitrate?: number
+    }
+  }): Promise<SegmentResult> {
+    const { index, fromSnippet, toSnippet, startTimeMs, timeline, outputPath, videoConfig } = params
+
+    this.resetState()
+    this.app.exporting = true
+
+    const options: VideoExportOptions = {
+      fps: videoConfig.fps,
+      width: videoConfig.width,
+      height: videoConfig.height,
+      quality: 'high',
+      format: 'mp4',
+      codec: 'h264',
+      crf: videoConfig.crf,
+      useGpu: true,
+      gpuRenderer: 'auto',
+      exportMode: 'fast',
+      exportBitrate: videoConfig.exportBitrate,
+      exportFastEncoder: videoConfig.exportFastEncoder,
+      jpegQuality: 0.85,
+      batchSize: 30,
+      apiMode: true,
+      apiOutputPath: outputPath,
+      apiCrf: videoConfig.crf,
+      apiAudioBitrate: videoConfig.audioBitrate
+    }
+
+    try {
+      const result = await this.exportVideoFast(options, null, null, () => undefined, {
+        index,
+        fromSnippet,
+        toSnippet,
+        startTimeMs,
+        timeline
+      })
+      if (!result.segmentResult) {
+        throw new Error(`Segment ${index} render produced no segment result`)
+      }
+      return result.segmentResult
+    } finally {
+      this.app.exporting = false
+    }
+  }
+
+  /**
+   * 按 BlackIn 黑场切点把故事分成至多 maxSegments 段（parallel 编排用）。
+   */
+  planSegmentsFor(snippets: SnippetData[], timeline: SnippetTimelineEntry[], maxSegments: number): SegmentSpec[] {
+    return planSegments(snippets, timeline, maxSegments)
   }
 
   async exportVideo(
@@ -809,8 +888,16 @@ export default class VideoExportManager {
     options: VideoExportOptions,
     progressFill: HTMLDivElement | null,
     exportStatus: HTMLElement | null,
-    onProgress: InternalProgressCallback
-  ): Promise<ExportResult> {
+    onProgress: InternalProgressCallback,
+    segment?: {
+      index: number
+      fromSnippet: number
+      toSnippet: number
+      startTimeMs: number
+      timeline: SnippetTimelineEntry[]
+    }
+  ): Promise<ExportResult & { segmentResult?: SegmentResult }> {
+    const isSegment = !!segment
     const { canvas, snippets } = await this.prepareStreamRecording(
       options,
       progressFill,
@@ -837,7 +924,7 @@ export default class VideoExportManager {
       snippetCount: snippets.length
     })
 
-    let ttsEnabled = this.app.ttsManager?.isTTSEnabled() ?? false
+    let ttsEnabled = !isSegment && (this.app.ttsManager?.isTTSEnabled() ?? false)
     if (ttsEnabled) {
       this.logger.info('Checking TTS service availability...')
       const available = await this.app.ttsManager!.checkTTSAvailability()
@@ -847,8 +934,9 @@ export default class VideoExportManager {
       }
     }
 
+    // 分段渲染：音频由编排页统一混合，段页面只出画面
     const bgmConfig = this.app.ttsManager?.getBGMConfig()
-    const bgmEnabled = bgmConfig?.enabled ?? false
+    const bgmEnabled = !isSegment && (bgmConfig?.enabled ?? false)
     const audioMuxer = new AudioMuxer()
     if (ttsEnabled || bgmEnabled) {
       await audioMuxer.initialize()
@@ -877,7 +965,10 @@ export default class VideoExportManager {
       }
     >()
 
-    const timeline: SnippetTimelineEntry[] = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
+    // 分段渲染用宿主下发的定稿时间轴（TTS 已并入，不再动态补丁）
+    const timeline: SnippetTimelineEntry[] = segment
+      ? segment.timeline
+      : this.app.ttsManager.buildTimelineWithoutTTS(snippets)
     this.app.ttsManager.setTimeline(timeline)
 
     const virtualClock = new VirtualClockController()
@@ -914,32 +1005,49 @@ export default class VideoExportManager {
       options.exportFastEncoder ?? 'auto'
     )
 
-    let encoder: WebCodecsMp4Encoder | null = null
-    let jpegSink: JpegFrameSink | null = null
-    let framesDir: string | null = null
+    // 注意：sink 由 createSink 异步创建，若用裸 let，TS 的控制流分析会在
+    // `if (!isSegment) createSink()` 之后把 sink 收窄成 never。放进对象
+    // 属性可关闭收窄，读取处也不需要改。
+    const sinks: {
+      encoder: WebCodecsMp4Encoder | null
+      jpegSink: JpegFrameSink | null
+      framesDir: string | null
+      segmentVideoPath: string | null
+    } = { encoder: null, jpegSink: null, framesDir: null, segmentVideoPath: null }
 
-    if (useWebCodecs) {
-      const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
-      const videoFilePath = `${tempDir}/mss-fast-${Date.now()}.mp4`
-      encoder = new WebCodecsMp4Encoder({ width: outW, height: outH, fps: encodeFps, bitrate })
-      await encoder.initialize(videoFilePath)
-      this.logger.info(
-        `Fast export: WebCodecs MP4 → ${videoFilePath} ` +
-          `(canvas ${canvas.width}x${canvas.height} → ${outW}x${outH})`
-      )
-    } else {
-      this.logger.warn('WebCodecs unavailable, falling back to JPEG frame sink')
-      const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
-      framesDir = dir
-      // 中间帧用高质量 JPEG：块噪声更少，成品码率更低、画质更好；
-      // 帧只临时落盘，不占成品体积
-      jpegSink = new JpegFrameSink({
-        width: outW,
-        height: outH,
-        quality: Math.max(this.getJpegQuality(options.quality), 0.92),
-        framesDir: dir
-      })
-      await jpegSink.initialize(canvas)
+    const createSink = async (): Promise<void> => {
+      if (sinks.encoder || sinks.jpegSink) return
+      if (useWebCodecs) {
+        const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
+        const videoFilePath = `${tempDir}/mss-seg-${Date.now()}.mp4`
+        const encoder = new WebCodecsMp4Encoder({
+          width: outW,
+          height: outH,
+          fps: encodeFps,
+          bitrate
+        })
+        await encoder.initialize(videoFilePath)
+        sinks.encoder = encoder
+        sinks.segmentVideoPath = videoFilePath
+        this.logger.info(`Fast export: WebCodecs MP4 → ${videoFilePath}`)
+      } else {
+        const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
+        // 中间帧用高质量 JPEG：块噪声更少，成品码率更低、画质更好；
+        // 帧只临时落盘，不占成品体积
+        const jpegSink = new JpegFrameSink({
+          width: outW,
+          height: outH,
+          quality: Math.max(this.getJpegQuality(options.quality), 0.92),
+          framesDir: dir
+        })
+        await jpegSink.initialize(canvas)
+        sinks.jpegSink = jpegSink
+        sinks.framesDir = dir
+      }
+    }
+
+    if (!isSegment) {
+      await createSink()
     }
 
     const realStart = virtualClock.realTimeMs()
@@ -953,33 +1061,64 @@ export default class VideoExportManager {
     let encodeMs = 0
     let audioMs = 0
     let invokeMs = 0
+    let prefixMs = 0
 
     let pumpPaused = false
     let pumpDone = false
+    /** 尾部追帧目标（虚拟毫秒）：片段循环结束后让帧泵跑到这个虚拟时间再停，
+     *  避免最后几帧（TTS 尾垫、刚结束的出场动画）被丢导致视频戛然而止 */
+    let pumpTargetVirtualMs = -1
     let pumpError: Error | null = null
     let blackFrameValidationCount = 0
     frameValidator.reset()
     let frameIndex = 0
+    /** 前缀快进 → 正式抓帧 的切换点；切点后 frameIndex 归零，段 mp4 从 t=0 开始 */
+    let captureStarted = !isSegment
+
+    let prefixMode = isSegment && (segment?.fromSnippet ?? 0) > 0
 
     const framePump = (async (): Promise<void> => {
       try {
-        while (!pumpDone) {
+        // 退出条件：请求停止 且 已追上尾部目标虚拟时间（追帧期间 pumpPaused 不生效）
+        const shouldStop = (): boolean => {
+          if (!pumpDone) return false
+          if (pumpTargetVirtualMs < 0) return true
+          return virtualClock.now() >= pumpTargetVirtualMs
+        }
+        while (!shouldStop()) {
           this.checkAborted()
-          if (pumpPaused) {
+          if (pumpPaused && !pumpDone) {
             await virtualClock.realSleep(4)
             continue
           }
           const frameStart = virtualClock.realTimeMs()
+
+          if (prefixMode) {
+            // 前缀快进：与抓帧完全相同的虚拟步长推进（保证 Live2D 物理/呼吸的
+            // 积分历史与顺序渲染一致），只是不抓帧、不编码、不校验
+            await virtualClock.tick(frameMs)
+            prefixMs += virtualClock.realTimeMs() - frameStart
+            continue
+          }
+
+          if (!captureStarted) {
+            // 刚到切点：建 sink、frameIndex 归零、timestamp 起点对齐
+            await createSink()
+            captureStarted = true
+            frameIndex = 0
+            timestampRecorder.markRenderStart()
+          }
+
           await virtualClock.tick(frameMs)
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
           const durationUs = Math.round(1_000_000 / encodeFps)
           const keyFrame = frameIndex % (encodeFps * 4) === 0
 
-          if (encoder) {
-            await encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
-          } else if (jpegSink) {
-            await jpegSink.captureFrame(canvas)
+          if (sinks.encoder) {
+            await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
+          } else if (sinks.jpegSink) {
+            await sinks.jpegSink.captureFrame(canvas)
           }
 
           if (frameIndex % (encodeFps * 5) === 0) {
@@ -1012,9 +1151,17 @@ export default class VideoExportManager {
     })()
 
     try {
-      const totalSnippets = snippets.length
+      const fromSnippet = segment?.fromSnippet ?? 0
+      const toSnippet = segment?.toSnippet ?? snippets.length
+      const totalSnippets = toSnippet
 
-      for (let i = 0; i < totalSnippets; i++) {
+      if (prefixMode) {
+        this.logger.info(
+          `Segment prefix: replaying snippets [0,${fromSnippet}) without capture to reach the cut point`
+        )
+      }
+
+      for (let i = 0; i < toSnippet; i++) {
         this.checkAborted()
         if (pumpError) throw pumpError
 
@@ -1024,6 +1171,19 @@ export default class VideoExportManager {
           ? (snippet as { data?: { speaker?: string; content?: string } }).data
           : undefined
 
+        if (i < fromSnippet) {
+          // 前缀段：只把场景状态推到切点，不记时间戳、不抓帧
+          await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
+          continue
+        }
+
+        if (prefixMode) {
+          // 到达切点：切到正式抓帧（帧泵负责建 sink / 归零计时 / 恢复帧率）
+          prefixMode = false
+          await virtualClock.realSleep(1)
+          if (pumpError) throw pumpError
+        }
+
         if (ttsEnabled && isTalk) {
           pumpPaused = true
           const ttsWaitStart = virtualClock.realTimeMs()
@@ -1032,27 +1192,8 @@ export default class VideoExportManager {
           pumpPaused = false
           if (pumpError) throw pumpError
 
-          const timelineEntry = timeline[i]
           if (ttsResult && ttsResult.success && ttsResult.duration > 0) {
-            const oldDurationMs = timelineEntry?.durationMs ?? 0
-            const newDurationMs = Math.max(oldDurationMs, ttsResult.duration + TTS_TAIL_SILENCE_MS)
-            const durationDelta = newDurationMs - oldDurationMs
-            timeline[i] = {
-              ...timelineEntry,
-              ttsDurationMs: ttsResult.duration,
-              hasTTS: true,
-              durationMs: newDurationMs,
-              endTimeMs: (timelineEntry?.startTimeMs ?? 0) + newDurationMs
-            }
-            if (durationDelta > 0) {
-              for (let j = i + 1; j < timeline.length; j++) {
-                timeline[j] = {
-                  ...timeline[j],
-                  startTimeMs: (timeline[j]?.startTimeMs ?? 0) + durationDelta,
-                  endTimeMs: (timeline[j]?.endTimeMs ?? 0) + durationDelta
-                }
-              }
-            }
+            applyTalkPatch(timeline, i, ttsResult.duration)
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
             if (rawAudioBuffer) {
               ttsAudioResults.set(i, {
@@ -1063,23 +1204,9 @@ export default class VideoExportManager {
                 preDecoded: false
               })
             }
-          } else if (timelineEntry) {
-            const fallbackMs = estimateSnippetDuration(snippet)
-            if (timelineEntry.durationMs < fallbackMs) {
-              const durationDelta = fallbackMs - timelineEntry.durationMs
-              timeline[i] = {
-                ...timelineEntry,
-                durationMs: fallbackMs,
-                endTimeMs: timelineEntry.startTimeMs + fallbackMs
-              }
-              for (let j = i + 1; j < timeline.length; j++) {
-                timeline[j] = {
-                  ...timeline[j],
-                  startTimeMs: timeline[j].startTimeMs + durationDelta,
-                  endTimeMs: timeline[j].endTimeMs + durationDelta
-                }
-              }
-            }
+          } else {
+            // TTS 未接入或合成失败：按字数生成台词时长（打字机 + 阅读停留），保证句间呼吸
+            applyTalkPatch(timeline, i, 0, estimateSnippetDuration(snippet))
           }
           this.app.ttsManager.setTimeline(timeline)
         }
@@ -1110,6 +1237,13 @@ export default class VideoExportManager {
         timestampRecorder.markSnippetEnd(ttsDur)
       }
 
+      // 尾部追帧：让帧泵渲染到「最后一个片段的虚拟结束时间」，
+      // 保证 TTS 尾垫与出场动画的最后一帧都在视频里
+      const lastTimelineEntry = timeline[toSnippet - 1]
+      pumpTargetVirtualMs = Math.max(
+        virtualClock.now(),
+        lastTimelineEntry ? lastTimelineEntry.endTimeMs : virtualClock.now()
+      )
       pumpDone = true
       await framePump
       if (pumpError) throw pumpError
@@ -1119,12 +1253,57 @@ export default class VideoExportManager {
 
       let videoFilePath: string
       const encodeStart = virtualClock.realTimeMs()
-      if (encoder) {
-        videoFilePath = await encoder.finish()
+      if (sinks.encoder) {
+        videoFilePath = await sinks.encoder.finish()
+      } else if (sinks.jpegSink) {
+        videoFilePath = await sinks.jpegSink.finish()
       } else {
-        videoFilePath = await jpegSink!.finish()
+        videoFilePath = sinks.segmentVideoPath ?? ''
       }
       encodeMs = virtualClock.realTimeMs() - encodeStart
+
+      // ---- 段模式：只回传段画面路径与台词时间，音频/拼接由编排页+宿主负责 ----
+      if (isSegment) {
+        const talkPlacements = timestampRecorder
+          .getAllTimestamps()
+          .filter((t) => t.isTalk)
+          .map((t) => ({
+            snippetIndex: t.snippetIndex,
+            startMs: Math.max(0, t.wallStartMs - timestampRecorder.getRenderStartWallMs()),
+            endMs: Math.max(0, t.wallEndMs - timestampRecorder.getRenderStartWallMs()),
+            speaker: t.speaker,
+            content: t.content,
+            ttsDurationMs: t.ttsDurationMs
+          }))
+
+        const segmentResult: SegmentResult = {
+          index: segment.index,
+          success: true,
+          videoPath: videoFilePath,
+          actualStartMs: Math.round(timestampRecorder.getRenderStartWallMs()),
+          talkPlacements,
+          frameCount: frameIndex
+        }
+        this.logger.info(
+          `Segment[${segment.index}] rendered: ${videoFilePath}, frames=${frameIndex}, ` +
+            `pump=${pumpMs.toFixed(0)}ms prefix=${prefixMs.toFixed(0)}ms ` +
+            `avgPumpFps=${pumpMs > 0 ? (frameIndex / (pumpMs / 1000)).toFixed(1) : '0'}`
+        )
+        return {
+          success: true,
+          duration: (virtualClock.realTimeMs() - realStart) / 1000,
+          frameCount: frameIndex,
+          outputSize: videoFilePath ? 1 : 0,
+          timings: {
+            pumpMs: Math.round(pumpMs),
+            prefixMs: Math.round(prefixMs),
+            encodeMs: Math.round(encodeMs),
+            frames: frameIndex,
+            avgPumpFps: pumpMs > 0 ? Math.round((frameIndex / (pumpMs / 1000)) * 10) / 10 : 0
+          },
+          segmentResult
+        }
+      }
 
       virtualClock.uninstall()
 
@@ -1176,7 +1355,7 @@ export default class VideoExportManager {
 
       let saveResult: { success: boolean; error?: string; fileSize?: number }
       const invokeStart = virtualClock.realTimeMs()
-      if (encoder) {
+      if (sinks.encoder) {
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -1187,9 +1366,9 @@ export default class VideoExportManager {
           }
         )
       } else {
-        if (!framesDir) throw new Error('JPEG frame sink produced no frames directory')
+        if (!sinks.framesDir) throw new Error('JPEG frame sink produced no frames directory')
         saveResult = await window.electron.ipcRenderer.invoke('electron:api-encode-frames-video', {
-          framesDir,
+          framesDir: sinks.framesDir,
           audioPath: audioFilePath,
           outputPath,
           fps: encodeFps,
@@ -1241,8 +1420,8 @@ export default class VideoExportManager {
       } catch {
         /* already uninstalled */
       }
-      encoder?.dispose()
-      if (jpegSink) await jpegSink.dispose()
+      sinks.encoder?.dispose()
+      if (sinks.jpegSink) await sinks.jpegSink.dispose()
       await concurrentPipeline.dispose()
       audioMuxer.dispose()
       this.app.ttsManager?.clearAudioTracks()
@@ -1259,9 +1438,9 @@ export default class VideoExportManager {
 
     AnimationManager.setExportMode(true)
     AnimationManager.exportSpeedMultiplier = 1
-    AnimationManager.exportTargetFPS =
-      options.exportMode === 'fast' ? Math.min(options.fps, 30) : options.fps
-    if (options.exportMode === 'fast') {
+    const isFastLike = options.exportMode === 'fast'
+    AnimationManager.exportTargetFPS = isFastLike ? Math.min(options.fps, 30) : options.fps
+    if (isFastLike) {
       Ticker.shared.maxFPS = Math.min(options.fps, 30)
     }
 
