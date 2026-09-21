@@ -228,6 +228,13 @@ export default class VideoExportManager {
             `Fast export failed (${error instanceof Error ? error.message : error}), ` +
               `falling back to record mode`
           )
+          // fast 模式下私有渲染 ticker 是停掉的，回退 record 前必须恢复，
+          // 否则 MediaRecorder 录到的是静止画面
+          try {
+            this.app.pixiApplication.ticker.start()
+          } catch {
+            /* renderer may already be destroyed */
+          }
           this.app.lastSnippetActualDurationMs = 0
           this.app.ttsManager?.clearAudioTracks()
           return await this.exportVideoStream(
@@ -956,6 +963,17 @@ export default class VideoExportManager {
     await createSink()
 
     const realStart = virtualClock.realTimeMs()
+
+    // fast 模式每帧只渲染一次：
+    // pixi 的 Application 用私有 ticker（maxFPS=0 不限速），而 VirtualClockController
+    // 只接管 Ticker.shared。私有 ticker 跨过 install 后改挂假 rAF，于是每次
+    // tickAsync(frameMs)（假 rAF 是 16ms 栅格）会触发 2~3 次完整 renderer.render()，
+    // 其中只有最后一次的画面被捕获——其余全是纯浪费。
+    // 这里停掉私有渲染 ticker，由帧泵在 tick 之后显式 render 一次；Live2D 参数
+    // 更新仍走 Ticker.shared（帧数不变），因此画面与改造前一致。
+    this.app.pixiApplication.ticker.stop()
+    this.logger.info('Fast export: app render ticker stopped, rendering once per frame')
+
     virtualClock.install()
     timestampRecorder.markRenderStart()
     concurrentPipeline.markRenderStart()
@@ -963,6 +981,7 @@ export default class VideoExportManager {
     // 分段计时（真实墙钟；虚拟时钟下 performance.now 是虚拟时间）
     let pumpMs = 0
     let tickMs = 0
+    let renderMs = 0
     let snapshotMs = 0
     let ttsWaitMs = 0
     let encodeMs = 0
@@ -998,6 +1017,12 @@ export default class VideoExportManager {
           const tickStart = virtualClock.realTimeMs()
           await virtualClock.tick(frameMs)
           tickMs += virtualClock.realTimeMs() - tickStart
+
+          // 显式渲染一次（私有渲染 ticker 已停）；放在 tick 之后可保证
+          // Live2D 参数更新完才绘制，捕获到的是最新状态
+          const renderStart = virtualClock.realTimeMs()
+          this.app.pixiApplication.render()
+          renderMs += virtualClock.realTimeMs() - renderStart
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
           const durationUs = Math.round(1_000_000 / encodeFps)
@@ -1208,6 +1233,7 @@ export default class VideoExportManager {
       const timings: Record<string, number> = {
         pumpMs: Math.round(pumpMs),
         tickMs: Math.round(tickMs),
+        renderMs: Math.round(renderMs),
         snapshotMs: Math.round(snapshotMs),
         ttsWaitMs: Math.round(ttsWaitMs),
         encodeMs: Math.round(encodeMs),
@@ -1227,7 +1253,8 @@ export default class VideoExportManager {
 
       this.logger.info(
         `Fast export phase timings: pump=${pumpMs.toFixed(0)}ms ` +
-          `(tick=${tickMs.toFixed(0)}ms capture=${snapshotMs.toFixed(0)}ms) ` +
+          `(tick=${tickMs.toFixed(0)}ms render=${renderMs.toFixed(0)}ms ` +
+          `capture=${snapshotMs.toFixed(0)}ms) ` +
           `ttsWait=${ttsWaitMs.toFixed(0)}ms encode=${encodeMs.toFixed(0)}ms ` +
           `audio=${audioMs.toFixed(0)}ms invoke=${invokeMs.toFixed(0)}ms ` +
           `frames=${frameIndex} ` +
@@ -1246,6 +1273,13 @@ export default class VideoExportManager {
         virtualClock.uninstall()
       } catch {
         /* already uninstalled */
+      }
+      // 恢复私有渲染 ticker：record 回退路径与后续任务都要靠它出画面
+      try {
+        this.app.pixiApplication.ticker.start()
+        this.logger.info('Fast export: app render ticker restored')
+      } catch {
+        /* renderer may already be destroyed */
       }
       sinks.encoder?.dispose()
       if (sinks.jpegSink) await sinks.jpegSink.dispose()
