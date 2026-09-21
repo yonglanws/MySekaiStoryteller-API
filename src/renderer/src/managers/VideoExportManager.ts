@@ -962,6 +962,8 @@ export default class VideoExportManager {
 
     // 分段计时（真实墙钟；虚拟时钟下 performance.now 是虚拟时间）
     let pumpMs = 0
+    let tickMs = 0
+    let snapshotMs = 0
     let ttsWaitMs = 0
     let encodeMs = 0
     let audioMs = 0
@@ -993,17 +995,21 @@ export default class VideoExportManager {
           }
           const frameStart = virtualClock.realTimeMs()
 
+          const tickStart = virtualClock.realTimeMs()
           await virtualClock.tick(frameMs)
+          tickMs += virtualClock.realTimeMs() - tickStart
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
           const durationUs = Math.round(1_000_000 / encodeFps)
           const keyFrame = frameIndex % (encodeFps * 4) === 0
 
+          const captureStart = virtualClock.realTimeMs()
           if (sinks.encoder) {
             await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
           } else if (sinks.jpegSink) {
             await sinks.jpegSink.captureFrame(canvas)
           }
+          snapshotMs += virtualClock.realTimeMs() - captureStart
 
           if (frameIndex % (encodeFps * 5) === 0) {
             const v = frameValidator.validateFrame(canvas, frameIndex)
@@ -1201,6 +1207,8 @@ export default class VideoExportManager {
 
       const timings: Record<string, number> = {
         pumpMs: Math.round(pumpMs),
+        tickMs: Math.round(tickMs),
+        snapshotMs: Math.round(snapshotMs),
         ttsWaitMs: Math.round(ttsWaitMs),
         encodeMs: Math.round(encodeMs),
         audioMs: Math.round(audioMs),
@@ -1219,6 +1227,7 @@ export default class VideoExportManager {
 
       this.logger.info(
         `Fast export phase timings: pump=${pumpMs.toFixed(0)}ms ` +
+          `(tick=${tickMs.toFixed(0)}ms capture=${snapshotMs.toFixed(0)}ms) ` +
           `ttsWait=${ttsWaitMs.toFixed(0)}ms encode=${encodeMs.toFixed(0)}ms ` +
           `audio=${audioMs.toFixed(0)}ms invoke=${invokeMs.toFixed(0)}ms ` +
           `frames=${frameIndex} ` +
