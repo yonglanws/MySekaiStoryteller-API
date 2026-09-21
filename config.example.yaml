@@ -45,6 +45,11 @@ video:
                            # auto/on = 浏览器支持时直录 h264/mp4，宿主 -c:v copy 流拷贝合流，
                            #           省掉整个重编码；任一环节失败自动回退 off 的行为
                            # （env: MSS_RECORD_STREAM_COPY）
+  recordTargetSizeMb: 0    # 流拷贝路径的目标成片体积 MB（0 = 不启用，按 recordBitrate 固定码率）。
+                           # >0 时按录制前估算时长反推视频码率（扣除音轨、留 15% 余量，
+                           # 下限 600kbps、上限 recordBitrate），不同长度的故事都落在目标附近。
+                           # 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效
+                           # （env: MSS_RECORD_TARGET_SIZE_MB）
   exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
   fastFps: 30        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
                       # 动画仍按 video.fps 推进，低上限只减少抓帧/编码次数

@@ -85,6 +85,29 @@ export class StreamRecorder {
     throw new Error('No supported mime type found for MediaRecorder')
   }
 
+  /**
+   * 浏览器是否支持 h264/mp4 录制（流拷贝合流路径的前提）。
+   * 与 getSupportedMimeType 的 mp4 候选一致；录制前用它决定
+   * 「按目标体积反推码率」是否安全（不支持时会回退 webm + 重编码，
+   * 低码率中间件会实打实损害最终画质）。
+   */
+  static isMp4RecordingSupported(): boolean {
+    return (
+      MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.42E01E') ||
+      MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.640028') ||
+      MediaRecorder.isTypeSupported('video/mp4')
+    )
+  }
+
+  /** 录制开始前调整视频码率（按目标体积反推时用） */
+  setVideoBitrate(bitrate: number): void {
+    if (this.isRecording) {
+      this.logger.warn('Cannot change bitrate while recording')
+      return
+    }
+    this.config.bitrate = bitrate
+  }
+
   startRecording(canvas: HTMLCanvasElement): void {
     if (this.isRecording) {
       throw new Error('Recording is already in progress')

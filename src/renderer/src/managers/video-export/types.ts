@@ -26,6 +26,8 @@ export interface VideoExportOptions {
   recordBitrate?: number
   /** record 模式收尾：off（默认，webm + 全量重编码）| auto/on（h264/mp4 直录 + 流拷贝，失败回退重编码） */
   recordStreamCopy?: 'auto' | 'on' | 'off'
+  /** 流拷贝路径的目标成片体积（MB）；>0 时按估算时长反推视频码率，0 = 按 recordBitrate */
+  recordTargetSizeMb?: number
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

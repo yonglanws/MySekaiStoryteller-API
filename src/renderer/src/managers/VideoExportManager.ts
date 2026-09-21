@@ -42,6 +42,16 @@ type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 /** 台词音频结束后的静音尾垫：保证相邻对话之间有呼吸间隔 */
 const TTS_TAIL_SILENCE_MS = 600
 
+/** 解析 '128k' / '128000' 形式的码率为 bps */
+function parseBitrateBps(value: string): number {
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)(k?)$/)
+  if (!match) return 128000
+  return match[2] === 'k' ? Math.round(parseFloat(match[1]) * 1000) : Math.round(parseFloat(match[1]))
+}
+
+/** 目标体积反推码率的下限：再低画质不可接受 */
+const MIN_TARGET_BITRATE_BPS = 600_000
+
 export default class VideoExportManager {
   private readonly logger: ExportLogger
   private readonly checkpointManager: CheckpointManager
@@ -408,6 +418,37 @@ export default class VideoExportManager {
     }
 
     totalDurationMs = timeline.length > 0 ? timeline[timeline.length - 1].endTimeMs : 0
+
+    // 流拷贝路径下按目标体积反推录制码率。仅在确认走 mp4 直录时调整——
+    // 万一回退 webm + 重编码，被压低的中间码率会实打实损害最终画质。
+    // 时长用的是录制前估算（TTS 实际时长通常不低于估算），留 15% 余量。
+    const targetSizeMb = options.recordTargetSizeMb ?? 0
+    if (targetSizeMb > 0) {
+      const streamCopyPlanned =
+        options.recordStreamCopy !== undefined &&
+        options.recordStreamCopy !== 'off' &&
+        StreamRecorder.isMp4RecordingSupported()
+      if (streamCopyPlanned && totalDurationMs > 0) {
+        const durationSec = totalDurationMs / 1000
+        const audioBps = parseBitrateBps(options.apiAudioBitrate ?? '128k')
+        const targetBytes = targetSizeMb * 1024 * 1024
+        const videoBytes = Math.max(targetBytes * 0.85 - (audioBps / 8) * durationSec, 0)
+        const derivedBps = Math.round((videoBytes * 8) / durationSec)
+        const finalBps = Math.max(
+          MIN_TARGET_BITRATE_BPS,
+          Math.min(derivedBps, options.recordBitrate ?? 8_000_000)
+        )
+        recorder.setVideoBitrate(finalBps)
+        this.logger.info(
+          `Record size targeting: target=${targetSizeMb}MB, estimated=${durationSec.toFixed(1)}s, ` +
+            `audio=${(audioBps / 1000).toFixed(0)}kbps -> videoBitrate=${(finalBps / 1_000_000).toFixed(2)}Mbps`
+        )
+      } else {
+        this.logger.warn(
+          'recordTargetSizeMb ignored: requires recordStreamCopy on/auto and mp4 recording support'
+        )
+      }
+    }
 
     const totalSnippets = snippets.length
     let contextLost = false

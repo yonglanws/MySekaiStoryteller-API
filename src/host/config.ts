@@ -47,7 +47,14 @@ const VideoSchema = z.object({
    *         任一环节失败自动回退 off 的路径
    * - on：强制 auto 行为（探测不支持时仍回退）
    */
-  recordStreamCopy: z.enum(['auto', 'on', 'off']).default('off')
+  recordStreamCopy: z.enum(['auto', 'on', 'off']).default('off'),
+  /**
+   * 流拷贝路径的目标成片体积（MB）。>0 时按录制前估算的时长反推视频码率
+   * （扣除音轨、留 15% 余量，下限 600kbps，上限 recordBitrate），
+   * 使不同长度的故事都落在目标附近；0 = 不启用，按 recordBitrate 固定码率。
+   * 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效。
+   */
+  recordTargetSizeMb: z.number().default(0)
 })
 
 const RenderSchema = z.object({
@@ -188,6 +195,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_RECORD_STREAM_COPY) {
     const v = env.MSS_RECORD_STREAM_COPY.toLowerCase()
     if (v === 'auto' || v === 'on' || v === 'off') config.video.recordStreamCopy = v
+  }
+  if (env.MSS_RECORD_TARGET_SIZE_MB) {
+    const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)
+    if (Number.isFinite(v) && v >= 0) config.video.recordTargetSizeMb = v
   }
 
   // render
