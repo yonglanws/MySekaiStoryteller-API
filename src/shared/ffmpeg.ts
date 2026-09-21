@@ -93,7 +93,17 @@ export type GpuRenderer = 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu'
  */
 export type VideoEncoderChoice = GpuRenderer | 'libx264'
 
+/** 编码器探测结果缓存：ffmpeg -encoders 每次导出只需跑一次 */
+let cachedEncoderChoice: 'nvidia' | 'amd' | 'intel' | 'cpu' | null = null
+
+/** 已缓存探测结果时同步返回（health 上报用）；未探测过返回 null */
+export function getCachedGpuEncoder(): 'nvidia' | 'amd' | 'intel' | 'cpu' | null {
+  return cachedEncoderChoice
+}
+
 export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'intel' | 'cpu'> {
+  if (cachedEncoderChoice) return cachedEncoderChoice
+
   const gpuEncoders = [
     { name: 'nvidia', codec: 'h264_nvenc' },
     { name: 'amd', codec: 'h264_amf' },
@@ -127,6 +137,7 @@ export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'i
 
       if (result) {
         logger.info(`Detected GPU encoder: ${encoder.codec} (${encoder.name})`)
+        cachedEncoderChoice = encoder.name
         return encoder.name
       }
     } catch {
@@ -135,6 +146,7 @@ export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'i
   }
 
   logger.info('No GPU encoder detected, falling back to CPU encoding')
+  cachedEncoderChoice = 'cpu'
   return 'cpu'
 }
 
@@ -320,8 +332,33 @@ function outputScaleFilter(width: number, height: number): string {
 }
 
 /**
+ * 解析收尾转码的缩放滤镜：
+ * - 输入与输出完全一致（renderScale=1.0 时画布即输出分辨率）→ 返回 null，
+ *   连 -vf 都不挂。恒等缩放仍要付出完整一遍 解码→缩放→编码 的成本。
+ * - QSV 需要 hwupload 滤镜链把帧送显存，恒等输入也保留滤镜（由调用方处理）。
+ */
+function resolveOutputScaleFilter(
+  inputWidth: number,
+  inputHeight: number,
+  outputWidth: number,
+  outputHeight: number,
+  needsQsvInit: boolean
+): { filter: string | null; skip: boolean } {
+  const identity =
+    inputWidth === outputWidth &&
+    inputHeight === outputHeight &&
+    inputWidth % 2 === 0 &&
+    inputHeight % 2 === 0
+
+  if (identity && !needsQsvInit) {
+    return { filter: null, skip: true }
+  }
+  return { filter: outputScaleFilter(outputWidth, outputHeight), skip: false }
+}
+
+/**
  * API 导出收尾：视频（无音轨）转码压缩为 MP4。
- * 与旧版 IpcHandler 行为一致（1280x720 pad、-r fps），仅编码器改为可选。
+ * 与旧版 IpcHandler 行为一致（等比缩放 + pad、-r fps），仅编码器改为可选。
  */
 export async function apiConvertVideoWithCompression(
   inputPath: string,
@@ -330,27 +367,42 @@ export async function apiConvertVideoWithCompression(
   fps: number = 30,
   encoder: VideoEncoderChoice = 'libx264',
   width: number,
-  height: number
+  height: number,
+  inputWidth: number = width,
+  inputHeight: number = height,
+  recordedBitrate: number = 8_000_000
 ): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
-  const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
-
-  const scale = outputScaleFilter(width, height)
+  const estimatedDuration = Math.max(stat.size / (recordedBitrate / 8), 10)
 
   const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
   logger.info(`API video conversion using encoder: ${encoderArgs.codec} (${encoder}), CRF=${crf}`)
 
+  const { filter: scale, skip: skipScale } = resolveOutputScaleFilter(
+    inputWidth,
+    inputHeight,
+    width,
+    height,
+    encoderArgs.needsQsvInit
+  )
+  if (skipScale) {
+    logger.info(
+      `API video conversion: input ${inputWidth}x${inputHeight} matches output, skipping scale filter`
+    )
+  }
+
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []
-  const qsvVfPrefix = encoderArgs.needsQsvInit ? 'hw_upload,' : ''
+  const vfArgs = scale
+    ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`]
+    : []
 
   const ffmpegArgs = [
     ...qsvInitArgs,
     '-i',
     inputPath,
-    '-vf',
-    `${qsvVfPrefix}${scale}`,
+    ...vfArgs,
     '-c:v',
     encoderArgs.codec,
     '-preset',
@@ -378,8 +430,7 @@ export async function apiConvertVideoWithCompression(
       const fallbackArgs = [
         '-i',
         inputPath,
-        '-vf',
-        scale,
+        ...vfArgs,
         '-c:v',
         'libx264',
         '-preset',
@@ -405,7 +456,18 @@ export async function apiConvertVideoWithCompression(
         `API video conversion failed with ${encoderArgs.codec}, falling back to CPU:`,
         error
       )
-      await apiConvertVideoWithCompression(inputPath, outputPath, crf, fps, 'libx264', width, height)
+      await apiConvertVideoWithCompression(
+        inputPath,
+        outputPath,
+        crf,
+        fps,
+        'libx264',
+        width,
+        height,
+        inputWidth,
+        inputHeight,
+        recordedBitrate
+      )
     }
   }
 }
@@ -423,20 +485,36 @@ export async function apiMergeVideoAudioWithCompression(
   fps: number = 30,
   encoder: VideoEncoderChoice = 'libx264',
   width: number,
-  height: number
+  height: number,
+  inputWidth: number = width,
+  inputHeight: number = height,
+  recordedBitrate: number = 8_000_000
 ): Promise<void> {
   const videoStat = await fs.promises.stat(videoPath)
-  const estimatedDuration = Math.max(videoStat.size / (8000000 / 8), 10)
-
-  const scale = outputScaleFilter(width, height)
+  const estimatedDuration = Math.max(videoStat.size / (recordedBitrate / 8), 10)
 
   const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
   logger.info(`API video-audio merge using encoder: ${encoderArgs.codec} (${encoder}), CRF=${crf}`)
 
+  const { filter: scale, skip: skipScale } = resolveOutputScaleFilter(
+    inputWidth,
+    inputHeight,
+    width,
+    height,
+    encoderArgs.needsQsvInit
+  )
+  if (skipScale) {
+    logger.info(
+      `API video-audio merge: input ${inputWidth}x${inputHeight} matches output, skipping scale filter`
+    )
+  }
+
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []
-  const qsvVfPrefix = encoderArgs.needsQsvInit ? 'hw_upload,' : ''
+  const vfArgs = scale
+    ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`]
+    : []
 
   const ffmpegArgs = [
     ...qsvInitArgs,
@@ -444,8 +522,7 @@ export async function apiMergeVideoAudioWithCompression(
     videoPath,
     '-i',
     audioPath,
-    '-vf',
-    `${qsvVfPrefix}${scale}`,
+    ...vfArgs,
     '-c:v',
     encoderArgs.codec,
     '-preset',
@@ -482,8 +559,7 @@ export async function apiMergeVideoAudioWithCompression(
         videoPath,
         '-i',
         audioPath,
-        '-vf',
-        scale,
+        ...vfArgs,
         '-c:v',
         'libx264',
         '-preset',
@@ -520,7 +596,10 @@ export async function apiMergeVideoAudioWithCompression(
         fps,
         'libx264',
         width,
-        height
+        height,
+        inputWidth,
+        inputHeight,
+        recordedBitrate
       )
     }
   }

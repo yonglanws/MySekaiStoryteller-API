@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express'
 import { ILogObj, Logger } from 'tslog'
 import * as fs from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { StorySchema, StoryData } from '../../common/types/Story'
 import type { VideoSettings } from '../config'
@@ -33,6 +34,10 @@ export interface VideoConfig {
   exportBitrate: number
   exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
   fastFps: number
+  /** record 模式 MediaRecorder 码率（bps），默认 8Mbps */
+  recordBitrate: number
+  /** record 模式是否在支持时直录 h264/mp4 并流拷贝合流（默认 off） */
+  recordStreamCopy: 'auto' | 'on' | 'off'
 }
 
 export interface ExportTask {
@@ -41,6 +46,8 @@ export interface ExportTask {
   outputPath: string
   videoConfig: VideoConfig
   addedAt: number
+  /** 本任务的超时上限（毫秒），渲染池看门狗以此推导强制回收 deadline */
+  timeoutMs: number
 }
 
 /**
@@ -69,6 +76,17 @@ const FILES_PAGE_SIZE_DEFAULT = 20
 const FILES_PAGE_SIZE_MAX = 100
 
 const CLEANUP_EXTENSIONS = new Set(['.mp4', '.json'])
+
+/** 导出临时文件（录制 webm / 帧目录 / 混音 WAV）前缀，超过保留期后由宿主清扫 */
+const TEMP_SWEEP_PREFIXES = [
+  'mss-stream-',
+  'mss-export-',
+  'mss-api-audio-',
+  'mss-audio-',
+  'mss-hf-',
+  'mss-fast-'
+]
+const TEMP_FILE_MAX_AGE_MS = 6 * 60 * 60 * 1000
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -101,6 +119,13 @@ export class VideoApiServer {
   private totalFilesCleaned: number = 0
   private rateLimitMap: Map<string, RateLimitEntry> = new Map()
   private extraHealthProvider: (() => Record<string, unknown>) | null = null
+  /** 最近完成的导出（滚动窗口，供 /api/v1/status 观测并行负载） */
+  private recentExports: Array<{
+    taskId: string
+    durationMs: number
+    success: boolean
+    finishedAt: number
+  }> = []
   constructor(
     logger: Logger<ILogObj>,
     options: {
@@ -145,6 +170,11 @@ export class VideoApiServer {
     this.extraHealthProvider = provider
   }
 
+  /** 是否仍有在途导出（关停排空用） */
+  hasActiveExports(): boolean {
+    return this.activeExports.size > 0 || this.exportQueue.length > 0
+  }
+
   private ensureOutputDir(): void {
     if (!fs.existsSync(this.outputDir)) {
       fs.mkdirSync(this.outputDir, { recursive: true })
@@ -155,8 +185,52 @@ export class VideoApiServer {
     const ONE_HOUR = 60 * 60 * 1000
     this.cleanupInterval = setInterval(() => {
       this.cleanupOldExports()
+      this.cleanupStaleTempFiles()
       this.cleanupRateLimitMap()
     }, ONE_HOUR)
+  }
+
+  /**
+   * 清扫 tmpdir 下泄漏的导出临时文件（录制 webm、帧目录、混音 WAV）。
+   * 正常路径由桥接层 finally 删除；取消/崩溃/重试遗留的靠这里兜底。
+   * 在途文件被持续追加，mtime 不会超过保留期，不会被误删。
+   */
+  private cleanupStaleTempFiles(): void {
+    const now = Date.now()
+    let entries: string[]
+    try {
+      entries = fs.readdirSync(tmpdir())
+    } catch {
+      return
+    }
+
+    let cleaned = 0
+    let cleanedBytes = 0
+    for (const name of entries) {
+      if (!TEMP_SWEEP_PREFIXES.some((prefix) => name.startsWith(prefix))) continue
+      const fullPath = path.join(tmpdir(), name)
+      try {
+        const stats = fs.statSync(fullPath)
+        if (!stats.isFile() && !stats.isDirectory()) continue
+        if (now - stats.mtimeMs < TEMP_FILE_MAX_AGE_MS) continue
+        if (stats.isDirectory()) {
+          fs.rmSync(fullPath, { recursive: true, force: true })
+        } else {
+          fs.unlinkSync(fullPath)
+        }
+        cleaned++
+        cleanedBytes += stats.size
+      } catch {
+        /* 并发删除或权限问题：忽略单项失败 */
+      }
+    }
+
+    if (cleaned > 0) {
+      this.logger.info(
+        `[API] Temp sweep: removed ${cleaned} stale mss-* entries ` +
+          `(${(cleanedBytes / 1024 / 1024).toFixed(2)} MB)`
+      )
+    }
   }
 
   private cleanupOldExports(): void {
@@ -297,7 +371,8 @@ export class VideoApiServer {
         pendingExports: this.pendingExports.size,
         maxConcurrent: this.maxConcurrentExports,
         activeTaskIds: Array.from(this.activeExports),
-        queuedTaskIds: this.exportQueue.map((t) => t.taskId)
+        queuedTaskIds: this.exportQueue.map((t) => t.taskId),
+        recentExports: this.recentExports
       })
     })
 
@@ -517,7 +592,9 @@ export class VideoApiServer {
       exportMode: this.video.exportMode,
       exportBitrate: this.video.exportBitrate,
       exportFastEncoder: this.video.exportFastEncoder,
-      fastFps: this.video.fastFps
+      fastFps: this.video.fastFps,
+      recordBitrate: this.video.recordBitrate,
+      recordStreamCopy: this.video.recordStreamCopy
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {
@@ -536,11 +613,20 @@ export class VideoApiServer {
       story: parsedStory,
       outputPath,
       videoConfig,
-      addedAt: Date.now()
+      addedAt: Date.now(),
+      timeoutMs
     }
 
     this.exportQueue.push(task)
     this.processQueue()
+
+    // 客户端断连（插件 httpx 超时普遍早于宿主 30 分钟上限）：任务跑完也没有
+    // 接收方，继续渲染只是白占 worker/GPU，直接取消
+    res.on('close', () => {
+      if (res.writableEnded) return
+      this.logger.warn(`[API] Client disconnected before response for task ${taskId}, cancelling`)
+      this.cancelExport(taskId)
+    })
 
     try {
       let timeoutId: ReturnType<typeof setTimeout> | null = null
@@ -638,7 +724,13 @@ export class VideoApiServer {
     const queueIndex = this.exportQueue.findIndex((t) => t.taskId === taskId)
     if (queueIndex > -1) {
       this.exportQueue.splice(queueIndex, 1)
-      this.pendingExports.delete(taskId)
+      // 必须拒绝等待中的 Promise：只删除 pendingExports 会让 HTTP 请求
+      // 挂到超时竞赛结束（最长 30 分钟）才收到响应
+      const pending = this.pendingExports.get(taskId)
+      if (pending) {
+        pending.reject(new Error('Export cancelled by user'))
+        this.pendingExports.delete(taskId)
+      }
       this.dispatcher?.cancel(taskId)
       this.logger.info(`[API] Cancelled queued export: ${taskId}`)
       return true
@@ -659,6 +751,20 @@ export class VideoApiServer {
     return false
   }
 
+  private recordRecentExport(taskId: string, success: boolean): void {
+    const pending = this.pendingExports.get(taskId)
+    if (!pending) return
+    this.recentExports.unshift({
+      taskId,
+      durationMs: Date.now() - pending.startTime,
+      success,
+      finishedAt: Date.now()
+    })
+    if (this.recentExports.length > 10) {
+      this.recentExports.length = 10
+    }
+  }
+
   resolveExport(
     taskId: string,
     result: {
@@ -673,8 +779,9 @@ export class VideoApiServer {
     const pending = this.pendingExports.get(taskId)
     if (pending) {
       this.logger.info(
-        `[API] Resolving export task: ${taskId}, success: ${result.success}, videoPath: ${result.videoPath}`
+        `[API] Resolving export task: ${taskId}, success=${result.success}, videoPath=${result.videoPath}`
       )
+      this.recordRecentExport(taskId, result.success)
       pending.resolve({
         success: result.success,
         message: result.success ? 'Export completed' : 'Export failed',
@@ -700,6 +807,7 @@ export class VideoApiServer {
     const pending = this.pendingExports.get(taskId)
     if (pending) {
       this.logger.error(`[API] Rejecting export task: ${taskId}`, error)
+      this.recordRecentExport(taskId, false)
       pending.reject(error)
       this.activeExports.delete(taskId)
       this.processQueue()

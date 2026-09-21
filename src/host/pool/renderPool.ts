@@ -1,5 +1,7 @@
 import { chromium, Browser, Page } from 'playwright'
 import { ILogObj, Logger } from 'tslog'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
 import type { HostConfig, TtsCharacter } from '../config'
 import type { WsHub, WorkerMessage } from '../bridge/wsHub'
 import type { ExportDispatcher, ExportTask } from '../servers/VideoApiServer'
@@ -26,10 +28,18 @@ interface WorkerState {
   exportsCompleted: number
   webglRenderer: string | null
   launching: boolean
+  /** 看门狗：当前任务超时后的强制回收 deadline（毫秒时间戳） */
+  taskDeadline: number | null
+  /** 看门狗：是否已向该 worker 发过 abort */
+  abortSent: boolean
 }
 
 const WORKER_READY_TIMEOUT_MS = 60000
 const RELAUNCH_DELAY_MS = 30000
+/** 看门狗巡检间隔 */
+const WATCHDOG_INTERVAL_MS = 15000
+/** 超过任务超时后、强制回收前的宽限（等待渲染端优雅退出） */
+const WATCHDOG_GRACE_MS = 60000
 
 function baseLaunchArgs(config: HostConfig): string[] {
   const args = [
@@ -69,6 +79,7 @@ export class RenderPool implements ExportDispatcher {
   private readonly readyWaiters = new Map<string, Array<() => void>>()
   private readonly bufferedTasks: ExportTask[] = []
   private stopping = false
+  private watchdogInterval: ReturnType<typeof setInterval> | null = null
 
   onExportResult: ((taskId: string, result: ExportResultPayload) => void) | null = null
 
@@ -96,10 +107,24 @@ export class RenderPool implements ExportDispatcher {
       // 串行启动，避免并发启动争抢
       await this.launchWorker(this.workers.get(workerId)!, launchArgs)
     }
+
+    // 看门狗：渲染端挂起（不返回 export-result 也不崩溃）时强制回收 worker，
+    // 否则 busy 永真，后续任务全部堆积在 bufferedTasks；
+    // 同时兜底冲刷被内存护栏暂缓的缓冲任务
+    this.watchdogInterval = setInterval(() => {
+      this.checkWatchdog()
+      if (this.bufferedTasks.length > 0) {
+        this.flushBufferedTasks()
+      }
+    }, WATCHDOG_INTERVAL_MS)
   }
 
   async stop(): Promise<void> {
     this.stopping = true
+    if (this.watchdogInterval) {
+      clearInterval(this.watchdogInterval)
+      this.watchdogInterval = null
+    }
     for (const [, worker] of this.workers) {
       await this.closeBrowser(worker)
     }
@@ -114,6 +139,7 @@ export class RenderPool implements ExportDispatcher {
       readyWorkers: all.filter((w) => w.ready).length,
       idleWorkers: all.filter((w) => w.ready && !w.busy).length,
       busyTaskIds: all.filter((w) => w.busyTaskId).map((w) => w.busyTaskId),
+      bufferedTasks: this.bufferedTasks.length,
       webglRenderers: all.map((w) => ({ workerId: w.workerId, renderer: w.webglRenderer })),
       exportsCompleted: all.reduce((sum, w) => sum + w.exportsCompleted, 0)
     }
@@ -131,7 +157,9 @@ export class RenderPool implements ExportDispatcher {
       busyTaskId: null,
       exportsCompleted: 0,
       webglRenderer: null,
-      launching: false
+      launching: false,
+      taskDeadline: null,
+      abortSent: false
     }
   }
 
@@ -190,6 +218,16 @@ export class RenderPool implements ExportDispatcher {
   }
 
   private async openWorkerPage(worker: WorkerState): Promise<void> {
+    // 先关旧页：WS  flap 后重复 newPage 会累积多个带 WebGL 上下文的页面
+    if (worker.page) {
+      try {
+        await worker.page.close()
+      } catch {
+        /* 旧页可能已随导航/崩溃销毁 */
+      }
+      worker.page = null
+    }
+
     const page = await worker.browser!.newPage()
     worker.page = page
 
@@ -250,6 +288,8 @@ export class RenderPool implements ExportDispatcher {
     worker.browser = null
     worker.page = null
     worker.ready = false
+    worker.taskDeadline = null
+    worker.abortSent = false
 
     if (worker.busyTaskId) {
       const taskId = worker.busyTaskId
@@ -320,6 +360,8 @@ export class RenderPool implements ExportDispatcher {
     const worker = this.workers.get(workerId)
     if (!worker) return
     worker.ready = false
+    worker.taskDeadline = null
+    worker.abortSent = false
 
     // WS 断开但浏览器仍存活：重建页面；若正在导出则视为失败
     if (worker.busyTaskId) {
@@ -349,6 +391,8 @@ export class RenderPool implements ExportDispatcher {
   private releaseWorker(worker: WorkerState): void {
     worker.busy = false
     worker.busyTaskId = null
+    worker.taskDeadline = null
+    worker.abortSent = false
     worker.exportsCompleted++
 
     // 页面回收：按导出次数重建，防止 Live2D/Cubism 内存累积
@@ -371,8 +415,9 @@ export class RenderPool implements ExportDispatcher {
 
   dispatch(task: ExportTask): void {
     const worker = this.pickIdleWorker()
-    if (!worker) {
+    if (!worker || !this.hasEnoughFreeMemory()) {
       // 正常情况下 VideoApiServer 的并发上限保证有空闲 worker；此处仅兜底
+      // （含内存护栏暂缓派发——由看门狗巡检周期内的 flushBufferedTasks 重试）
       this.bufferedTasks.push(task)
       this.logger.warn(
         `[Pool] No idle worker for task ${task.taskId}, buffered (buffered=${this.bufferedTasks.length})`
@@ -382,6 +427,8 @@ export class RenderPool implements ExportDispatcher {
 
     worker.busy = true
     worker.busyTaskId = task.taskId
+    worker.abortSent = false
+    worker.taskDeadline = Date.now() + task.timeoutMs + WATCHDOG_GRACE_MS
 
     const payload = {
       taskId: task.taskId,
@@ -398,6 +445,8 @@ export class RenderPool implements ExportDispatcher {
     if (!sent) {
       worker.busy = false
       worker.busyTaskId = null
+      worker.taskDeadline = null
+      worker.abortSent = false
       this.onExportResult?.(task.taskId, {
         taskId: task.taskId,
         success: false,
@@ -423,6 +472,74 @@ export class RenderPool implements ExportDispatcher {
     }
     const sent = this.hub.send(workerId, { type: 'api:abort-export', args: [taskId] })
     this.logger.info(`[Pool] Abort sent to ${workerId} for task ${taskId} (sent=${sent})`)
+  }
+
+  /**
+   * 看门狗巡检：渲染端挂起（既不返回 export-result 也不崩溃/断连）时，
+   * 超期先补发 abort，宽限后仍无响应则强制回收页面并失败任务——
+   * 避免单个卡死任务把 worker 永久占死、bufferedTasks 无限堆积。
+   */
+  private checkWatchdog(): void {
+    const now = Date.now()
+    for (const worker of this.workers.values()) {
+      if (!worker.busy || !worker.taskDeadline) continue
+
+      if (now > worker.taskDeadline + WATCHDOG_GRACE_MS) {
+        const taskId = worker.busyTaskId
+        this.logger.error(
+          `[Pool] Worker ${worker.workerId} watchdog timeout for task ${taskId}, ` +
+            `force-recycling page`
+        )
+        worker.busy = false
+        worker.busyTaskId = null
+        worker.taskDeadline = null
+        worker.abortSent = false
+        if (taskId) {
+          this.onExportResult?.(taskId, {
+            taskId,
+            success: false,
+            error: `Render worker ${worker.workerId} watchdog timeout (no export-result)`
+          })
+        }
+        void this.recoverWorker(worker)
+        continue
+      }
+
+      if (now > worker.taskDeadline && !worker.abortSent) {
+        worker.abortSent = true
+        this.logger.warn(
+          `[Pool] Worker ${worker.workerId} task ${worker.busyTaskId} exceeded timeout, ` +
+            `re-sending abort`
+        )
+        this.hub.send(worker.workerId, {
+          type: 'api:abort-export',
+          args: [worker.busyTaskId]
+        })
+      }
+    }
+  }
+
+  /** 强制回收：关页（失败时升级为关浏览器）后重新拉起重试内的 worker */
+  private async recoverWorker(worker: WorkerState): Promise<void> {
+    try {
+      await worker.page?.close()
+    } catch {
+      /* 页面可能已销毁 */
+    }
+    worker.page = null
+    worker.ready = false
+
+    if (worker.browser && worker.browser.isConnected()) {
+      try {
+        await this.openWorkerPage(worker)
+        this.logger.info(`[Pool] Worker ${worker.workerId} recovered after watchdog recycle`)
+      } catch (err) {
+        this.logger.warn(`[Pool] Worker ${worker.workerId} watchdog recovery failed`, err)
+        void this.closeBrowser(worker).then(() => this.launchWorker(worker))
+      }
+    } else {
+      void this.launchWorker(worker)
+    }
   }
 
   /**
@@ -471,8 +588,33 @@ export class RenderPool implements ExportDispatcher {
     return idle
   }
 
+  /**
+   * 内存护栏（render.minFreeMemoryMb > 0 时生效）：
+   * 可用内存过低时暂缓派发，避免 OOM killer 在导出中途杀掉 Chrome。
+   * 探测失败时不拦截（宁可尝试也不无限搁置任务）。
+   */
+  private hasEnoughFreeMemory(): boolean {
+    const minMb = this.config.render.minFreeMemoryMb
+    if (minMb <= 0) return true
+
+    try {
+      if (process.platform === 'linux') {
+        const meminfo = fs.readFileSync('/proc/meminfo', 'utf-8')
+        const match = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/)
+        if (match) {
+          return Number(match[1]) / 1024 >= minMb
+        }
+      }
+      return os.freemem() / (1024 * 1024) >= minMb
+    } catch {
+      return true
+    }
+  }
+
   private flushBufferedTasks(): void {
     while (this.bufferedTasks.length > 0) {
+      // 内存护栏未解除时不 shift，避免 dispatch 再次缓冲形成空转
+      if (!this.hasEnoughFreeMemory()) return
       const worker = this.pickIdleWorker()
       if (!worker) return
       const task = this.bufferedTasks.shift()!

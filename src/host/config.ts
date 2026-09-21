@@ -28,7 +28,7 @@ const VideoSchema = z.object({
   width: z.number().default(1280),
   height: z.number().default(720),
   fps: z.number().default(30),
-  crf: z.number().default(28),
+  crf: z.number().default(23),
   renderScale: z.number().default(1.5),
   audioBitrate: z.string().default('128k'),
   encoder: z.string().default('auto'),
@@ -37,7 +37,17 @@ const VideoSchema = z.object({
   exportBitrate: z.number().default(12_000_000),
   exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto'),
   /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
-  fastFps: z.number().default(30)
+  fastFps: z.number().default(30),
+  /** record 模式 MediaRecorder 视频码率（bps） */
+  recordBitrate: z.number().default(8_000_000),
+  /**
+   * record 模式收尾合成方式：
+   * - off（默认）：浏览器录制 webm，宿主全量重编码合流（现行行为）
+   * - auto：浏览器支持时直录 h264/mp4，宿主 -c:v copy 流拷贝合流；
+   *         任一环节失败自动回退 off 的路径
+   * - on：强制 auto 行为（探测不支持时仍回退）
+   */
+  recordStreamCopy: z.enum(['auto', 'on', 'off']).default('off')
 })
 
 const RenderSchema = z.object({
@@ -46,7 +56,9 @@ const RenderSchema = z.object({
   browserChannels: z.array(z.string()).default(['msedge', 'chrome', 'chromium']),
   browserExecutablePath: z.string().default(''),
   extraChromeArgs: z.string().default(''),
-  linuxGpuAngle: z.boolean().default(true)
+  linuxGpuAngle: z.boolean().default(true),
+  /** 派发导出任务前要求的最小可用内存（MB）；0 = 关闭护栏 */
+  minFreeMemoryMb: z.number().default(0)
 })
 
 const PathsSchema = z.object({
@@ -169,6 +181,14 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     const v = parseInt(env.MSS_FAST_FPS, 10)
     if (Number.isFinite(v) && v >= 1) config.video.fastFps = v
   }
+  if (env.MSS_RECORD_BITRATE) {
+    const v = parseInt(env.MSS_RECORD_BITRATE, 10)
+    if (Number.isFinite(v) && v > 0) config.video.recordBitrate = v
+  }
+  if (env.MSS_RECORD_STREAM_COPY) {
+    const v = env.MSS_RECORD_STREAM_COPY.toLowerCase()
+    if (v === 'auto' || v === 'on' || v === 'off') config.video.recordStreamCopy = v
+  }
 
   // render
   if (env.MSS_WORKERS) {
@@ -190,6 +210,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     config.render.linuxGpuAngle = !['0', 'false', 'no', 'off'].includes(
       env.MSS_LINUX_GPU_ANGLE.toLowerCase()
     )
+  }
+  if (env.MSS_MIN_FREE_MEMORY_MB) {
+    const v = parseInt(env.MSS_MIN_FREE_MEMORY_MB, 10)
+    if (Number.isFinite(v) && v >= 0) config.render.minFreeMemoryMb = v
   }
 
   // log

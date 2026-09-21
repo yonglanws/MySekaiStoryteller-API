@@ -6,6 +6,7 @@ import { WsHub } from './bridge/wsHub'
 import { RenderPool } from './pool/renderPool'
 import { createStaticRouter } from './static/staticRoutes'
 import { ResourceCatalog } from './resources/resourceCatalog'
+import { detectAvailableGpuEncoder, getCachedGpuEncoder } from '../shared/ffmpeg'
 
 /**
  * MySekaiStoryteller-API 纯 API 渲染宿主。
@@ -18,6 +19,9 @@ import { ResourceCatalog } from './resources/resourceCatalog'
  *
  * 配置来源：config.yaml（样例 config.example.yaml），MSS_* 环境变量可覆盖。
  */
+/** 关停时等待在途导出完成的上限（毫秒） */
+const SHUTDOWN_DRAIN_MS = 120_000
+
 /**
  * 宿主级异常兜底：渲染宿主是长驻服务，任何单点异常（Playwright CDP 管道
  * 溢出、段渲染偶发错误、未处理的 Promise 拒绝）都不应该让整个进程退出——
@@ -57,8 +61,12 @@ async function bootstrap(): Promise<void> {
 
   installProcessGuards(logger)
 
+  // 启动时探测一次硬件编码器并缓存：避免每次导出都 spawn ffmpeg -encoders，
+  // health 也能上报真实使用的编码器（此前只报配置值）
+  const detectedEncoder = await detectAvailableGpuEncoder()
+
   logger.info(
-    `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder}`
+    `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder} (detected: ${detectedEncoder})`
   )
 
   const hub = new WsHub(logger, {
@@ -110,7 +118,8 @@ async function bootstrap(): Promise<void> {
     host: {
       platform: process.platform,
       node: process.version,
-      ffmpegEncoder: config.video.encoder
+      ffmpegEncoder: config.video.encoder,
+      ffmpegEncoderDetected: getCachedGpuEncoder()
     }
   }))
 
@@ -138,6 +147,14 @@ async function bootstrap(): Promise<void> {
     if (shuttingDown) return
     shuttingDown = true
     logger.info(`Received ${signal}, shutting down...`)
+    // 排空在途导出：直接关浏览器会把半渲染的任务静默丢弃
+    const drainDeadline = Date.now() + SHUTDOWN_DRAIN_MS
+    while (apiServer.hasActiveExports() && Date.now() < drainDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+    if (apiServer.hasActiveExports()) {
+      logger.warn('Shutdown drain timeout, in-flight exports will be dropped')
+    }
     try {
       await pool.stop()
     } catch (err) {

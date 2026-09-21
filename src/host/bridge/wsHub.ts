@@ -58,6 +58,18 @@ export class WsHub {
       const url = new URL(req.url || '/', 'http://localhost')
       const workerId = url.searchParams.get('worker') || `anon-${Date.now()}`
 
+      // 同一 worker 重连：静默替换旧连接。先关旧 socket 防止连接累积；
+      // 旧 socket 的 close 回调因映射已更新不会触发误报的断连事件。
+      const existing = this.connections.get(workerId)
+      if (existing && existing.socket !== ws) {
+        this.logger.info(`[WS] Replacing stale connection for worker ${workerId}`)
+        try {
+          existing.socket.close()
+        } catch {
+          /* 旧 socket 可能已处于关闭中 */
+        }
+      }
+
       this.connections.set(workerId, { workerId, socket: ws })
       this.logger.info(`[WS] Worker connected: ${workerId}`)
 

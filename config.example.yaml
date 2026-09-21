@@ -40,6 +40,11 @@ video:
                       #          导出耗时不再随视频时长线性增长；
                       #          运行环境不支持时自动回退 record
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
+  recordBitrate: 8000000   # record 模式 MediaRecorder 视频码率 bps（env: MSS_RECORD_BITRATE）
+  recordStreamCopy: off    # record 收尾：off = webm 录制 + ffmpeg 全量重编码（默认）
+                           # auto/on = 浏览器支持时直录 h264/mp4，宿主 -c:v copy 流拷贝合流，
+                           #           省掉整个重编码；任一环节失败自动回退 off 的行为
+                           # （env: MSS_RECORD_STREAM_COPY）
   exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
   fastFps: 30        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
                       # 动画仍按 video.fps 推进，低上限只减少抓帧/编码次数
@@ -61,6 +66,8 @@ render:
   extraChromeArgs: ""             # 附加 Chrome 启动参数，空格分隔（env: MSS_CHROME_ARGS）
                                   # Linux NVIDIA 无桌面示例: "--use-angle=vulkan"（同时把 linuxGpuAngle 设 false）
   linuxGpuAngle: true             # Linux 上自动追加 --use-angle=gl；无 X 的 NVIDIA 机器请设 false（env: MSS_LINUX_GPU_ANGLE）
+  minFreeMemoryMb: 0              # 派发导出任务前要求的最小可用内存 MB（0 = 关闭护栏）；
+                                  # 内存紧张的服务器可设 1500 之类，暂缓派发避免 OOM（env: MSS_MIN_FREE_MEMORY_MB）
 
 # ---------------------------------------------------------------------------
 # 路径（相对仓库根，也可写绝对路径）

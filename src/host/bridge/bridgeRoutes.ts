@@ -18,6 +18,11 @@ interface BridgeDeps {
   config: HostConfig
 }
 
+/** 临时名随机后缀：避免同毫秒并发导出共用同一路径 */
+function randomSuffix(): string {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+}
+
 /**
  * 渲染页面 ↔ 宿主的桥接层。
  * 通道语义与原 Electron IpcHandler 对齐：
@@ -50,15 +55,23 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   async function handleInvoke(channel: string, args: unknown[]): Promise<unknown> {
     switch (channel) {
       case 'electron:get-temp-dir': {
-        const framesDir = path.join(tmpdir(), `mss-hf-${Date.now()}`, 'frames')
+        const framesDir = path.join(tmpdir(), `mss-hf-${Date.now()}-${randomSuffix()}`, 'frames')
         await fs.promises.mkdir(framesDir, { recursive: true })
         return framesDir
       }
 
       case 'electron:get-temp-base-dir': {
-        const baseDir = path.join(tmpdir(), `mss-export-${Date.now()}`)
+        const baseDir = path.join(tmpdir(), `mss-export-${Date.now()}-${randomSuffix()}`)
         await fs.promises.mkdir(baseDir, { recursive: true })
         return baseDir
+      }
+
+      case 'electron:delete-temp-file': {
+        // 导出失败/取消时的临时文件清理（ENOENT 等错误静默）
+        const payload = args[0] as { filePath: string }
+        if (!payload?.filePath) return null
+        await fs.promises.rm(payload.filePath, { recursive: true, force: true })
+        return null
       }
 
       case 'electron:api-export-video-from-files': {
@@ -71,6 +84,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           height: number
           crf: number
           audioBitrate: string
+          /** 录制文件的实际像素尺寸（画布后备存储）；缺省时按配置分辨率处理（旧渲染端兼容） */
+          inputWidth?: number
+          inputHeight?: number
+          /** 录制时使用的视频码率（bps），用于 ffmpeg 超时/进度估算 */
+          recordedBitrate?: number
         }
         logger.info(
           `[Bridge] API: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
@@ -84,6 +102,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const encoder = config.video.encoder as VideoEncoderChoice
+          // 输入尺寸缺省时保守回退配置分辨率：与输出相同时会跳过缩放滤镜，
+          // 旧渲染端（renderScale≠1 时画布大于输出）因此保持原有缩放行为
+          const inputWidth = payload.inputWidth ?? config.video.width
+          const inputHeight = payload.inputHeight ?? config.video.height
+          const recordedBitrate = payload.recordedBitrate ?? 8_000_000
 
           if (payload.audioPath && fs.existsSync(payload.audioPath)) {
             await apiMergeVideoAudioWithCompression(
@@ -95,7 +118,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               payload.fps,
               encoder,
               config.video.width,
-              config.video.height
+              config.video.height,
+              inputWidth,
+              inputHeight,
+              recordedBitrate
             )
           } else {
             await apiConvertVideoWithCompression(
@@ -105,7 +131,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               payload.fps,
               encoder,
               config.video.width,
-              config.video.height
+              config.video.height,
+              inputWidth,
+              inputHeight,
+              recordedBitrate
             )
           }
 
@@ -150,6 +179,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           audioPath?: string
           outputPath: string
           audioBitrate: string
+          /** true 时保留输入文件由调用方自行清理（record 流拷贝路径的回退需要） */
+          keepInputs?: boolean
         }
         logger.info(
           `[Bridge] API remux: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
@@ -194,15 +225,19 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             error: error instanceof Error ? error.message : String(error)
           }
         } finally {
-          try {
-            if (payload.videoPath) await fs.promises.unlink(payload.videoPath)
-          } catch {
-            /* cleanup */
-          }
-          try {
-            if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
-          } catch {
-            /* cleanup */
+          if (payload.keepInputs) {
+            // 输入保留给调用方（失败回退或自行清理）
+          } else {
+            try {
+              if (payload.videoPath) await fs.promises.unlink(payload.videoPath)
+            } catch {
+              /* cleanup */
+            }
+            try {
+              if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+            } catch {
+              /* cleanup */
+            }
           }
         }
       }
@@ -229,7 +264,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
           const encoder = config.video.encoder as VideoEncoderChoice
           const intermediatePath = payload.audioPath
-            ? path.join(outputDir, `.mss-frames-video-${Date.now()}.mp4`)
+            ? path.join(outputDir, `.mss-frames-video-${Date.now()}-${randomSuffix()}.mp4`)
             : payload.outputPath
 
           await encodeFramesToVideo(
@@ -361,7 +396,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
       case 'electron:write-temp-file': {
         const payload = args[0] as { prefix: string; extension: string }
-        const tempPath = path.join(tmpdir(), `${payload.prefix}-${Date.now()}.${payload.extension}`)
+        const tempPath = path.join(
+          tmpdir(),
+          `${payload.prefix}-${Date.now()}-${randomSuffix()}.${payload.extension}`
+        )
         await fs.promises.writeFile(tempPath, body)
         logger.info(
           `[Bridge] Temp file written: ${tempPath}, size=${(body.length / 1024 / 1024).toFixed(2)} MB`

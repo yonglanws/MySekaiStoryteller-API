@@ -15,6 +15,7 @@ type IpcListener = (event: unknown, ...args: unknown[]) => void
 const JSON_INVOKE_CHANNELS = new Set([
   'electron:get-temp-dir',
   'electron:get-temp-base-dir',
+  'electron:delete-temp-file',
   'electron:api-export-video-from-files',
   'electron:api-remux-video-from-files',
   'electron:api-encode-frames-video'
