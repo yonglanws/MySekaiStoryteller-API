@@ -50,6 +50,10 @@ video:
                            # 下限 600kbps、上限 recordBitrate），不同长度的故事都落在目标附近。
                            # 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效
                            # （env: MSS_RECORD_TARGET_SIZE_MB）
+  recordCaptureFps: 0       # record 模式 MediaRecorder 采集帧率上限（0 = 跟随 video.fps）。
+                           # 编码器跟不上时采集帧率本就低于设定值，调小只是把既成事实变显式：
+                           # 编码量随之下降，录制期间 CPU/GPU 争缓减少（渲染上限会同步压到
+                           # video.fps）。低于编码器实际能力没有意义（env: MSS_RECORD_CAPTURE_FPS）
   exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
   fastFps: 30        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
                       # 动画仍按 video.fps 推进，低上限只减少抓帧/编码次数

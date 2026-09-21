@@ -40,6 +40,8 @@ export interface VideoConfig {
   recordStreamCopy: 'auto' | 'on' | 'off'
   /** 流拷贝路径的目标成片体积（MB）；0 = 按 recordBitrate 固定码率 */
   recordTargetSizeMb: number
+  /** record 模式采集帧率上限；0 = 跟随 video.fps */
+  recordCaptureFps: number
 }
 
 export interface ExportTask {
@@ -597,7 +599,8 @@ export class VideoApiServer {
       fastFps: this.video.fastFps,
       recordBitrate: this.video.recordBitrate,
       recordStreamCopy: this.video.recordStreamCopy,
-      recordTargetSizeMb: this.video.recordTargetSizeMb
+      recordTargetSizeMb: this.video.recordTargetSizeMb,
+      recordCaptureFps: this.video.recordCaptureFps
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {

@@ -300,7 +300,7 @@ export default class VideoExportManager {
     const startTime = performance.now()
     const isApiMode = options.apiMode === true
 
-    const { canvas, snippets } = await this.prepareStreamRecording(
+    const { canvas, snippets, captureFps } = await this.prepareStreamRecording(
       options,
       progressFill,
       exportStatus,
@@ -310,6 +310,7 @@ export default class VideoExportManager {
 
     this.logger.info('Starting concurrent stream recording', {
       fps: options.fps,
+      captureFps,
       width: options.width,
       height: options.height,
       snippetCount: snippets.length,
@@ -320,7 +321,7 @@ export default class VideoExportManager {
     let timeline: SnippetTimelineEntry[] = []
 
     const recorder = new StreamRecorder({
-      fps: options.fps,
+      fps: captureFps,
       width: options.width,
       height: options.height,
       bitrate: options.recordBitrate ?? 8_000_000,
@@ -791,7 +792,8 @@ export default class VideoExportManager {
       const result = {
         success: true,
         duration: (performance.now() - startTime) / 1000,
-        frameCount: Math.round((totalDurationMs / 1000) * options.fps),
+        // 与实际采集帧率一致（recordCaptureFps 调低时同步变化）
+        frameCount: Math.round((totalDurationMs / 1000) * captureFps),
         timings: isApiMode
           ? {
               recordMs: Math.round(recordMs),
@@ -1376,7 +1378,7 @@ export default class VideoExportManager {
     _progressFill: HTMLDivElement | null,
     exportStatus: HTMLElement | null,
     _onProgress: InternalProgressCallback
-  ): Promise<{ canvas: HTMLCanvasElement; snippets: SnippetData[] }> {
+  ): Promise<{ canvas: HTMLCanvasElement; snippets: SnippetData[]; captureFps: number }> {
     const isApiMode = options.apiMode === true
 
     AnimationManager.setExportMode(true)
@@ -1386,6 +1388,23 @@ export default class VideoExportManager {
     AnimationManager.exportTargetFPS = isFastLike ? fastFpsCap : options.fps
     if (isFastLike) {
       Ticker.shared.maxFPS = fastFpsCap
+    }
+
+    // 采集帧率：默认跟随 video.fps；显式调低时编码量随之下降。
+    // 注意 StreamRecorder 的 fps 只用于 captureStream/约束/日志，
+    // 不影响片段时长（墙钟驱动）与 ffmpeg 的 -r 参数。
+    const captureFps =
+      options.recordCaptureFps && options.recordCaptureFps > 0
+        ? Math.max(1, Math.min(Math.round(options.recordCaptureFps), options.fps))
+        : options.fps
+    if (!isFastLike && captureFps < options.fps) {
+      // 采集降帧的同时把渲染上限压到 video.fps：导出模式默认 120fps 上限，
+      // 而动画步进本就是 options.fps，多出的绘制纯属浪费 GPU
+      Ticker.shared.maxFPS = options.fps
+      this.logger.info(
+        `Record capture fps capped to ${captureFps} (from ${options.fps}), ` +
+          `render ticker capped to ${options.fps}`
+      )
     }
 
     if (isApiMode) {
@@ -1430,7 +1449,7 @@ export default class VideoExportManager {
 
     this.logger.info('Pre-export validation passed')
 
-    return { canvas, snippets }
+    return { canvas, snippets, captureFps }
   }
 
   private async initializeExport(

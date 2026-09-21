@@ -54,7 +54,13 @@ const VideoSchema = z.object({
    * 使不同长度的故事都落在目标附近；0 = 不启用，按 recordBitrate 固定码率。
    * 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效。
    */
-  recordTargetSizeMb: z.number().default(0)
+  recordTargetSizeMb: z.number().default(0),
+  /**
+   * record 模式 MediaRecorder 采集帧率上限（0 = 跟随 video.fps）。
+   * 编码器跟不上时采集帧率本就低于设定值，调小只是把既成事实变显式：
+   * 编码量随之下降，录制期间 CPU/GPU 争缓减少。低于编码器实际能力没有意义。
+   */
+  recordCaptureFps: z.number().default(0)
 })
 
 const RenderSchema = z.object({
@@ -199,6 +205,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_RECORD_TARGET_SIZE_MB) {
     const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)
     if (Number.isFinite(v) && v >= 0) config.video.recordTargetSizeMb = v
+  }
+  if (env.MSS_RECORD_CAPTURE_FPS) {
+    const v = parseInt(env.MSS_RECORD_CAPTURE_FPS, 10)
+    if (Number.isFinite(v) && v >= 0) config.video.recordCaptureFps = v
   }
 
   // render

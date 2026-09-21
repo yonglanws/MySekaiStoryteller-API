@@ -28,6 +28,8 @@ export interface VideoExportOptions {
   recordStreamCopy?: 'auto' | 'on' | 'off'
   /** 流拷贝路径的目标成片体积（MB）；>0 时按估算时长反推视频码率，0 = 按 recordBitrate */
   recordTargetSizeMb?: number
+  /** record 模式采集帧率上限；0/缺省 = 跟随 fps。调小降低编码负载，输出帧率随之变化 */
+  recordCaptureFps?: number
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

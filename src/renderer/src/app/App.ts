@@ -252,6 +252,7 @@ export class App {
             recordBitrate?: number
             recordStreamCopy?: 'auto' | 'on' | 'off'
             recordTargetSizeMb?: number
+            recordCaptureFps?: number
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -338,6 +339,7 @@ export class App {
       recordBitrate?: number
       recordStreamCopy?: 'auto' | 'on' | 'off'
       recordTargetSizeMb?: number
+      recordCaptureFps?: number
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig,
@@ -395,6 +397,7 @@ export class App {
       recordBitrate: videoConfig.recordBitrate,
       recordStreamCopy: videoConfig.recordStreamCopy,
       recordTargetSizeMb: videoConfig.recordTargetSizeMb,
+      recordCaptureFps: videoConfig.recordCaptureFps,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,
