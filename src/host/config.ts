@@ -35,7 +35,9 @@ const VideoSchema = z.object({
   watermark: z.boolean().default(true),
   exportMode: z.enum(['record', 'fast']).default('record'),
   exportBitrate: z.number().default(12_000_000),
-  exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto')
+  exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto'),
+  /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
+  fastFps: z.number().default(30)
 })
 
 const RenderSchema = z.object({
@@ -162,6 +164,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_EXPORT_FAST_ENCODER) {
     const v = env.MSS_EXPORT_FAST_ENCODER.toLowerCase()
     if (v === 'auto' || v === 'webcodecs' || v === 'frames') config.video.exportFastEncoder = v
+  }
+  if (env.MSS_FAST_FPS) {
+    const v = parseInt(env.MSS_FAST_FPS, 10)
+    if (Number.isFinite(v) && v >= 1) config.video.fastFps = v
   }
 
   // render

@@ -32,6 +32,7 @@ export interface VideoConfig {
   exportMode: 'record' | 'fast'
   exportBitrate: number
   exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
+  fastFps: number
 }
 
 export interface ExportTask {
@@ -516,6 +517,7 @@ export class VideoApiServer {
       exportMode: this.video.exportMode,
       exportBitrate: this.video.exportBitrate,
       exportFastEncoder: this.video.exportFastEncoder,
+      fastFps: this.video.fastFps
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {

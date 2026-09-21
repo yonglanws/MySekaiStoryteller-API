@@ -22,7 +22,10 @@ video:
   height: 1080         # 输出视频高度
   fps: 60             # 帧率
   crf: 28             # 质量因子（越小质量越高、体积越大）
-  renderScale: 1    # 渲染超采样倍率（1 = 1:1，1.5 = 抗锯齿更好、更吃性能）
+  renderScale: 1    # 渲染倍率（相对 1280 宽逻辑坐标；1 = 按输出分辨率 1:1 渲染，
+                      # 1.5 = 超采样抗锯齿更好、每帧成本 x2.25，
+                      # <1 = 降渲染分辨率提速，画面变软。例：1080p 输出下
+                      # 1 = 渲染 1080p，0.75 = 渲染 810p 再放大）
   audioBitrate: 128k  # 音频码率
   encoder: auto       # 视频编码器：auto | nvidia | amd | intel | libx264
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264
@@ -38,6 +41,8 @@ video:
                       #          运行环境不支持时自动回退 record
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
   exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
+  fastFps: 30        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
+                      # 动画仍按 video.fps 推进，低上限只减少抓帧/编码次数
                       # auto：Linux+NVIDIA 时 WebCodecs 只有软编（慢），自动改走
                       #       JPEG 帧序列 + ffmpeg 硬件编码；其余平台优先 WebCodecs
 

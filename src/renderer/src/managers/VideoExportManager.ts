@@ -832,8 +832,9 @@ export default class VideoExportManager {
     const outH = options.height
     const bitrate = options.exportBitrate ?? 12_000_000
     // 编码帧率独立于时间轴：动画仍按 options.fps 的虚拟时间推进，
-    // 但每帧 GPU 读回很贵。把编码 fps 封顶到 30，时长不变、吞吐翻倍。
-    const encodeFps = Math.min(fps, 30)
+    // 但每帧 GPU 读回很贵。用 video.fastFps（默认 30）封顶，时长不变。
+    const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, fps))
+    const encodeFps = fastFpsCap
     const frameMs = 1000 / encodeFps
 
     this.logger.info('Starting fast export (virtual clock)', {
@@ -1300,9 +1301,10 @@ export default class VideoExportManager {
     AnimationManager.setExportMode(true)
     AnimationManager.exportSpeedMultiplier = 1
     const isFastLike = options.exportMode === 'fast'
-    AnimationManager.exportTargetFPS = isFastLike ? Math.min(options.fps, 30) : options.fps
+    const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, options.fps))
+    AnimationManager.exportTargetFPS = isFastLike ? fastFpsCap : options.fps
     if (isFastLike) {
-      Ticker.shared.maxFPS = Math.min(options.fps, 30)
+      Ticker.shared.maxFPS = fastFpsCap
     }
 
     if (isApiMode) {

@@ -329,8 +329,8 @@ export async function apiConvertVideoWithCompression(
   crf: number = 23,
   fps: number = 30,
   encoder: VideoEncoderChoice = 'libx264',
-  width: number = 1280,
-  height: number = 720
+  width: number,
+  height: number
 ): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
   const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
@@ -422,8 +422,8 @@ export async function apiMergeVideoAudioWithCompression(
   audioBitrate: string = '128k',
   fps: number = 30,
   encoder: VideoEncoderChoice = 'libx264',
-  width: number = 1280,
-  height: number = 720
+  width: number,
+  height: number
 ): Promise<void> {
   const videoStat = await fs.promises.stat(videoPath)
   const estimatedDuration = Math.max(videoStat.size / (8000000 / 8), 10)
@@ -586,8 +586,8 @@ export async function encodeFramesToVideo(
   framesDir: string,
   outputPath: string,
   encoder: VideoEncoderChoice = 'auto',
-  width: number = 1280,
-  height: number = 720,
+  width: number,
+  height: number,
   crf: number = 23
 ): Promise<void> {
   let framePattern = 'frame-%06d.png'

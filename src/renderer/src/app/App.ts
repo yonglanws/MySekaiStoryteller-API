@@ -82,7 +82,20 @@ export class App {
     this.logger.info('SnippetStrategyManager initialized')
   }
 
-  public initializeRenderer(scale: number, forExport = false): void {
+  /**
+   * @param scale renderScale：导出时是「输出宽度相对 1280 的倍率」。
+   *   1 = 按输出分辨率 1:1 渲染；1.5 = 超采样（抗锯齿更好、更贵）；
+   *   <1 = 降渲染分辨率提速（画面变软）。
+   * @param forExport 导出模式
+   * @param outputWidth 输出视频宽度（决定后备存储倍率）
+   * @param outputHeight 输出视频高度
+   */
+  public initializeRenderer(
+    scale: number,
+    forExport = false,
+    outputWidth = 1280,
+    outputHeight = 720
+  ): void {
     this.applicationWrapper = document.getElementById('app') as HTMLDivElement | null
 
     if (!this.applicationWrapper) {
@@ -109,7 +122,18 @@ export class App {
       }
     }
 
-    const resolution = scale
+    // 逻辑坐标空间固定 1280×720（所有布局代码依赖 stage_size，改这里会破坏构图），
+    // 用 resolution 控制后备存储：renderScale 1.0 + 1920 宽输出 → 后备 1920×1080。
+    const logicalWidth = 1280
+    const logicalHeight = 720
+    if (forExport && outputWidth / outputHeight !== logicalWidth / logicalHeight) {
+      // 布局按 16:9 设计，非 16:9 输出只能靠 ffmpeg 侧 pad 补齐
+      this.logger.warn(
+        `Output aspect ${outputWidth}x${outputHeight} is not 16:9; ` +
+          `scene will be letterboxed by the host encoder`
+      )
+    }
+    const resolution = forExport ? scale * (outputWidth / logicalWidth) : scale
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- PixiJS v7 的 ApplicationOptions 未导出 resizeTo 宽泛类型
@@ -122,8 +146,8 @@ export class App {
       }
 
       if (forExport) {
-        appOptions.width = 1280
-        appOptions.height = 720
+        appOptions.width = logicalWidth
+        appOptions.height = logicalHeight
       } else {
         appOptions.resizeTo = this.applicationWrapper
       }
@@ -219,6 +243,7 @@ export class App {
             exportMode?: 'record' | 'fast'
             exportBitrate?: number
             exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+            fastFps?: number
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -297,6 +322,7 @@ export class App {
       exportMode?: 'record' | 'fast'
       exportBitrate?: number
       exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+      fastFps?: number
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig
@@ -319,7 +345,7 @@ export class App {
     AnimationManager.exportSpeedMultiplier = 1
 
     await this.initializeManagers(storyData)
-    this.initializeRenderer(videoConfig.renderScale, true)
+    this.initializeRenderer(videoConfig.renderScale, true, videoConfig.width, videoConfig.height)
     await new Promise<void>((resolve) => setTimeout(resolve, 100))
 
     await this.preloadStoryAssets()
@@ -342,6 +368,7 @@ export class App {
       exportMode: videoConfig.exportMode === 'fast' ? 'fast' : 'stream',
       exportBitrate: videoConfig.exportBitrate,
       exportFastEncoder: videoConfig.exportFastEncoder,
+      fastFps: videoConfig.fastFps,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,
