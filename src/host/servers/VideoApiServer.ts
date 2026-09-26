@@ -71,6 +71,8 @@ interface PendingExport {
 }
 
 const DEFAULT_EXPORT_TIMEOUT_MS = 1_800_000
+// Node timers overflow to 1 ms above the signed 32-bit limit.
+const MAX_EXPORT_TIMEOUT_MS = 2_147_483_647
 const DEFAULT_MAX_CONCURRENT_EXPORTS = 2
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const DEFAULT_FILE_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -552,10 +554,24 @@ export class VideoApiServer {
     }
 
     const body = req.body as ApiExportRequest
-    if (!body.story) {
+    if (!body?.story) {
       res.status(400).json({
         success: false,
         message: 'Request body must contain a "story" field with valid story data.'
+      })
+      return
+    }
+
+    if (
+      body.timeout !== undefined &&
+      (typeof body.timeout !== 'number' ||
+        !Number.isInteger(body.timeout) ||
+        body.timeout < 1 ||
+        body.timeout > MAX_EXPORT_TIMEOUT_MS)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid timeout: expected an integer between 1 and ${MAX_EXPORT_TIMEOUT_MS} milliseconds.`
       })
       return
     }
@@ -582,7 +598,7 @@ export class VideoApiServer {
       `[API] Story: ${parsedStory.models.length} models, ${parsedStory.snippets.length} snippets`
     )
 
-    const timeoutMs = body.timeout || DEFAULT_EXPORT_TIMEOUT_MS
+    const timeoutMs = body.timeout ?? DEFAULT_EXPORT_TIMEOUT_MS
 
     const videoConfig: VideoConfig = {
       width: this.video.width,
@@ -634,8 +650,8 @@ export class VideoApiServer {
       this.cancelExport(taskId)
     })
 
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
     try {
-      let timeoutId: ReturnType<typeof setTimeout> | null = null
       const result = await Promise.race([
         exportPromise,
         new Promise<never>((_, reject) => {
@@ -645,11 +661,6 @@ export class VideoApiServer {
           )
         })
       ])
-
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId)
-        timeoutId = null
-      }
 
       this.logger.info(`[API] Export promise resolved: taskId=${taskId}, success=${result.success}`)
       this.logger.info(`[API] videoPath=${result.videoPath}`)
@@ -700,6 +711,7 @@ export class VideoApiServer {
         message: error instanceof Error ? error.message : 'Export failed'
       })
     } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId)
       this.pendingExports.delete(taskId)
       this.activeExports.delete(taskId)
       this.processQueue()

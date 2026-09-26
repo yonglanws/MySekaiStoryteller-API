@@ -89,6 +89,8 @@ npm run e2e                        # 示例故事导出 + 产物断言（编码/
 node scripts/test-parallel.mjs 2   # 并发导出验证
 ```
 
+API 回归测试可直接运行 `npm test`，无需启动宿主、安装浏览器或准备模型资源。
+
 ### 资源准备
 
 **本仓库不附带渲染资源**：仓库只保留目录结构，资源需自行放入（详见
@@ -121,13 +123,22 @@ resources/
 | `/api/v1/health`                 | GET  | 健康检查（含渲染池/GPU 状态） |
 | `/api/v1/status`                 | GET  | 队列状态             |
 
-提交导出只需把完整故事 JSON 作为请求体：
+提交导出时，将完整故事 JSON 放在请求体的 `story` 字段中：
 
 ```bash
-curl -X POST http://127.0.0.1:9881/api/v1/export \
-  -H "Content-Type: application/json" \
-  -d @resources/stories/multi-character-demo.sekai-story.json
+node -e '
+const fs = require("node:fs");
+const story = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+process.stdout.write(JSON.stringify({ story }));
+' resources/stories/multi-character-demo.sekai-story.json |
+  curl -X POST http://127.0.0.1:9881/api/v1/export \
+    -H "Content-Type: application/json" \
+    --data-binary @-
 ```
+
+请求体可同时包含 `timeout`（毫秒），例如 `{ "story": { ... }, "timeout": 600000 }`。
+省略时默认为 30 分钟，包含排队时间；显式传入时必须是 `1` 至 `2147483647` 的整数，
+非法值返回 HTTP 400。请求会等待导出结果，客户端断连或超时会取消任务。
 
 宿主会自动把请求留档一份到 `apifile/`，便于排查。
 
