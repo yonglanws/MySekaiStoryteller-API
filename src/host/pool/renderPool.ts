@@ -28,7 +28,9 @@ interface WorkerState {
   exportsCompleted: number
   webglRenderer: string | null
   launching: boolean
-  /** 看门狗：当前任务超时后的强制回收 deadline（毫秒时间戳） */
+  /** 正在主动回收，忽略旧页面关闭产生的断连通知 */
+  recovering: boolean
+  /** 任务截止时间或取消时间；再过 WATCHDOG_GRACE_MS 后强制回收 */
   taskDeadline: number | null
   /** 看门狗：是否已向该 worker 发过 abort */
   abortSent: boolean
@@ -125,6 +127,7 @@ export class RenderPool implements ExportDispatcher {
       clearInterval(this.watchdogInterval)
       this.watchdogInterval = null
     }
+    this.bufferedTasks.length = 0
     for (const [, worker] of this.workers) {
       await this.closeBrowser(worker)
     }
@@ -158,6 +161,7 @@ export class RenderPool implements ExportDispatcher {
       exportsCompleted: 0,
       webglRenderer: null,
       launching: false,
+      recovering: false,
       taskDeadline: null,
       abortSent: false
     }
@@ -197,7 +201,10 @@ export class RenderPool implements ExportDispatcher {
       const { browser, via } = await this.launchBrowser(args)
       worker.browser = browser
 
-      browser.on('disconnected', () => this.handleBrowserDisconnected(worker))
+      browser.on('disconnected', () => {
+        // 主动回收已把 worker.browser 清空；旧浏览器不能触发第二次重启。
+        if (worker.browser === browser) this.handleBrowserDisconnected(worker)
+      })
 
       await this.openWorkerPage(worker)
       this.logger.info(
@@ -239,9 +246,10 @@ export class RenderPool implements ExportDispatcher {
     })
 
     await readyPromise
-    worker.ready = true
-
     await this.probeWebGL(worker)
+    if (this.stopping || worker.page !== page) return
+    worker.ready = true
+    this.flushBufferedTasks()
   }
 
   private waitForReady(workerId: string): Promise<void> {
@@ -358,12 +366,12 @@ export class RenderPool implements ExportDispatcher {
 
   handleWorkerDisconnected(workerId: string): void {
     const worker = this.workers.get(workerId)
-    if (!worker) return
+    if (!worker || !worker.browser || this.stopping || worker.recovering || worker.launching) return
     worker.ready = false
     worker.taskDeadline = null
     worker.abortSent = false
 
-    // WS 断开但浏览器仍存活：重建页面；若正在导出则视为失败
+    // WS 断开：若正在导出则视为失败，重启浏览器以清除旧页面和 GPU 状态。
     if (worker.busyTaskId) {
       const taskId = worker.busyTaskId
       worker.busy = false
@@ -375,14 +383,7 @@ export class RenderPool implements ExportDispatcher {
       })
     }
 
-    if (worker.browser && worker.browser.isConnected()) {
-      void this.openWorkerPage(worker)
-        .then(() => this.logger.info(`[Pool] Worker ${worker.workerId} page recovered`))
-        .catch((err) => {
-          this.logger.warn(`[Pool] Worker ${worker.workerId} page recovery failed, recycling`, err)
-          void this.closeBrowser(worker).then(() => this.launchWorker(worker))
-        })
-    }
+    void this.recoverWorker(worker)
   }
 
   // ----- ExportDispatcher -----
@@ -414,6 +415,17 @@ export class RenderPool implements ExportDispatcher {
   }
 
   dispatch(task: ExportTask): void {
+    if (this.stopping || Date.now() >= task.addedAt + task.timeoutMs) {
+      this.onExportResult?.(task.taskId, {
+        taskId: task.taskId,
+        success: false,
+        error: this.stopping
+          ? 'Render pool is stopping'
+          : 'Export timed out before rendering started'
+      })
+      return
+    }
+
     const worker = this.pickIdleWorker()
     if (!worker || !this.hasEnoughFreeMemory()) {
       // 正常情况下 VideoApiServer 的并发上限保证有空闲 worker；此处仅兜底
@@ -428,7 +440,7 @@ export class RenderPool implements ExportDispatcher {
     worker.busy = true
     worker.busyTaskId = task.taskId
     worker.abortSent = false
-    worker.taskDeadline = Date.now() + task.timeoutMs + WATCHDOG_GRACE_MS
+    worker.taskDeadline = task.addedAt + task.timeoutMs
 
     const payload = {
       taskId: task.taskId,
@@ -456,22 +468,31 @@ export class RenderPool implements ExportDispatcher {
   }
 
   cancel(taskId: string): void {
+    const bufferedIndex = this.bufferedTasks.findIndex((task) => task.taskId === taskId)
+    if (bufferedIndex !== -1) {
+      this.bufferedTasks.splice(bufferedIndex, 1)
+      this.logger.info(`[Pool] Cancelled buffered task ${taskId}`)
+      return
+    }
+
     // 通知渲染页中止当前导出。worker 保持 busy 直到收到 export-result，
     // 不会被派新任务；否则 HTTP 超时只取消等待，渲染还会跑完并写盘，
     // 白白阻塞下一个排队的任务（单 worker 时直接卡死）。
-    let workerId: string | null = null
-    for (const [id, worker] of this.workers.entries()) {
+    for (const worker of this.workers.values()) {
       if (worker.busyTaskId === taskId) {
-        workerId = id
-        break
+        if (worker.abortSent) return
+        // 取消从现在起计宽限，不能让无响应页面继续占用 worker 直到原任务超时。
+        // 重复取消也不能延长宽限期。
+        worker.taskDeadline = Math.min(worker.taskDeadline ?? Date.now(), Date.now())
+        worker.abortSent = true
+        const sent = this.hub.send(worker.workerId, { type: 'api:abort-export', args: [taskId] })
+        this.logger.info(
+          `[Pool] Abort sent to ${worker.workerId} for task ${taskId} (sent=${sent})`
+        )
+        return
       }
     }
-    if (!workerId) {
-      this.logger.info(`[Pool] Cancel requested for task ${taskId} (no busy worker)`)
-      return
-    }
-    const sent = this.hub.send(workerId, { type: 'api:abort-export', args: [taskId] })
-    this.logger.info(`[Pool] Abort sent to ${workerId} for task ${taskId} (sent=${sent})`)
+    this.logger.info(`[Pool] Cancel requested for task ${taskId} (no busy worker)`)
   }
 
   /**
@@ -482,14 +503,16 @@ export class RenderPool implements ExportDispatcher {
   private checkWatchdog(): void {
     const now = Date.now()
     for (const worker of this.workers.values()) {
-      if (!worker.busy || !worker.taskDeadline) continue
+      if (!worker.busy || worker.taskDeadline === null) continue
 
-      if (now > worker.taskDeadline + WATCHDOG_GRACE_MS) {
+      if (now >= worker.taskDeadline + WATCHDOG_GRACE_MS) {
         const taskId = worker.busyTaskId
         this.logger.error(
           `[Pool] Worker ${worker.workerId} watchdog timeout for task ${taskId}, ` +
             `force-recycling page`
         )
+        // 回调可能同步派发下一任务；先隔离旧 worker，避免把新任务派到即将关闭的页。
+        worker.ready = false
         worker.busy = false
         worker.busyTaskId = null
         worker.taskDeadline = null
@@ -505,40 +528,26 @@ export class RenderPool implements ExportDispatcher {
         continue
       }
 
-      if (now > worker.taskDeadline && !worker.abortSent) {
-        worker.abortSent = true
+      if (now >= worker.taskDeadline && !worker.abortSent) {
         this.logger.warn(
           `[Pool] Worker ${worker.workerId} task ${worker.busyTaskId} exceeded timeout, ` +
             `re-sending abort`
         )
-        this.hub.send(worker.workerId, {
-          type: 'api:abort-export',
-          args: [worker.busyTaskId]
-        })
+        if (worker.busyTaskId) this.cancel(worker.busyTaskId)
       }
     }
   }
 
-  /** 强制回收：关页（失败时升级为关浏览器）后重新拉起重试内的 worker */
+  /** 单次回收整个浏览器，释放失联页面/GPU 资源并避免断连回调重复重启。 */
   private async recoverWorker(worker: WorkerState): Promise<void> {
-    try {
-      await worker.page?.close()
-    } catch {
-      /* 页面可能已销毁 */
-    }
-    worker.page = null
+    if (this.stopping || worker.recovering) return
+    worker.recovering = true
     worker.ready = false
-
-    if (worker.browser && worker.browser.isConnected()) {
-      try {
-        await this.openWorkerPage(worker)
-        this.logger.info(`[Pool] Worker ${worker.workerId} recovered after watchdog recycle`)
-      } catch (err) {
-        this.logger.warn(`[Pool] Worker ${worker.workerId} watchdog recovery failed`, err)
-        void this.closeBrowser(worker).then(() => this.launchWorker(worker))
-      }
-    } else {
-      void this.launchWorker(worker)
+    try {
+      await this.closeBrowser(worker)
+      await this.launchWorker(worker)
+    } finally {
+      worker.recovering = false
     }
   }
 
@@ -612,6 +621,7 @@ export class RenderPool implements ExportDispatcher {
   }
 
   private flushBufferedTasks(): void {
+    if (this.stopping) return
     while (this.bufferedTasks.length > 0) {
       // 内存护栏未解除时不 shift，避免 dispatch 再次缓冲形成空转
       if (!this.hasEnoughFreeMemory()) return

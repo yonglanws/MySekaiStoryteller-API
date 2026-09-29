@@ -18,6 +18,7 @@
     "build": "npm run typecheck && npm run build:web && npm run build:host",
     "start": "node out-host/host/main.js",
     "test": "npm run build:host && node --test scripts/api/export-timeout.test.mjs",
+    "test:pool": "npm run build:host && node --test scripts/render-pool.test.mjs",
     "e2e": "node scripts/test-export.mjs"
   },
   "dependencies": {
