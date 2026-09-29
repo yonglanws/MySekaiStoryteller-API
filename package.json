@@ -19,6 +19,8 @@
     "start": "node out-host/host/main.js",
     "test": "npm run build:host && node --test scripts/api/export-timeout.test.mjs",
     "test:pool": "npm run build:host && node --test scripts/render-pool.test.mjs",
+    "test:config": "npm run build:host && node --test scripts/config/bgm.test.mjs",
+    "test:all": "npm run build:host && node --test scripts/api/export-timeout.test.mjs scripts/render-pool.test.mjs scripts/config/bgm.test.mjs",
     "e2e": "node scripts/test-export.mjs"
   },
   "dependencies": {

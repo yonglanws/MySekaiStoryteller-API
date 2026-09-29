@@ -283,8 +283,15 @@ __pycache__/
 astrbot_plugin_msst/
 
 # 渲染内容资源不入库（模型/剧本/图片/音频；获取方式见 resources/README.md）
-resources/models/
-resources/stories/
-resources/images/
-resources/voices/
-resources/audio/
+# 各目录下的 *.example.yaml 是格式示例，随仓库分发（复制为正式文件名使用）。
+# 注意：这里排除的是目录内容而不是目录本身，否则 git 不会进目录匹配下面的例外。
+resources/models/*
+!resources/models/models.example.yaml
+resources/stories/*
+resources/images/*
+!resources/images/images.example.yaml
+resources/voices/*
+resources/audio/*
+!resources/audio/bgm/
+resources/audio/bgm/*
+!resources/audio/bgm/bgm.example.yaml

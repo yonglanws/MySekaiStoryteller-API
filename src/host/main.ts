@@ -140,6 +140,9 @@ async function bootstrap(): Promise<void> {
 
   await pool.start()
 
+  logger.info(
+    `BGM: enabled=${config.bgm.enabled}, volume=${config.bgm.volume}, path=${config.bgm.path}`
+  )
   logger.info(`Host ready: API http://${config.server.host}:${config.server.port}/api/v1/health`)
 
   let shuttingDown = false

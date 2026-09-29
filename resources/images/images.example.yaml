@@ -1,0 +1,24 @@
+# 背景图清单（示例）—— 渲染宿主与 AstrBot 插件的场景选图表
+#
+# 用法：把本文件复制为同目录下的 images.yaml 后维护（images.yaml 不入库）。
+#
+# 新增背景的完整步骤：
+#   1. 把图片放到 resources/images/（jpg / jpeg / png / webp）
+#   2. 在 images.yaml 里加一条（file 必须与磁盘文件名完全一致）
+#   3. 完成 —— 约 30 秒内插件自动感知（可用 /mssadmin resources 验证）
+#
+# 字段说明：
+#   file        相对 resources/images/ 的文件名（故事 JSON 的 image 字段引用它）
+#   name        短名（提示词对照表用）
+#   description 画面内容与适用场景，供 AI 按剧情自行选图
+#
+# 磁盘上有、本表未登记的图片仍可被引用，但提示词里没有描述，AI 不容易选中。
+# 本表有、磁盘没有的条目会被宿主忽略。
+
+images:
+  - file: bg_example_01.jpg
+    name: 示例场景·白天
+    description: 白天的室内场景，适合轻松日常的对话
+  - file: bg_example_02.jpg
+    name: 示例场景·夜晚
+    description: 夜晚的室内场景，适合安静的独白或倾诉

@@ -115,11 +115,36 @@ const TtsSchema = z.object({
   characters: z.array(TtsCharacterSchema).default([])
 })
 
+/**
+ * BGM 播放设置：以资源根下的 audio/bgm/bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
+ * 该文件不存在时回落到 config.yaml 的 bgm 节，旧配置照常可用。
+ */
 const BgmSchema = z.object({
   enabled: z.boolean().default(true),
   path: z.string().default('audio/bgm/bg1.mp3'),
   volume: z.number().default(0.2)
 })
+
+/**
+ * 读取 bgm.yaml（BGM 的独立配置文件）。
+ *
+ * 文件缺失返回 null，由调用方回落 config.yaml 的 bgm 节；
+ * 文件存在但内容不合法时直接抛错——配置写错要立刻可见，不能静默用错值。
+ */
+export function readBgmManifest(resourcesDir: string): BgmSettings | null {
+  const manifestPath = path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml')
+  if (!fs.existsSync(manifestPath)) return null
+
+  const text = fs.readFileSync(manifestPath, 'utf-8')
+  // 空文件（刚建好还没填）按全默认处理，不算配置错误
+  const raw = text.trim() === '' ? {} : yaml.load(text)
+  if (raw !== null && raw !== undefined && (typeof raw !== 'object' || Array.isArray(raw))) {
+    throw new Error(`bgm.yaml must be a key-value mapping: ${manifestPath}`)
+  }
+  const settings = BgmSchema.parse(raw ?? {})
+  settings.volume = Math.min(Math.max(settings.volume, 0), 1)
+  return settings
+}
 
 export type TtsCharacter = z.infer<typeof TtsCharacterSchema>
 export type VideoSettings = z.infer<typeof VideoSchema>
@@ -302,13 +327,22 @@ export function loadHostConfig(): HostConfig {
 
   applyEnvOverrides(config)
 
+  const paths = {
+    output: path.resolve(rootDir, pathsRaw.output),
+    resources: path.resolve(rootDir, pathsRaw.resources),
+    webRenderer: path.resolve(rootDir, pathsRaw.webRenderer)
+  }
+
+  // BGM 设置以资源根下的 bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
+  // 文件不存在时沿用 config.yaml 的 bgm 节，行为与旧版一致。
+  const bgmFromManifest = readBgmManifest(paths.resources)
+  if (bgmFromManifest) {
+    config.bgm = bgmFromManifest
+  }
+
   return {
     ...config,
     rootDir,
-    paths: {
-      output: path.resolve(rootDir, pathsRaw.output),
-      resources: path.resolve(rootDir, pathsRaw.resources),
-      webRenderer: path.resolve(rootDir, pathsRaw.webRenderer)
-    }
+    paths
   }
 }

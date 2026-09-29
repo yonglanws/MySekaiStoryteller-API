@@ -32,6 +32,8 @@
 > 如需桌面编辑器，请访问原项目。感谢原作者 [GuangChen2333](https://github.com/GuangChen2333) 与
 > [Untitled-Story](https://github.com/Untitled-Story) 组织。
 
+**示例成片**（2026-09-30，配合官方 AstrBot 插件导出）：[点此观看](https://share.fnnas.net/s/38f7e5301f3e4573ae)
+
 ## 项目简介
 
 接收 `*.sekai-story.json` 故事剧本，用 Live2D（Project SEKAI 风格）渲染并导出为 MP4 视频，
@@ -45,7 +47,7 @@
 | 表演系统 | 角色滑入/滑出登场退场、台词内时序动作与表情、听者反应、按语音音量包络驱动的口型 |
 | 导出管线 | `record`（默认，MediaRecorder 墙钟录制）或 `fast`（虚拟时钟逐帧渲染）          |
 | 视频编码 | ffmpeg 自动探测 NVENC / AMF / QSV 硬件编码，失败自动回退 CPU                 |
-| 音频     | 内置 BGM + GPT-SoVITS 语音合成（无 TTS 时自动跳过配音，导出不受影响）        |
+| 音频     | BGM 混入 + GPT-SoVITS 语音合成（无 TTS 时自动跳过配音，导出不受影响）        |
 | 队列管理 | 任务排队、可配置并发导出、IP 限流、过期文件自动清理                          |
 | 统一配置 | 单个 `config.yaml`，全字段中文注释，`MSS_*` 环境变量可覆盖                   |
 
@@ -74,38 +76,35 @@ npm run build
 npm start
 ```
 
-**启动验证**
+启动后确认渲染池拿到真实 GPU（而非 SwiftShader），并在资源就绪后验证整条导出链路：
 
 ```bash
-curl http://127.0.0.1:9881/api/v1/health
-# renderPool.webglRenderers 应显示真实 GPU（如 NVIDIA / Intel），而非 SwiftShader
+curl http://127.0.0.1:9881/api/v1/health   # renderPool.webglRenderers 应显示真实 GPU 名
+npm run test:all                           # 纯逻辑回归 29 项，无需宿主/浏览器/模型资源
+npm run e2e                                # 真实导出 + 产物断言（需先完成资源准备；
+                                           # 用 MSS_E2E_STORY=xx.sekai-story.json 指定剧本）
+node scripts/test-parallel.mjs 2           # 并发导出验证
 ```
-
-**全链路验证**（需先完成资源准备）
-
-```bash
-npm run e2e                        # 示例故事导出 + 产物断言（编码/分辨率/时长/音轨）
-node scripts/test-parallel.mjs 2   # 并发导出验证
-```
-
-API 回归测试可直接运行 `npm test`，无需启动宿主、安装浏览器或准备模型资源。
 
 ### 资源准备
 
-**本仓库不附带渲染资源**：仓库只保留目录结构，资源需自行放入（详见
+**本仓库不附带渲染资源**：只保留目录结构，资源需自行放入（详见
 [resources/README.md](resources/README.md)）：
 
 ```
 resources/
-├─ models/       Live2D 模型包（<角色>/<变体>/，含 model3.json；根下 models.yaml 为登记表）
-├─ images/       背景图 / 卡面（根下 images.yaml 为画面描述表，供 AI 选图）
+├─ models/       Live2D 模型包（<角色>/<变体>/，含 model3.json；models.yaml 为登记表）
+├─ images/       背景图 / 卡面（images.yaml 为画面描述表，供 AI 选图）
 ├─ voices/       故事语音（.wav，故事 JSON 按文件名引用）
-├─ audio/bgm/    BGM
+├─ audio/bgm/    BGM（bgm.yaml 为 BGM 设置：开关/路径/音量）
 └─ stories/      *.sekai-story.json 剧本
 ```
 
+三份清单/设置文件（`models.yaml` / `images.yaml` / `bgm.yaml`）各附一份 `*.example.yaml`
+示例随仓库分发：复制为去掉 `.example` 的正式文件名后编辑即可；正式文件与渲染资源不入库。
+
 资源根不强制叫 `resources/`：可在 `config.yaml` 的 `paths.resources` 或环境变量
-`MSS_RESOURCE_DIR` 指向任意目录。
+`MSS_RESOURCE_DIR` 指向任意目录（示例文件也要一起带过去）。
 
 ## API 接口
 
@@ -124,29 +123,21 @@ resources/
 | `/api/v1/health`                 | GET  | 健康检查（含渲染池/GPU 状态） |
 | `/api/v1/status`                 | GET  | 队列状态             |
 
-提交导出时，将完整故事 JSON 放在请求体的 `story` 字段中：
+提交导出时把完整故事 JSON 放在请求体的 `story` 字段里；`timeout`（毫秒，`1` 至
+`2147483647` 的整数，默认 30 分钟且**包含排队时间**）可选，非法值返回 400：
 
 ```bash
-node -e '
-const fs = require("node:fs");
-const story = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-process.stdout.write(JSON.stringify({ story }));
-' resources/stories/multi-character-demo.sekai-story.json |
+node -e 'process.stdout.write(JSON.stringify({story: require(process.argv[1]), timeout: 600000}))' \
+  resources/stories/demo.sekai-story.json |
   curl -X POST http://127.0.0.1:9881/api/v1/export \
-    -H "Content-Type: application/json" \
-    --data-binary @-
+    -H "Content-Type: application/json" --data-binary @-
 ```
 
-请求体可同时包含 `timeout`（毫秒），例如 `{ "story": { ... }, "timeout": 600000 }`。
-省略时默认为 30 分钟，包含排队时间；显式传入时必须是 `1` 至 `2147483647` 的整数，
-非法值返回 HTTP 400。请求会等待导出结果，客户端断连或超时会取消任务。
-
-宿主会自动把请求留档一份到 `apifile/`，便于排查。
+请求会等待导出结果，客户端断连或超时会取消任务；宿主会把请求留档一份到 `apifile/`，便于排查。
 
 ## 故事文件格式
 
-故事通过 `*.sekai-story.json` 文件定义，包含 `models`、`images` 和 `snippets` 三个字段。
-下面是一场完整短戏的骨架（字段与当前版本一致）：
+故事通过 `*.sekai-story.json` 定义，含 `models`、`images`、`snippets` 三个字段：
 
 ```json
 {
@@ -178,148 +169,108 @@ process.stdout.write(JSON.stringify({ story }));
 }
 ```
 
-- 故事内的 `model` / `image` 路径相对于**资源根** `resources/`，宿主通过 `/resources/*` 提供访问
-- 指令片段（`snippets`）的完整类型定义见 `src/common/types/Story.ts`；
-  `resources/stories/` 下附带的示例剧本可直接参考或改造
+- `model` / `image` 路径相对于**资源根** `resources/`，宿主通过 `/resources/*` 提供访问
+- 片段类型的完整定义见 [src/common/types/Story.ts](src/common/types/Story.ts)；
+  `snippets` 覆盖背景/黑场、登场退场、台词、静默动作、参数动画等
 
-### 登场与退场（滑入滑出 + 入场退场动作）
+### 演出要点
 
-`LayoutAppear` / `LayoutClear` 各自承载两种舞台动画：
+**登场与退场**：`LayoutAppear` / `LayoutClear` 的 `from` 与 `to` 不同时做滑动（`moveSpeed`：
+Slow 700ms / Normal 500ms / Fast 300ms / Immediate 瞬移），全程同步播放 `motion` + `facial`，
+入场动作播完前剧情不继续；两者相同时原地淡入/淡出。`offset` 是相对槽位的水平像素偏移，
+给同侧槽位写 `-100` / `+100` 即可从画外短距离滑入滑出。
 
-- `from` 与 `to` **不同**时做滑动：角色从 `from` 位置滑到 `to` 位置，`moveSpeed` 控制时长
-  （Slow 700ms / Normal 500ms / Fast 300ms / Immediate 瞬移），滑入滑出全程同步播放入场/退场动作
-  （`motion` + `facial`），入场动作播完前剧情不会继续
-- `from` 与 `to` **相同**时原地淡入/淡出，适合黑暗中现身等特殊演出
-- `offset` 是相对槽位的水平像素偏移（正值向右）：给同侧槽位写 `-100` / `+100`，
-  角色就会从槽位旁侧短距离滑入/滑出，配合入场/退场动作构成完整的登场/退场表演
-
-### 台词中的连续动作与听者反应
-
-`Talk.data.actions` 在本条台词内调度动作和表情，`at` 为实际台词时长的比例（0 到 1），
-而不是秒数。`modelId` 可以是说话者，也可以是当前在场的听话者；不在场角色的事件不会让角色重新出现。
-动作和表情独立更新，省略的通道保持原状态。同一角色可以按时间连续切换；渲染层最多 24 个事件
-（AstrBot 插件生成的剧本会更克制，且插件侧有自己的数量与间隔校验）。
+**台词内的动作与听者反应**：`Talk.data.actions` 在台词内调度动作/表情，`at` 是台词时长的比例
+（0 到 1）而非秒数；`modelId` 可以是说话者，也可以是在场听者。动作与表情独立更新，省略的通道
+保持原状，同时事件最多 24 个（AstrBot 插件侧另有更严格的数量与间隔校验）：
 
 ```json
-{
-  "type": "Talk", "wait": true, "delay": 0,
-  "data": {
-    "speaker": "晓山瑞希", "modelId": 1, "content": "先别着急，听我慢慢说。",
-    "actions": [
-      {"at": 0, "modelId": 1, "motion": "w-normal-default01", "facial": "face_smile_01"},
-      {"at": 0.4, "modelId": 2, "facial": "face_smile_01"},
-      {"at": 0.7, "modelId": 1, "facial": "face_smile_01"}
-    ]
-  }
-}
+{"type": "Talk", "wait": true, "delay": 0, "data": {
+  "speaker": "晓山瑞希", "modelId": 1, "content": "先别着急，听我慢慢说。",
+  "actions": [{"at": 0, "modelId": 1, "motion": "w-normal-default01"},
+              {"at": 0.4, "modelId": 2, "facial": "face_smile_01"},
+              {"at": 0.7, "modelId": 1, "facial": "face_smile_01"}]}}
 ```
 
-动作名和表情名必须以该角色的资源目录为准。旧的 `Talk.data.motion` / `facial` 仍在台词开始时生效；
-新的事件只覆盖指定通道。不要用 `Talk(wait:false)` 后接 `Motion` 来模拟导出时的并行动作。
-独立 `Motion.data.actions` 可用于无声连续表演，`data.duration` 为秒数（默认 2，最大 120）。
-
-口型优先从当前台词音频提取音量包络，静音和语音结束后闭嘴；无音频时按文字和标点产生确定性节奏。
-两人同屏、滑入滑出换角等舞台规则属于 AstrBot 插件生成规则，渲染 API 不强制这些限制。
+动作名/表情名以该角色的资源目录为准。旧的 `Talk.data.motion` / `facial` 仍作用于台词开头，
+新事件只覆盖指定通道；无声连续表演用独立 `Motion.data.actions`（`duration` 秒，默认 2，最大 120）。
+口型优先从台词音频提取音量包络，静音或语音结束后闭嘴，无音频时按文字与标点产生确定性节奏。
+两人同屏、换角顺序等舞台规则属于 AstrBot 插件的生成规则，渲染 API 不强制。
 
 ## 资源导入指南
 
-### 新增 Live2D 角色（模型）
+| 资源    | 存放位置                        | 怎么生效                                                     |
+| ------- | ------------------------------- | ------------------------------------------------------------ |
+| 模型    | `resources/models/<角色>/<变体>/` | 目录内需含 `model3.json`（动作 `motions/*.motion3.json` 跟着模型走），再到 `models.yaml` 登记一行：`id` 全表唯一、`name` 角色全名、`shortName` 简称、`path` 以磁盘实际文件名为准 |
+| 背景图  | `resources/images/`             | 放图后在 `images.yaml` 登记 `file`（与磁盘文件名一致）/ `name` / `description`，描述供 AI 按剧情选图 |
+| 故事语音 | `resources/voices/`            | 故事 JSON 的 `voice` 字段按文件名引用                        |
+| 配音（TTS） | GPT-SoVITS 服务             | 见下节 `tts.characters` 参考音频配置                         |
 
-1. 把模型包整个拷到 `resources/models/<角色>/<变体>/`，目录内需含 `model3.json`
-   （动作 `motions/*.motion3.json` 是模型包的一部分，由 model3.json 的
-   `FileReferences.Motions` 索引——**动作文件跟着模型走，不需要单独登记**）
-2. 在 `resources/models/models.yaml` 登记一行（`id` 全表唯一、`name` 角色全名、
-   `shortName` 简称、`path` 以磁盘实际文件名为准）
-3. 完成。宿主 30 秒内自动识别，提示词中的角色对照表、动作/表情清单、校验白名单
-   **全部自动更新，无需改任何代码**；AstrBot 插件 5 分钟内自动感知（可发 `/mssadmin resources` 确认）
-
-### 新增背景图
-
-1. 把图片放到 `resources/images/`（jpg / jpeg / png / webp）
-2. 在 `resources/images/images.yaml` 登记一行（`file` 与磁盘文件名一致、`name` 短名、`description` 画面内容与适用场景）
-3. 完成。宿主 30 秒内自动识别，AstrBot 插件提示词会带上描述，由 AI 按剧情自行选图
-
-### 语音 / BGM
-
-| 资源   | 存放位置               | 如何生效                                                    |
-| ------ | ---------------------- | ----------------------------------------------------------- |
-| 背景图 | `resources/images/`    | 放入图片后在 `images.yaml` 写 name/description，AI 按描述选图 |
-| 故事语音 | `resources/voices/`  | 故事 JSON 的 `voice` 字段按文件名引用                       |
-| BGM    | `resources/audio/bgm/` | 在宿主 `config.yaml` 的 `bgm.path` 指定（如 `audio/bgm/bg1.mp3`） |
+清单文件缺失或条目在磁盘上不存在时，宿主会在日志里告警并跳过（`bgm.yaml` 内容写错会直接
+启动失败，便于立刻发现）；新增资源后宿主 30 秒内自动识别，提示词中的对照表、动作/表情清单、
+校验白名单全部自动更新，AstrBot 插件 5 分钟内自动感知（可发 `/mssadmin resources` 确认）。
 
 ## TTS / BGM 配置
 
-全部在 `config.yaml` 中完成（见 `config.example.yaml` 的 `tts:` / `bgm:` 节）：
+### TTS
+
+在 `config.yaml` 中完成（见 `config.example.yaml` 的 `tts:` 节）：
 
 1. 启动 [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)（默认端口 `9880`），
    把地址填入 `tts.apiBaseUrl`
 2. 在 `tts.characters` 下为每个角色配置参考音频（`refAudioPath` 为 **GPT-SoVITS 服务端**可访问的路径）
    与提示文本
-3. BGM 放在 `resources/audio/bgm/` 下，`bgm.path` 填相对资源根的路径（如 `audio/bgm/bg1.mp3`）
-4. `tts.enabled: false` 可整体关闭配音；无 TTS 时导出仍会成功，只是没有角色配音
+3. `tts.enabled: false` 可整体关闭配音；无 TTS 时导出仍会成功，只是没有角色配音
+
+### BGM
+
+BGM 设置单独放在资源根下的 `resources/audio/bgm/bgm.yaml`（改完重启宿主生效）：
+
+```yaml
+enabled: true              # 导出时是否混入 BGM
+path: audio/bgm/bg1.mp3    # 相对资源根（resources/）的路径，也可用绝对路径或 http(s) URL
+volume: 0.2                # 音量 0.0 - 1.0
+```
+
+该文件不存在时，宿主回落到 `config.yaml` 的 `bgm` 节（同样三个字段），旧配置照常可用。
 
 ## 导出模式
 
 `config.yaml` 的 `video.exportMode`（环境变量 `MSS_EXPORT_MODE`）在两条管线间切换，默认 `record`。
 
-| 模式     | 怎么出片 | 耗时怎么涨 
+| 模式     | 怎么出片 | 耗时怎么涨 |
 | -------- | -------- | ---------- |
 | `record` | 无头页用 MediaRecorder 墙钟录制画布，ffmpeg 合流（可选流拷贝或二次转码） | 至少等于视频时长 + 合流 |
-| `fast`   | 虚拟时钟按时间轴逐帧推进动画，页内 WebCodecs 直编或帧序列交 ffmpeg 硬编 | 跟「帧数 x 每帧 GPU 读回」成正比，不再跟视频时长 1:1 |`record` |
+| `fast`   | 虚拟时钟按时间轴逐帧推进动画，页内 WebCodecs 直编或帧序列交 ffmpeg 硬编 | 跟「帧数 x 每帧 GPU 读回」成正比，不再跟视频时长 1:1 |
 
-`record` 的合流路径由 `video.recordStreamCopy` 决定：
-
-- `off`（默认）：浏览器录 webm，宿主全量重编码合流
-- `auto` / `on`：浏览器支持直录 h264/mp4 时按目标码率录制、宿主 `-c:v copy` 流拷贝合流，
-  省掉二次编码；配合 `recordTargetSizeMb`（按估算时长反推码率控制成片体积）、
-  `recordBitrateOvershoot`、`recordKeyframeIntervalSec`、`recordCaptureFps`（0 跟随 `video.fps`）微调
-- 浏览器不支持 mp4 直录时自动回到重编码路径，导出不受影响
-
-`fast` 的时间轴、TTS 落点和 `record` 同一套：台词时长仍按 TTS 波形 + 尾垫，音频离线混进 WAV 后再 mux。
-`video.exportFastEncoder`（`auto` / `webcodecs` / `frames`）决定页内直编还是「JPEG 帧序列 + ffmpeg 硬编」，
-`video.exportBitrate` 控制 fast 模式码率。WebCodecs 探测失败或 fast 整条失败时，会自动回退 `record`。
+- `record` 的合流路径由 `video.recordStreamCopy` 决定：`off`（默认）浏览器录 webm、宿主全量重编码；
+  `auto` / `on` 时浏览器支持直录 h264/mp4 就按目标码率录制、宿主 `-c:v copy` 流拷贝合流，省掉二次编码。
+  可用 `recordTargetSizeMb`（按估算时长反推码率控制成片体积）、`recordBitrateOvershoot`、
+  `recordKeyframeIntervalSec`、`recordCaptureFps`（0 跟随 `video.fps`）微调；浏览器不支持时自动回到重编码
+- `fast` 的时间轴、TTS 落点与 `record` 同一套（台词时长按 TTS 波形 + 尾垫，音频离线混进 WAV 再 mux）；
+  `video.exportFastEncoder`（`auto` / `webcodecs` / `frames`）决定页内直编还是帧序列硬编，
+  `video.exportBitrate` 控制码率。WebCodecs 探测失败或 fast 整条失败时自动回退 `record`
 
 ## 部署
 
-宿主是普通 Node 进程，**Windows / Linux / macOS 都可以跑**，不依赖 Electron，也不强制要桌面环境。
-字段说明、环境变量与 Linux systemd 单元见 **[docs/host-deployment.md](docs/host-deployment.md)**。
-
-Live2D 渲染和 MP4 编码是两条独立的 GPU 路径，可以分别成功或失败：
-
-| 路径       | 谁在干活                         | 成功标志                                                     | 失败时                                      |
-| ---------- | -------------------------------- | ------------------------------------------------------------ | ------------------------------------------- |
-| WebGL 渲染 | 无头 Chrome / Edge（Playwright） | `GET /api/v1/health` 的 `webglRenderers[].renderer` 含真实 GPU 名 | `SwiftShader` / `llvmpipe`，导出慢 5–10 倍 |
-| 视频编码   | ffmpeg                           | 导出日志出现 `using encoder: h264_nvenc` / `h264_amf` / `h264_qsv` | 自动回退 `libx264`（CPU）                   |
-
-`health` 里的 `ffmpegEncoder` 是**配置值**（`auto` / `nvidia` / `amd` / `intel` / `libx264`），不是 ffmpeg 实际选中的编码器。
-
-### 按平台
-
-| 平台    | 浏览器                                         | WebGL                                                        | 编码（`video.encoder`，默认 `auto`）            |
-| ------- | ---------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
-| Windows | 系统 Edge（默认探测 `msedge` → `chrome`）      | 独显 / 核显通常开箱即用                                      | NVIDIA→`h264_nvenc`，AMD→`h264_amf`，Intel→`h264_qsv` |
-| Linux   | 系统 Chrome / Chromium；没有再 `playwright install` | 无桌面也可以。NVIDIA **无 X** 时不要用 `--use-angle=gl`（会去开 X，失败掉 SwiftShader），改为 `linuxGpuAngle: false` 且 `extraChromeArgs: "--use-angle=vulkan"` | 同上；ffmpeg 需带对应硬件编码器                 |
-| macOS   | 系统 Chrome / Edge                             | 走 Apple GPU / AMD 即可                                      | 当前不探测 VideoToolbox，`auto` 会落到 `libx264` |
-
-无独立 GPU 时：渲染走核显即可，编码显式设 `video.encoder: libx264`。
-
-### 常驻运行
+宿主是普通 Node 进程，**Windows / Linux / macOS 都能跑**，不依赖 Electron，也不强制要桌面环境。
+平台差异、`config.yaml` 全字段说明、环境变量、systemd / Windows / macOS 常驻方式、GPU 排障与
+升级流程都见 **[docs/host-deployment.md](docs/host-deployment.md)**。
 
 ```bash
 npm run build
 npm start          # node out-host/host/main.js，工作目录必须是仓库根
 ```
 
-Linux 可用 `deploy/mysekai-host.service` 交给 systemd（改 `User` / `WorkingDirectory` 后 `daemon-reload`）。
-Windows 用任务计划程序或 [NSSM](https://nssm.cc/) 跑同一条命令；macOS 用 launchd / tmux 即可。
-不要用 Docker 跑渲染宿主（无头 Chrome 的 GPU 透传收益差，还多一层排障）。
-
-升级代码：`git pull` → 依赖变了再 `npm ci` → `npm run build` → 重启进程。`config.yaml` 与 `resources/` 不入库，不会被覆盖。
+升级：`git pull` → 依赖有变再 `npm ci` → `npm run build` → 重启进程；
+`config.yaml` 与 `resources/` 不入库，不会被覆盖。不要用 Docker 跑渲染宿主
+（无头 Chrome 的 GPU 透传收益差，还多一层排障）。
 
 ## 项目结构
 
 ```
 config.example.yaml   统一配置样例（复制为 config.yaml 使用，config.yaml 不入库）
+CHANGELOG.md          版本变更记录
 src/host/             Node 宿主：API 服务 / 静态托管 / 桥接层 / 渲染池 / ffmpeg 编码
 src/webrender/        渲染工作进程页面（无头浏览器加载，构建产物在 out/webrenderer/）
 src/renderer/         渲染引擎（PixiJS + Live2D + 导出管线）
@@ -332,32 +283,15 @@ docs/                 部署文档；deploy/ systemd 单元；scripts/ 测试与
 
 ## 故障排除
 
-**Q: 启动报 "Failed to launch any browser"**
-
-系统没有 Edge/Chrome 且未下载 playwright 浏览器。执行 `npx playwright install chromium`
-或安装系统 Chrome/Edge。
-
-**Q: health 里 WebGL renderer 显示 SwiftShader / llvmpipe**
-
-WebGL 落到了软件渲染，导出会慢 5–10 倍，并可能音画不同步。按平台改 `render.extraChromeArgs`
-（或 `MSS_CHROME_ARGS`），详见 [docs/host-deployment.md](docs/host-deployment.md)：
-
-- Linux + NVIDIA、无桌面 / 无 X：`linuxGpuAngle: false`，`extraChromeArgs: "--use-angle=vulkan"`
-- Linux 有可用的 X11 / GLX：可试 `--use-angle=gl`（这也是 `linuxGpuAngle: true` 的默认追加项）
-- Windows / macOS：一般不用额外参数；确认走的是系统 Edge/Chrome，而不是 Playwright 的 headless-shell
-
-**Q: 视频导出失败或卡住**
-
-- 查看宿主日志中的 ffmpeg / 渲染错误
-- 尝试降低 `render.workers`（显存/内存不足时）
-- 确认 `video.encoder` 对应的硬件在当前机器可用（失败会自动回退 CPU）。
-  取值是 `auto` / `nvidia` / `amd` / `intel` / `libx264`，不是 ffmpeg 的 `nvenc` 字符串
-- `record` 流拷贝在浏览器不支持 mp4 直录或合并失败时，会自动回到重编码路径
-- `exportMode: fast` 失败时会自动回退 `record`；日志里会出现 `Fast export failed ... falling back to record mode`
-
-**Q: 开了 fast 反而更慢**
-
-fast 每一帧都要把 WebGL 画布读回给编码器，核显上这一步可能比「等墙钟录完」还贵。短片继续用 `record`；长片或独显再开 `fast`。也可把 `renderScale` 从 `1.5` 降到 `1.0` 减轻读回。
+- **启动报 "Failed to launch any browser"**：系统没有 Edge/Chrome 且未下载 playwright 浏览器。
+  执行 `npx playwright install chromium` 或安装系统 Chrome/Edge
+- **health 显示 SwiftShader / llvmpipe**：WebGL 落到了软件渲染（导出慢 5–10 倍、可能音画不同步）。
+  按平台调整 `render.extraChromeArgs`，见 [docs/host-deployment.md](docs/host-deployment.md) 的 WebGL 章节
+- **导出失败或卡住**：查宿主日志里的 ffmpeg / 渲染错误；显存或内存不足时下调 `render.workers`；
+  确认 `video.encoder` 取值（`auto` / `nvidia` / `amd` / `intel` / `libx264`，不是 ffmpeg 的 `nvenc`
+  字符串）对应硬件可用——失败会自动回退 CPU，`record` 流拷贝与 `fast` 失败也都会自动回退并在日志提示
+- **开了 fast 反而更慢**：fast 每帧都要把 WebGL 画布读回给编码器，核显上这可能比「等墙钟录完」更贵。
+  短片继续用 `record`，长片或独显再开 `fast`；也可把 `renderScale` 从 `1.5` 降到 `1.0` 减轻读回
 
 ## 相关项目
 
@@ -372,6 +306,6 @@ fast 每一帧都要把 WebGL 画布读回给编码器，核显上这一步可�
 
 ## 致谢
 
-- [Untitled-Story/MySekaiStoryteller](https://github.com/Untitled-Story/MySekaiStoryteller)
-- [Sekai-World/sekai-viewer](https://github.com/Sekai-World/sekai-viewer)
-- [lezzthanthree/SEKAI-Stories](https://github.com/lezzthanthree/SEKAI-Stories)
+[Untitled-Story/MySekaiStoryteller](https://github.com/Untitled-Story/MySekaiStoryteller) ·
+[Sekai-World/sekai-viewer](https://github.com/Sekai-World/sekai-viewer) ·
+[lezzthanthree/SEKAI-Stories](https://github.com/lezzthanthree/SEKAI-Stories)

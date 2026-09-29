@@ -1,0 +1,28 @@
+# 模型清单（示例）—— 渲染宿主与 AstrBot 插件的"角色注册表"
+#
+# 用法：把本文件复制为同目录下的 models.yaml 后按下面步骤维护（models.yaml 不入库）。
+#
+# 新增角色的完整步骤：
+#   1. 把 Live2D 模型包放到 resources/models/<角色>/<变体>/ 下
+#      （目录内需有 model3.json；动作 motion3.json 在模型包的 motions/ 里，
+#        由 model3.json 的 FileReferences.Motions 索引，宿主会自动枚举）
+#   2. 在 models.yaml 里加一条（id 不要和现有角色重复）
+#   3. 完成 —— 约 30 秒内插件自动感知（可用 /mssadmin resources 验证）
+#
+# 字段说明：
+#   id        出现在生成故事 JSON 的 modelId 里，全表唯一
+#   name      角色全名（对话 speaker 用）
+#   shortName 简称（对照表/角色池用）
+#   path      相对 resources/models/ 的 model3.json 路径（以磁盘实际文件名为准）
+#
+# 插件端会为 name 匹配内置的角色人设档案；未匹配的新角色由 LLM 依据名字演绎
+
+models:
+  - id: 1
+    name: 角色全名
+    shortName: 简称
+    path: 角色目录/变体目录/角色.model3.json
+  - id: 2
+    name: 另一位角色
+    shortName: 简称二
+    path: another/another_normal/another_normal.model3.json
