@@ -33,6 +33,7 @@
 ## 快速开始
 
 由于无法做到开箱即用，且文档内容较多，部署及配置较为麻烦，本项目推荐使用Agent进行部署及资源配置
+
 需要 **Node.js ≥ 20** 和 Chrome / Edge / Chromium。ffmpeg 由 `ffmpeg-static` 随依赖安装。
 以下命令在仓库根目录执行（Windows 可使用 Git Bash）：
 
@@ -46,6 +47,7 @@ cp config.example.yaml config.yaml
 ```
 
 编辑 `config.yaml`，并按 [资源与音频配置](doc/resources.md) 放置模型、背景等资源及清单。
+
 **仓库不附带渲染资源或示例剧本**；资源根默认为 `resources/`，可通过 `paths.resources` 或 `MSS_RESOURCE_DIR` 修改。
 
 ```bash
