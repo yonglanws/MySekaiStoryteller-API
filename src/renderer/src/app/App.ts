@@ -253,10 +253,6 @@ export class App {
             exportBitrate?: number
             exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
             fastFps?: number
-            recordBitrate?: number
-            recordStreamCopy?: 'auto' | 'on' | 'off'
-            recordTargetSizeMb?: number
-            recordCaptureFps?: number
             idleChainGapSec?: number
           }
           tts?: ApiExportTtsConfig
@@ -342,12 +338,6 @@ export class App {
       exportBitrate?: number
       exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
       fastFps?: number
-      recordBitrate?: number
-      recordStreamCopy?: 'auto' | 'on' | 'off'
-      recordTargetSizeMb?: number
-      recordBitrateOvershoot?: number
-      recordKeyframeIntervalSec?: number
-      recordCaptureFps?: number
       idleChainGapSec?: number
     },
     ttsConfig?: ApiExportTtsConfig,
@@ -406,12 +396,6 @@ export class App {
       exportBitrate: videoConfig.exportBitrate,
       exportFastEncoder: videoConfig.exportFastEncoder,
       fastFps: videoConfig.fastFps,
-      recordBitrate: videoConfig.recordBitrate,
-      recordStreamCopy: videoConfig.recordStreamCopy,
-      recordTargetSizeMb: videoConfig.recordTargetSizeMb,
-      recordBitrateOvershoot: videoConfig.recordBitrateOvershoot,
-      recordKeyframeIntervalSec: videoConfig.recordKeyframeIntervalSec,
-      recordCaptureFps: videoConfig.recordCaptureFps,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

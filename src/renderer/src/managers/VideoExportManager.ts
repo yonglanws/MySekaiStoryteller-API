@@ -43,16 +43,6 @@ type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 /** 台词音频结束后的静音尾垫：保证相邻对话之间有呼吸间隔 */
 const TTS_TAIL_SILENCE_MS = 600
 
-/** 解析 '128k' / '128000' 形式的码率为 bps */
-function parseBitrateBps(value: string): number {
-  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)(k?)$/)
-  if (!match) return 128000
-  return match[2] === 'k' ? Math.round(parseFloat(match[1]) * 1000) : Math.round(parseFloat(match[1]))
-}
-
-/** 目标体积反推码率的下限：再低画质不可接受 */
-const MIN_TARGET_BITRATE_BPS = 600_000
-
 export default class VideoExportManager {
   private readonly logger: ExportLogger
   private readonly checkpointManager: CheckpointManager
@@ -348,19 +338,29 @@ export default class VideoExportManager {
       fps: captureFps,
       width: options.width,
       height: options.height,
-      bitrate: options.recordBitrate ?? 8_000_000,
-      timeslice: 100,
-      estimatedDurationMs: undefined,
-      // 流拷贝合流路径需要 h264/mp4 录制；off 时保持 webm + 全量重编码
-      preferMp4: options.recordStreamCopy !== undefined && options.recordStreamCopy !== 'off',
-      keyframeIntervalMs: Math.max(0, (options.recordKeyframeIntervalSec ?? 0) * 1000)
+      bitrate: Math.round(Math.min(40_000_000, Math.max(8_000_000, canvas.width * canvas.height * captureFps * 0.2))),
+      timeslice: 250,
+      preferMp4: true,
+      keyframeIntervalMs: 1000
     })
 
+    let recordingError: Error | null = null
     recorder.setOnErrorCallback((error) => {
+      recordingError = error
       this.logger.error('StreamRecorder error during recording', error)
     })
 
     let videoFilePath: string | null = null
+    let recordSessionId: string | null = null
+    let encodedVideo: Promise<{ videoPath: string; frameCount: number; durationMs: number }> | undefined
+    let finalVideo: { frameCount: number; durationMs: number; fileSize: number } | undefined
+    const cancelRecord = (): void => {
+      recorder.dispose()
+      if (recordSessionId) {
+        void window.electron.ipcRenderer.invoke('electron:record-cancel', { id: recordSessionId })
+          .catch((error: unknown) => this.logger.warn('Could not cancel record encoder', error))
+      }
+    }
     // 宿主收尾（桥接层 finally）会删除输入文件；未走到那一步时由下方兜底删除
     const apiTempFiles: { audioPath: string | null; invoked: boolean } = {
       audioPath: null,
@@ -445,43 +445,6 @@ export default class VideoExportManager {
 
     totalDurationMs = timeline.length > 0 ? timeline[timeline.length - 1].endTimeMs : 0
 
-    // 流拷贝路径下按目标体积反推录制码率。仅在确认走 mp4 直录时调整——
-    // 万一回退 webm + 重编码，被压低的中间码率会实打实损害最终画质。
-    // 时长用的是录制前估算（TTS 实际时长通常不低于估算），留 15% 余量。
-    // 浏览器编码器是 VBR：简单画面上的实际产出常低于请求（服务器实测
-    // 请求 2.9Mbps 只出 2.1Mbps），overshoot 把请求抬高让复杂画面多分比特；
-    // 体积由收尾的上限兜底：预估超出目标时宿主改为按精确码率重编码。
-    const targetSizeMb = options.recordTargetSizeMb ?? 0
-    if (targetSizeMb > 0) {
-      const streamCopyPlanned =
-        options.recordStreamCopy !== undefined &&
-        options.recordStreamCopy !== 'off' &&
-        StreamRecorder.isMp4RecordingSupported()
-      if (streamCopyPlanned && totalDurationMs > 0) {
-        const durationSec = totalDurationMs / 1000
-        const audioBps = parseBitrateBps(options.apiAudioBitrate ?? '128k')
-        const overshoot = Math.max(1, Math.min(options.recordBitrateOvershoot ?? 1, 2))
-        const targetBytes = targetSizeMb * 1024 * 1024
-        const videoBytes = Math.max(targetBytes * 0.85 - (audioBps / 8) * durationSec, 0)
-        const derivedBps = Math.round(((videoBytes * 8) / durationSec) * overshoot)
-        const finalBps = Math.max(
-          MIN_TARGET_BITRATE_BPS,
-          Math.min(derivedBps, options.recordBitrate ?? 8_000_000)
-        )
-        recorder.setVideoBitrate(finalBps)
-        this.logger.info(
-          `Record size targeting: target=${targetSizeMb}MB, estimated=${durationSec.toFixed(1)}s, ` +
-            `audio=${(audioBps / 1000).toFixed(0)}kbps, overshoot=${overshoot} -> ` +
-            `videoBitrate=${(finalBps / 1_000_000).toFixed(2)}Mbps ` +
-            `(base=${((videoBytes * 8) / durationSec / 1_000_000).toFixed(2)}Mbps)`
-        )
-      } else {
-        this.logger.warn(
-          'recordTargetSizeMb ignored: requires recordStreamCopy on/auto and mp4 recording support'
-        )
-      }
-    }
-
     const totalSnippets = snippets.length
     let contextLost = false
     let contextRestoreAttempts = 0
@@ -503,8 +466,24 @@ export default class VideoExportManager {
     canvas.addEventListener('webglcontextrestored', handleContextRestored)
 
     try {
+      if (isApiMode) {
+        const session = await window.electron.ipcRenderer.invoke('electron:record-start', {
+          inputWidth: canvas.width,
+          inputHeight: canvas.height
+        })
+        recordSessionId = session.id
+        this.signal?.addEventListener('abort', cancelRecord, { once: true })
+        this.checkAborted()
+      }
       const recordStart = performance.now()
-      videoFilePath = await recorder.startRecordingToDisk(canvas)
+      if (recordSessionId) {
+        const id = recordSessionId
+        recorder.startRecordingToSink(canvas, async (data) => {
+          await window.electron.ipcRenderer.invoke('electron:record-chunk', { id, data })
+        })
+      } else {
+        videoFilePath = await recorder.startRecordingToDisk(canvas)
+      }
       concurrentPipeline.markRenderStart()
       timestampRecorder.markRenderStart()
 
@@ -522,6 +501,7 @@ export default class VideoExportManager {
 
       for (let i = 0; i < snippets.length; i++) {
         this.checkAborted()
+        if (recordingError) throw recordingError
 
         if (contextLost) {
           contextRestoreAttempts++
@@ -699,9 +679,17 @@ export default class VideoExportManager {
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
 
-      videoFilePath = await recorder.stopRecordingToDisk()
+      const recordedDurationMs = performance.now() - recordStart
+      if (recordSessionId) {
+        await recorder.stopRecordingToSink()
+        encodedVideo = window.electron.ipcRenderer.invoke('electron:record-finish', { id: recordSessionId })
+        // Audio mixing runs concurrently; attach a handler immediately to avoid unhandled rejection.
+        void encodedVideo!.catch(() => undefined)
+      } else {
+        videoFilePath = await recorder.stopRecordingToDisk()
+      }
       const recordMs = performance.now() - recordStart
-      this.logger.info(`Video recorded to disk: ${videoFilePath} (recordMs=${recordMs.toFixed(0)})`)
+      this.logger.info(`Video capture finished (recordMs=${recordMs.toFixed(0)})`)
 
       onProgress({
         stage: 'saving',
@@ -716,8 +704,7 @@ export default class VideoExportManager {
       this.logger.info('Phase 3: Audio mixing and final assembly')
 
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      const recordingDurationMs = performance.now() - startTime
-      totalDurationMs = Math.max(actualVideoDurationMs, recordingDurationMs) + 500
+      totalDurationMs = Math.max(actualVideoDurationMs, recordedDurationMs)
 
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
       this.logger.info(
@@ -726,13 +713,11 @@ export default class VideoExportManager {
 
       let mergeMs = 0
       if (isApiMode) {
-        if (!videoFilePath) {
-          throw new Error('Video file path is not available after recording')
-        }
+        if (!encodedVideo) throw new Error('Record encoder session is missing')
         const mergeStart = performance.now()
-        await this.saveApiVideoFromDisk(
+        finalVideo = await this.saveApiVideoFromDisk(
           options,
-          videoFilePath,
+          encodedVideo,
           hasTtsTracks,
           bgmBuffer,
           bgmEnabled,
@@ -742,13 +727,8 @@ export default class VideoExportManager {
           onProgress,
           ttsAudioResults,
           timestampRecorder,
-          {
-            canvasWidth: canvas.width,
-            canvasHeight: canvas.height,
-            recordedBitrate: options.recordBitrate ?? 8_000_000,
-            recordedMimeType: recorder.getLastMimeType(),
-            tempFiles: apiTempFiles
-          }
+          apiTempFiles,
+          recordSessionId!
         )
         mergeMs = performance.now() - mergeStart
         this.logger.info(
@@ -827,13 +807,13 @@ export default class VideoExportManager {
       const result = {
         success: true,
         duration: (performance.now() - startTime) / 1000,
-        // 与实际采集帧率一致（recordCaptureFps 调低时同步变化）
-        frameCount: Math.round((totalDurationMs / 1000) * captureFps),
+        frameCount: finalVideo?.frameCount ?? Math.round((totalDurationMs / 1000) * captureFps),
+        outputSize: finalVideo?.fileSize,
         timings: isApiMode
           ? {
               recordMs: Math.round(recordMs),
               mergeMs: Math.round(mergeMs),
-              videoDurationMs: Math.round(totalDurationMs)
+              videoDurationMs: Math.round(finalVideo?.durationMs ?? totalDurationMs)
             }
           : undefined
       }
@@ -849,6 +829,15 @@ export default class VideoExportManager {
       this.logger.error('Concurrent stream recording failed', error)
       throw error
     } finally {
+      this.signal?.removeEventListener('abort', cancelRecord)
+      recorder.dispose()
+      if (recordSessionId) {
+        try {
+          await window.electron.ipcRenderer.invoke('electron:record-cancel', { id: recordSessionId })
+        } catch (error) {
+          this.logger.warn('Could not clean up record encoder session', error)
+        }
+      }
       canvas.removeEventListener('webglcontextlost', handleContextLost)
       canvas.removeEventListener('webglcontextrestored', handleContextRestored)
       // 临时文件兜底清理：未进入宿主收尾时（取消/异常/重试）桥接层不会删除输入；
@@ -857,7 +846,6 @@ export default class VideoExportManager {
       const webmDir = videoFilePath ? videoFilePath.replace(/\/[^/]*$/, '') : null
       await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
       await concurrentPipeline.dispose()
-      recorder.dispose()
       audioMuxer.dispose()
       this.app.ttsManager?.clearAudioTracks()
     }
@@ -1431,21 +1419,10 @@ export default class VideoExportManager {
       Ticker.shared.maxFPS = fastFpsCap
     }
 
-    // 采集帧率：默认跟随 video.fps；显式调低时编码量随之下降。
-    // 注意 StreamRecorder 的 fps 只用于 captureStream/约束/日志，
-    // 不影响片段时长（墙钟驱动）与 ffmpeg 的 -r 参数。
-    const captureFps =
-      options.recordCaptureFps && options.recordCaptureFps > 0
-        ? Math.max(1, Math.min(Math.round(options.recordCaptureFps), options.fps))
-        : options.fps
-    if (!isFastLike && captureFps < options.fps) {
-      // 采集降帧的同时把渲染上限压到 video.fps：导出模式默认 120fps 上限，
-      // 而动画步进本就是 options.fps，多出的绘制纯属浪费 GPU
-      Ticker.shared.maxFPS = options.fps
-      this.logger.info(
-        `Record capture fps capped to ${captureFps} (from ${options.fps}), ` +
-          `render ticker capped to ${options.fps}`
-      )
+    const captureFps = options.fps
+    if (!isFastLike) {
+      Ticker.shared.maxFPS = captureFps
+      this.app.pixiApplication.ticker.maxFPS = captureFps
     }
 
     if (isApiMode) {
@@ -2012,7 +1989,7 @@ export default class VideoExportManager {
 
   private async saveApiVideoFromDisk(
     options: VideoExportOptions,
-    videoFilePath: string,
+    encodedVideo: Promise<{ videoPath: string; frameCount: number; durationMs: number }>,
     hasTtsTracks: boolean,
     bgmBuffer: AudioBuffer | null,
     bgmEnabled: boolean,
@@ -2036,27 +2013,11 @@ export default class VideoExportManager {
       }
     >,
     timestampRecorder: SnippetTimestampRecorder,
-    finalizeInfo: {
-      /** 录制文件的实际像素尺寸（画布后备存储） */
-      canvasWidth: number
-      canvasHeight: number
-      /** 录制时使用的视频码率（bps） */
-      recordedBitrate: number
-      /** 录制实际使用的 MIME 类型 */
-      recordedMimeType: string | null
-      /** 临时文件追踪：invoked 置位后由桥接层或本方法负责删除 */
-      tempFiles: { audioPath: string | null; invoked: boolean }
-    }
-  ): Promise<void> {
-    const crf = options.apiCrf ?? 23
+    tempFiles: { audioPath: string | null; invoked: boolean },
+    recordSessionId: string
+  ): Promise<{ frameCount: number; durationMs: number; fileSize: number }> {
     const audioBitrate = options.apiAudioBitrate ?? '128k'
     const outputPath = options.apiOutputPath ?? ''
-    const { canvasWidth, canvasHeight, recordedBitrate, recordedMimeType, tempFiles } = finalizeInfo
-
-    this.logger.info(
-      `API save from disk: videoPath=${videoFilePath}, outputPath=${outputPath}, crf=${crf}, ` +
-        `input=${canvasWidth}x${canvasHeight}, mime=${recordedMimeType ?? 'unknown'}`
-    )
 
     let audioFilePath: string | undefined
 
@@ -2123,76 +2084,18 @@ export default class VideoExportManager {
     // 中止时 audioFilePath 尚未被桥接层管理，由 exportVideoStream 的 finally 兜底删除。
     this.checkAborted()
 
-    // h264/mp4 直录时走流拷贝合流（-c:v copy），省掉整个宿主重编码；
-    // 任一环节失败都保留输入并回退下方的全量重编码路径
-    const canStreamCopy =
-      options.recordStreamCopy !== undefined &&
-      options.recordStreamCopy !== 'off' &&
-      (recordedMimeType ?? '').includes('mp4')
-
-    if (canStreamCopy) {
-      try {
-        tempFiles.invoked = true
-        // 目标体积同时作为成片上限：过头系数抬高了请求码率，编码器万一全额
-        // 兑现，宿主会改为按精确码率重编码压回目标，否则照常流拷贝
-        const targetSizeMb = options.recordTargetSizeMb ?? 0
-        const sizeCap =
-          targetSizeMb > 0 && totalDurationMs > 0
-            ? { maxBytes: targetSizeMb * 1024 * 1024, durationSec: totalDurationMs / 1000 }
-            : undefined
-        const copyResult = await window.electron.ipcRenderer.invoke(
-          'electron:api-remux-video-from-files',
-          {
-            videoPath: videoFilePath,
-            audioPath: audioFilePath,
-            outputPath,
-            audioBitrate,
-            keepInputs: true,
-            sizeCap
-          }
-        )
-        if (copyResult?.success) {
-          await this.removeTempPaths([videoFilePath, audioFilePath])
-          this.logger.info(
-            `API: Video ${copyResult.sizeCapped ? 'size-capped re-encoded' : 'stream-copied'} to ` +
-              `${copyResult.outputPath}, ` +
-              `size=${((copyResult.fileSize || 0) / 1024 / 1024).toFixed(2)} MB`
-          )
-          return
-        }
-        this.logger.warn(
-          `API: Stream copy failed (${copyResult?.error || 'unknown'}), falling back to re-encode`
-        )
-      } catch (copyError) {
-        this.logger.warn('API: Stream copy invoke failed, falling back to re-encode', copyError)
-      }
-    }
-
+    const encoded = await encodedVideo
+    this.checkAborted()
     tempFiles.invoked = true
-    const apiResult = await window.electron.ipcRenderer.invoke(
-      'electron:api-export-video-from-files',
-      {
-        videoPath: videoFilePath,
-        audioPath: audioFilePath,
-        outputPath,
-        fps: options.fps,
-        width: options.width,
-        height: options.height,
-        crf,
-        audioBitrate,
-        inputWidth: canvasWidth,
-        inputHeight: canvasHeight,
-        recordedBitrate
-      }
-    )
-
-    if (!apiResult.success) {
-      throw new Error(`API video export failed: ${apiResult.error || 'Unknown error'}`)
-    }
-
-    this.logger.info(
-      `API: Video saved to ${apiResult.outputPath}, size=${((apiResult.fileSize || 0) / 1024 / 1024).toFixed(2)} MB`
-    )
+    const result = await window.electron.ipcRenderer.invoke('electron:record-mux', {
+      id: recordSessionId,
+      audioPath: audioFilePath,
+      outputPath,
+      audioBitrate
+    })
+    this.checkAborted()
+    if (!result?.success) throw new Error(`API video mux failed: ${result?.error ?? 'Unknown error'}`)
+    return { frameCount: encoded.frameCount, durationMs: encoded.durationMs, fileSize: result.fileSize }
   }
 
   private async saveApiVideo(

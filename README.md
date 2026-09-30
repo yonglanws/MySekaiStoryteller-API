@@ -240,13 +240,17 @@ volume: 0.2                # 音量 0.0 - 1.0
 
 | 模式     | 怎么出片 | 耗时怎么涨 |
 | -------- | -------- | ---------- |
-| `record` | 无头页用 MediaRecorder 墙钟录制画布，ffmpeg 合流（可选流拷贝或二次转码） | 至少等于视频时长 + 合流 |
+| `record` | MediaRecorder 实时采集，宿主同步编码为 H.264，收尾只合入音轨 | 至少等于视频时长，编码与录制重叠 |
 | `fast`   | 虚拟时钟按时间轴逐帧推进动画，页内 WebCodecs 直编或帧序列交 ffmpeg 硬编 | 跟「帧数 x 每帧 GPU 读回」成正比，不再跟视频时长 1:1 |
 
-- `record` 的合流路径由 `video.recordStreamCopy` 决定：`off`（默认）浏览器录 webm、宿主全量重编码；
-  `auto` / `on` 时浏览器支持直录 h264/mp4 就按目标码率录制、宿主 `-c:v copy` 流拷贝合流，省掉二次编码。
-  可用 `recordTargetSizeMb`（按估算时长反推码率控制成片体积）、`recordBitrateOvershoot`、
-  `recordKeyframeIntervalSec`、`recordCaptureFps`（0 跟随 `video.fps`）微调；浏览器不支持时自动回到重编码
+- `record` 统一使用 `video.width`、`video.height`、`video.fps`、`video.crf` 和 `video.encoder`；
+  浏览器采集与宿主 H.264 编码并行，结束后只把 TTS/BGM 音轨合入 MP4。浏览器会优先选择
+  H.264 High profile，若环境不支持则回退到可用的采集格式；编码器不可用时由宿主回退 CPU。
+- `record` 的画质/体积用 `crf` 调整（越小越清晰、体积越大），`fps` 同时限制采集与渲染频率。
+  输出始终遵循 `width` / `height`，`renderScale < 1` 仍会先低分辨率渲染再放大，追求清晰度建议设为 `1`。
+  旧的 `recordBitrate`、`recordStreamCopy`、`recordTargetSizeMb`、`recordBitrateOvershoot`、
+  `recordKeyframeIntervalSec`、`recordCaptureFps` 及对应 `MSS_RECORD_*` 环境变量已移除，升级后可删除；
+  旧字段不会阻止启动，但不再生效，也不再承诺固定文件体积上限。
 - `fast` 的时间轴、TTS 落点与 `record` 同一套（台词时长按 TTS 波形 + 尾垫，音频离线混进 WAV 再 mux）；
   `video.exportFastEncoder`（`auto` / `webcodecs` / `frames`）决定页内直编还是帧序列硬编，
   `video.exportBitrate` 控制码率。WebCodecs 探测失败或 fast 整条失败时自动回退 `record`
@@ -289,7 +293,7 @@ docs/                 部署文档；deploy/ systemd 单元；scripts/ 测试与
   按平台调整 `render.extraChromeArgs`，见 [docs/host-deployment.md](docs/host-deployment.md) 的 WebGL 章节
 - **导出失败或卡住**：查宿主日志里的 ffmpeg / 渲染错误；显存或内存不足时下调 `render.workers`；
   确认 `video.encoder` 取值（`auto` / `nvidia` / `amd` / `intel` / `libx264`，不是 ffmpeg 的 `nvenc`
-  字符串）对应硬件可用——失败会自动回退 CPU，`record` 流拷贝与 `fast` 失败也都会自动回退并在日志提示
+  字符串）对应硬件可用——record 会试编码确认硬件可用；编码失败回退 CPU，并在日志提示。fast 失败仍回退 record
 - **开了 fast 反而更慢**：fast 每帧都要把 WebGL 画布读回给编码器，核显上这可能比「等墙钟录完」更贵。
   短片继续用 `record`，长片或独显再开 `fast`；也可把 `renderScale` 从 `1.5` 降到 `1.0` 减轻读回
 

@@ -35,18 +35,6 @@ export interface VideoConfig {
   exportBitrate: number
   exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
   fastFps: number
-  /** record 模式 MediaRecorder 码率（bps），默认 8Mbps */
-  recordBitrate: number
-  /** record 模式是否在支持时直录 h264/mp4 并流拷贝合流（默认 off） */
-  recordStreamCopy: 'auto' | 'on' | 'off'
-  /** 流拷贝路径的目标成片体积（MB）；0 = 按 recordBitrate 固定码率 */
-  recordTargetSizeMb: number
-  /** 目标体积反推码率的过头系数（1-2，默认 1） */
-  recordBitrateOvershoot: number
-  /** record 模式关键帧间隔（秒）；0 = 浏览器默认 */
-  recordKeyframeIntervalSec: number
-  /** record 模式采集帧率上限；0 = 跟随 video.fps */
-  recordCaptureFps: number
   /** 表演续演间隔（秒）；0 = 关闭续演，动作播完回落默认待机 */
   idleChainGapSec: number
 }
@@ -623,12 +611,6 @@ export class VideoApiServer {
       exportBitrate: this.video.exportBitrate,
       exportFastEncoder: this.video.exportFastEncoder,
       fastFps: this.video.fastFps,
-      recordBitrate: this.video.recordBitrate,
-      recordStreamCopy: this.video.recordStreamCopy,
-      recordTargetSizeMb: this.video.recordTargetSizeMb,
-      recordBitrateOvershoot: this.video.recordBitrateOvershoot,
-      recordKeyframeIntervalSec: this.video.recordKeyframeIntervalSec,
-      recordCaptureFps: this.video.recordCaptureFps,
       idleChainGapSec: this.video.idleChainGapSec
     }
 

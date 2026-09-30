@@ -38,35 +38,11 @@ video:
                       # 支持最多 2 行（\n 换行），留空则只显示自带水印
                       # （env: MSS_VIDEO_WATERMARK_TEXT）
   exportMode: record  # 导出管线：record | fast（env: MSS_EXPORT_MODE）
-                      # record = 实时录制（MediaRecorder 墙钟录制，慢但最保守）
+                      # record = 实时采集，宿主并行编码并在末尾只合入音轨
                       # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4，
-                      #          导出耗时不再随视频时长线性增长；
                       #          运行环境不支持时自动回退 record
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
-  recordBitrate: 8000000   # record 模式 MediaRecorder 视频码率 bps（env: MSS_RECORD_BITRATE）
-  recordStreamCopy: off    # record 收尾：off = webm 录制 + ffmpeg 全量重编码（默认）
-                           # auto/on = 浏览器支持时直录 h264/mp4，宿主 -c:v copy 流拷贝合流，
-                           #           省掉整个重编码；任一环节失败自动回退 off 的行为
-                           # （env: MSS_RECORD_STREAM_COPY）
-  recordTargetSizeMb: 0    # 流拷贝路径的目标成片体积 MB（0 = 不启用，按 recordBitrate 固定码率）。
-                           # >0 时按录制前估算时长反推视频码率（扣除音轨、留 15% 余量，
-                           # 下限 600kbps、上限 recordBitrate），不同长度的故事都落在目标附近。
-                           # 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效。
-                           # 同时是成片上限：预估超出 2% 以上时收尾按精确码率重编码压回
-                           # （env: MSS_RECORD_TARGET_SIZE_MB）
-  recordBitrateOvershoot: 1 # 目标体积反推码率的过头系数（1-2，默认 1）。浏览器编码器是 VBR，
-                           # 简单画面上实际产出常低于请求；按系数抬高请求让复杂画面
-                           # 多分比特。编码器全额兑现导致预估成片超出目标时，收尾改为
-                           # 按精确码率重编码压回目标（多一次硬件编码），体积不会超标
-                           # （env: MSS_RECORD_BITRATE_OVERSHOOT）
-  recordKeyframeIntervalSec: 0 # record 模式关键帧间隔秒数（0 = 浏览器默认，Chrome 约每 100 帧一个）。
-                           # 录制编码是 Constrained Baseline，I 帧约为 P 帧的 10 倍大；
-                           # 拉长到 10 秒左右，省下的比特在同码率下留给 P 帧，不影响速度。
-                           # 代价是播放器拖动定位变粗（env: MSS_RECORD_KEYFRAME_INTERVAL_SEC）
-  recordCaptureFps: 0       # record 模式 MediaRecorder 采集帧率上限（0 = 跟随 video.fps）。
-                           # 编码器跟不上时采集帧率本就低于设定值，调小只是把既成事实变显式：
-                           # 编码量随之下降，录制期间 CPU/GPU 争缓减少（渲染上限会同步压到
-                           # video.fps）。低于编码器实际能力没有意义（env: MSS_RECORD_CAPTURE_FPS）
+
   idleChainGapSec: 0       # 表演续演间隔秒数（0 = 关闭续演，默认）。
                            # 角色动作播完后：0 = 保持动作结束时的姿势（不回落站立），之后只有呼吸与眨眼
                            # （只有呼吸与眨眼）；>0 = 按该间隔（±25% 抖动）再接一个同情绪族
