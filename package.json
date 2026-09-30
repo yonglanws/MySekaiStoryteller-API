@@ -21,7 +21,8 @@
     "test:pool": "npm run build:host && node --test scripts/render-pool.test.mjs",
     "test:config": "npm run build:host && node --test scripts/config/bgm.test.mjs",
     "test:record": "npm run build:host && node --test scripts/record/*.test.mjs",
-    "test:all": "npm run build:host && node --test scripts/api/export-timeout.test.mjs scripts/render-pool.test.mjs scripts/config/bgm.test.mjs scripts/record/*.test.mjs",
+    "test:renderer": "node --test scripts/renderer/*.test.mjs",
+    "test:all": "npm run build:host && node --test scripts/api/export-timeout.test.mjs scripts/render-pool.test.mjs scripts/config/bgm.test.mjs scripts/record/*.test.mjs scripts/renderer/*.test.mjs",
     "e2e": "node scripts/test-export.mjs"
   },
   "dependencies": {

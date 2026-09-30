@@ -24,6 +24,7 @@ import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
 import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
+import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import { webGLValidator } from '../utils/WebGLContextValidator'
 import { frameValidator } from '../utils/FrameContentValidator'
 import { resolveBgmUrl } from '../utils/ResourceUrl'
@@ -39,9 +40,6 @@ export interface ExportProgress {
 
 type ProgressCallback = (progress: ExportProgress) => void
 type InternalProgressCallback = (progress: ExtendedExportProgress) => void
-
-/** 台词音频结束后的静音尾垫：保证相邻对话之间有呼吸间隔 */
-const TTS_TAIL_SILENCE_MS = 600
 
 export default class VideoExportManager {
   private readonly logger: ExportLogger
@@ -88,7 +86,7 @@ export default class VideoExportManager {
       this.app.currentTalkLipSync = buildLipSyncEnvelope(channels, decoded.sampleRate)
     } catch (error) {
       this.checkAborted()
-      this.logger.warn('Speech envelope unavailable; using text rhythm for lip sync', error)
+      this.logger.warn('Speech envelope unavailable; skipping lip sync', error)
     }
   }
 
@@ -338,7 +336,9 @@ export default class VideoExportManager {
       fps: captureFps,
       width: options.width,
       height: options.height,
-      bitrate: Math.round(Math.min(40_000_000, Math.max(8_000_000, canvas.width * canvas.height * captureFps * 0.2))),
+      bitrate: Math.round(
+        Math.min(40_000_000, Math.max(8_000_000, canvas.width * canvas.height * captureFps * 0.2))
+      ),
       timeslice: 250,
       preferMp4: true,
       keyframeIntervalMs: 1000
@@ -352,12 +352,15 @@ export default class VideoExportManager {
 
     let videoFilePath: string | null = null
     let recordSessionId: string | null = null
-    let encodedVideo: Promise<{ videoPath: string; frameCount: number; durationMs: number }> | undefined
+    let encodedVideo:
+      | Promise<{ videoPath: string; frameCount: number; durationMs: number }>
+      | undefined
     let finalVideo: { frameCount: number; durationMs: number; fileSize: number } | undefined
     const cancelRecord = (): void => {
       recorder.dispose()
       if (recordSessionId) {
-        void window.electron.ipcRenderer.invoke('electron:record-cancel', { id: recordSessionId })
+        void window.electron.ipcRenderer
+          .invoke('electron:record-cancel', { id: recordSessionId })
           .catch((error: unknown) => this.logger.warn('Could not cancel record encoder', error))
       }
     }
@@ -541,62 +544,31 @@ export default class VideoExportManager {
 
         const snippet = snippets[i]
         const isTalk = snippet.type === 'Talk'
-        const talkData = isTalk
-          ? (snippet as { data?: { speaker?: string; content?: string } }).data
-          : undefined
+        const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
-        if (ttsEnabled && isTalk) {
+        let resolvedTalkDurationMs: number | undefined
+        if (ttsEnabled && talkData) {
           const ttsResult = await concurrentPipeline.waitForTTSReady(i)
-          if (ttsResult && ttsResult.success && ttsResult.duration > 0) {
-            const timelineEntry = timeline[i]
-            const oldDurationMs = timelineEntry?.durationMs ?? 0
-            const newDurationMs = Math.max(oldDurationMs, ttsResult.duration + TTS_TAIL_SILENCE_MS)
-            const durationDelta = newDurationMs - oldDurationMs
-
-            timeline[i] = {
-              ...timelineEntry,
-              ttsDurationMs: ttsResult.duration,
-              hasTTS: true,
-              durationMs: newDurationMs,
-              endTimeMs: (timelineEntry?.startTimeMs ?? 0) + newDurationMs
-            }
-
-            if (durationDelta > 0) {
-              // 原地累加后续条目：保持数组与对象标识不变（ttsManager 持有同一数组），
-              // 同时避免每条 TTS 都重建整条时间轴
-              for (let j = i + 1; j < timeline.length; j++) {
-                const later = timeline[j]
-                later.startTimeMs += durationDelta
-                later.endTimeMs += durationDelta
-              }
-            }
-
+          const ttsDurationMs =
+            ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
+              ? ttsResult.duration
+              : 0
+          resolvedTalkDurationMs = applyTalkPatch(
+            timeline,
+            i,
+            ttsDurationMs,
+            calculateTalkDurationMs(talkData.content, ttsDurationMs, talkData.ttsText)
+          )
+          if (ttsDurationMs > 0) {
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
             if (rawAudioBuffer) {
               ttsAudioResults.set(i, {
                 audioBuffer: rawAudioBuffer,
-                durationMs: ttsResult.duration,
-                characterName: talkData?.speaker ?? '',
-                text: talkData?.content ?? '',
+                durationMs: ttsDurationMs,
+                characterName: talkData.speaker,
+                text: talkData.content,
                 preDecoded: false
               })
-            }
-          } else {
-            // TTS 未接入或合成失败：按字数生成台词时长（打字机 + 阅读停留），保证句间呼吸
-            const timelineEntry = timeline[i]
-            const fallbackMs = estimateSnippetDuration(snippet)
-            if (timelineEntry && timelineEntry.durationMs < fallbackMs) {
-              const durationDelta = fallbackMs - timelineEntry.durationMs
-              timeline[i] = {
-                ...timelineEntry,
-                durationMs: fallbackMs,
-                endTimeMs: timelineEntry.startTimeMs + fallbackMs
-              }
-              for (let j = i + 1; j < timeline.length; j++) {
-                const later = timeline[j]
-                later.startTimeMs += durationDelta
-                later.endTimeMs += durationDelta
-              }
             }
           }
         }
@@ -621,8 +593,11 @@ export default class VideoExportManager {
         })
 
         this.app.lastSnippetActualDurationMs =
+          resolvedTalkDurationMs ??
           timelineEntry?.durationMs ??
-          Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet))
+          (snippet.type === 'Talk'
+            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
         await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
         this.app.currentTalkStartedAtMs = 0
@@ -661,8 +636,12 @@ export default class VideoExportManager {
         }
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
-        timestampRecorder.markSnippetEnd(ttsDur,
-          this.app.currentTalkStartedAtMs > 0 ? this.app.currentTalkStartedAtMs - snippetStartedAtMs : 0)
+        timestampRecorder.markSnippetEnd(
+          ttsDur,
+          this.app.currentTalkStartedAtMs > 0
+            ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
+            : 0
+        )
 
         if (i % 50 === 0) {
           this.logger.info(
@@ -682,7 +661,9 @@ export default class VideoExportManager {
       const recordedDurationMs = performance.now() - recordStart
       if (recordSessionId) {
         await recorder.stopRecordingToSink()
-        encodedVideo = window.electron.ipcRenderer.invoke('electron:record-finish', { id: recordSessionId })
+        encodedVideo = window.electron.ipcRenderer.invoke('electron:record-finish', {
+          id: recordSessionId
+        })
         // Audio mixing runs concurrently; attach a handler immediately to avoid unhandled rejection.
         void encodedVideo!.catch(() => undefined)
       } else {
@@ -833,7 +814,9 @@ export default class VideoExportManager {
       recorder.dispose()
       if (recordSessionId) {
         try {
-          await window.electron.ipcRenderer.invoke('electron:record-cancel', { id: recordSessionId })
+          await window.electron.ipcRenderer.invoke('electron:record-cancel', {
+            id: recordSessionId
+          })
         } catch (error) {
           this.logger.warn('Could not clean up record encoder session', error)
         }
@@ -880,7 +863,8 @@ export default class VideoExportManager {
     choice: 'auto' | 'webcodecs' | 'frames'
   ): Promise<boolean> {
     if (choice === 'frames') return false
-    const available = (await WebCodecsMp4Encoder.resolveConfig(width, height, fps, bitrate)) !== null
+    const available =
+      (await WebCodecsMp4Encoder.resolveConfig(width, height, fps, bitrate)) !== null
     if (!available) return false
     if (choice === 'webcodecs') return true
 
@@ -1180,12 +1164,10 @@ export default class VideoExportManager {
         if (pumpError) throw pumpError
 
         const snippet = snippets[i]
-        const isTalk = snippet.type === 'Talk'
-        const talkData = isTalk
-          ? (snippet as { data?: { speaker?: string; content?: string } }).data
-          : undefined
+        const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
-        if (ttsEnabled && isTalk) {
+        let resolvedTalkDurationMs: number | undefined
+        if (ttsEnabled && talkData) {
           pumpPaused = true
           const ttsWaitStart = virtualClock.realTimeMs()
           const ttsResult = await concurrentPipeline.waitForTTSReady(i)
@@ -1193,21 +1175,27 @@ export default class VideoExportManager {
           pumpPaused = false
           if (pumpError) throw pumpError
 
-          if (ttsResult && ttsResult.success && ttsResult.duration > 0) {
-            applyTalkPatch(timeline, i, ttsResult.duration)
+          const ttsDurationMs =
+            ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
+              ? ttsResult.duration
+              : 0
+          resolvedTalkDurationMs = applyTalkPatch(
+            timeline,
+            i,
+            ttsDurationMs,
+            calculateTalkDurationMs(talkData.content, ttsDurationMs, talkData.ttsText)
+          )
+          if (ttsDurationMs > 0) {
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
             if (rawAudioBuffer) {
               ttsAudioResults.set(i, {
                 audioBuffer: rawAudioBuffer,
-                durationMs: ttsResult.duration,
-                characterName: talkData?.speaker ?? '',
-                text: talkData?.content ?? '',
+                durationMs: ttsDurationMs,
+                characterName: talkData.speaker,
+                text: talkData.content,
                 preDecoded: false
               })
             }
-          } else {
-            // TTS 未接入或合成失败：按字数生成台词时长（打字机 + 阅读停留），保证句间呼吸
-            applyTalkPatch(timeline, i, 0, estimateSnippetDuration(snippet))
           }
           this.app.ttsManager.setTimeline(timeline)
         }
@@ -1224,8 +1212,11 @@ export default class VideoExportManager {
         })
 
         this.app.lastSnippetActualDurationMs =
+          resolvedTalkDurationMs ??
           timelineEntry?.durationMs ??
-          Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet))
+          (snippet.type === 'Talk'
+            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
         pumpPaused = true
         await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
@@ -1240,8 +1231,12 @@ export default class VideoExportManager {
         await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
-        timestampRecorder.markSnippetEnd(ttsDur,
-          this.app.currentTalkStartedAtMs > 0 ? this.app.currentTalkStartedAtMs - snippetStartedAtMs : 0)
+        timestampRecorder.markSnippetEnd(
+          ttsDur,
+          this.app.currentTalkStartedAtMs > 0
+            ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
+            : 0
+        )
       }
 
       // 尾部追帧：让帧泵渲染到「最后一个片段的虚拟结束时间」，
@@ -1685,12 +1680,11 @@ export default class VideoExportManager {
 
         this.app.lastSnippetActualDurationMs =
           timelineEntry?.durationMs ??
-          Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet))
+          (snippet.type === 'Talk'
+            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
-        const isTalk = snippet.type === 'Talk'
-        const talkData = isTalk
-          ? (snippet as { data?: { speaker?: string; content?: string } }).data
-          : undefined
+        const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
         this.app.currentTalkStartedAtMs = 0
         timestampRecorder.markSnippetStart(i, snippet.type, {
@@ -2054,10 +2048,7 @@ export default class VideoExportManager {
 
       // 混音直出 Int16 交错 PCM（与旧 Float32→WAV 路径数学一致），
       // 避免全时长双 Float32Array + AudioBuffer 拷贝 + 逐样本 setInt16
-      const pcm = await audioMuxer.mixToInt16Interleaved(
-        totalDurationMs,
-        bgmBuffer || undefined
-      )
+      const pcm = await audioMuxer.mixToInt16Interleaved(totalDurationMs, bgmBuffer || undefined)
       const wavBuffer = audioMuxer.encodeWavFromInt16(pcm)
 
       this.logger.info(`API: Audio mixed, size=${(wavBuffer.byteLength / 1024).toFixed(1)} KB`)
@@ -2094,8 +2085,13 @@ export default class VideoExportManager {
       audioBitrate
     })
     this.checkAborted()
-    if (!result?.success) throw new Error(`API video mux failed: ${result?.error ?? 'Unknown error'}`)
-    return { frameCount: encoded.frameCount, durationMs: encoded.durationMs, fileSize: result.fileSize }
+    if (!result?.success)
+      throw new Error(`API video mux failed: ${result?.error ?? 'Unknown error'}`)
+    return {
+      frameCount: encoded.frameCount,
+      durationMs: encoded.durationMs,
+      fileSize: result.fileSize
+    }
   }
 
   private async saveApiVideo(

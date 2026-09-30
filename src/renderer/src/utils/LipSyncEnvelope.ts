@@ -66,21 +66,3 @@ export function sampleLipSync(envelope: LipSyncEnvelope, elapsedMs: number): num
   const next = envelope.values[index + 1] ?? 0
   return current + (next - current) * (frame - index)
 }
-
-export function sampleTextMouth(text: string, elapsedMs: number, durationMs: number): number {
-  if (!text || !Number.isFinite(elapsedMs) || elapsedMs < 0 || durationMs <= 0) return 0
-  const speechMs = Math.max(1, durationMs - Math.min(800, durationMs * 0.2))
-  if (elapsedMs >= speechMs) return 0
-  const characters = Array.from(text)
-  // 每个音节至少约 170ms：字符映射到慢音节序列，避免逐字快速开合
-  const syllableCount = Math.max(2, Math.ceil(speechMs / 170))
-  const phase = (elapsedMs / speechMs) * syllableCount
-  const syllable = phase - Math.floor(phase)
-  const index = Math.min(characters.length - 1, Math.floor((phase / syllableCount) * characters.length))
-  const character = characters[index]
-  if (/[\s，。！？、；：,.!?;:…—「」『』“”"'（）()]/u.test(character)) return 0
-  const attack = Math.min(1, syllable / 0.3)
-  const release = Math.max(0, Math.min(1, (0.85 - syllable) / 0.3))
-  const intensity = 0.2 + ((character.codePointAt(0) ?? 0) % 7) * 0.016
-  return intensity * Math.min(attack, release)
-}

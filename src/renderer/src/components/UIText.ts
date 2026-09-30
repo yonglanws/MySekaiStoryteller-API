@@ -1,5 +1,6 @@
 import { AlphaFilter, Text, TextStyle } from 'pixi.js'
 import AnimationManager from '../managers/AnimationManager'
+import { TALK_DISPLAY_MS_PER_CHAR } from '../utils/TalkTiming'
 
 export default class UIText extends Text {
   public data: string = ''
@@ -51,7 +52,7 @@ export default class UIText extends Text {
 
   public async startDisplayContent(): Promise<void> {
     const contentLength = this.data.length
-    const timeMS = contentLength * 80
+    const timeMS = contentLength * TALK_DISPLAY_MS_PER_CHAR
 
     if (contentLength === 0 || timeMS < 30) {
       this.text = this.data

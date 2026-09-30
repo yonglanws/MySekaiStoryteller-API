@@ -1,4 +1,5 @@
 import type { SnippetData } from '../../../common/types/Story'
+import { calculateTalkDurationMs } from './TalkTiming'
 
 export interface TimelineEntry {
   snippetIndex: number
@@ -65,17 +66,9 @@ export interface TTSMapping {
   audioPath?: string
 }
 
-const TTS_PADDING_MS = 300
-const CHAR_READ_SPEED_MS = 80
 const CHAR_TELOP_SPEED_MS = 90
 const MIN_DURATION_MS = 500
 const MAX_DURATION_MS = 30000
-// 无 TTS 时 Talk 时长的校准参数：
-// 正常日语台词约 7 字/秒（≈143ms/字），用它折算"这句话如果配音会念多久"，
-// 再叠加阅读停留，避免无配音时估算明显短于真实说话节奏
-const SPEECH_EQUIVALENT_MS_PER_CHAR = 143
-const TALK_READING_LINGER_MS = 1200
-const MIN_TALK_DURATION_MS = 1800
 const CROSS_VALIDATION_TOLERANCE_MS = 500
 const EMERGENCY_FALLBACK_MS = 600
 
@@ -116,24 +109,12 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
 } {
   switch (snippet.type) {
     case 'Talk': {
-      const content = getSnippetDataField(snippet, 'content') || ''
-      const charCount = content.length
-      // 无 TTS 时的台词时长拆三段，向真实语音节奏对齐：
-      //   1) 打字机时间（逐字出现）
-      //   2) 等效语音时长——按正常日语语速 ~7 字/秒 折算，避免估算远短于
-      //      真人说话的时长，否则整段对话会显得"没说完就跳"
-      //   3) 阅读停留，给观众读完句子的余量
-      const typewriterMs = charCount * CHAR_READ_SPEED_MS
-      const speechEquivalentMs = charCount * SPEECH_EQUIVALENT_MS_PER_CHAR
-      const readingLingerMs = TALK_READING_LINGER_MS
-      const estimated = Math.max(
-        typewriterMs + speechEquivalentMs * 0.5 + readingLingerMs,
-        MIN_TALK_DURATION_MS
-      )
+      const { content, ttsText } = snippet.data
+      const estimated = calculateTalkDurationMs(content, 0, ttsText)
       return {
         durationMs: estimated,
         source: 'content_estimation',
-        detail: `Talk: ${charCount} chars, typewriter ${typewriterMs} + speech~${Math.round(speechEquivalentMs)} + linger ${readingLingerMs} = ${estimated}ms`
+        detail: `Talk: ${content.length} display chars, ${(ttsText || content).length} speech chars = ${estimated}ms`
       }
     }
     case 'Telop': {
@@ -272,21 +253,16 @@ function crossValidate(
   let selectedSource: DurationSource
   let decisionReason: string
 
-  const isTalk = snippet.type === 'Talk'
-  const hasTTS = isTalk && !!ttsMapping && ttsMapping.durationMs > 0
-
-  if (hasTTS) {
-    const ttsDur = ttsMapping!.durationMs
-    // 优化: TTS时长优先，但不超过内容估算的1.5倍，避免过长
-    const ttsWithPadding = ttsDur + TTS_PADDING_MS
-    const contentEstimated = pathA.durationMs
-    // 取TTS时长和内容估算的较小值，但不少于TTS时长
-    finalDurationMs = Math.min(
-      Math.max(ttsWithPadding, contentEstimated * 0.8),
-      Math.max(ttsWithPadding, contentEstimated * 1.3)
-    )
-    selectedSource = 'tts_audio'
-    decisionReason = `TTS audio=${ttsDur}ms + padding=${TTS_PADDING_MS}ms, balanced with content estimation(${contentEstimated}ms)`
+  if (snippet.type === 'Talk') {
+    const ttsDurationMs = ttsMapping?.durationMs ?? 0
+    const hasTTS = Number.isFinite(ttsDurationMs) && ttsDurationMs > 0
+    const { content, ttsText } = snippet.data
+    return {
+      finalDurationMs: calculateTalkDurationMs(content, ttsDurationMs, ttsText),
+      selectedSource: hasTTS ? 'tts_audio' : 'content_estimation',
+      decisionReason: 'Shared dialogue body timing; pre-dialogue delay is handled separately',
+      warnings
+    }
   } else {
     const diff = Math.abs(pathA.durationMs - pathB.durationMs)
 
@@ -386,7 +362,8 @@ export function calculateTimeline(
     const snippet = snippets[i]
     const ttsMapping = ttsMappings.get(i)
     const isTalk = snippet.type === 'Talk'
-    const hasTTS = isTalk && !!ttsMapping && ttsMapping.durationMs > 0
+    const hasTTS =
+      isTalk && !!ttsMapping && Number.isFinite(ttsMapping.durationMs) && ttsMapping.durationMs > 0
 
     const pathA = calculatePathA_ContentBased(snippet)
     const pathB = calculatePathB_DelayBased(snippet)
@@ -490,6 +467,9 @@ export function calculateTimelineWithoutTTS(snippets: SnippetData[]): TimelineCa
 }
 
 export function estimateSnippetDuration(snippet: SnippetData): number {
+  if (snippet.type === 'Talk') {
+    return calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+  }
   const pathA = calculatePathA_ContentBased(snippet)
   const pathB = calculatePathB_DelayBased(snippet)
   return Math.max(pathA.durationMs, pathB.durationMs)
