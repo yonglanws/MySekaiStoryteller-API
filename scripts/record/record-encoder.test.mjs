@@ -350,6 +350,29 @@ test(
 )
 
 test(
+  'capture smaller than configured output is encoded at capture size without upscaling',
+  { timeout: 30_000 },
+  async (t) => {
+    const directory = await tempDirectory(t)
+    const { bytes } = await fixture(directory, 'mp4')
+    const calls = spySpawns(t)
+    const session = await sessionFor(t, directory, { width: 640, height: 360 })
+    for (const chunk of chunks(bytes)) await session.append(chunk)
+    const result = await session.finish()
+    const media = await inspect(result.videoPath)
+    assert.match(
+      media.stderr,
+      /Video: h264 \(High\).*yuv420p.*160x90/,
+      'must stay at capture size instead of upscaling to the configured output'
+    )
+    assert.ok(
+      !calls.find(({ args }) => args.includes('pipe:0')).args.includes('-vf'),
+      'capture smaller than output must not add a scale filter'
+    )
+  }
+)
+
+test(
   'cancel is idempotent, kills streaming process, preserves caller files and rejects finish',
   { timeout: 30_000 },
   async (t) => {

@@ -46,7 +46,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       height: config.video.height,
       fps: config.video.fps,
       crf: config.video.crf,
-      encoder: config.video.encoder as VideoEncoderChoice
+      encoder: config.video.encoder as VideoEncoderChoice,
+      targetSizeBytes: Math.max(0, config.video.recordTargetSizeMb ?? 0) * 1024 * 1024
     },
     config.render.workers,
     deps.recordSessionOptions

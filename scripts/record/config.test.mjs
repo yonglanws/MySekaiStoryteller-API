@@ -10,7 +10,6 @@ const require = createRequire(import.meta.url)
 const legacy = {
   recordBitrate: 8000000,
   recordStreamCopy: 'on',
-  recordTargetSizeMb: 30,
   recordBitrateOvershoot: 1.4,
   recordKeyframeIntervalSec: 10,
   recordCaptureFps: 15
@@ -55,13 +54,18 @@ test('obsolete environment variables cannot silently restore removed behavior', 
     {
       MSS_RECORD_BITRATE: '100000',
       MSS_RECORD_STREAM_COPY: 'on',
-      MSS_RECORD_TARGET_SIZE_MB: '1',
       MSS_RECORD_BITRATE_OVERSHOOT: '2',
       MSS_RECORD_KEYFRAME_INTERVAL_SEC: '10',
       MSS_RECORD_CAPTURE_FPS: '1'
     }
   )
   for (const key of Object.keys(legacy)) assert.equal(key in video, false, key)
+})
+
+test('record output size cap is configurable and defaults to off', () => {
+  assert.equal(load({}).recordTargetSizeMb, 0)
+  assert.equal(load({ recordTargetSizeMb: 30 }).recordTargetSizeMb, 30)
+  assert.equal(load({}, { MSS_RECORD_TARGET_SIZE_MB: '25' }).recordTargetSizeMb, 25)
 })
 
 test('fast configuration remains unchanged', () => {

@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   createRecordEncoding,
   type RecordEncodingConfig,
   type RecordEncodingResult
 } from './recordEncoder'
-import type { VideoEncoderChoice } from '../../shared/ffmpeg'
+import {
+  apiEncodeVideoAudioToBitrate,
+  parseBitrateToBps,
+  type VideoEncoderChoice
+} from '../../shared/ffmpeg'
 import { muxRecordVideo, type RecordMuxResult } from './recordMux'
 
 const MIN_DIMENSION = 1
@@ -21,6 +25,8 @@ export interface RecordSessionHostConfig {
   fps: number
   crf: number
   encoder: VideoEncoderChoice
+  /** record 收尾成片体积上限（字节，来自 video.recordTargetSizeMb）；0/缺省 = 不限制 */
+  targetSizeBytes?: number
 }
 
 export interface RecordEncodingSession {
@@ -238,7 +244,13 @@ export class RecordSessionRegistry {
 
   async mux(
     id: unknown,
-    payload: { outputPath?: unknown; audioPath?: unknown; audioBitrate?: unknown }
+    payload: {
+      outputPath?: unknown
+      audioPath?: unknown
+      audioBitrate?: unknown
+      /** 时间轴总时长（秒）；体积上限预估用，缺省或非法时跳过上限检查 */
+      durationSec?: unknown
+    }
   ): Promise<RecordMuxResult> {
     const entry = this.getEntry(id)
     if (entry.state !== 'finished' || !entry.encoder) {
@@ -256,6 +268,12 @@ export class RecordSessionRegistry {
     entry.state = 'muxing'
     this.clearIdle(entry)
     entry.muxAbort = new AbortController()
+    const durationSec =
+      typeof payload.durationSec === 'number' &&
+      Number.isFinite(payload.durationSec) &&
+      payload.durationSec > 0
+        ? payload.durationSec
+        : 0
     entry.muxPromise = (async () => {
       const exists = await stat(payload.outputPath as string).then(
         () => true,
@@ -268,9 +286,19 @@ export class RecordSessionRegistry {
       if (entry.muxAbort!.signal.aborted)
         throw new RecordSessionError('Record mux was cancelled', 409)
       entry.muxOutputPath = payload.outputPath as string
+      const hasAudio = typeof payload.audioPath === 'string' && payload.audioPath.length > 0
+      const cappedVideoBps = await this.sizeCapBps(
+        entry,
+        hasAudio,
+        payload.audioBitrate,
+        durationSec
+      )
+      if (cappedVideoBps > 0) {
+        return this.encodeToTargetSize(entry, hasAudio, payload, cappedVideoBps, durationSec)
+      }
       return muxRecordVideo({
         videoPath: entry.encoder!.outputPath,
-        audioPath: payload.audioPath as string | undefined,
+        audioPath: hasAudio ? (payload.audioPath as string) : undefined,
         outputPath: payload.outputPath as string,
         audioBitrate: payload.audioBitrate as string,
         signal: entry.muxAbort!.signal
@@ -291,6 +319,57 @@ export class RecordSessionRegistry {
       if (!entry.cancelPromise) await this.cleanupEntry(entry).catch(() => undefined)
       throw error
     }
+  }
+
+  /**
+   * 预估成片（录制视频 + 音轨）超出体积上限 2% 以上时，返回把视频压回上限的
+   * 码率（保留 3% 余量、扣除音轨）；否则返回 0，照常流拷贝合流。
+   * 反推码率过低（<300kbps）说明上限已经不现实，同样返回 0 交由原路径出片。
+   */
+  private async sizeCapBps(
+    entry: SessionEntry,
+    hasAudio: boolean,
+    audioBitrate: unknown,
+    durationSec: number
+  ): Promise<number> {
+    const targetSizeBytes = this.hostConfig.targetSizeBytes ?? 0
+    if (targetSizeBytes <= 0 || durationSec <= 0) return 0
+    const videoBytes = (await stat(entry.encoder!.outputPath)).size
+    const audioBytes = hasAudio ? (parseBitrateToBps(audioBitrate as string) / 8) * durationSec : 0
+    const projected = videoBytes + audioBytes
+    if (projected <= targetSizeBytes * 1.02) return 0
+    const bps = Math.floor(((targetSizeBytes * 0.97 - audioBytes) * 8) / durationSec)
+    console.info(
+      `[record-sessions] projected output ${(projected / 1024 / 1024).toFixed(2)}MB exceeds ` +
+        `${(targetSizeBytes / 1024 / 1024).toFixed(2)}MB cap; re-encoding video at ` +
+        `${(bps / 1_000_000).toFixed(2)}Mbps`
+    )
+    return bps >= 300_000 ? bps : 0
+  }
+
+  /** 按精确码率重编码视频并合流（分辨率与时间戳不变），产出体积受上限约束。 */
+  private async encodeToTargetSize(
+    entry: SessionEntry,
+    hasAudio: boolean,
+    payload: { outputPath?: unknown; audioPath?: unknown; audioBitrate?: unknown },
+    videoBps: number,
+    durationSec: number
+  ): Promise<RecordMuxResult> {
+    const outputPath = payload.outputPath as string
+    await mkdir(dirname(outputPath), { recursive: true })
+    await apiEncodeVideoAudioToBitrate(
+      entry.encoder!.outputPath,
+      hasAudio ? (payload.audioPath as string) : undefined,
+      outputPath,
+      payload.audioBitrate as string,
+      this.hostConfig.encoder,
+      videoBps,
+      durationSec,
+      this.hostConfig.targetSizeBytes ?? 0
+    )
+    const fileSize = (await stat(outputPath)).size
+    if (!fileSize) throw new Error('Record size-capped encode produced an empty output')
+    return { success: true, outputPath, fileSize, sizeCapped: true }
   }
 
   async cancel(id: unknown): Promise<null> {

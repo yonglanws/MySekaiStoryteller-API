@@ -16,6 +16,8 @@ export interface RecordMuxResult {
   success: true
   outputPath: string
   fileSize: number
+  /** true = 预估超出体积上限，已按精确码率重编码压回（recordTargetSizeMb 路径） */
+  sizeCapped?: boolean
 }
 
 export async function muxRecordVideo(options: RecordMuxOptions): Promise<RecordMuxResult> {
