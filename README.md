@@ -32,6 +32,8 @@
 > 如需桌面编辑器，请访问原项目。感谢原作者 [GuangChen2333](https://github.com/GuangChen2333) 与
 > [Untitled-Story](https://github.com/Untitled-Story) 组织。
 
+**示例成片**:[点此观看](https://share.fnnas.net/s/7cefbd92baf04955b3) (由DeepSeek V4.1 Flash生成)
+
 ## 项目简介
 
 接收 `*.sekai-story.json` 故事剧本，用 Live2D（Project SEKAI 风格）渲染并导出为 MP4 视频，
