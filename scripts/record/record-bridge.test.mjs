@@ -47,13 +47,20 @@ function failure(response, pattern) {
   assert.match(response.body.error, pattern)
 }
 
-async function createFixture(t, { workers = 1, idleTimeoutMs, hooks = {} } = {}) {
+async function createFixture(t, { workers = 1, idleTimeoutMs, hooks = {}, targetSizeMb } = {}) {
   const calls = []
   const ids = new Set()
   const gates = []
   const extraDirectories = []
   const config = {
-    video: { width: 1280, height: 720, fps: 30, crf: 19, encoder: 'cpu' },
+    video: {
+      width: 1280,
+      height: 720,
+      fps: 30,
+      crf: 19,
+      encoder: 'cpu',
+      recordTargetSizeMb: targetSizeMb ?? 0
+    },
     render: { workers }
   }
   const createEncoding = async (options) => {
@@ -212,10 +219,13 @@ test('record endpoints stream exact binary chunks using trusted host settings an
   assert.deepEqual(Object.keys(started), ['id'])
   assert.match(started.id, /^[a-f0-9-]{36}$/i)
   const entry = fixture.calls[0]
+  // recordTargetSizeMb 由注册表消费，不进入单帧编码配置
+  const expectedVideoConfig = { ...fixture.config.video }
+  delete expectedVideoConfig.recordTargetSizeMb
   assert.deepEqual(entry.options, {
     directory: entry.options.directory,
     ...dimensions,
-    ...fixture.config.video
+    ...expectedVideoConfig
   })
   assert.equal(path.dirname(entry.options.directory), tmpdir())
   assert.match(path.basename(entry.options.directory), /^mss-record-/)
@@ -572,6 +582,98 @@ test('record-mux uses only the finished session video and retains completed outp
   success(await fixture.invoke('record-cancel', started))
   assert.equal(await readFile(outputPath, 'utf8'), 'encoded video')
   assert.equal(await exists(fixture.calls[0].options.directory), false)
+})
+
+test('record mux re-encodes to the target size when projected output exceeds recordTargetSizeMb', async (t) => {
+  const encodeCalls = []
+  t.mock.method(ffmpeg, 'apiEncodeVideoAudioToBitrate', async (...args) => {
+    const [
+      videoPath,
+      audioPath,
+      outputPath,
+      audioBitrate,
+      encoder,
+      videoBps,
+      durationSec,
+      maxBytes
+    ] = args
+    encodeCalls.push({
+      videoPath,
+      audioPath,
+      outputPath,
+      audioBitrate,
+      encoder,
+      videoBps,
+      durationSec,
+      maxBytes
+    })
+    await writeFile(outputPath, Buffer.alloc(1000))
+  })
+  const fixture = await createFixture(t, {
+    targetSizeMb: 2,
+    hooks: {
+      create(entry) {
+        // 预估 = 8MB 录制视频 + 30s×128kbps 音轨 ≈ 8.48MB，远超 2MiB 上限
+        return writeFile(entry.outputPath, Buffer.alloc(8_000_000))
+      }
+    }
+  })
+  const directory = await fixture.files()
+  const outputPath = path.join(directory, 'capped.mp4')
+  const audioPath = path.join(directory, 'audio.wav')
+  const started = success(await fixture.invoke('record-start', dimensions))
+  success(await fixture.invoke('record-finish', started))
+  const result = success(
+    await fixture.invoke('record-mux', {
+      ...started,
+      outputPath,
+      audioPath,
+      audioBitrate: '128k',
+      durationSec: 30
+    })
+  )
+  assert.deepEqual(result, { success: true, outputPath, fileSize: 1000, sizeCapped: true })
+  assert.deepEqual(encodeCalls, [
+    {
+      videoPath: fixture.calls[0].outputPath,
+      audioPath,
+      outputPath,
+      audioBitrate: '128k',
+      encoder: 'cpu',
+      videoBps: 414463,
+      durationSec: 30,
+      maxBytes: 2 * 1024 * 1024
+    }
+  ])
+})
+
+test('record mux without a duration estimate keeps the stream copy path', async (t) => {
+  const encodeCalls = []
+  t.mock.method(ffmpeg, 'apiEncodeVideoAudioToBitrate', async () => {
+    encodeCalls.push(1)
+  })
+  const fixture = await createFixture(t, {
+    targetSizeMb: 2,
+    hooks: {
+      create(entry) {
+        return writeFile(entry.outputPath, Buffer.alloc(8_000_000))
+      }
+    }
+  })
+  const muxModule = require('../../out-host/host/record/recordMux.js')
+  t.mock.method(muxModule, 'muxRecordVideo', async (options) => {
+    await writeFile(options.outputPath, await readFile(options.videoPath))
+    return { success: true, outputPath: options.outputPath, fileSize: 8_000_000 }
+  })
+  const directory = await fixture.files()
+  const outputPath = path.join(directory, 'copied.mp4')
+  const started = success(await fixture.invoke('record-start', dimensions))
+  success(await fixture.invoke('record-finish', started))
+  const result = success(
+    await fixture.invoke('record-mux', { ...started, outputPath, audioBitrate: '128k' })
+  )
+  assert.deepEqual(result, { success: true, outputPath, fileSize: 8_000_000 })
+  assert.equal(encodeCalls.length, 0)
 })
 
 for (const disconnect of [false, true]) {

@@ -41,6 +41,11 @@ const VideoSchema = z.object({
   /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
   fastFps: z.number().default(30),
   /**
+   * record 收尾成片体积上限（MiB）。收尾预估（录制视频 + 音轨）超出上限 2% 时，
+   * 按精确码率重编码视频压回上限（分辨率与时间戳不变）；0 = 不限制。
+   */
+  recordTargetSizeMb: z.number().default(0),
+  /**
    * 表演续演间隔（秒，默认 0 = 关闭续演）。角色动作播完后的行为：
    * - 0：保持动作结束时的姿势（不回落站立），之后只有呼吸与眨眼
    * - >0：按该间隔（±25% 抖动）再接一个同情绪族手势，间隔内保持当前姿态
@@ -211,6 +216,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_IDLE_CHAIN_GAP_SEC) {
     const v = parseFloat(env.MSS_IDLE_CHAIN_GAP_SEC)
     if (Number.isFinite(v) && v >= 0) config.video.idleChainGapSec = v
+  }
+  if (env.MSS_RECORD_TARGET_SIZE_MB) {
+    const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)
+    if (Number.isFinite(v) && v >= 0) config.video.recordTargetSizeMb = v
   }
 
   // render

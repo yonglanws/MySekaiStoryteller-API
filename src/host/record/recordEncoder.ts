@@ -285,13 +285,15 @@ function validateConfig(config: RecordEncodingConfig): void {
 }
 
 function videoArgs(config: RecordEncodingConfig, encoder: Encoder): string[] {
-  const filter =
-    config.inputWidth === config.width && config.inputHeight === config.height
-      ? []
-      : [
-          '-vf',
-          `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
-        ]
+  // 采集不大于配置输出时按采集尺寸直出：renderScale<1 是有意降像素换编码余量，
+  // 放大回配置分辨率不增加细节，只会按更大的画布虚增码率。
+  const passthrough = config.inputWidth <= config.width && config.inputHeight <= config.height
+  const filter = passthrough
+    ? []
+    : [
+        '-vf',
+        `scale=${config.width}:${config.height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${config.width}:${config.height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
+      ]
   return [
     ...filter,
     ...codecArgs(encoder, config.crf),

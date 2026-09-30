@@ -2082,7 +2082,9 @@ export default class VideoExportManager {
       id: recordSessionId,
       audioPath: audioFilePath,
       outputPath,
-      audioBitrate
+      audioBitrate,
+      // 体积上限（recordTargetSizeMb）预估用：时间轴总时长在录制前已知
+      durationSec: totalDurationMs / 1000
     })
     this.checkAborted()
     if (!result?.success)

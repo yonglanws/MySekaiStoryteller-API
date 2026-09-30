@@ -41,6 +41,9 @@ video:
                       # record = 实时采集，宿主并行编码并在末尾只合入音轨
                       # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4，
                       #          运行环境不支持时自动回退 record
+  recordTargetSizeMb: 0    # record 收尾成片体积上限 MiB（env: MSS_RECORD_TARGET_SIZE_MB）
+                           # 收尾预估（录制视频 + 音轨）超出上限 2% 时，按精确码率重编码
+                           # 视频压回上限（分辨率与时间戳不变）；0 = 不限制
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
 
   idleChainGapSec: 0       # 表演续演间隔秒数（0 = 关闭续演，默认）。
