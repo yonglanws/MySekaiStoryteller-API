@@ -5,19 +5,24 @@ import { tmpdir } from 'node:os'
 import { ILogObj, Logger } from 'tslog'
 import type { HostConfig } from '../config'
 import {
+  RecordSessionRegistry,
+  RecordSessionError,
+  type RecordSessionOptions
+} from '../record/recordSessions'
+import {
   apiConvertVideoWithCompression,
   apiMergeVideoAudioWithCompression,
   apiMuxVideoAudioCopy,
   apiCopyVideo,
-  apiEncodeVideoAudioToBitrate,
   encodeFramesToVideo,
-  parseBitrateToBps,
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
 interface BridgeDeps {
   logger: Logger<ILogObj>
   config: HostConfig
+  /** Optional host-only factory/timeout injection for deterministic bridge tests. */
+  recordSessionOptions?: RecordSessionOptions
 }
 
 /** 临时名随机后缀：避免同毫秒并发导出共用同一路径 */
@@ -35,6 +40,17 @@ function randomSuffix(): string {
 export function createBridgeRouter(deps: BridgeDeps): Router {
   const { logger, config } = deps
   const router = Router()
+  const recordSessions = new RecordSessionRegistry(
+    {
+      width: config.video.width,
+      height: config.video.height,
+      fps: config.video.fps,
+      crf: config.video.crf,
+      encoder: config.video.encoder as VideoEncoderChoice
+    },
+    config.render.workers,
+    deps.recordSessionOptions
+  )
 
   // ----- JSON invoke 通道 -----
 
@@ -42,15 +58,53 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     const channel = String(req.params.channel)
     const args = (Array.isArray(req.body) ? req.body : []) as unknown[]
 
+    const abort = new AbortController()
+    let startedId: string | undefined
+    const onDisconnect = (): void => {
+      if (res.writableFinished) return
+      abort.abort()
+      const id = startedId ?? (args[0] as { id?: unknown } | undefined)?.id
+      if (channel === 'electron:record-finish' || channel === 'electron:record-mux' || startedId) {
+        void recordSessions
+          .cancel(id)
+          .catch((error) => logger.error('[Bridge] record disconnect cleanup failed', error))
+      }
+    }
+    req.once('aborted', onDisconnect)
+    res.once('close', onDisconnect)
+    const detach = (): void => {
+      req.off('aborted', onDisconnect)
+      res.off('close', onDisconnect)
+    }
+    res.once('finish', detach)
+    res.once('close', detach)
+
     try {
-      const result = await handleInvoke(channel, args)
-      res.json({ ok: true, result })
+      let result: unknown
+      if (channel === 'electron:record-start') {
+        const payload = args[0] as { inputWidth?: unknown; inputHeight?: unknown } | undefined
+        const started = await recordSessions.start(
+          payload?.inputWidth,
+          payload?.inputHeight,
+          abort.signal
+        )
+        startedId = started.id
+        if (abort.signal.aborted) {
+          await recordSessions.cancel(startedId)
+          return
+        }
+        result = started
+      } else {
+        result = await handleInvoke(channel, args)
+      }
+      if (!res.destroyed) res.json({ ok: true, result })
     } catch (error) {
       logger.error(`[Bridge] invoke ${channel} failed`, error)
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
-      })
+      if (!res.destroyed)
+        res.status(error instanceof RecordSessionError ? error.statusCode : 500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
     }
   })
 
@@ -74,6 +128,28 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         if (!payload?.filePath) return null
         await fs.promises.rm(payload.filePath, { recursive: true, force: true })
         return null
+      }
+
+      case 'electron:record-finish': {
+        const payload = args[0] as { id?: unknown } | undefined
+        return await recordSessions.finish(payload?.id)
+      }
+
+      case 'electron:record-cancel': {
+        const payload = args[0] as { id?: unknown } | undefined
+        return await recordSessions.cancel(payload?.id)
+      }
+
+      case 'electron:record-mux': {
+        const payload = args[0] as
+          | {
+              id?: unknown
+              audioPath?: unknown
+              outputPath?: unknown
+              audioBitrate?: unknown
+            }
+          | undefined
+        return await recordSessions.mux(payload?.id, payload ?? {})
       }
 
       case 'electron:api-export-video-from-files': {
@@ -181,13 +257,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           audioPath?: string
           outputPath: string
           audioBitrate: string
-          /** true 时保留输入文件由调用方自行清理（record 流拷贝路径的回退需要） */
+          /** true 时保留输入文件由调用方自行清理（record 会在 finally 中取消 session） */
           keepInputs?: boolean
-          /**
-           * 体积上限（record 目标体积）。预估成片超出上限 2% 以上时改为按精确码率
-           * 重编码，否则照常流拷贝。durationSec 为音频混音用的时间轴总时长。
-           */
-          sizeCap?: { maxBytes: number; durationSec: number }
         }
         logger.info(
           `[Bridge] API remux: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
@@ -201,38 +272,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const hasAudio = !!payload.audioPath && fs.existsSync(payload.audioPath)
-          let cappedVideoBps = 0
-          const cap = payload.sizeCap
-          if (cap && cap.maxBytes > 0 && cap.durationSec > 0) {
-            const videoBytes = (await fs.promises.stat(payload.videoPath)).size
-            const audioBytes = hasAudio
-              ? (parseBitrateToBps(payload.audioBitrate) / 8) * cap.durationSec
-              : 0
-            const projected = videoBytes + audioBytes
-            if (projected > cap.maxBytes * 1.02) {
-              cappedVideoBps = Math.floor(
-                ((cap.maxBytes * 0.97 - audioBytes) * 8) / cap.durationSec
-              )
-              logger.info(
-                `[Bridge] API remux: projected ${(projected / 1024 / 1024).toFixed(2)} MB exceeds cap ` +
-                  `${(cap.maxBytes / 1024 / 1024).toFixed(2)} MB, re-encoding at ` +
-                  `${(cappedVideoBps / 1_000_000).toFixed(2)}Mbps`
-              )
-            }
-          }
-
-          if (cappedVideoBps >= 300_000) {
-            await apiEncodeVideoAudioToBitrate(
-              payload.videoPath,
-              hasAudio ? payload.audioPath : undefined,
-              payload.outputPath,
-              payload.audioBitrate,
-              config.video.encoder as VideoEncoderChoice,
-              cappedVideoBps,
-              cap!.durationSec,
-              cap!.maxBytes
-            )
-          } else if (hasAudio) {
+          if (hasAudio) {
             await apiMuxVideoAudioCopy(
               payload.videoPath,
               payload.audioPath!,
@@ -252,13 +292,16 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const outputSize = (await fs.promises.stat(payload.outputPath)).size
-          const sizeCapped = cappedVideoBps >= 300_000
           logger.info(
             `[Bridge] API remux: Video exported successfully: ${payload.outputPath}, ` +
-              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}` +
-              (sizeCapped ? ' (size-capped re-encode)' : '')
+              `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
-          return { success: true, outputPath: payload.outputPath, fileSize: outputSize, sizeCapped }
+          return {
+            success: true,
+            outputPath: payload.outputPath,
+            fileSize: outputSize,
+            sizeCapped: false
+          }
         } catch (error) {
           logger.error('[Bridge] API remux: Failed to remux video from files', error)
           return {
@@ -391,15 +434,31 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return
       }
 
+      const onDisconnect = (): void => {
+        if (res.writableFinished || channel !== 'electron:record-chunk') return
+        const id = (args[0] as { id?: unknown } | undefined)?.id
+        void recordSessions
+          .cancel(id)
+          .catch((error) => logger.error('[Bridge] record disconnect cleanup failed', error))
+      }
+      req.once('aborted', onDisconnect)
+      res.once('close', onDisconnect)
+      const detach = (): void => {
+        req.off('aborted', onDisconnect)
+        res.off('close', onDisconnect)
+      }
+      res.once('finish', detach)
+      res.once('close', detach)
       try {
         const result = await handleBinaryInvoke(channel, args, req.body as Buffer)
-        res.json({ ok: true, result })
+        if (!res.destroyed) res.json({ ok: true, result })
       } catch (error) {
         logger.error(`[Bridge] bin ${channel} failed`, error)
-        res.status(500).json({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error)
-        })
+        if (!res.destroyed)
+          res.status(error instanceof RecordSessionError ? error.statusCode : 500).json({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          })
       }
     }
   )
@@ -410,6 +469,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     body: Buffer
   ): Promise<unknown> {
     switch (channel) {
+      case 'electron:record-chunk': {
+        const payload = args[0] as { id?: unknown } | undefined
+        return await recordSessions.append(payload?.id, body)
+      }
+
       case 'electron:append-to-file': {
         const payload = args[0] as { filePath: string }
         await fs.promises.appendFile(payload.filePath, body)

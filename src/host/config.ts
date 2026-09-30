@@ -40,42 +40,6 @@ const VideoSchema = z.object({
   exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto'),
   /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
   fastFps: z.number().default(30),
-  /** record 模式 MediaRecorder 视频码率（bps） */
-  recordBitrate: z.number().default(8_000_000),
-  /**
-   * record 模式收尾合成方式：
-   * - off（默认）：浏览器录制 webm，宿主全量重编码合流（现行行为）
-   * - auto：浏览器支持时直录 h264/mp4，宿主 -c:v copy 流拷贝合流；
-   *         任一环节失败自动回退 off 的路径
-   * - on：强制 auto 行为（探测不支持时仍回退）
-   */
-  recordStreamCopy: z.enum(['auto', 'on', 'off']).default('off'),
-  /**
-   * 流拷贝路径的目标成片体积（MB）。>0 时按录制前估算的时长反推视频码率
-   * （扣除音轨、留 15% 余量，下限 600kbps，上限 recordBitrate），
-   * 使不同长度的故事都落在目标附近；0 = 不启用，按 recordBitrate 固定码率。
-   * 仅在 recordStreamCopy 为 on/auto 且浏览器支持 mp4 录制时生效。
-   */
-  recordTargetSizeMb: z.number().default(0),
-  /**
-   * 目标体积反推码率的过头系数（1-2，默认 1）。浏览器编码器（VBR）在简单
-   * 画面上的实际产出常低于请求码率；按系数抬高请求，让复杂画面分到更多
-   * 比特。编码器全额兑现导致预估成片超出目标时，收尾改为按精确码率重编码
-   * 压回目标（多一次硬件编码），因此成片不会明显超过 recordTargetSizeMb。
-   */
-  recordBitrateOvershoot: z.number().default(1),
-  /**
-   * record 模式关键帧间隔（秒，0 = 浏览器默认，Chrome 约每 100 帧一个）。
-   * 录制编码是 Constrained Baseline，I 帧约为 P 帧的 10 倍大，占成片字节一成以上；
-   * 拉长间隔后省下的比特在同码率下留给 P 帧。代价是播放器拖动定位变粗。
-   */
-  recordKeyframeIntervalSec: z.number().default(0),
-  /**
-   * record 模式 MediaRecorder 采集帧率上限（0 = 跟随 video.fps）。
-   * 编码器跟不上时采集帧率本就低于设定值，调小只是把既成事实变显式：
-   * 编码量随之下降，录制期间 CPU/GPU 争缓减少。低于编码器实际能力没有意义。
-   */
-  recordCaptureFps: z.number().default(0),
   /**
    * 表演续演间隔（秒，默认 0 = 关闭续演）。角色动作播完后的行为：
    * - 0：保持动作结束时的姿势（不回落站立），之后只有呼吸与眨眼
@@ -243,30 +207,6 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_FAST_FPS) {
     const v = parseInt(env.MSS_FAST_FPS, 10)
     if (Number.isFinite(v) && v >= 1) config.video.fastFps = v
-  }
-  if (env.MSS_RECORD_BITRATE) {
-    const v = parseInt(env.MSS_RECORD_BITRATE, 10)
-    if (Number.isFinite(v) && v > 0) config.video.recordBitrate = v
-  }
-  if (env.MSS_RECORD_STREAM_COPY) {
-    const v = env.MSS_RECORD_STREAM_COPY.toLowerCase()
-    if (v === 'auto' || v === 'on' || v === 'off') config.video.recordStreamCopy = v
-  }
-  if (env.MSS_RECORD_TARGET_SIZE_MB) {
-    const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)
-    if (Number.isFinite(v) && v >= 0) config.video.recordTargetSizeMb = v
-  }
-  if (env.MSS_RECORD_CAPTURE_FPS) {
-    const v = parseInt(env.MSS_RECORD_CAPTURE_FPS, 10)
-    if (Number.isFinite(v) && v >= 0) config.video.recordCaptureFps = v
-  }
-  if (env.MSS_RECORD_BITRATE_OVERSHOOT) {
-    const v = parseFloat(env.MSS_RECORD_BITRATE_OVERSHOOT)
-    if (Number.isFinite(v) && v >= 1 && v <= 2) config.video.recordBitrateOvershoot = v
-  }
-  if (env.MSS_RECORD_KEYFRAME_INTERVAL_SEC) {
-    const v = parseFloat(env.MSS_RECORD_KEYFRAME_INTERVAL_SEC)
-    if (Number.isFinite(v) && v >= 0) config.video.recordKeyframeIntervalSec = v
   }
   if (env.MSS_IDLE_CHAIN_GAP_SEC) {
     const v = parseFloat(env.MSS_IDLE_CHAIN_GAP_SEC)

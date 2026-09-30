@@ -22,19 +22,6 @@ export interface VideoExportOptions {
    * fast 模式页内编码路径：auto（默认，按 GPU/平台探测）| webcodecs | frames（JPEG 帧序列交 ffmpeg）
    */
   exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
-  /** record 模式 MediaRecorder 视频码率（bps），缺省 8Mbps */
-  recordBitrate?: number
-  /** record 模式收尾：off（默认，webm + 全量重编码）| auto/on（h264/mp4 直录 + 流拷贝，失败回退重编码） */
-  recordStreamCopy?: 'auto' | 'on' | 'off'
-  /** 流拷贝路径的目标成片体积（MB）；>0 时按估算时长反推视频码率，0 = 按 recordBitrate */
-  recordTargetSizeMb?: number
-  /** 目标体积反推码率的过头系数（1-2，默认 1）：浏览器编码器在简单画面上
-   *  产出常低于请求，抬高请求让复杂画面分到更多比特；体积仍受目标值约束 */
-  recordBitrateOvershoot?: number
-  /** record 模式关键帧间隔（秒）；0/缺省 = 浏览器默认（约每 100 帧） */
-  recordKeyframeIntervalSec?: number
-  /** record 模式采集帧率上限；0/缺省 = 跟随 fps。调小降低编码负载，输出帧率随之变化 */
-  recordCaptureFps?: number
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

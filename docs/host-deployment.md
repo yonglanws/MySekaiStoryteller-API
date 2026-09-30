@@ -29,7 +29,7 @@ Node 20 宿主（单进程 + N 个无头浏览器渲染工作进程）
 `POST /api/v1/export` → 队列（并发上限 = `render.workers`，默认 2）→ 渲染页面按 `video.exportMode` 出片
 → Web Audio 混音 WAV → ffmpeg 合流 MP4 → `downloadUrl` 供下载。
 
-- `record`（默认）：MediaRecorder 墙钟录 WebM（分块回传写盘）→ ffmpeg 二次转码/合流
+- `record`（默认）：MediaRecorder 实时采集并分块回传，宿主同步编码为 H.264 MP4；结束后只合入音轨
 - `fast`：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编 H.264 → ffmpeg `-c:v copy` 仅 remux；失败自动回退 `record`
 AstrBot 插件（[astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst)，
 独立仓库）**零改动兼容**。
@@ -105,11 +105,20 @@ Windows 没有 `cp` 时用资源管理器复制，或 `copy config.example.yaml 
 | 节       | 内容                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------- |
 | `server` | 端口、监听地址                                                                               |
-| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto / nvidia / amd / intel / libx264）、**导出管线**（`exportMode`: record / fast） |
+| `video`  | 分辨率、帧率、CRF、渲染超采样、音频码率、**编码器**（auto / nvidia / amd / intel / libx264）、**导出管线**（`exportMode`: record / fast）；record 只使用这些通用视频设置 |
 | `render` | worker 数、页面回收周期、浏览器探测顺序、附加 Chrome 参数、Linux ANGLE 开关                  |
 | `paths`  | 输出目录（apifile）、资源根（resources）、webrenderer 产物目录                               |
 | `tts`    | GPT-SoVITS 地址、启停、全局/角色参考音频与权重                                               |
 | `bgm`    | 启停、BGM 路径（相对资源根，如 `audio/bgm/bg1.mp3`）、音量                                   |
+
+record 使用通用的 `width`、`height`、`fps`、`crf`、`encoder` 控制输出，浏览器中间采集码率和
+关键帧间隔由程序自动选择。硬件编码器先实际试编码，失败回退 CPU；正常情况下压缩与录制重叠，
+收尾只等待剩余编码并合入音轨。实时录制无法快于故事播放本身，慢 TTS、CPU 或 GPU 仍会增加耗时。
+
+升级时可删除旧的 `recordBitrate`、`recordStreamCopy`、`recordTargetSizeMb`、`recordBitrateOvershoot`、
+`recordKeyframeIntervalSec`、`recordCaptureFps` 及对应 `MSS_RECORD_*` 环境变量；它们不再生效。
+不再按目标文件大小挤压长故事的码率，也没有固定体积上限。`crf` 越小画质越高、体积越大；
+`renderScale < 1` 会让画面变软，即使最终输出尺寸不变，丢失的细节也无法靠提高码率恢复。
 
 环境变量可覆盖同名配置（适合 systemd / 任务计划 / launchd 注入），见下表。
 

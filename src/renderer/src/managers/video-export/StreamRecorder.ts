@@ -49,12 +49,18 @@ export class StreamRecorder {
   private hasRecordingError: boolean = false
   private recordingError: Error | null = null
   private streamingToDisk: boolean = false
+  private streamingToSink: boolean = false
   private tempFilePath: string | null = null
   private pendingWritePromises: Promise<void>[] = []
   /** 分块写盘串行链：并发 appendFile 的完成顺序不保证，乱序会静默损坏 webm */
   private writeChain: Promise<void> = Promise.resolve()
   private totalBytesWritten: number = 0
   private lastMimeType: string | null = null
+  private chunkSink: ((data: ArrayBuffer) => Promise<void>) | null = null
+  private sinkError: Error | null = null
+  private pendingSinkBytes = 0
+  private disposed = false
+  private static readonly MAX_PENDING_SINK_BYTES = 64 * 1024 * 1024
 
   constructor(config: StreamRecorderConfig) {
     this.config = config
@@ -65,56 +71,39 @@ export class StreamRecorder {
     }
   }
 
-  private getSupportedMimeType(): string {
-    // 优先使用高性能编码器。mp4/h264 仅在 preferMp4 时前置——
-    // Chrome 的 MediaRecorder 对 webm 容器不支持 h264，该类型通常不可用。
-    const mp4Types = ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1.640028', 'video/mp4']
+  private getSupportedMimeTypes(): string[] {
+    const mp4Types = ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.42E01E', 'video/mp4']
     const webmTypes = [
       'video/webm;codecs=h264',
-      'video/webm;codecs=vp9',
       'video/webm;codecs=vp8',
+      'video/webm;codecs=vp9',
       'video/webm'
     ]
-    const types = this.config.preferMp4 ? [...mp4Types, ...webmTypes] : [...webmTypes, ...mp4Types]
-
-    for (const type of types) {
-      if (MediaRecorder.isTypeSupported(type)) {
-        this.logger.info(`Using mime type: ${type}`)
-        return type
-      }
-    }
-
-    throw new Error('No supported mime type found for MediaRecorder')
-  }
-
-  /**
-   * 浏览器是否支持 h264/mp4 录制（流拷贝合流路径的前提）。
-   * 与 getSupportedMimeType 的 mp4 候选一致；录制前用它决定
-   * 「按目标体积反推码率」是否安全（不支持时会回退 webm + 重编码，
-   * 低码率中间件会实打实损害最终画质）。
-   */
-  static isMp4RecordingSupported(): boolean {
-    return (
-      MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.42E01E') ||
-      MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.640028') ||
-      MediaRecorder.isTypeSupported('video/mp4')
-    )
-  }
-
-  /** 录制开始前调整视频码率（按目标体积反推时用） */
-  setVideoBitrate(bitrate: number): void {
-    if (this.isRecording) {
-      this.logger.warn('Cannot change bitrate while recording')
-      return
-    }
-    this.config.bitrate = bitrate
+    const types = this.config.mimeType
+      ? [this.config.mimeType]
+      : this.config.preferMp4
+        ? [...mp4Types, ...webmTypes]
+        : [...webmTypes, ...mp4Types]
+    return types.filter((type) => MediaRecorder.isTypeSupported(type))
   }
 
   startRecording(canvas: HTMLCanvasElement): void {
-    if (this.isRecording) {
-      throw new Error('Recording is already in progress')
+    if (this.isRecording) throw new Error('Recording is already in progress')
+    this.disposed = false
+    let lastError: unknown
+    for (const mimeType of this.getSupportedMimeTypes()) {
+      try {
+        this.startRecordingWithType(canvas, mimeType)
+        return
+      } catch (error) {
+        lastError = error
+        this.logger.warn(`Recorder could not start with ${mimeType}, trying next codec`, error)
+      }
     }
+    throw lastError ?? new Error('No supported mime type found for MediaRecorder')
+  }
 
+  private startRecordingWithType(canvas: HTMLCanvasElement, mimeType: string): void {
     this.hasRecordingError = false
     this.recordingError = null
 
@@ -141,7 +130,6 @@ export class StreamRecorder {
 
     this.chunkIndex = 0
 
-    const mimeType = this.config.mimeType || this.getSupportedMimeType()
     const timeslice = this.config.timeslice || 100
     this.lastMimeType = mimeType
 
@@ -172,7 +160,9 @@ export class StreamRecorder {
 
     this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
       if (event.data.size > 0) {
-        if (this.streamingToDisk) {
+        if (this.chunkSink) {
+          void this.writeChunkToSink(event.data)
+        } else if (this.streamingToDisk) {
           this.writeChunkToDisk(event.data)
         } else {
           pendingChunks.push(event.data)
@@ -231,6 +221,80 @@ export class StreamRecorder {
       bitrate: this.config.bitrate,
       initialCapacity
     })
+  }
+
+  private async writeChunkToSink(chunk: Blob): Promise<void> {
+    const sink = this.chunkSink
+    if (!sink || this.disposed || this.sinkError) return
+    if (this.pendingSinkBytes + chunk.size > StreamRecorder.MAX_PENDING_SINK_BYTES) {
+      this.sinkError = new Error('Record encoder backlog exceeded 64 MiB; reduce fps or resolution')
+      this.onErrorCallback?.(this.sinkError)
+      return
+    }
+    this.pendingSinkBytes += chunk.size
+    this.writeChain = this.writeChain.then(async () => {
+      try {
+        if (this.disposed || this.sinkError) return
+        await sink(await chunk.arrayBuffer())
+        this.totalBytesWritten += chunk.size
+        this.chunkIndex++
+      } catch (error) {
+        this.sinkError = error instanceof Error ? error : new Error(String(error))
+        this.onErrorCallback?.(this.sinkError)
+      } finally {
+        this.pendingSinkBytes -= chunk.size
+      }
+    })
+    await this.writeChain
+  }
+
+  startRecordingToSink(
+    canvas: HTMLCanvasElement,
+    sink: (data: ArrayBuffer) => Promise<void>
+  ): void {
+    this.chunkSink = sink
+    this.streamingToSink = true
+    this.sinkError = null
+    this.totalBytesWritten = 0
+    this.writeChain = Promise.resolve()
+    this.startRecording(canvas)
+  }
+
+  async stopRecordingToSink(): Promise<void> {
+    if (!this.streamingToSink || !this.mediaRecorder) throw new Error('Not recording to a sink')
+    try {
+      if (this.mediaRecorder.state !== 'inactive') {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('MediaRecorder stop timed out')), 15_000)
+          this.mediaRecorder!.onstop = () => {
+            clearTimeout(timer)
+            resolve()
+          }
+          this.mediaRecorder!.onerror = () => {
+            clearTimeout(timer)
+            reject(new Error('MediaRecorder failed while stopping'))
+          }
+          try {
+            this.mediaRecorder!.stop()
+          } catch (error) {
+            clearTimeout(timer)
+            reject(error)
+          }
+        })
+      }
+      // MediaRecorder dispatches its last dataavailable before stop.
+      await this.writeChain
+      if (this.sinkError) throw this.sinkError
+      if (this.recordingError) throw this.recordingError
+      if (this.totalBytesWritten === 0) throw new Error('Recording produced no output data')
+    } finally {
+      this.isRecording = false
+      this.streamingToSink = false
+      this.chunkSink = null
+      this.stream?.getTracks().forEach((track) => track.stop())
+      this.stream = null
+      this.mediaRecorder = null
+    }
   }
 
   private processPendingChunks(chunks: Blob[]): void {
@@ -666,6 +730,9 @@ export class StreamRecorder {
   }
 
   dispose(): void {
+    this.disposed = true
+    this.chunkSink = null
+    if (this.mediaRecorder) this.mediaRecorder.ondataavailable = null
     if (this.stream) {
       this.stream.getTracks().forEach((track) => track.stop())
       this.stream = null
@@ -687,7 +754,10 @@ export class StreamRecorder {
     this.hasRecordingError = false
     this.recordingError = null
     this.streamingToDisk = false
+    this.streamingToSink = false
     this.tempFilePath = null
+    this.sinkError = null
+    this.pendingSinkBytes = 0
     this.pendingWritePromises = []
     this.writeChain = Promise.resolve()
     this.totalBytesWritten = 0
