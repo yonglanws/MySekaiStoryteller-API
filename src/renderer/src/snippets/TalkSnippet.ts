@@ -4,7 +4,8 @@ import { Cubism2InternalModel, Cubism4InternalModel } from 'pixi-live2d-display-
 import AdvancedModel from '../model/AdvancedModel'
 import type { CharacterAction } from '../../../common/types/Story'
 import { scheduleCharacterActions } from '../utils/CharacterActionScheduler'
-import { sampleLipSync, sampleTextMouth } from '../utils/LipSyncEnvelope'
+import { sampleLipSync } from '../utils/LipSyncEnvelope'
+import { calculateTalkDurationMs } from '../utils/TalkTiming'
 
 interface TalkData {
   type: 'Talk'
@@ -13,6 +14,7 @@ interface TalkData {
   data: {
     speaker: string
     content: string
+    ttsText?: string
     modelId: number
     voice: string
     motion?: string
@@ -39,17 +41,22 @@ export default class TalkSnippet extends BaseSnippet {
     }
   }
 
-  private startMouthAnimation(model: AdvancedModel, text: string, durationMs: number): void {
+  private startMouthAnimation(model: AdvancedModel): void {
     this.stopMouthAnimation()
-    const startTime = this.app.currentTalkStartedAtMs || performance.now()
     const envelope = this.app.currentTalkLipSync
+    if (
+      !envelope?.values.length ||
+      !Number.isFinite(envelope.durationMs) ||
+      envelope.durationMs <= 0 ||
+      model.destroyed ||
+      model.actionSignal?.aborted
+    )
+      return
+    const startTime = this.app.currentTalkStartedAtMs
     const update = (): void => {
       if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
       const elapsed = performance.now() - startTime
-      this.setMouthParam(
-        model,
-        envelope ? sampleLipSync(envelope, elapsed) : sampleTextMouth(text, elapsed, durationMs)
-      )
+      this.setMouthParam(model, sampleLipSync(envelope, elapsed))
     }
     // The dependency emits this event after physics but omits it from its declaration.
     const events = model.internalModel as unknown as {
@@ -72,18 +79,11 @@ export default class TalkSnippet extends BaseSnippet {
     this.mouthCleanup = null
   }
 
-  private resolveExportTalkDurationMs(originalDelayMs: number): number {
-    const timelineMs =
-      this.app.lastSnippetActualDurationMs > 0
-        ? this.app.lastSnippetActualDurationMs
-        : originalDelayMs
+  private resolveExportTalkDurationMs(): number {
+    const timelineMs = this.app.lastSnippetActualDurationMs
+    if (Number.isFinite(timelineMs) && timelineMs > 0) return timelineMs
     const talkData = this.data as unknown as TalkData
-    const contentLength = talkData.data?.content?.length ?? 0
-    const charBasedMinMs = Math.max(
-      contentLength * 80 + (contentLength * 143) / 2 + 1200,
-      1800
-    )
-    return Math.max(timelineMs, charBasedMinMs)
+    return calculateTalkDurationMs(talkData.data.content, 0, talkData.data.ttsText)
   }
 
   protected async handleSnippet(): Promise<void> {
@@ -94,7 +94,7 @@ export default class TalkSnippet extends BaseSnippet {
     if (signal?.aborted) return
     const snippetStartTime = performance.now()
     this.app.currentTalkStartedAtMs = snippetStartTime
-    const targetDurationMs = this.resolveExportTalkDurationMs(talkData.delay * 1000)
+    const targetDurationMs = this.resolveExportTalkDurationMs()
     const hasModel = talkData.data.modelId !== -1
     const actions: CharacterAction[] = []
     if (hasModel && (talkData.data.motion || talkData.data.facial)) {
@@ -106,16 +106,21 @@ export default class TalkSnippet extends BaseSnippet {
       })
     }
     actions.push(...(talkData.data.actions ?? []))
-    const sequence = scheduleCharacterActions(actions, targetDurationMs, {
-      isVisible: (id) => this.app.layerModel.isModelVisible(id),
-      apply: (action, actionSignal) =>
-        this.app.getModelById(action.modelId).applyCharacterAction(
-          action,
-          actionSignal,
-          () => this.app.layerModel.isModelVisible(action.modelId)
-        ),
-      onError: (error) => this.logger.warn('Talk character action failed', error)
-    }, signal)
+    const sequence = scheduleCharacterActions(
+      actions,
+      targetDurationMs,
+      {
+        isVisible: (id) => this.app.layerModel.isModelVisible(id),
+        apply: (action, actionSignal) =>
+          this.app
+            .getModelById(action.modelId)
+            .applyCharacterAction(action, actionSignal, () =>
+              this.app.layerModel.isModelVisible(action.modelId)
+            ),
+        onError: (error) => this.logger.warn('Talk character action failed', error)
+      },
+      signal
+    )
     const stopMouth = (): void => this.stopMouthAnimation()
     signal?.addEventListener('abort', stopMouth, { once: true })
 
@@ -123,19 +128,20 @@ export default class TalkSnippet extends BaseSnippet {
       this.app.layerUI.resetTalkData()
       this.app.layerUI.setTalkData(talkData.data.speaker, talkData.data.content)
       if (isExporting && hasModel) {
-        this.startMouthAnimation(
-          this.app.getModelById(talkData.data.modelId),
-          talkData.data.content,
-          targetDurationMs
-        )
+        this.startMouthAnimation(this.app.getModelById(talkData.data.modelId))
       }
       if (!this.app.layerUI.UITalkShowed) await this.app.layerUI.showTextBackground()
       const waits: Promise<unknown>[] = [this.app.layerUI.startDisplayContent()]
       if (hasModel && talkData.data.voice && !isExporting && !this.app.ttsManager?.isTTSEnabled()) {
         const model = this.app.getModelById(talkData.data.modelId)
-        waits.push(new Promise<void>((resolve) => {
-          model.speak(this.app.getVoiceByName(talkData.data.voice), { volume: 0.5, onFinish: resolve })
-        }))
+        waits.push(
+          new Promise<void>((resolve) => {
+            model.speak(this.app.getVoiceByName(talkData.data.voice), {
+              volume: 0.5,
+              onFinish: resolve
+            })
+          })
+        )
       }
       await Promise.all(waits)
       if (isExporting) {
