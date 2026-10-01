@@ -23,6 +23,12 @@ export interface CatalogImage {
   description: string
 }
 
+export interface CatalogBgm {
+  file: string
+  name: string
+  description: string
+}
+
 export interface ResourceCatalogData {
   models: CatalogModel[]
   images: string[]
@@ -30,6 +36,8 @@ export interface ResourceCatalogData {
   imageDetails: CatalogImage[]
   voices: string[]
   bgm: string[]
+  /** 带描述的 BGM 清单（audio/bgm/bgm.yaml 登记时供 AI 了解可选项；未登记时为空） */
+  bgmDetails: CatalogBgm[]
 }
 
 interface ModelManifest {
@@ -43,6 +51,14 @@ interface ModelManifest {
 
 interface ImageManifest {
   images?: Array<{
+    file?: string
+    name?: string
+    description?: string
+  }>
+}
+
+interface BgmManifest {
+  bgm?: Array<{
     file?: string
     name?: string
     description?: string
@@ -97,7 +113,7 @@ export class ResourceCatalog {
       if (this.cache) {
         return this.cache
       }
-      return { models: [], images: [], imageDetails: [], voices: [], bgm: [] }
+      return { models: [], images: [], imageDetails: [], voices: [], bgm: [], bgmDetails: [] }
     }
   }
 
@@ -163,14 +179,53 @@ export class ResourceCatalog {
 
     const imageFiles = listFiles('images', IMAGE_EXTENSIONS)
     const imageDetails = this.loadImageDetails(resourcesDir, imageFiles)
+    const bgmFiles = listFiles('audio/bgm', AUDIO_EXTENSIONS)
+    const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
 
     return {
       models,
       images: imageFiles,
       imageDetails,
       voices: listFiles('voices', AUDIO_EXTENSIONS),
-      bgm: listFiles('audio/bgm', AUDIO_EXTENSIONS)
+      bgm: bgmFiles,
+      bgmDetails
     }
+  }
+
+  /**
+   * 读取 BGM 清单（audio/bgm/bgm.yaml）。返回带描述的曲目列表，
+   * 只保留在磁盘上真实存在的文件；未登记或格式非法时返回空列表。
+   */
+  private loadBgmDetails(resourcesDir: string, bgmFiles: string[]): CatalogBgm[] {
+    const manifestPath = path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml')
+    if (!fs.existsSync(manifestPath)) {
+      return []
+    }
+
+    let manifest: BgmManifest
+    try {
+      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as BgmManifest
+    } catch (err) {
+      this.logger.warn('[Catalog] Failed to parse audio/bgm/bgm.yaml', err)
+      return []
+    }
+
+    const known = new Set(bgmFiles)
+    const details: CatalogBgm[] = []
+    for (const entry of manifest.bgm ?? []) {
+      const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
+      if (!file) continue
+      if (!known.has(file)) {
+        this.logger.warn(`[Catalog] bgm.yaml entry missing on disk, skipped: ${file}`)
+        continue
+      }
+      details.push({
+        file,
+        name: (entry.name || file).trim(),
+        description: (entry.description || '').trim()
+      })
+    }
+    return details
   }
 
   /**

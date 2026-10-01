@@ -1,12 +1,31 @@
-# BGM 设置（示例）—— 独立配置文件
+# BGM 清单与默认设置（示例）—— 独立配置文件
 #
 # 用法：把本文件复制为同目录下的 bgm.yaml 后修改（bgm.yaml 不入库）。
 # 改完重启宿主生效；bgm.yaml 不存在时，宿主回落 config.yaml 的 bgm 节（同样三个字段）。
 #
-#   enabled  导出时是否混入 BGM
-#   path     BGM 路径：相对资源根（resources/）的路径，也可用绝对路径或 http(s) URL
-#   volume   音量 0.0 - 1.0
+# 本文件同时承担两件事：
+#   1. 全局默认 BGM（enabled/path/volume）：导出时混入的背景音乐（当前行为）
+#   2. 清单（bgm: 数组）：带描述的曲目登记，/api/v1/resources 返回给插件
+#
+# 字段说明：
+#   enabled     导出时是否混入 BGM
+#   path        全局默认 BGM 路径：相对资源根（resources/），也可绝对路径或 http(s) URL
+#   volume      音量 0.0 - 1.0
+#   bgm[].file        相对 resources/audio/bgm/ 的文件名；必须与磁盘文件名完全一致
+#   bgm[].name        曲名
+#   bgm[].description 曲风 / 情绪 / 适用场景，供 AI 按剧情氛围感知可选项
+#
+# 磁盘上有、清单未登记的曲目仍可被引用，但提示词里不会列出；
+# 清单有、磁盘没有的条目会被宿主忽略并在日志中警告。
 
 enabled: true
 path: audio/bgm/bg1.mp3
 volume: 0.2
+
+bgm:
+  - file: bg1.mp3
+    name: 默认轻音乐
+    description: 轻缓的居家背景音乐，适合日常闲聊、温馨、轻松的剧情
+  # - file: bg2.ogg
+  #   name: 感伤钢琴曲
+  #   description: 钢琴独奏，慢板，适合离别、回忆、释然后的寂静
