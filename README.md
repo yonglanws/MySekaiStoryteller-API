@@ -62,7 +62,7 @@ npm start
 curl http://127.0.0.1:9881/api/v1/health
 ```
 
-`renderPool.webglRenderers` 应显示真实 GPU 名称；若出现 `SwiftShader` / `llvmpipe`，见 [故障排除](doc/troubleshooting.md
+`renderPool.webglRenderers` 应显示真实 GPU 名称；若出现 `SwiftShader` / `llvmpipe`，见 [故障排除](doc/troubleshooting.md)
 
 常驻运行、平台差异与环境变量见 [部署指南](doc/host-deployment.md)。
 
