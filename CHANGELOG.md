@@ -27,7 +27,7 @@
   BGM 设置独立到 `resources/audio/bgm/bgm.yaml`
 - 测试：`npm test` / `test:pool` / `test:config`（`npm run test:all` 共 29 项），
   无需宿主、浏览器或模型资源即可运行
-- 部署文档 [docs/host-deployment.md](docs/host-deployment.md)：平台差异、环境变量、
+- 部署文档 [doc/host-deployment.md](doc/host-deployment.md)：平台差异、环境变量、
   systemd / Windows / macOS 常驻方式与 GPU 排障
 
 ### Fixed
