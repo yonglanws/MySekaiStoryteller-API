@@ -23,6 +23,7 @@
 ## 项目简介
 
 接收 `*.sekai-story.json` 剧本，通过 HTTP API 渲染并导出 Project SEKAI 风格的 Live2D MP4 视频。
+
 不依赖 Electron 或桌面环境，支持 Windows / Linux / macOS；配合官方 AstrBot 插件，可自动生成剧本并向 QQ / Telegram 发送视频。
 
 - **无头渲染**：PixiJS + Live2D，运行于 Playwright 管理的 Chrome / Edge 渲染池。
@@ -61,12 +62,14 @@ npm start
 curl http://127.0.0.1:9881/api/v1/health
 ```
 
-`renderPool.webglRenderers` 应显示真实 GPU 名称；若出现 `SwiftShader` / `llvmpipe`，见 [故障排除](doc/troubleshooting.md)。
+`renderPool.webglRenderers` 应显示真实 GPU 名称；若出现 `SwiftShader` / `llvmpipe`，见 [故障排除](doc/troubleshooting.md
+
 常驻运行、平台差异与环境变量见 [部署指南](doc/host-deployment.md)。
 
 ## API 接口
 
 默认地址为 `http://127.0.0.1:9881`。准备好符合 [故事文件格式](doc/story-format.md) 的剧本后提交导出；
+
 下面的文件名仅为示例，请替换为自己的剧本路径：
 
 ```bash
@@ -77,6 +80,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 ```
 
 请求会等待导出结果，成功后返回 `downloadUrl`。`timeout` 包含排队时间，客户端断连或超时会取消任务。
+
 完整端点、参数与任务行为见 [API 参考](doc/api.md)。
 
 > [!WARNING]
@@ -97,6 +101,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 ## 相关内容
 
 - [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) —— 官方 AstrBot 插件：AI 剧本生成、队列调度与机器人视频回传，通过 HTTP API 与本宿主交互。
+- 
 - [更新日志](CHANGELOG.md) —— 版本变更记录。
 
 ## 许可证
