@@ -101,7 +101,6 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 ## 相关内容
 
 - [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) —— 官方 AstrBot 插件：AI 剧本生成、队列调度与机器人视频回传，通过 HTTP API 与本宿主交互。
-- 
 - [更新日志](CHANGELOG.md) —— 版本变更记录。
 
 ## 许可证
