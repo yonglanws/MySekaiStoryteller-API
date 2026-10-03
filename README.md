@@ -18,7 +18,7 @@
 > 如需桌面编辑器，请访问原项目。
 > 感谢原作者 [GuangChen2333](https://github.com/GuangChen2333) 与 [Untitled-Story](https://github.com/Untitled-Story) 组织。
 
-[示例成片](https://share.fnnas.net/s/57aec1969e1e420996)（由 DeepSeek V4.1 Flash & [AstrBot 插件](https://github.com/yonglanws/astrbot_plugin_msst) 一句话生成）
+[示例成片 (2026-9-20)](https://share.fnnas.net/s/7cefbd92baf04955b3)（由 DeepSeek V4.1 Flash & [AstrBot 插件](https://github.com/yonglanws/astrbot_plugin_msst) 一句话生成）
 
 ## 项目简介
 
@@ -48,7 +48,6 @@ cp config.example.yaml config.yaml
 ```
 
 编辑 `config.yaml`，并按 [资源与音频配置](doc/resources.md) 放置模型、背景等资源及清单。
-
 **仓库不附带渲染资源或示例剧本**；资源根默认为 `resources/`，可通过 `paths.resources` 或 `MSS_RESOURCE_DIR` 修改。
 
 ```bash
