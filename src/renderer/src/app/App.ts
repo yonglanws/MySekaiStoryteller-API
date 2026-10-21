@@ -255,6 +255,7 @@ export class App {
             exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
             fastFps?: number
             idleChainGapSec?: number
+            ttsMode?: 'serial' | 'concurrent'
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -340,6 +341,7 @@ export class App {
       exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
       fastFps?: number
       idleChainGapSec?: number
+      ttsMode?: 'serial' | 'concurrent'
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig,
@@ -398,6 +400,7 @@ export class App {
       exportBitrate: videoConfig.exportBitrate,
       exportFastEncoder: videoConfig.exportFastEncoder,
       fastFps: videoConfig.fastFps,
+      ttsMode: videoConfig.ttsMode,
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

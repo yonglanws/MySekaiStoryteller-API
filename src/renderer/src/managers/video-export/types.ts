@@ -22,6 +22,11 @@ export interface VideoExportOptions {
    * fast 模式页内编码路径：auto（默认，按 GPU/平台探测）| webcodecs | frames（JPEG 帧序列交 ffmpeg）
    */
   exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
+  /**
+   * TTS 与渲染调度：serial（默认）= 先合成完全部语音再开始录制/渲染；
+   * concurrent = 边渲染边合成，总耗时更短但会与渲染争抢 CPU/GPU
+   */
+  ttsMode?: 'serial' | 'concurrent'
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

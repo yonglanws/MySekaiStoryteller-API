@@ -427,9 +427,16 @@ export default class VideoExportManager {
       }
     >()
 
+    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
     if (ttsEnabled) {
-      this.logger.info('Concurrent mode: Starting TTS pipeline in background')
-      if (exportStatus) exportStatus.textContent = '启动并发语音合成…'
+      this.logger.info(
+        serialTts
+          ? 'Serial mode: Synthesizing all TTS before recording'
+          : 'Concurrent mode: Starting TTS pipeline in background'
+      )
+      if (exportStatus) {
+        exportStatus.textContent = serialTts ? '正在合成语音…' : '启动并发语音合成…'
+      }
 
       timeline = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
       this.app.ttsManager.setTimeline(timeline)
@@ -441,6 +448,19 @@ export default class VideoExportManager {
           this.logger.info(`[TTS Pipeline] ${current}/${total}: ${message}`)
         }
       )
+
+      if (serialTts) {
+        onProgress({
+          stage: 'loading',
+          current: 0,
+          total: 1,
+          message: '正在串行合成语音…',
+          percentage: 20
+        })
+        await concurrentPipeline.waitForTTSPipeline()
+        this.checkAborted()
+        if (exportStatus) exportStatus.textContent = '语音合成完成，开始录制…'
+      }
     } else {
       timeline = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
       this.app.ttsManager.setTimeline(timeline)
@@ -989,8 +1009,13 @@ export default class VideoExportManager {
       nowMs: () => virtualClock.realTimeMs()
     })
 
+    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
     if (ttsEnabled) {
-      this.logger.info('Concurrent mode: Starting TTS pipeline in background')
+      this.logger.info(
+        serialTts
+          ? 'Serial mode: Synthesizing all TTS before fast rendering'
+          : 'Concurrent mode: Starting TTS pipeline in background'
+      )
       concurrentPipeline.startTTSPipeline(
         snippets,
         this.app.ttsManager,
@@ -998,6 +1023,19 @@ export default class VideoExportManager {
           this.logger.info(`[TTS Pipeline] ${current}/${total}: ${message}`)
         }
       )
+
+      if (serialTts) {
+        onProgress({
+          stage: 'loading',
+          current: 0,
+          total: 1,
+          message: '正在串行合成语音…',
+          percentage: 20
+        })
+        await concurrentPipeline.waitForTTSPipeline()
+        this.checkAborted()
+        if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
+      }
     }
 
     // ---- 帧接收器：优先 WebCodecs 直编 MP4，回退 JPEG 帧序列 ----
@@ -1645,10 +1683,17 @@ export default class VideoExportManager {
     >()
 
     let ttsPromise: Promise<void> | null = null
+    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
 
     if (ttsEnabled) {
-      this.logger.info('Starting TTS synthesis in background')
-      if (exportStatus) exportStatus.textContent = '启动语音合成（后台运行）…'
+      this.logger.info(
+        serialTts
+          ? 'Serial mode: Synthesizing all TTS before frame capture'
+          : 'Starting TTS synthesis in background'
+      )
+      if (exportStatus) {
+        exportStatus.textContent = serialTts ? '正在合成语音…' : '启动语音合成（后台运行）…'
+      }
 
       ttsPromise = (async () => {
         await this.app.ttsManager.preSynthesizeAll(snippets, (current, total, message) => {
@@ -1656,6 +1701,19 @@ export default class VideoExportManager {
         })
         this.logger.info('TTS background synthesis completed')
       })()
+
+      if (serialTts) {
+        onProgress({
+          stage: 'loading',
+          current: 0,
+          total: 1,
+          message: '正在串行合成语音…',
+          percentage: 20
+        })
+        await ttsPromise
+        this.checkAborted()
+        if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
+      }
     }
 
     try {

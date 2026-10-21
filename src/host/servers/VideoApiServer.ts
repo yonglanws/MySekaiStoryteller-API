@@ -37,6 +37,8 @@ export interface VideoConfig {
   fastFps: number
   /** 表演续演间隔（秒）；0 = 关闭续演，动作播完回落默认待机 */
   idleChainGapSec: number
+  /** TTS 与渲染调度：serial = 先合成再渲染，concurrent = 边渲染边合成 */
+  ttsMode: 'serial' | 'concurrent'
 }
 
 export interface ExportTask {
@@ -361,7 +363,8 @@ export class VideoApiServer {
           audioBitrate: this.video.audioBitrate,
           watermark: this.video.watermark,
           watermarkText: this.video.watermarkText,
-          idleChainGapSec: this.video.idleChainGapSec
+          idleChainGapSec: this.video.idleChainGapSec,
+          ttsMode: this.video.ttsMode
         },
         ...(this.extraHealthProvider ? this.extraHealthProvider() : {})
       })
@@ -611,7 +614,8 @@ export class VideoApiServer {
       exportBitrate: this.video.exportBitrate,
       exportFastEncoder: this.video.exportFastEncoder,
       fastFps: this.video.fastFps,
-      idleChainGapSec: this.video.idleChainGapSec
+      idleChainGapSec: this.video.idleChainGapSec,
+      ttsMode: this.video.ttsMode
     }
 
     const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {

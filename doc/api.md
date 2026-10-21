@@ -228,14 +228,14 @@ curl -fS 'http://127.0.0.1:9881/api/v1/download/export-1800000000000-demo01.mp4'
 
 无参数，HTTP 200；`status: "ok"` 表示该路由可响应，**不保证全部 worker 就绪、素材完整或后续导出成功**。
 
-| 顶层字段                                           | 结构与含义                                                                                                                                                                                       |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `status`、`version`                                | 当前分别为 `"ok"`、`"2.0.0"`；`version` 是接口中固定的值                                                                                                                                         |
-| `activeExports`、`queuedExports`、`pendingExports` | API 已派发数、API 等待队列数、等待导出结果的请求数；均为数量                                                                                                                                     |
-| `cleanup`                                          | 与 `/cleanup/stats` 相同的对象                                                                                                                                                                   |
-| `videoConfig`                                      | `width/height`（像素）、`renderScale`（倍率）、`fps`（帧/秒）、`codec`（当前 `h264`）、`crf`（编码质量参数）、`audioBitrate`（如 `128k`）、`watermark`、`watermarkText`、`idleChainGapSec`（秒） |
-| `renderPool`                                       | 渲染池观测对象，字段见下文                                                                                                                                                                       |
-| `host`                                             | `platform`（平台）、`node`（Node 版本）、`ffmpegEncoder`（配置值）、`ffmpegEncoderDetected`（探测缓存：`nvidia/amd/intel/cpu` 或 `null`）                                                        |
+| 顶层字段                                           | 结构与含义                                                                                                                                                                                                                             |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`、`version`                                | 当前分别为 `"ok"`、`"2.0.0"`；`version` 是接口中固定的值                                                                                                                                                                               |
+| `activeExports`、`queuedExports`、`pendingExports` | API 已派发数、API 等待队列数、等待导出结果的请求数；均为数量                                                                                                                                                                           |
+| `cleanup`                                          | 与 `/cleanup/stats` 相同的对象                                                                                                                                                                                                         |
+| `videoConfig`                                      | `width/height`（像素）、`renderScale`（倍率）、`fps`（帧/秒）、`codec`（当前 `h264`）、`crf`（编码质量参数）、`audioBitrate`（如 `128k`）、`watermark`、`watermarkText`、`idleChainGapSec`（秒）、`ttsMode`（`serial` / `concurrent`） |
+| `renderPool`                                       | 渲染池观测对象，字段见下文                                                                                                                                                                                                             |
+| `host`                                             | `platform`（平台）、`node`（Node 版本）、`ffmpegEncoder`（配置值）、`ffmpegEncoderDetected`（探测缓存：`nvidia/amd/intel/cpu` 或 `null`）                                                                                              |
 
 `renderPool` 包含 `configuredWorkers`、`readyWorkers`、`idleWorkers`（数量），`busyTaskIds`（占用 worker 的任务 ID 数组）、`bufferedTasks`（内部缓冲任务数）、`exportsCompleted`（worker 已释放的任务计数，不是成功数），以及 `webglRenderers` 数组。
 每个 WebGL 条目形如 `{"workerId":"w1","renderer":"示意 GPU renderer"}`；尚无结果时 `renderer` 可以为 `null`。

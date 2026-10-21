@@ -51,7 +51,14 @@ const VideoSchema = z.object({
    * - >0：按该间隔（±25% 抖动）再接一个同情绪族手势，间隔内保持当前姿态
    * 关闭是"动作尽可能少"的默认舞台风格；想要早期"连续表演"效果再调大。
    */
-  idleChainGapSec: z.number().default(0)
+  idleChainGapSec: z.number().default(0),
+  /**
+   * TTS 与画面渲染的调度方式：
+   * - serial（默认）：先串行合成完全部语音，再开始录制/渲染，避免 TTS 推理与
+   *   WebGL/编码争抢 CPU/GPU；录制模式推荐
+   * - concurrent：边渲染边合成，总耗时更短，但两条流水线会并行争资源
+   */
+  ttsMode: z.enum(['serial', 'concurrent']).default('serial')
 })
 
 const RenderSchema = z.object({
@@ -216,6 +223,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_IDLE_CHAIN_GAP_SEC) {
     const v = parseFloat(env.MSS_IDLE_CHAIN_GAP_SEC)
     if (Number.isFinite(v) && v >= 0) config.video.idleChainGapSec = v
+  }
+  if (env.MSS_TTS_MODE) {
+    const mode = env.MSS_TTS_MODE.toLowerCase()
+    if (mode === 'serial' || mode === 'concurrent') config.video.ttsMode = mode
   }
   if (env.MSS_RECORD_TARGET_SIZE_MB) {
     const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)

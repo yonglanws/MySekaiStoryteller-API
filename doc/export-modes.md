@@ -21,21 +21,22 @@
 **内置默认值不等于示例文件值。** 下表前一列取自 `src/host/config.ts`，后一列是公开模板明确填写的值。
 复制 [config.example.yaml](../config.example.yaml) 后会采用模板值，不能再把它称为“未配置默认”。
 
-| `video` 字段        | 内置默认       | 模板显式值      | 单位、范围或约束                                                           |
-| ------------------- | -------------- | --------------- | -------------------------------------------------------------------------- |
-| `width` / `height`  | `1280` / `720` | `1920` / `1080` | 像素；使用正偶整数，推荐 16:9；record 的 H.264 编码会检查正整数和偶数      |
-| `fps`               | `30`           | `60`            | 帧/秒；应为有限正数，推荐 24、30、60 等常用值；record 会检查正数           |
-| `crf`               | `23`           | `28`            | 无单位质量因子；record 检查 `0`～`51`，其他编码器实际支持范围可能不同      |
-| `renderScale`       | `1.5`          | `1`             | 渲染倍率；使用正数，`1` 为输出尺寸对应渲染，`<1` 降采样，`>1` 超采样       |
-| `audioBitrate`      | `128k`         | `128k`          | AAC 目标码率字符串，例如 `96k`、`128k`、`192k`；有音轨时生效               |
-| `encoder`           | `auto`         | `auto`          | 宿主 ffmpeg 编码选择：`auto` / `nvidia` / `amd` / `intel` / `libx264`      |
-| `watermark`         | `true`         | `true`          | 布尔值，是否显示水印                                                       |
-| `watermarkText`     | `""`           | `""`            | 自定义水印，最多两行，追加在自带两行下方；`\n` 换行                        |
-| `exportMode`        | `record`       | `record`        | 枚举 `record` / `fast`                                                     |
-| `exportBitrate`     | `12000000`     | `12000000`      | bps；正数，仅 fast 的 WebCodecs 视频编码使用                               |
-| `exportFastEncoder` | `auto`         | `auto`          | 枚举 `auto` / `webcodecs` / `frames`，仅 fast 使用                         |
-| `fastFps`           | `30`           | `30`            | 帧/秒；fast 有效值为 `max(1, min(fastFps, fps))`，建议 `1 ≤ fastFps ≤ fps` |
-| `idleChainGapSec`   | `0`            | `0`             | 秒；`0` 关闭动作续演，正数以该间隔（±25% 抖动）接同情绪族手势              |
+| `video` 字段        | 内置默认       | 模板显式值      | 单位、范围或约束                                                                    |
+| ------------------- | -------------- | --------------- | ----------------------------------------------------------------------------------- |
+| `width` / `height`  | `1280` / `720` | `1920` / `1080` | 像素；使用正偶整数，推荐 16:9；record 的 H.264 编码会检查正整数和偶数               |
+| `fps`               | `30`           | `60`            | 帧/秒；应为有限正数，推荐 24、30、60 等常用值；record 会检查正数                    |
+| `crf`               | `23`           | `28`            | 无单位质量因子；record 检查 `0`～`51`，其他编码器实际支持范围可能不同               |
+| `renderScale`       | `1.5`          | `1`             | 渲染倍率；使用正数，`1` 为输出尺寸对应渲染，`<1` 降采样，`>1` 超采样                |
+| `audioBitrate`      | `128k`         | `128k`          | AAC 目标码率字符串，例如 `96k`、`128k`、`192k`；有音轨时生效                        |
+| `encoder`           | `auto`         | `auto`          | 宿主 ffmpeg 编码选择：`auto` / `nvidia` / `amd` / `intel` / `libx264`               |
+| `watermark`         | `true`         | `true`          | 布尔值，是否显示水印                                                                |
+| `watermarkText`     | `""`           | `""`            | 自定义水印，最多两行，追加在自带两行下方；`\n` 换行                                 |
+| `exportMode`        | `record`       | `record`        | 枚举 `record` / `fast`                                                              |
+| `exportBitrate`     | `12000000`     | `12000000`      | bps；正数，仅 fast 的 WebCodecs 视频编码使用                                        |
+| `exportFastEncoder` | `auto`         | `auto`          | 枚举 `auto` / `webcodecs` / `frames`，仅 fast 使用                                  |
+| `fastFps`           | `30`           | `30`            | 帧/秒；fast 有效值为 `max(1, min(fastFps, fps))`，建议 `1 ≤ fastFps ≤ fps`          |
+| `ttsMode`           | `serial`       | `serial`        | 枚举 `serial` / `concurrent`；serial 先合成语音再录制/渲染，concurrent 边渲染边合成 |
+| `idleChainGapSec`   | `0`            | `0`             | 秒；`0` 关闭动作续演，正数以该间隔（±25% 抖动）接同情绪族手势                       |
 
 宿主 schema 对多数数值仅检查类型，不统一检查范围；“启动成功”不代表浏览器或编码器一定接受。
 不要依赖负数、零尺寸或超大分辨率触发自动修正；GPU 纹理、显存、浏览器编码能力决定实际可用上限。
@@ -50,6 +51,7 @@
 | `encoder`                          | `MSS_FFMPEG_ENCODER`，不是 ffmpeg codec 名 `nvenc`                         |
 | `exportMode` / `exportBitrate`     | `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                   |
 | `exportFastEncoder` / `fastFps`    | `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                 |
+| `ttsMode`                          | `MSS_TTS_MODE`                                                             |
 | `watermark` / `watermarkText`      | `MSS_VIDEO_WATERMARK` / `MSS_VIDEO_WATERMARK_TEXT`                         |
 | `idleChainGapSec`                  | `MSS_IDLE_CHAIN_GAP_SEC`                                                   |
 

@@ -45,6 +45,10 @@ video:
                            # 收尾预估（录制视频 + 音轨）超出上限 2% 时，按精确码率重编码
                            # 视频压回上限（分辨率与时间戳不变）；0 = 不限制
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
+  ttsMode: serial          # TTS 与渲染调度：serial | concurrent（env: MSS_TTS_MODE）
+                           # serial（默认）= 先串行合成完全部语音，再开始录制/渲染，
+                           #                 避免 TTS 推理与 WebGL/编码抢 CPU/GPU
+                           # concurrent = 边渲染边合成，总耗时更短但两条流水线并行争资源
 
   idleChainGapSec: 0       # 表演续演间隔秒数（0 = 关闭续演，默认）。
                            # 角色动作播完后：0 = 保持动作结束时的姿势（不回落站立），之后只有呼吸与眨眼
