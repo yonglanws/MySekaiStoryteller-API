@@ -453,6 +453,14 @@ export class RenderPool implements ExportDispatcher {
       bgm: { ...this.config.bgm }
     }
 
+    const ttsCharacters = payload.tts.characters
+    const weightedCharacters = ttsCharacters.filter(
+      (character) => character.gptWeightsPath && character.sovitsWeightsPath
+    ).length
+    this.logger.info(
+      `[Pool] TTS characters dispatched: total=${ttsCharacters.length}, withWeights=${weightedCharacters}`
+    )
+
     const sent = this.hub.send(worker.workerId, { type: 'api:start-export', args: [payload] })
     if (!sent) {
       worker.busy = false

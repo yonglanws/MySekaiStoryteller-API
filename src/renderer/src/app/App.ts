@@ -234,7 +234,8 @@ export class App {
   private setupApiExportListener(): void {
     window.electron.ipcRenderer.on(
       'api:start-export',
-      async (        _event,
+      async (
+        _event,
         payload: {
           taskId: string
           story: StoryData
@@ -358,6 +359,7 @@ export class App {
     )
 
     this.applyApiExportConfig(ttsConfig, bgmConfig)
+    this.ttsManager.beginExportSession()
 
     AnimationManager.exportSpeedMultiplier = 1
     // 表演续演间隔由宿主配置下发；0 = 关闭续演（动作播完回落默认待机后保持安静）
@@ -452,6 +454,11 @@ export class App {
       this.ttsManager.updateConfig({
         enabled: ttsConfig.enabled,
         apiBaseUrl: ttsConfig.apiBaseUrl || 'http://127.0.0.1:9880',
+        // 租约走宿主自己的 HTTP 端口；页面由宿主加载时 origin 就是宿主
+        hostApiBaseUrl:
+          typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
+            ? window.location.origin
+            : '',
         defaultRefAudioPath: ttsConfig.defaultRefAudioPath || '',
         defaultPromptText: ttsConfig.defaultPromptText || '',
         promptLang: ttsConfig.promptLang || 'ja',

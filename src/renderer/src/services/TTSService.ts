@@ -4,6 +4,8 @@ import getSubLogger from '../utils/Logger'
 export interface TTSConfig {
   enabled: boolean
   apiBaseUrl: string
+  /** 宿主 API 地址；用于申请 GSV 权重租约（空 = 不租约，直接合成） */
+  hostApiBaseUrl: string
   textLang: string
   promptLang: string
   defaultRefAudioPath: string
@@ -72,6 +74,7 @@ export interface CharacterVoiceConfig {
 export const DEFAULT_TTS_CONFIG: TTSConfig = {
   enabled: false,
   apiBaseUrl: 'http://127.0.0.1:9880',
+  hostApiBaseUrl: '',
   textLang: 'zh',
   promptLang: 'zh',
   defaultRefAudioPath: '',
@@ -103,10 +106,25 @@ interface Dialogue {
   characterName: string
 }
 
+interface TtsWeights {
+  gptWeightsPath: string
+  sovitsWeightsPath: string
+}
+
+interface TtsLeaseGrant {
+  leaseId: string
+  currentWeights: TtsWeights | null
+}
+
 const MAX_CACHE_SIZE = 50
 const CACHE_TTL_MS = 30 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 30000
 const TEST_TIMEOUT_MS = 15000
+/** 排队等租约的上限：要覆盖前面若干个导出各占一次 30s 合成的最坏情况 */
+const LEASE_ACQUIRE_TIMEOUT_MS = 180000
+const LEASE_RELEASE_TIMEOUT_MS = 5000
+/** 切 GPT/SoVITS 权重是加载几百 MB 模型，给足时间 */
+const WEIGHT_SWITCH_TIMEOUT_MS = 120000
 
 export class TTSService {
   private readonly logger: Logger<ILogObj>
@@ -114,6 +132,11 @@ export class TTSService {
   private characterConfigs: Map<string, CharacterVoiceConfig>
   private audioCache: Map<string, CacheEntry>
   private audioContext: AudioContext | null = null
+  /** 每次导出开始时置位：首句强制重切权重，避免继承上一次导出或 WebUI 留下的状态 */
+  private forceWeightSwitch: boolean = false
+  private leaseUnavailableLogged: boolean = false
+  /** 宿主没有租约端点（Electron/开发模式）时永久降级，避免每句都白等一次 */
+  private leaseDisabled: boolean = false
 
   constructor(config: TTSConfig) {
     this.config = config
@@ -124,6 +147,11 @@ export class TTSService {
 
   updateConfig(config: Partial<TTSConfig>): void {
     this.config = { ...this.config, ...config }
+  }
+
+  /** 新导出开始：首句必须重新确认 GSV 权重，不能信任上一场留下的全局状态 */
+  beginSession(): void {
+    this.forceWeightSwitch = true
   }
 
   setCharacterVoice(characterName: string, voiceConfig: CharacterVoiceConfig): void {
@@ -146,8 +174,15 @@ export class TTSService {
     this.audioCache.clear()
   }
 
-  private getCacheKey(text: string, characterName: string, speedFactor?: number): string {
-    return `${characterName}:${speedFactor ?? this.config.speedFactor}:${text}`
+  private getCacheKey(
+    text: string,
+    characterName: string,
+    speedFactor?: number,
+    gptWeightsPath: string = '',
+    sovitsWeightsPath: string = ''
+  ): string {
+    // 权重也进缓存键：改了角色权重后不能复用旧音色的缓存
+    return `${characterName}:${speedFactor ?? this.config.speedFactor}:${gptWeightsPath}:${sovitsWeightsPath}:${text}`
   }
 
   private addToCache(key: string, result: TTSResult): void {
@@ -176,7 +211,20 @@ export class TTSService {
   ): Promise<TTSResult> {
     this.cleanupExpiredCache()
 
-    const cacheKey = this.getCacheKey(text, characterName, speedFactor)
+    const charConfig = this.getCharacterVoice(characterName)
+    const refAudioPath = charConfig?.refAudioPath || this.config.defaultRefAudioPath
+    const promptText = charConfig?.promptText || this.config.defaultPromptText
+    const promptLang = charConfig?.promptLang || this.config.promptLang
+    const gptWeightsPath = charConfig?.gptWeightsPath || this.config.gptWeightsPath || ''
+    const sovitsWeightsPath = charConfig?.sovitsWeightsPath || this.config.sovitsWeightsPath || ''
+
+    const cacheKey = this.getCacheKey(
+      text,
+      characterName,
+      speedFactor,
+      gptWeightsPath,
+      sovitsWeightsPath
+    )
     const cached = this.audioCache.get(cacheKey)
     if (cached) {
       cached.timestamp = Date.now()
@@ -191,11 +239,6 @@ export class TTSService {
         error: 'TTS is not enabled'
       }
     }
-
-    const charConfig = this.getCharacterVoice(characterName)
-    const refAudioPath = charConfig?.refAudioPath || this.config.defaultRefAudioPath
-    const promptText = charConfig?.promptText || this.config.defaultPromptText
-    const promptLang = charConfig?.promptLang || this.config.promptLang
 
     if (!refAudioPath) {
       return {
@@ -229,14 +272,29 @@ export class TTSService {
       repetition_penalty: 1.35
     }
 
-    if (charConfig?.gptWeightsPath || this.config.gptWeightsPath) {
-      request.gpt_weights = charConfig?.gptWeightsPath || this.config.gptWeightsPath
+    if (gptWeightsPath) {
+      request.gpt_weights = gptWeightsPath
     }
-    if (charConfig?.sovitsWeightsPath || this.config.sovitsWeightsPath) {
-      request.sovits_weights = charConfig?.sovitsWeightsPath || this.config.sovitsWeightsPath
+    if (sovitsWeightsPath) {
+      request.sovits_weights = sovitsWeightsPath
     }
 
+    // GSV 的权重是服务端全局状态：拿租约 → 切权重 → /tts → 释放，
+    // 全程串行，避免别的渲染 worker 在合成途中把权重换掉。
+    const lease = await this.acquireTtsLease()
+    const baseWeights = lease?.currentWeights ?? null
+    const effectiveGpt = gptWeightsPath || baseWeights?.gptWeightsPath || ''
+    const effectiveSovits = sovitsWeightsPath || baseWeights?.sovitsWeightsPath || ''
+    let releaseWeights: TtsWeights | null =
+      effectiveGpt && effectiveSovits
+        ? { gptWeightsPath: effectiveGpt, sovitsWeightsPath: effectiveSovits }
+        : null
+
     try {
+      if (lease) {
+        await this.ensureWeights(gptWeightsPath, sovitsWeightsPath, lease.currentWeights)
+      }
+
       const audioBuffer = await this.fetchTTS(request)
 
       if (!audioBuffer || audioBuffer.byteLength === 0) {
@@ -263,12 +321,232 @@ export class TTSService {
       this.addToCache(cacheKey, result)
       return result
     } catch (error) {
+      // 切权重失败时服务端可能处于新旧混合状态，下一次必须重新切
+      releaseWeights = null
       return {
         audioBuffer: new ArrayBuffer(0),
         duration: 0,
         success: false,
         error: `TTS request failed: ${error instanceof Error ? error.message : String(error)}`
       }
+    } finally {
+      if (lease) {
+        await this.releaseTtsLease(lease.leaseId, releaseWeights)
+      }
+    }
+  }
+
+  /**
+   * 申请宿主租约。宿主不可用（例如 Electron/开发模式）时返回 null，
+   * 退化为直接合成；API 模式下宿主一定提供该端点。
+   */
+  private async acquireTtsLease(): Promise<TtsLeaseGrant | null> {
+    if (this.leaseDisabled) return null
+    const base = this.normalizeBaseUrl(this.config.hostApiBaseUrl)
+    if (!base) return null
+
+    let permanentFailure = false
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), LEASE_ACQUIRE_TIMEOUT_MS)
+    try {
+      const response = await fetch(`${base}/api/v1/tts/lease`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: controller.signal
+      })
+      if (response.status === 404) {
+        permanentFailure = true
+        throw new Error('HTTP 404')
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const contentType = response.headers.get('content-type') || ''
+      if (!contentType.includes('application/json')) {
+        permanentFailure = true
+        throw new Error(`unexpected lease response type: ${contentType || 'unknown'}`)
+      }
+      const data = (await response.json()) as {
+        success?: boolean
+        leaseId?: string
+        currentWeights?: TtsWeights | null
+      }
+      if (!data.success || typeof data.leaseId !== 'string') {
+        permanentFailure = true
+        throw new Error('invalid lease response')
+      }
+      return {
+        leaseId: data.leaseId,
+        currentWeights: data.currentWeights ?? null
+      }
+    } catch (error) {
+      if (permanentFailure || error instanceof TypeError) {
+        this.leaseDisabled = true
+      }
+      if (!this.leaseUnavailableLogged) {
+        this.leaseUnavailableLogged = true
+        this.logger.warn(
+          `TTS lease unavailable (${error instanceof Error ? error.message : String(error)}); ` +
+            'falling back to direct synthesis without weight serialization'
+        )
+      }
+      return null
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  private async releaseTtsLease(leaseId: string, weights: TtsWeights | null): Promise<void> {
+    const base = this.normalizeBaseUrl(this.config.hostApiBaseUrl)
+    if (!base) return
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), LEASE_RELEASE_TIMEOUT_MS)
+    try {
+      await fetch(`${base}/api/v1/tts/lease/release`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leaseId, weights }),
+        signal: controller.signal
+      })
+    } catch (error) {
+      // 释放失败由宿主租约 TTL 兜底，不能阻塞导出
+      this.logger.warn(
+        `TTS lease release failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  /**
+   * 在租约内把 GSV 权重切到当前角色。空路径表示沿用服务端已有权重。
+   */
+  private async ensureWeights(
+    gptWeightsPath: string,
+    sovitsWeightsPath: string,
+    currentWeights: TtsWeights | null
+  ): Promise<void> {
+    const force = this.forceWeightSwitch
+    const needGpt = !!gptWeightsPath && (force || currentWeights?.gptWeightsPath !== gptWeightsPath)
+    const needSovits =
+      !!sovitsWeightsPath && (force || currentWeights?.sovitsWeightsPath !== sovitsWeightsPath)
+
+    if (needGpt) {
+      const startedAt = Date.now()
+      await this.setWeights('gpt', gptWeightsPath)
+      this.logger.info(`TTS GPT weights switched in ${Date.now() - startedAt}ms: ${gptWeightsPath}`)
+    }
+    if (needSovits) {
+      const startedAt = Date.now()
+      await this.setWeights('sovits', sovitsWeightsPath)
+      this.logger.info(
+        `TTS SoVITS weights switched in ${Date.now() - startedAt}ms: ${sovitsWeightsPath}`
+      )
+    }
+
+    // 只在真正处理过租约后清除；宿主不可用时保留，等下次拿到租约再强制切
+    this.forceWeightSwitch = false
+  }
+
+  private async setWeights(kind: 'gpt' | 'sovits', weightsPath: string): Promise<void> {
+    const base = this.normalizeBaseUrl(this.config.apiBaseUrl)
+    if (!base) {
+      throw new Error(`Invalid TTS apiBaseUrl: ${this.config.apiBaseUrl}`)
+    }
+
+    const url = `${base}/set_${kind}_weights?weights_path=${encodeURIComponent(weightsPath)}`
+    const response = await this.fetchTtsAuxiliary(url)
+
+    let parsed: { message?: string; Exception?: string } | null = null
+    try {
+      parsed = JSON.parse(response.text) as { message?: string; Exception?: string }
+    } catch {
+      // 非 JSON 响应（例如代理层错误页）在下面统一报错
+    }
+
+    if (!response.ok || parsed?.message !== 'success') {
+      const detail =
+        parsed?.Exception ||
+        parsed?.message ||
+        response.text.slice(0, 200) ||
+        `HTTP ${response.status}`
+      throw new Error(`Failed to switch ${kind} weights: ${detail}`)
+    }
+  }
+
+  /**
+   * GSV 不带 CORS 头，浏览器直连 /set_* 会被拦；走宿主已有的 tts-fetch 代理
+   * （与 /tts 直连失败时的兜底路径一致），Electron 下由主进程转发。
+   */
+  private async fetchTtsAuxiliary(
+    url: string
+  ): Promise<{ ok: boolean; status: number; text: string }> {
+    const ipc = typeof window !== 'undefined' ? window.electron?.ipcRenderer : undefined
+
+    if (ipc?.invoke) {
+      let timeoutId: ReturnType<typeof setTimeout> | null = null
+      try {
+        const result = (await Promise.race([
+          ipc.invoke('electron:tts-fetch', {
+            url,
+            method: 'GET',
+            headers: {},
+            body: ''
+          }),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error('TTS auxiliary request timed out')),
+              WEIGHT_SWITCH_TIMEOUT_MS
+            )
+          })
+        ])) as { ok: boolean; status: number; body: ArrayBuffer }
+
+        return {
+          ok: result.ok,
+          status: result.status,
+          text: new TextDecoder().decode(new Uint8Array(result.body))
+        }
+      } catch (error) {
+        // IPC 代理不可用时再退回直连（同源/开发环境）
+        this.logger.warn(
+          `TTS auxiliary IPC proxy failed, trying direct fetch: ${error instanceof Error ? error.message : String(error)}`
+        )
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId)
+      }
+    }
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), WEIGHT_SWITCH_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, { method: 'GET', signal: controller.signal })
+      return {
+        ok: response.ok,
+        status: response.status,
+        text: await response.text()
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Timed out requesting ${url}`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  private normalizeBaseUrl(raw: string | undefined): string {
+    const value = raw?.trim()
+    if (!value) return ''
+    try {
+      const parsed = new URL(value)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) return ''
+      return parsed.href.replace(/\/+$/, '')
+    } catch {
+      return ''
     }
   }
 

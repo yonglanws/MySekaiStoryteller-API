@@ -155,6 +155,14 @@ export class TTSManager {
     this.logger.info(`TTS concurrency set to ${this.concurrency}`)
   }
 
+  /** 新导出的第一句强制重新确认 GSV 权重，避免继承上一场或外部改过的全局状态 */
+  beginExportSession(): void {
+    if (!this.ttsService) {
+      this.initialize()
+    }
+    this.ttsService?.beginSession()
+  }
+
   setCharacterVoice(characterName: string, voiceConfig: CharacterVoiceConfig): void {
     if (!this.ttsService) {
       this.initialize()
