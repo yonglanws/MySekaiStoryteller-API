@@ -1,7 +1,6 @@
 <!--suppress HtmlDeprecatedAttribute -->
 <p>
-<div align="center">
- <img src="documents/assets/logo.png" width="500" style="border-radius: 40px;" alt="MySekaiStoryteller-API Logo" />
+MySekaiStoryteller-API
 <p>
  <p>无头纯 API 的 Project SEKAI 风格 Live2D 视频渲染框架</p>
  <p>
@@ -12,6 +11,8 @@
   <a href="#相关内容">相关内容</a>
  </p>
 </div>
+
+> 这个项目疑似过于史山了...
 
 > [!IMPORTANT]
 > 本项目基于 [Untitled-Story/MySekaiStoryteller](https://github.com/Untitled-Story/MySekaiStoryteller) **二次开发**，
