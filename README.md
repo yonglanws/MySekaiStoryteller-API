@@ -1,7 +1,7 @@
 <!--suppress HtmlDeprecatedAttribute -->
-<p>
-MySekaiStoryteller-API
-<p>
+
+# MySekaiStoryteller-API
+
  <p>无头纯 API 的 Project SEKAI 风格 Live2D 视频渲染框架</p>
  <p>
   <a href="#项目简介">项目简介</a> ·
