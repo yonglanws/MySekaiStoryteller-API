@@ -5,6 +5,7 @@ import * as os from 'node:os'
 import type { HostConfig, TtsCharacter } from '../config'
 import type { WsHub, WorkerMessage } from '../bridge/wsHub'
 import type { ExportDispatcher, ExportTask } from '../servers/VideoApiServer'
+import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 
 export interface ExportResultPayload {
   taskId: string
@@ -15,6 +16,8 @@ export interface ExportResultPayload {
   outputSize?: number
   /** 分段时间统计（页内埋点，毫秒） */
   timings?: Record<string, number>
+  /** 逐句/逐动作/TTS/日志诊断，宿主落盘为 <video>.log.json */
+  diagnostics?: ExportDiagnostics
   error?: string
 }
 

@@ -25,6 +25,8 @@ export interface SnippetTimelineEntry {
   endTimeMs: number
   ttsDurationMs: number
   hasTTS: boolean
+  /** 时间线时长来源（tts_audio/content_estimation/type_default…），导出诊断用 */
+  durationSource?: string
 }
 
 interface TalkSnippet {
@@ -32,6 +34,7 @@ interface TalkSnippet {
   speaker: string
   content: string
   ttsText: string
+  emotion: string
 }
 
 interface SynthesizeResult {
@@ -247,12 +250,18 @@ export class TTSManager {
     for (let i = 0; i < snippets.length; i++) {
       const s = snippets[i]
       if (s.type === 'Talk') {
-        const data = s.data as { speaker: string; content: string; ttsText?: string }
+        const data = s.data as {
+          speaker: string
+          content: string
+          ttsText?: string
+          emotion?: string
+        }
         talkSnippets.push({
           index: i,
           speaker: data.speaker,
           content: data.content,
-          ttsText: data.ttsText || ''
+          ttsText: data.ttsText || '',
+          emotion: data.emotion || ''
         })
       }
     }
@@ -369,13 +378,19 @@ export class TTSManager {
     try {
       this.currentTimeMs = this.calculateCurrentTimeMsFromIndex(talk.index)
       if (talk.ttsText) {
-        const result = await this.synthesizeWithText(talk.ttsText, talk.speaker, talk.index)
+        const result = await this.synthesizeWithText(
+          talk.ttsText,
+          talk.speaker,
+          talk.index,
+          talk.emotion
+        )
         return { ...result, index: talk.index }
       }
       const result = await this.translateAndSynthesizeWithPrefetch(
         talk.content,
         talk.speaker,
-        talk.index
+        talk.index,
+        talk.emotion
       )
       return { ...result, index: talk.index }
     } catch (error) {
@@ -389,7 +404,8 @@ export class TTSManager {
   async synthesizeWithText(
     text: string,
     characterName: string,
-    snippetIndex?: number
+    snippetIndex?: number,
+    emotion = ''
   ): Promise<{ success: boolean; duration: number }> {
     if (!this.ttsService) {
       this.initialize()
@@ -399,7 +415,12 @@ export class TTSManager {
       return { success: false, duration: 0 }
     }
 
-    const ttsResult = await this.ttsService.synthesizeSpeech(text, characterName)
+    const ttsResult = await this.ttsService.synthesizeSpeech(
+      text,
+      characterName,
+      undefined,
+      emotion
+    )
 
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
       const audioTrack: AudioTrackData = {
@@ -429,7 +450,8 @@ export class TTSManager {
   private async translateAndSynthesizeWithPrefetch(
     text: string,
     characterName: string,
-    snippetIndex?: number
+    snippetIndex?: number,
+    emotion = ''
   ): Promise<{ success: boolean; duration: number }> {
     // 使用纯文本内容作为缓存键，与预取时保持一致
     const cacheKey = text
@@ -465,7 +487,12 @@ export class TTSManager {
       return { success: false, duration: 0 }
     }
 
-    const ttsResult = await this.ttsService.synthesizeSpeech(translatedText, characterName)
+    const ttsResult = await this.ttsService.synthesizeSpeech(
+      translatedText,
+      characterName,
+      undefined,
+      emotion
+    )
 
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
       const audioTrack: AudioTrackData = {
@@ -529,7 +556,8 @@ export class TTSManager {
       durationMs: e.durationMs,
       endTimeMs: e.endTimeMs,
       ttsDurationMs: e.ttsDurationMs,
-      hasTTS: e.hasTTS
+      hasTTS: e.hasTTS,
+      durationSource: e.durationSource
     }
   }
 
@@ -659,20 +687,23 @@ export class TTSManager {
 
   async checkTTSAvailability(): Promise<boolean> {
     const apiBaseUrl = this.config.apiBaseUrl || 'http://127.0.0.1:9880'
+    const url = this.config.provider === 'irodori' ? `${apiBaseUrl}/health` : `${apiBaseUrl}/tts`
     try {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 5000)
-      await fetch(`${apiBaseUrl}/tts`, {
+      await fetch(url, {
         method: 'HEAD',
         signal: controller.signal
       })
       clearTimeout(timeoutId)
       return true
     } catch {
+      const ipc = typeof window !== 'undefined' ? window.electron?.ipcRenderer : undefined
+      if (!ipc?.invoke) return false
       try {
         const ipcResult = await Promise.race([
-          window.electron.ipcRenderer.invoke('electron:tts-fetch', {
-            url: `${apiBaseUrl}/tts`,
+          ipc.invoke('electron:tts-fetch', {
+            url,
             method: 'HEAD',
             headers: {},
             body: ''

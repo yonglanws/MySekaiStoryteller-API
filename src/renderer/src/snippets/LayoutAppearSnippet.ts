@@ -1,6 +1,14 @@
 import PositionRel from '../types/PositionRel'
 import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
+import AnimationManager from '../managers/AnimationManager'
+import {
+  APPEAR_FADE_TOTAL_FRAMES,
+  APPEAR_SHOWN_MOVE_MS,
+  CHARACTER_FADE_MS,
+  FRAME_MS,
+  framesForSeconds
+} from '../../../common/official/timing'
 
 // noinspection DuplicatedCode
 export default class LayoutAppearSnippet extends BaseSnippet {
@@ -8,10 +16,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     if (this.data.type !== 'LayoutAppear') return
 
     const model = this.app.getModelById(this.data.data.modelId)
-
-    // 阻止 idle 动作干扰入场表演
-    model.internalModel?.parallelMotionManager[0]?.stopAllMotions()
-    model.internalModel?.parallelMotionManager[1]?.stopAllMotions()
+    const wasShown = this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false
 
     this.app.layerModel.addModelToLayer(model)
 
@@ -33,23 +38,41 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     )
 
     const is_moved = from.x !== to.x || from.y !== to.y
-    model.setPositionRel(this.app.stage_size, is_moved ? from : to)
 
-    // 淡入、入场动作、滑入并发：动作先加载并启动（await 到"已开始播放"），
-    // 随后立即启动滑动——滑入全程动作在播，杜绝站桩滑动。
-    const show_task = model.show(200, this.data.data.hologram)
-
-    let motions_started = false
-    if (this.data.data.motion || this.data.data.facial) {
-      await model.startMotions(
-        this.data.data.motion,
-        this.data.data.facial,
-        this.data.data.facialFirst
-      )
-      motions_started = true
+    // 先把动作真正启动（此时模型 alpha=0，观众看不到），再开始淡入/滑入。
+    // 旧顺序先 show 再 await startMotions：动作文件冷加载期间角色已经淡入但仍是站姿，
+    // 这就是“入场一瞬间站桩”的直接来源。
+    const entryMotion =
+      this.data.data.motion && model.hasMotion(this.data.data.motion) ? this.data.data.motion : ''
+    if (entryMotion || this.data.data.facial) {
+      await model.startMotions(entryMotion, this.data.data.facial, this.data.data.facialFirst, {
+        facialForce: true,
+        traceSnippetIndex: this.snippetIndex
+      })
+    }
+    if (!entryMotion) {
+      // 外部直接导出的剧本可能没写、或写了别的模型的动作；兜底也要边动边出现。
+      // 剧本已给合法表情时保留它，不要被默认表情覆盖。
+      await model.startEntryMotion(!this.data.data.facial, this.snippetIndex)
     }
 
-    const move_task = is_moved
+    if (wasShown) {
+      // 官方 AppearCharacter 对已在场的 view 走 CharacterMoveToCoroutine(side, 0.2)：
+      // 不淡入，片段等这 0.2s 的滑动完成。
+      model.setPositionRel(this.app.stage_size, from)
+      if (is_moved) {
+        await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS)
+      } else {
+        await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
+      }
+      model.startBodyIdleLoop()
+      return
+    }
+
+    // 新 view：AppearCharacter(SideFrom) 先落到 from，CharacterMoveTo(SideTo) 与淡入并发。
+    model.setPositionRel(this.app.stage_size, is_moved ? from : to)
+
+    const moveTask = is_moved
       ? model.move(
           this.app.stage_size,
           from,
@@ -57,16 +80,20 @@ export default class LayoutAppearSnippet extends BaseSnippet {
           StageUtils.move_speed_to_num(this.data.data.moveSpeed)
         )
       : null
+    if (moveTask) {
+      // 官方 Appear 片段只等淡入（7 帧），滑入继续在后台播放；不能 await 完整 move。
+      void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))
+    }
 
-    await show_task
-    if (move_task) {
-      await move_task
-    }
-    if (motions_started) {
-      // 入场动作播完再继续剧情：角色到位并完成动作后才开始说话（与原项目一致）
-      await model.waitForMotionsFinished()
-    }
-    // 入场后进入连续表演：动作之间接着演同情绪族手势，台词间隙不再站桩
+    // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后 0.1s 淡入。
+    const holdFrames = Math.max(
+      0,
+      APPEAR_FADE_TOTAL_FRAMES - framesForSeconds(CHARACTER_FADE_MS / 1000)
+    )
+    if (holdFrames > 0) await AnimationManager.delay(holdFrames * FRAME_MS)
+    await model.show(CHARACTER_FADE_MS, this.data.data.hologram)
+
+    // 入场动作继续播放；body 通道交给 idle 续演逻辑，台词间隙不站桩。
     model.startBodyIdleLoop()
   }
 }

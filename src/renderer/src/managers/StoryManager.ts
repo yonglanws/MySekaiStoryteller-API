@@ -51,20 +51,30 @@ export default class StoryManager {
       // Cue timing must not include a first-use network fetch, especially under the virtual clock.
       const actionNames = new Set<string>()
       for (const snippet of this.storyData.snippets) {
-        if (snippet.type !== 'Talk' && snippet.type !== 'Motion') continue
+        // 入场/退场动作也必须预加载：旧代码只扫 Talk/Motion，第一次 LayoutAppear
+        // 才去加载动作文件，淡入已经开始了动作还没开始，形成“入场站桩”。
+        if (
+          snippet.type !== 'Talk' &&
+          snippet.type !== 'Motion' &&
+          snippet.type !== 'LayoutAppear' &&
+          snippet.type !== 'LayoutClear'
+        )
+          continue
         if (snippet.data.modelId === model_data.id) {
           if (snippet.data.motion) actionNames.add(snippet.data.motion)
           if (snippet.data.facial) actionNames.add(snippet.data.facial)
         }
-        for (const action of snippet.data.actions ?? []) {
-          if (action.modelId !== model_data.id) continue
-          if (action.motion) actionNames.add(action.motion)
-          if (action.facial) actionNames.add(action.facial)
+        if (snippet.type === 'Talk' || snippet.type === 'Motion') {
+          for (const action of snippet.data.actions ?? []) {
+            if (action.modelId !== model_data.id) continue
+            if (action.motion) actionNames.add(action.motion)
+            if (action.facial) actionNames.add(action.facial)
+          }
         }
       }
-      await Promise.all(Array.from(actionNames, (name) =>
-        model.internalModel.motionManager.loadMotion(name, 0)
-      ))
+      await Promise.all(
+        Array.from(actionNames, (name) => model.internalModel.motionManager.loadMotion(name, 0))
+      )
 
       result.push({
         id: model_data.id,

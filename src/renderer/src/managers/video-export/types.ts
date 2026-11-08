@@ -77,6 +77,8 @@ export interface ExportResult {
   outputSize?: number
   /** 分段时间统计（毫秒）：pump/ttsWait/encode/audio/invoke/avgPumpFps/frames */
   timings?: Record<string, number>
+  /** 逐句/逐动作/TTS/日志的完整导出诊断，由宿主写成 <video>.log.json */
+  diagnostics?: import('./ExportDiagnostics').ExportDiagnostics
   error?: string
   performanceMetrics?: ExportPerformanceMetrics
 }

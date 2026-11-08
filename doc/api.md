@@ -14,18 +14,25 @@ API 没有内置鉴权，部署边界见 [安全提示](host-deployment.md#安�
 - `downloadUrl` 是相对地址，应与服务地址组合；`videoPath` 是宿主文件路径，不是客户端本地路径。
 - CORS 允许任意来源、`GET/POST/OPTIONS` 和 `Content-Type` 请求头；预检返回 HTTP 204。这不等同于访问控制。
 
-| 方法 | 端点                            | 用途                                 |
-| ---- | ------------------------------- | ------------------------------------ |
-| POST | `/api/v1/export`                | 提交故事，同步等待导出结果           |
-| GET  | `/api/v1/export/:taskId/status` | 查询单个在途任务                     |
-| POST | `/api/v1/export/:taskId/cancel` | 取消指定在途任务                     |
-| GET  | `/api/v1/files`                 | 分页列出导出目录中的文件             |
-| GET  | `/api/v1/download/:filename`    | 下载指定文件                         |
-| GET  | `/api/v1/resources`             | 获取模型、动作、表情、背景及音频目录 |
-| GET  | `/api/v1/health`                | 查看宿主、渲染池与清理状态           |
-| GET  | `/api/v1/status`                | 查看队列与近期导出统计               |
-| POST | `/api/v1/cleanup`               | 立即执行一次过期导出文件清理         |
-| GET  | `/api/v1/cleanup/stats`         | 查看清理策略与累计统计               |
+| 方法 | 端点                             | 用途                                 |
+| ---- | -------------------------------- | ------------------------------------ |
+| POST | `/api/v1/export`                 | 提交故事，同步等待导出结果           |
+| GET  | `/api/v1/export/:taskId/status`  | 查询单个在途任务                     |
+| POST | `/api/v1/export/:taskId/cancel`  | 取消指定在途任务                     |
+| GET  | `/api/v1/files`                  | 分页列出导出目录中的文件             |
+| GET  | `/api/v1/download/:filename`     | 下载指定文件                         |
+| GET  | `/api/v1/resources`              | 获取模型、动作、表情、背景及音频目录 |
+| POST | `/api/v1/script/generate`        | 宿主内置 AI 生成剧本（不导出）       |
+| POST | `/api/v1/generate`               | 宿主内置 AI 生成剧本并导出视频       |
+| GET  | `/api/v1/assets/moesekai/models` | 查看 Moesekai 云端模型索引           |
+| GET  | `/api/v1/assets/moesekai/media`  | 浏览 Moesekai 背景 / BGM bundle      |
+| POST | `/api/v1/assets/fetch`           | 从 Moesekai 拉取模型、背景或 BGM     |
+| GET  | `/api/v1/health`                 | 查看宿主、渲染池与清理状态           |
+| GET  | `/api/v1/status`                 | 查看队列与近期导出统计               |
+| POST | `/api/v1/cleanup`                | 立即执行一次过期导出文件清理         |
+| GET  | `/api/v1/cleanup/stats`          | 查看清理策略与累计统计               |
+
+AI 生成与云端资源的字段、示例和错误处理见 [宿主内置 AI 剧本生成](ai-script.md) 与 [云端资源获取](cloud-assets.md)。
 
 ## 提交导出：`POST /api/v1/export`
 
@@ -62,6 +69,9 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
   "duration": 41.2,
   "frameCount": 900,
   "timings": { "recordMs": 35000, "mergeMs": 4500, "videoDurationMs": 30000 },
+  "logPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log",
+  "logJsonPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log.json",
+  "reportPath": "C:\\mss\\apifile\\export-1800000000000-demo01.report.txt",
   "downloadUrl": "/api/v1/download/export-1800000000000-demo01.mp4"
 }
 ```
@@ -74,6 +84,9 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 | `duration`           | **渲染侧导出耗时，单位秒，不是视频时长，也不含 API 排队时间** |
 | `frameCount`         | 渲染结果报告的帧数                                            |
 | `timings`            | 所用导出模式的统计对象，具体字段见下文                        |
+| `logPath`            | 逐句/逐动作/TTS 的可读诊断日志路径（与视频同目录）            |
+| `logJsonPath`        | 同一份诊断的结构化 JSON 路径                                  |
+| `reportPath`         | 成片时长、逐帧计划、近似项与异常的交付报告路径                |
 | `downloadUrl`        | 视频下载相对地址                                              |
 
 `duration`、`frameCount`、`timings` 随渲染结果透传，调用方应允许统计字段缺省。`timings` 不是所有数值都代表耗时：
@@ -235,6 +248,7 @@ curl -fS 'http://127.0.0.1:9881/api/v1/download/export-1800000000000-demo01.mp4'
 | `cleanup`                                          | 与 `/cleanup/stats` 相同的对象                                                                                                                                                                                                         |
 | `videoConfig`                                      | `width/height`（像素）、`renderScale`（倍率）、`fps`（帧/秒）、`codec`（当前 `h264`）、`crf`（编码质量参数）、`audioBitrate`（如 `128k`）、`watermark`、`watermarkText`、`idleChainGapSec`（秒）、`ttsMode`（`serial` / `concurrent`） |
 | `renderPool`                                       | 渲染池观测对象，字段见下文                                                                                                                                                                                                             |
+| `llm`、`assets`、`tts`                             | LLM 模型/流水线/密钥状态、云端资源拉取状态，以及 TTS 的 `provider`、`apiBaseUrl`、`emotionLabels`、角色数                                                                                                                              |
 | `host`                                             | `platform`（平台）、`node`（Node 版本）、`ffmpegEncoder`（配置值）、`ffmpegEncoderDetected`（探测缓存：`nvidia/amd/intel/cpu` 或 `null`）                                                                                              |
 
 `renderPool` 包含 `configuredWorkers`、`readyWorkers`、`idleWorkers`（数量），`busyTaskIds`（占用 worker 的任务 ID 数组）、`bufferedTasks`（内部缓冲任务数）、`exportsCompleted`（worker 已释放的任务计数，不是成功数），以及 `webglRenderers` 数组。

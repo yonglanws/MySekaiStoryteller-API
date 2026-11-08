@@ -18,10 +18,7 @@ function createResources(t, contents) {
 }
 
 test('bgm.yaml provides enabled / path / volume', (t) => {
-  const root = createResources(
-    t,
-    'enabled: false\npath: audio/bgm/song2.mp3\nvolume: 0.45\n'
-  )
+  const root = createResources(t, 'enabled: false\npath: audio/bgm/song2.mp3\nvolume: 0.45\n')
   assert.deepEqual(readBgmManifest(root), {
     enabled: false,
     path: 'audio/bgm/song2.mp3',

@@ -1,0 +1,20 @@
+{
+  "models": {
+    "21": {
+      "model3": "v2_19ena_school01/v2_19ena_school_t08/v2_19ena_school_t08.model3.json",
+      "bundle": "live2d/motion/v2_19ena_motion_base"
+    },
+    "22": {
+      "model3": "v2_20mizuki_culture/v2_20mizuki_culture_t08/v2_20mizuki_culture_t08.model3.json",
+      "bundle": "live2d/motion/v2_20mizuki_motion_base"
+    },
+    "23": {
+      "model3": "v2_20mizuki_culture_02/v2_20mizuki_culture_02_t08/v2_20mizuki_culture_02_t08.model3.json",
+      "bundle": "live2d/motion/v2_20mizuki_motion_base"
+    },
+    "24": {
+      "model3": "v2_20mizuki_culture_back/v2_20mizuki_culture_back_t04/v2_20mizuki_culture_back_t04.model3.json",
+      "bundle": "live2d/motion/v2_20mizuki_back_motion_base"
+    }
+  }
+}

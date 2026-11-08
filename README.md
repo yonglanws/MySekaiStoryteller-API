@@ -29,8 +29,10 @@
 
 - **无头渲染**：PixiJS + Live2D，运行于 Playwright 管理的 Chrome / Edge 渲染池。
 - **两种导出模式**：默认 `record` 实时录制，也支持 `fast` 虚拟时钟逐帧渲染；硬件编码失败自动回退 CPU。
-- **可选音频**：GPT-SoVITS TTS 配音与 BGM 混音，支持模拟说话口型；没有 TTS 也可导出
+- **可选音频**：GPT-SoVITS / IrodoriTTS 配音与 BGM 混音；Irodori 支持 LoRA、参考音频、caption 与情绪标签，支持模拟说话口型；没有 TTS 也可导出
 - **任务管理**：排队、并发导出、取消、IP 限流和过期文件清理。
+- **云端资源**：从 Moesekai（pjsk.moe）拉取 Live2D 模型与动作、剧情背景和 BGM；`sse-motion` 无损转 `motion3`，自动登记 `models.yaml` / `images.yaml` / `bgm.yaml`，BGM 用官方曲名索引补全，AI 可按曲名和分类选曲。
+- **宿主内置 AI**：配置任意 OpenAI 兼容 LLM，一句场景描述在宿主完成三段式生成（选角 → 台词 → 表演设计）和日文 `ttsText`，再交给同一条导出队列。
 
 ## 快速开始
 
@@ -50,6 +52,22 @@ cp config.example.yaml config.yaml
 
 编辑 `config.yaml`，并按 [资源与音频配置](doc/resources.md) 放置模型、背景等资源及清单。
 **仓库不附带渲染资源或示例剧本**；资源根默认为 `resources/`，可通过 `paths.resources` 或 `MSS_RESOURCE_DIR` 修改。
+
+没有现成模型、背景或 BGM 时，可以直接从 Moesekai 拉取（详见 [云端资源获取](doc/cloud-assets.md)）：
+
+```bash
+npm run fetch:models -- --characters mizuki,ena
+# 背景 / BGM 可选，按需拉取
+npm run fetch:media -- --kind backgrounds --limit 20
+npm run fetch:media -- --kind bgm --names bgm00003,bgm00006
+```
+
+要在宿主里用 AI 写剧本，设置 LLM 密钥并启用 `llm`（详见 [宿主内置 AI 剧本生成](doc/ai-script.md)）：
+
+```bash
+export MSS_LLM_API_KEY=sk-...
+# config.yaml: llm.enabled=true, llm.baseUrl/model 按服务填写
+```
 
 ```bash
 npm run build
@@ -90,9 +108,11 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 | 文档 | 内容 |
 | --- | --- |
-| [API 参考](doc/api.md) | 导出、状态查询、取消、下载、资源目录与清理接口 |
+| [API 参考](doc/api.md) | 导出、生成、资源拉取、状态查询、取消、下载与清理接口 |
 | [故事文件格式](doc/story-format.md) | 完整 JSON 示例、登场退场、台词动作与时长规则 |
 | [资源与音频配置](doc/resources.md) | 资源目录、模型与背景清单、TTS、BGM |
+| [云端资源获取](doc/cloud-assets.md) | Moesekai 模型/动作/背景/BGM 下载、sse-motion 转 motion3、缓存续传 |
+| [宿主内置 AI 剧本生成](doc/ai-script.md) | LLM 配置、staged/single 流水线、剧本/视频端点、校验修复、人格与人设 |
 | [导出模式](doc/export-modes.md) | record / fast、画质与体积、旧配置迁移 |
 | [部署指南](doc/host-deployment.md) | 平台依赖、配置与环境变量、常驻运行、GPU 与安全 |
 | [故障排除](doc/troubleshooting.md) | 浏览器启动、软件渲染、导出失败与性能问题 |

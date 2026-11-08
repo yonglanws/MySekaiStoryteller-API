@@ -1,5 +1,13 @@
 import { LayoutModes, MoveSpeed, Sides } from '../../../common/types/Story'
 import Position_rel from '../types/PositionRel'
+import {
+  LAYOUT_REFERENCE_WIDTH,
+  MOVE_DURATION_FAST_MS,
+  MOVE_DURATION_NORMAL_MS,
+  MOVE_DURATION_SLOW_MS,
+  SIDE_X_DEFAULT,
+  SIDE_X_THREE
+} from '../../../common/official/timing'
 
 export default class StageUtils {
   public static side_to_position(
@@ -7,32 +15,20 @@ export default class StageUtils {
     layout_mode: LayoutModes,
     offset: number
   ): Position_rel {
-    const position_map = {
-      [LayoutModes.Normal]: {
-        [Sides.Center]: [0.5, 0.5],
-        [Sides.Left]: [0.3, 0.5],
-        [Sides.Right]: [0.7, 0.5]
-      },
-      [LayoutModes.Three]: {
-        [Sides.Center]: [0.5, 0.5],
-        [Sides.Left]: [0.25, 0.5],
-        [Sides.Right]: [0.75, 0.5]
-      }
-    }
-
-    const position = [...(position_map[layout_mode][side] as [number, number])]
-    position[0] += offset / 1920
+    // 官方 layout.transform_map：普通 ±350、三人 ±550（参考像素，舞台宽 1920）。
+    const sideX = layout_mode === LayoutModes.Three ? SIDE_X_THREE : SIDE_X_DEFAULT
+    const direction = side === Sides.Left ? -1 : side === Sides.Right ? 1 : 0
     return {
-      x: position[0],
-      y: position[1]
+      x: 0.5 + (direction * sideX + offset) / LAYOUT_REFERENCE_WIDTH,
+      y: 0.5
     }
   }
 
   public static move_speed_to_num(move_speed: MoveSpeed): number {
     return {
-      [MoveSpeed.Slow]: 700,
-      [MoveSpeed.Normal]: 500,
-      [MoveSpeed.Fast]: 300,
+      [MoveSpeed.Slow]: MOVE_DURATION_SLOW_MS,
+      [MoveSpeed.Normal]: MOVE_DURATION_NORMAL_MS,
+      [MoveSpeed.Fast]: MOVE_DURATION_FAST_MS,
       [MoveSpeed.Immediate]: 0
     }[move_speed]
   }

@@ -1,6 +1,8 @@
 import PositionRel from '../types/PositionRel'
 import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
+import AnimationManager from '../managers/AnimationManager'
+import { CHARACTER_FADE_MS, HIDE_DELAY_IN_PLACE_MS } from '../../../common/official/timing'
 
 // noinspection DuplicatedCode
 export default class LayoutClearSnippet extends BaseSnippet {
@@ -8,6 +10,12 @@ export default class LayoutClearSnippet extends BaseSnippet {
     if (this.data.type !== 'LayoutClear') return
 
     const model = this.app.getModelById(this.data.data.modelId)
+    // 官方 HideCharacter：显示状态不是 Appear 时 OnFinished 立即触发。
+    const wasVisible = this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false
+    if (!wasVisible) {
+      this.app.layerModel.removeModel(model)
+      return
+    }
 
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
@@ -23,23 +31,29 @@ export default class LayoutClearSnippet extends BaseSnippet {
     const is_moved = from.x !== to.x || from.y !== to.y
     const move_duration_ms = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
 
-    // 退场动作先加载并启动（滑出全程动作在播），淡出与滑出等长：角色边演边走边隐
+    // 退场动作先加载并启动；淡出只在最后 0.1s 发生，角色边演边走边隐。
     const exit_motion = this.data.data.motion
     const exit_facial = this.data.data.facial
     if (exit_motion || exit_facial) {
-      await model.startMotions(exit_motion || undefined, exit_facial || undefined, true)
+      await model.startMotions(exit_motion || undefined, exit_facial || undefined, true, {
+        facialForce: true,
+        traceSnippetIndex: this.snippetIndex
+      })
     }
 
-    const hide_duration_ms = is_moved ? Math.max(move_duration_ms, 400) : 300
-    const hide_task = model.hide(hide_duration_ms)
-
-    if (!is_moved) {
-      model.setPositionRel(this.app.stage_size, to)
-    }
+    // SetTransformData(SideFrom) 先把角色放回起点，再 CharacterMoveTo(SideTo)。
+    model.setPositionRel(this.app.stage_size, is_moved ? from : to)
 
     const move_task = is_moved ? model.move(this.app.stage_size, from, to, move_duration_ms) : null
 
-    await hide_task
+    // HideCharacter(id, delay)：
+    // - 原地：delay 0.15s，然后 0.1s 淡出，共 0.25s；
+    // - 滑动：delay = move_duration - 0.1s，淡出结束时正好滑到位。
+    const delay_ms = is_moved
+      ? Math.max(0, move_duration_ms - CHARACTER_FADE_MS)
+      : HIDE_DELAY_IN_PLACE_MS
+    if (delay_ms > 0) await AnimationManager.delay(delay_ms)
+    await model.hide(CHARACTER_FADE_MS)
     if (move_task) await move_task
 
     // 动画全部结束后再移出渲染层；提前移除会导致淡出/滑出不可见（硬切消失）

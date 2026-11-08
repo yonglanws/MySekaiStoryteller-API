@@ -6,12 +6,24 @@ import {
 } from 'pixi-live2d-display-advanced'
 import AnimationManager from '../managers/AnimationManager'
 import PositionRel from '../types/PositionRel'
-import { getRandomNumber } from '../utils/HelperUtils'
 import { CharacterAction, ModelData } from '../../../common/types/Story'
 import { VisualEffectManager } from '../managers/VisualEffectManager'
 import { AlphaFilter } from 'pixi.js'
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../utils/Logger'
+import { motionTrace } from '../managers/video-export/MotionTraceCollector'
+import { bodyBlendSeconds, facialBlendSeconds } from './MotionBlend'
+import {
+  advanceBreathDegree,
+  breathParameterValue,
+  createBlinkState,
+  createSeededRandom,
+  sleepBlink,
+  stepBlink,
+  wakeBlink,
+  type BlinkState
+} from './NaturalMotion'
+import { BODY_MOTION_FADE_SECONDS, FACIAL_FADE_SECONDS } from '../../../common/official/timing'
 
 /**
  * 素材库里混有两种 Cubism 参数 ID 命名：Cubism2 风格全大写下划线（PARAM_ARM_R_1）
@@ -57,7 +69,11 @@ const MOTION_ID_ALIAS_GROUPS: ReadonlyArray<readonly string[]> = [
 const MOTION_PARAMETER_ID_ALIASES: Map<string, readonly string[]> = (() => {
   const map = new Map<string, readonly string[]>()
   const add = (group: readonly string[]): void => {
-    for (const id of group) map.set(id, group.filter((candidate) => candidate !== id))
+    for (const id of group)
+      map.set(
+        id,
+        group.filter((candidate) => candidate !== id)
+      )
   }
   for (const group of MOTION_ID_ALIAS_GROUPS) add(group)
   for (let i = 1; i <= 9; i++) {
@@ -82,17 +98,34 @@ export default class AdvancedModel extends Live2DModel {
   public autoBlink: boolean = true
   public lastChangeBlinkTime: number | null = null
   public readonly visualEffectManager: VisualEffectManager = new VisualEffectManager(this)
-  private blinkTimerId: ReturnType<typeof setTimeout> | null = null
-  private blinkGeneration = 0
   private readonly channelGeneration = [0, 0]
+  /** 每个通道下一次 startMotion 的交叉淡化秒数（由官方混合规则计算）。 */
+  private readonly channelFadeSeconds: [number, number] = [
+    BODY_MOTION_FADE_SECONDS,
+    FACIAL_FADE_SECONDS
+  ]
+  private blinkState: BlinkState = createBlinkState(1)
+  private breathDegree = 0
+  private breathParamId: string | null = null
+  private naturalMotionInstalled = false
+  private lastNaturalUpdateMs = 0
+  private firstBodyCue = true
+  private facialForceNext = false
   private bodyIgnoredParamIds: string[] = []
   private restoreBodyUpdate: (() => void) | null = null
   private readonly actionController = new AbortController()
   private defaultMotionName: string | null = null
+  private defaultFacialName: string | null = null
   private bodyChainArmed = false
   private bodyChainGeneration = -1
   private bodyChainTimer: ReturnType<typeof setTimeout> | null = null
   private recentBodyMotions: string[] = []
+  private currentBodyMotion: string | null = null
+  private currentBodySnippetIndex = -1
+  private currentFacialName: string | null = null
+  private currentBodyStartedAt = 0
+  private currentBodyClipDurationMs = 0
+  private bodyFinishReported = true
 
   /** Aborted when this model is destroyed; suitable for a snippet action scope. */
   public get actionSignal(): AbortSignal {
@@ -119,30 +152,36 @@ export default class AdvancedModel extends Live2DModel {
     this.internalModel.extendParallelMotionManager(2)
     this.installMotionIdNormalization()
     this.installBodyParameterIsolation()
+    this.installCrossfade(0)
+    this.installCrossfade(1)
 
     this.internalModel.parallelMotionManager[0].stopAllMotions()
     this.internalModel.parallelMotionManager[1].stopAllMotions()
+
+    // 官方模型先用别的方式驱动眨眼；这里关掉依赖自带的 eyeBlink，改由 NaturalMotion 控制。
+    const internalWithBlink = this.internalModel as unknown as { eyeBlink?: unknown }
+    internalWithBlink.eyeBlink = undefined
+
+    const seed = (metadata.id * 2654435761) >>> 0
+    this.blinkState = createBlinkState(seed)
+    this.breathDegree = createSeededRandom(seed ^ 0x6272656174)() * 360
+    sleepBlink(this.blinkState)
 
     const motionManager = this.internalModel.motionManager
     const groups = motionManager.motionGroups
     const defaultMotion = groups && groups['w-normal-default01'] ? 'w-normal-default01' : null
     const defaultFacial = groups && groups['face_normal_01'] ? 'face_normal_01' : null
     this.defaultMotionName = defaultMotion
+    this.defaultFacialName = defaultFacial
 
-    if (defaultMotion) {
-      this.internalModel.parallelMotionManager[0].startMotion(
-        defaultMotion,
-        0,
-        MotionPriority.FORCE
-      )
-    }
-    if (defaultFacial) {
-      this.internalModel.parallelMotionManager[1].startMotion(
-        defaultFacial,
-        0,
-        MotionPriority.FORCE
-      )
-    }
+    // 新模型的第一段 clip 没有可混合的旧姿势，官方 blend=0。
+    this.channelFadeSeconds[0] = 0
+    this.channelFadeSeconds[1] = 0
+    // 不在这里异步启动默认 body/facial：initialize 是同步的，startMotion 的加载
+    // 完成时机不可控。第一段 LayoutAppear 常请求同一个 face_normal_01，会和这里的
+    // 异步 default facial 抢 MotionState 的 reservation，导致表情 cue 被拒绝。
+    // 官方新模型本来也没有默认动作；第一段 cue（或 startEntryMotion 兜底）负责启动。
+    this.firstBodyCue = true
 
     const alpha_filter = new AlphaFilter(0)
     alpha_filter.resolution = 2
@@ -153,8 +192,120 @@ export default class AdvancedModel extends Live2DModel {
     this.anchor.y = this.metadata.anchor
 
     this.visualEffectManager.createAll()
+    this.installNaturalMotion()
 
     this.logger = getSubLogger(`AdvancedModel(${this._metadata.id})`)
+  }
+
+  /**
+   * 把依赖的平行动作队列改成官方 `PlayableAnimator` 语义：
+   * 新 clip 与旧 clip 交叉淡化，而不是每次 `stopAllMotions()` 把旧姿势直接丢掉。
+   * `ParallelMotionManager._startMotion` 内部会先 stopAll，这里绕开它，
+   * 直接调用 queueManager.startMotion，让旧 entry 按 fadeOut 自然退出。
+   */
+  private installCrossfade(channel: 0 | 1): void {
+    const manager = this.internalModel.parallelMotionManager[channel] as unknown as {
+      queueManager?: {
+        startMotion: (motion: unknown, autoDelete: boolean, now: number) => number
+        _motions?: Array<{ setFadeOut?: (seconds: number) => void }>
+      }
+      _startMotion?: (
+        motion: unknown,
+        onFinish?: () => void,
+        ignoreParamIds?: string[]
+      ) => number | void
+    }
+    if (!manager?.queueManager || typeof manager._startMotion !== 'function') return
+    const fallback = manager._startMotion.bind(manager)
+    manager._startMotion = (motion, onFinish, ignoreParamIds) => {
+      const fade = Math.max(0, this.channelFadeSeconds[channel])
+      try {
+        const typedMotion = motion as {
+          setFadeInTime?: (seconds: number) => void
+          setFinishedMotionHandler?: (handler?: () => void) => void
+          onFinishHandler?: () => void
+          _motionData?: { curves?: Array<{ id: string }>; curveCount?: number }
+          motions?: Array<{ _$4P?: string }>
+        }
+        if (typedMotion.setFadeInTime) typedMotion.setFadeInTime(fade)
+        if (typedMotion.setFinishedMotionHandler) typedMotion.setFinishedMotionHandler(onFinish)
+        if ('onFinishHandler' in typedMotion) typedMotion.onFinishHandler = onFinish
+        if (ignoreParamIds?.length) {
+          if (typedMotion._motionData?.curves) {
+            typedMotion._motionData.curves = typedMotion._motionData.curves.filter(
+              (curve) => !ignoreParamIds.includes(curve.id)
+            )
+            typedMotion._motionData.curveCount = typedMotion._motionData.curves.length
+          } else if (typedMotion.motions) {
+            typedMotion.motions = typedMotion.motions.filter(
+              (item) => !ignoreParamIds.includes(item._$4P ?? '')
+            )
+          }
+        }
+        const queue = manager.queueManager!
+        const handle = queue.startMotion(motion, false, performance.now())
+        // startMotion 会先把旧 entry 的 fadeOut 设成旧 clip 自己的值；这里统一成新 blend，
+        // 让旧动作与新动作在同一个时间窗内交叉完成。
+        const entries = queue._motions
+        if (Array.isArray(entries)) {
+          for (let i = 0; i < entries.length - 1; i++) {
+            entries[i]?.setFadeOut?.(fade)
+          }
+        }
+        return handle
+      } catch (error) {
+        this.logger.warn('Crossfade start failed, falling back to queue stop', error)
+        return fallback(motion, onFinish, ignoreParamIds)
+      }
+    }
+  }
+
+  /**
+   * 官方 LateUpdate 的自然动作：眨眼（动作期间 Sleep，动作结束 Wake）与 3s 呼吸。
+   * 监听 `beforeModelUpdate`：此时动作/物理已经求值，写进去的参数会进入本帧 model.update()。
+   */
+  private installNaturalMotion(): void {
+    if (this.naturalMotionInstalled) return
+    this.naturalMotionInstalled = true
+    const internal = this.internalModel as unknown as {
+      on: (event: 'beforeModelUpdate', listener: () => void) => void
+      coreModel: {
+        getParameterIndex?: (id: string) => number
+        getParameterValueById?: (id: string) => number
+        setParameterValueById?: (id: string, value: number) => void
+        getParamFloat?: (id: string) => number
+        setParamFloat?: (id: string, value: number) => void
+      }
+    }
+    const core = internal.coreModel
+    const has = (id: string): boolean =>
+      typeof core?.getParameterIndex === 'function' ? core.getParameterIndex(id) >= 0 : true
+    const eyeIds = this.eyeParameterIds()
+      .slice(0, 2)
+      .filter((id) => has(id))
+    const breathCandidates = ['ParamBreath', 'PARAM_BREATH']
+    this.breathParamId = breathCandidates.find((id) => has(id)) ?? null
+    if (!eyeIds.length && !this.breathParamId) return
+    this.lastNaturalUpdateMs = performance.now()
+    internal.on('beforeModelUpdate', () => {
+      const now = performance.now()
+      const dt = Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
+      this.lastNaturalUpdateMs = now
+      const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
+      if (!this.visible || alpha <= 0.01 || this.destroyed) return
+      const opening = stepBlink(this.blinkState, dt)
+      for (const id of eyeIds) {
+        const base = core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
+        if (core.setParameterValueById) core.setParameterValueById(id, base * opening)
+        else core.setParamFloat?.(id, base * opening)
+      }
+      if (this.breathParamId) {
+        this.breathDegree = advanceBreathDegree(this.breathDegree, dt)
+        const value = breathParameterValue(this.breathDegree)
+        if (core.setParameterValueById) core.setParameterValueById(this.breathParamId, value)
+        else core.setParamFloat?.(this.breathParamId, value)
+      }
+    })
   }
 
   /**
@@ -242,10 +393,31 @@ export default class AdvancedModel extends Live2DModel {
    * 路径通过 applyMotion 的 disarm 保持"等播完"的原语义。
    */
   private maybeStartBodyChain(): void {
-    if (!this.bodyChainArmed) return
     const internal = this.internalModel
     const manager = internal?.parallelMotionManager[0]
     if (!internal || !manager || this.destroyed) return
+    if (
+      !manager.playing &&
+      manager.isFinished() &&
+      this.currentBodyMotion &&
+      !this.bodyFinishReported
+    ) {
+      this.bodyFinishReported = true
+      wakeBlink(this.blinkState)
+      motionTrace.record({
+        at: performance.now(),
+        modelId: this.metadata.id,
+        snippetIndex: this.currentBodySnippetIndex,
+        channel: 0,
+        name: this.currentBodyMotion,
+        event: 'finished',
+        playedMs: performance.now() - this.currentBodyStartedAt,
+        clipDurationMs: this.currentBodyClipDurationMs
+      })
+    }
+    // 非循环身体动作播完后 Controller.WakeUp()；空闲时恢复自动眨眼。
+    if (!manager.playing && manager.isFinished()) wakeBlink(this.blinkState)
+    if (!this.bodyChainArmed) return
     if (!manager.isFinished() || manager.playing) return
     this.bodyChainArmed = false
     if (this.bodyChainGeneration !== this.channelGeneration[0]) return
@@ -254,16 +426,27 @@ export default class AdvancedModel extends Live2DModel {
     const gapMs = AdvancedModel.idleChainGapMs
     if (gapMs > 0) {
       if (this.bodyChainTimer) clearTimeout(this.bodyChainTimer)
-      this.bodyChainTimer = setTimeout(() => {
-        this.bodyChainTimer = null
-        if (this.destroyed) return
-        const mgr = this.internalModel?.parallelMotionManager[0]
-        if (!mgr || this.bodyChainGeneration !== this.channelGeneration[0]) return
-        if (!mgr.isFinished() || mgr.playing) return
-        const next = this.pickChainMotion()
-        if (!next) return
-        void this.startCharacterChannel(0, next, [], undefined, undefined, true)
-      }, gapMs * (0.75 + Math.random() * 0.5))
+      this.bodyChainTimer = setTimeout(
+        () => {
+          this.bodyChainTimer = null
+          if (this.destroyed) return
+          const mgr = this.internalModel?.parallelMotionManager[0]
+          if (!mgr || this.bodyChainGeneration !== this.channelGeneration[0]) return
+          if (!mgr.isFinished() || mgr.playing) return
+          const next = this.pickChainMotion()
+          if (!next) return
+          void this.startCharacterChannel(
+            0,
+            next,
+            [],
+            undefined,
+            undefined,
+            true,
+            this.currentBodySnippetIndex
+          )
+        },
+        gapMs * (0.75 + Math.random() * 0.5)
+      )
     }
     // gap=0：不回落站立，保持动作结束时的姿势，直到下一个 cue 或退场接管
   }
@@ -291,6 +474,52 @@ export default class AdvancedModel extends Live2DModel {
     this.bodyChainArmed = true
   }
 
+  /** 剧本给的动作可能来自别的模型/旧资源；不存在的动作会加载失败，必须能提前判断。 */
+  public hasMotion(name: string): boolean {
+    if (!name) return false
+    const groups = this.internalModel?.motionManager?.motionGroups as
+      | Record<string, unknown>
+      | undefined
+    return Boolean(groups && groups[name])
+  }
+
+  private loadedMotion(name: string): unknown {
+    const groups = this.internalModel?.motionManager?.motionGroups as
+      | Record<string, unknown[]>
+      | undefined
+    return groups?.[name]?.[0] ?? null
+  }
+
+  /** 已预加载动作的剪辑时长；循环动作返回 0（官方自动模式等不到它结束）。 */
+  public getMotionDurationMs(name: string): number {
+    const motion = this.loadedMotion(name)
+    if (!motion) return 0
+    const data = (motion as { _motionData?: { loop?: boolean } })._motionData
+    if (data?.loop) return 0
+    return this.motionClipDurationMs(motion)
+  }
+
+  public isMotionLooping(name: string): boolean {
+    const motion = this.loadedMotion(name)
+    const data = (motion as { _motionData?: { loop?: boolean } } | null)?._motionData
+    return data?.loop === true
+  }
+
+  /**
+   * 入场兜底动作：剧本没给 motion/facial 时也不能站桩淡入。
+   * 优先挑一个当前情绪族的 body motion；没有动作库时退回默认待机动作。
+   */
+  public async startEntryMotion(
+    applyDefaultFacial = true,
+    traceSnippetIndex?: number
+  ): Promise<void> {
+    const motion = this.pickChainMotion()
+    if (motion) await this.applyMotion(motion, false, [], traceSnippetIndex)
+    if (applyDefaultFacial && this.defaultFacialName) {
+      await this.applyFacial(this.defaultFacialName, true, traceSnippetIndex)
+    }
+  }
+
   private eyeParameterIds(): string[] {
     return this.internalModel instanceof Cubism2InternalModel
       ? ['PARAM_EYE_R_OPEN', 'PARAM_EYE_L_OPEN', 'PARAM_EYE_BALL_X', 'PARAM_EYE_BALL_Y']
@@ -303,7 +532,8 @@ export default class AdvancedModel extends Live2DModel {
     ignoredParamIds: string[] = [],
     signal?: AbortSignal,
     canApply?: () => boolean,
-    chainAfter = false
+    chainAfter = false,
+    traceSnippetIndex?: number
   ): Promise<void> {
     const generation = ++this.channelGeneration[channel]
     if (channel === 0) {
@@ -317,11 +547,53 @@ export default class AdvancedModel extends Live2DModel {
       }
     }
     const internal = this.internalModel
-    if (!internal || this.destroyed || signal?.aborted || this.actionSignal.aborted) return
+    const requestedAt = performance.now()
+    if (channel === 0 || channel === 1) {
+      motionTrace.record({
+        at: requestedAt,
+        modelId: this.metadata.id,
+        snippetIndex: traceSnippetIndex,
+        channel,
+        name,
+        event: 'request'
+      })
+    }
+    if (!internal || this.destroyed || signal?.aborted || this.actionSignal.aborted) {
+      motionTrace.record({
+        at: performance.now(),
+        modelId: this.metadata.id,
+        snippetIndex: traceSnippetIndex,
+        channel,
+        name,
+        event: 'skipped',
+        reason: 'model destroyed or action aborted'
+      })
+      return
+    }
     const manager = internal.parallelMotionManager[channel]
+    // 同一个表情已经在播时，官方 ChangeModelFacial 不会产生可见变化；
+    // 重新 startMotion 还会和 MotionState 的 reservation 打架。直接视为已应用。
+    if (
+      channel === 1 &&
+      name === this.currentFacialName &&
+      manager.playing &&
+      !manager.isFinished()
+    ) {
+      motionTrace.record({
+        at: requestedAt,
+        modelId: this.metadata.id,
+        snippetIndex: traceSnippetIndex,
+        channel,
+        name,
+        event: 'skipped',
+        reason: 'same facial already active'
+      })
+      return
+    }
     // Invalidate older asynchronous reservations without stopping the currently playing clip.
     manager.state.setReserved(undefined, undefined, 0)
     const motion = await internal.motionManager.loadMotion(name, 0)
+    const loadedAt = performance.now()
     if (
       !motion ||
       this.destroyed ||
@@ -330,12 +602,63 @@ export default class AdvancedModel extends Live2DModel {
       generation !== this.channelGeneration[channel] ||
       (canApply && !canApply())
     ) {
+      motionTrace.record({
+        at: loadedAt,
+        modelId: this.metadata.id,
+        snippetIndex: traceSnippetIndex,
+        channel,
+        name,
+        event: 'skipped',
+        loadMs: loadedAt - requestedAt,
+        reason: !motion
+          ? 'motion not found'
+          : generation !== this.channelGeneration[channel]
+            ? 'superseded by a newer cue'
+            : 'aborted or target hidden'
+      })
       return
     }
-    if (channel === 0) this.bodyIgnoredParamIds = ignoredParamIds
-    // Restarting the same named clip is intentional for consecutive cues. Only reset
-    // this channel: a body cue must never clear a listener's facial expression.
-    manager.stopAllMotions()
+    const clipDurationMs = this.motionClipDurationMs(motion)
+    motionTrace.record({
+      at: loadedAt,
+      modelId: this.metadata.id,
+      snippetIndex: traceSnippetIndex,
+      channel,
+      name,
+      event: 'loaded',
+      loadMs: loadedAt - requestedAt,
+      clipDurationMs
+    })
+    if (channel === 0) {
+      this.bodyIgnoredParamIds = ignoredParamIds
+      if (this.currentBodyMotion && manager.playing && !manager.isFinished()) {
+        motionTrace.record({
+          at: loadedAt,
+          modelId: this.metadata.id,
+          snippetIndex: traceSnippetIndex,
+          channel: 0,
+          name: this.currentBodyMotion,
+          event: 'interrupted',
+          playedMs: loadedAt - this.currentBodyStartedAt,
+          clipDurationMs: this.currentBodyClipDurationMs,
+          previous: name
+        })
+      }
+    }
+    // 官方 PlayableAnimator 是交叉淡化，不是先 stopAll 清空旧姿势。
+    const fadeSeconds =
+      channel === 0
+        ? this.firstBodyCue || this.currentBodyMotion === this.defaultMotionName
+          ? 0
+          : bodyBlendSeconds(this.currentBodyMotion, name)
+        : this.facialForceNext
+          ? facialBlendSeconds(true)
+          : facialBlendSeconds(false)
+    this.channelFadeSeconds[channel] = fadeSeconds
+    if (channel === 0) {
+      // ChangeMotionCore 结束时 Sleep()：动作播放期间不自动眨眼，动作结束再 Wake。
+      sleepBlink(this.blinkState)
+    }
     const invalidateReservation = (): void => {
       if (generation === this.channelGeneration[channel] && !this.destroyed) {
         manager.state.setReserved(undefined, undefined, 0)
@@ -343,32 +666,98 @@ export default class AdvancedModel extends Live2DModel {
     }
     signal?.addEventListener('abort', invalidateReservation, { once: true })
     try {
-      await manager.startMotion(name, 0, MotionPriority.FORCE)
+      const started = await manager.startMotion(name, 0, MotionPriority.FORCE)
+      const startedAt = performance.now()
+      motionTrace.record({
+        at: startedAt,
+        modelId: this.metadata.id,
+        snippetIndex: traceSnippetIndex,
+        channel,
+        name,
+        event: started ? 'started' : 'skipped',
+        loadMs: startedAt - requestedAt,
+        clipDurationMs,
+        fadeMs: Math.round(fadeSeconds * 1000),
+        reason: started ? undefined : 'motion manager refused the cue'
+      })
+      if (started && channel === 0) {
+        this.currentBodyMotion = name
+        this.currentBodySnippetIndex = traceSnippetIndex ?? -1
+        this.currentBodyStartedAt = startedAt
+        this.currentBodyClipDurationMs = clipDurationMs
+        this.bodyFinishReported = false
+        this.firstBodyCue = false
+      }
+      if (started && channel === 1) {
+        this.facialForceNext = false
+        this.currentFacialName = name
+      }
     } finally {
       signal?.removeEventListener('abort', invalidateReservation)
     }
   }
 
+  private motionClipDurationMs(motion: unknown): number {
+    const getDuration = (motion as { getDuration?: () => number }).getDuration
+    if (typeof getDuration === 'function') {
+      try {
+        const seconds = getDuration.call(motion)
+        if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000)
+      } catch {
+        /* fall through to motion data */
+      }
+    }
+    const data = (motion as { _motionData?: { duration?: number } })._motionData
+    if (data && Number.isFinite(data.duration) && (data.duration ?? 0) > 0) {
+      return Math.round((data.duration as number) * 1000)
+    }
+    return 0
+  }
+
   public async applyMotion(
     motion: string,
     ignoreParams: boolean = false,
-    extraIgnoreParamIds: string[] = []
+    extraIgnoreParamIds: string[] = [],
+    traceSnippetIndex?: number
   ): Promise<void> {
-    await this.startCharacterChannel(0, motion, [
-      ...(ignoreParams ? this.eyeParameterIds() : []),
-      ...extraIgnoreParamIds
-    ])
+    await this.startCharacterChannel(
+      0,
+      motion,
+      [...(ignoreParams ? this.eyeParameterIds() : []), ...extraIgnoreParamIds],
+      undefined,
+      undefined,
+      false,
+      traceSnippetIndex
+    )
   }
 
-  public async applyFacial(facial: string): Promise<void> {
-    await this.startCharacterChannel(1, facial)
+  public async applyFacial(
+    facial: string,
+    force = false,
+    traceSnippetIndex?: number
+  ): Promise<void> {
+    this.facialForceNext = force
+    try {
+      await this.startCharacterChannel(
+        1,
+        facial,
+        [],
+        undefined,
+        undefined,
+        false,
+        traceSnippetIndex
+      )
+    } finally {
+      this.facialForceNext = false
+    }
   }
 
   /** Start independent channels, preserving any omitted channel. Never changes visibility. */
   public async applyCharacterAction(
     action: Pick<CharacterAction, 'motion' | 'facial'>,
     signal?: AbortSignal,
-    canApply?: () => boolean
+    canApply?: () => boolean,
+    traceSnippetIndex?: number
   ): Promise<void> {
     const tasks: Promise<void>[] = []
     if (action.motion) {
@@ -378,16 +767,22 @@ export default class AdvancedModel extends Live2DModel {
           action.motion,
           [
             ...this.eyeParameterIds(),
-            this.internalModel instanceof Cubism2InternalModel ? 'PARAM_MOUTH_OPEN_Y' : 'ParamMouthOpenY'
+            this.internalModel instanceof Cubism2InternalModel
+              ? 'PARAM_MOUTH_OPEN_Y'
+              : 'ParamMouthOpenY'
           ],
           signal,
           canApply,
           // 该手势播完后接着演下一个（同情绪族），台词期间连续表演不站桩。
-          true
+          true,
+          traceSnippetIndex
         )
       )
     }
-    if (action.facial) tasks.push(this.startCharacterChannel(1, action.facial, [], signal, canApply))
+    if (action.facial)
+      tasks.push(
+        this.startCharacterChannel(1, action.facial, [], signal, canApply, false, traceSnippetIndex)
+      )
     await Promise.all(tasks)
   }
 
@@ -415,9 +810,6 @@ export default class AdvancedModel extends Live2DModel {
     }, time)
 
     this.lastChangeBlinkTime = Date.now()
-    const generation = ++this.blinkGeneration
-    if (this.blinkTimerId !== null) clearTimeout(this.blinkTimerId)
-    this.blinkTimerId = setTimeout(() => this.updateAutoBlink(generation), getRandomNumber(4000, 6500))
   }
 
   public async hide(time: number): Promise<void> {
@@ -433,19 +825,20 @@ export default class AdvancedModel extends Live2DModel {
 
     this.lastChangeBlinkTime = Date.now()
     this.autoBlink = false
-    this.blinkGeneration++
+    sleepBlink(this.blinkState)
     this.cancelPendingActions()
-    if (this.blinkTimerId !== null) {
-      clearTimeout(this.blinkTimerId)
-      this.blinkTimerId = null
-    }
   }
 
   /**
    * 仅启动动作/表情：返回时动作文件已加载并开始播放（尚未播完）。
    * 供"动作必须与移动同时进行"的场景先启动动作、再启动移动，杜绝滑入滑出时的站桩空窗。
    */
-  public async startMotions(motion?: string, facial?: string, facialFirst?: boolean): Promise<void> {
+  public async startMotions(
+    motion?: string,
+    facial?: string,
+    facialFirst?: boolean,
+    options: { facialForce?: boolean; traceSnippetIndex?: number } = {}
+  ): Promise<void> {
     // 确保模型已完全加载
     if (!this.internalModel) {
       this.logger.warn('Model not fully loaded, waiting...')
@@ -454,13 +847,11 @@ export default class AdvancedModel extends Live2DModel {
 
     const waits: Promise<void>[] = []
     if (motion) {
-      waits.push(this.applyMotion(motion, facialFirst))
+      waits.push(this.applyMotion(motion, facialFirst, [], options.traceSnippetIndex))
     }
     if (facial) {
-      waits.push(this.applyFacial(facial))
+      waits.push(this.applyFacial(facial, options.facialForce === true, options.traceSnippetIndex))
     }
-
-    this.lastChangeBlinkTime = Date.now()
 
     await Promise.all(waits)
   }
@@ -507,9 +898,10 @@ export default class AdvancedModel extends Live2DModel {
   public async applyAndWait(
     motion?: string,
     facial?: string,
-    facialFirst?: boolean
+    facialFirst?: boolean,
+    traceSnippetIndex?: number
   ): Promise<void> {
-    await this.startMotions(motion, facial, facialFirst)
+    await this.startMotions(motion, facial, facialFirst, { traceSnippetIndex })
     await this.waitForMotionsFinished()
   }
 
@@ -619,61 +1011,9 @@ export default class AdvancedModel extends Live2DModel {
     this.actionController.abort()
     this.cancelPendingActions()
     this.autoBlink = false
-    this.blinkGeneration++
-    if (this.blinkTimerId !== null) clearTimeout(this.blinkTimerId)
-    this.blinkTimerId = null
     this.restoreBodyUpdate?.()
     this.restoreBodyUpdate = null
     this.visualEffectManager.disableAll()
     super.destroy(options)
-  }
-
-  private async updateAutoBlink(generation: number): Promise<void> {
-    while (this.autoBlink && generation === this.blinkGeneration && !this.destroyed) {
-      const now = Date.now()
-      if (this.lastChangeBlinkTime && now - this.lastChangeBlinkTime < 2500) {
-        await AnimationManager.delay(500)
-        continue
-      }
-
-      if (this.internalModel instanceof Cubism2InternalModel) {
-        if (!this.internalModel.coreModel) {
-          this.logger.warn('coreModel is undefined, stopping auto blink')
-          this.autoBlink = false
-          return
-        }
-        if (
-          this.internalModel.coreModel.getParamFloat('PARAM_EYE_L_OPEN') < 1 ||
-          this.internalModel.coreModel.getParamFloat('PARAM_EYE_R_OPEN') < 1
-        ) {
-          this.logger.info('Blink has been blocked by eye param')
-          await AnimationManager.delay(getRandomNumber(4000, 6500))
-          continue
-        }
-      } else if (this.internalModel instanceof Cubism4InternalModel) {
-        if (!this.internalModel.coreModel) {
-          this.logger.warn('coreModel is undefined, stopping auto blink')
-          this.autoBlink = false
-          return
-        }
-        if (
-          this.internalModel.coreModel.getParameterValueById('ParamEyeLOpen') < 1 ||
-          this.internalModel.coreModel.getParameterValueById('ParamEyeROpen') < 1
-        ) {
-          this.logger.info('Blink has been blocked by eye param')
-          await AnimationManager.delay(getRandomNumber(4000, 6500))
-          continue
-        }
-      } else {
-        throw new Error('Not implement.')
-      }
-
-      await this.closeEyes(200)
-      await this.openEyes(250)
-
-      this.lastChangeBlinkTime = Date.now()
-
-      await AnimationManager.delay(getRandomNumber(4000, 6500))
-    }
   }
 }

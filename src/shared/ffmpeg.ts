@@ -394,9 +394,7 @@ export async function apiConvertVideoWithCompression(
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []
-  const vfArgs = scale
-    ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`]
-    : []
+  const vfArgs = scale ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`] : []
 
   const ffmpegArgs = [
     ...qsvInitArgs,
@@ -512,9 +510,7 @@ export async function apiMergeVideoAudioWithCompression(
   const qsvInitArgs = encoderArgs.needsQsvInit
     ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
     : []
-  const vfArgs = scale
-    ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`]
-    : []
+  const vfArgs = scale ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`] : []
 
   const ffmpegArgs = [
     ...qsvInitArgs,

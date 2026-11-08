@@ -13,7 +13,7 @@ const { ResourceCatalog } = await import('../../out-host/host/resources/resource
   }
 )
 
-function createResources(t, bgmYaml, files = []) {
+function createResources(t, bgmYaml, files = [], soundtracks = undefined) {
   const root = mkdtempSync(path.join(tmpdir(), 'mss-bgm-catalog-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const dir = path.join(root, 'audio', 'bgm')
@@ -24,6 +24,9 @@ function createResources(t, bgmYaml, files = []) {
   mkdirSync(modelsDir, { recursive: true })
   writeFileSync(path.join(modelsDir, 'models.yaml'), 'models: []\n', 'utf8')
   if (bgmYaml !== undefined) writeFileSync(path.join(dir, 'bgm.yaml'), bgmYaml, 'utf8')
+  if (soundtracks !== undefined) {
+    writeFileSync(path.join(dir, 'soundtracks.json'), JSON.stringify(soundtracks), 'utf8')
+  }
   return root
 }
 
@@ -68,4 +71,37 @@ test('missing bgm.yaml falls back with empty bgmDetails', async (t) => {
   const root = createResources(t, undefined, ['bg1.mp3'])
   const data = newCatalog(root).build()
   assert.deepEqual(data.bgmDetails, [])
+})
+
+test('official soundtrack cache fills empty names and descriptions only', async (t) => {
+  const root = createResources(
+    t,
+    `bgm:
+  - file: bgm00003.mp3
+    name: bgm00003
+    description: ''
+  - file: bgm00006.mp3
+    name: 我自己的名字
+    description: 人工写的描述
+  - file: bgm00009.mp3
+    name: ''
+    description: ''
+`,
+    ['bgm00003.mp3', 'bgm00006.mp3', 'bgm00009.mp3'],
+    {
+      version: 1,
+      source: 'test',
+      fetchedAt: '2026-01-01T00:00:00.000Z',
+      tracks: {
+        bgm00003: { titles: ['Slapstick!!'], categories: ['剧情'] },
+        bgm00006: { titles: ['微笑みの陽だまり'], categories: ['剧情'] }
+      }
+    }
+  )
+  const data = newCatalog(root).build()
+  assert.deepEqual(data.bgmDetails, [
+    { file: 'bgm00003.mp3', name: 'Slapstick!!', description: '剧情 BGM' },
+    { file: 'bgm00006.mp3', name: '我自己的名字', description: '人工写的描述' },
+    { file: 'bgm00009.mp3', name: 'bgm00009.mp3', description: '' }
+  ])
 })

@@ -10,6 +10,9 @@
 config.example.yaml   配置样例（复制为 config.yaml，正式配置不入库）
 CHANGELOG.md          版本变更记录
 src/host/             Node 宿主：API / 静态托管 / 桥接层 / 渲染池 / ffmpeg 编码
+src/host/ai/          宿主内置 AI：LLM 客户端、提示词、剧本校验与 TTS 翻译
+src/host/assets/      Moesekai 模型索引、下载、sse-motion 转 motion3、清单更新
+src/host/tools/       宿主命令行工具（fetchAssets）
 src/webrender/        无头浏览器加载的渲染工作页面
 src/renderer/         渲染引擎：PixiJS / Live2D / 导出管线
 src/common/           宿主与渲染侧共享的故事类型定义
@@ -43,17 +46,18 @@ npm run build
 npm run test:all
 ```
 
-无需先启动宿主，也不需要浏览器或模型资源。测试覆盖 API 超时、渲染池取消与恢复、BGM 配置、record 管线，以及口型和对话计时。部分 record 测试直接使用依赖中的 `ffmpeg-static` 生成媒体，该可执行文件必须可用；仅设置 `MSS_FFMPEG_PATH` 不能替代这些用例的直接依赖。
+无需先启动宿主，也不需要浏览器或模型资源。测试覆盖 API 超时、渲染池取消与恢复、BGM 配置、record 管线、口型与对话计时，以及 AI 剧本校验和 sse-motion 转换。部分 record 测试直接使用依赖中的 `ffmpeg-static` 生成媒体，该可执行文件必须可用；仅设置 `MSS_FFMPEG_PATH` 不能替代这些用例的直接依赖。
 
 需要缩小验证范围时：
 
-| 命令                    | 验证内容                           |
-| ----------------------- | ---------------------------------- |
-| `npm test`              | API 导出超时与参数校验             |
-| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复 |
-| `npm run test:config`   | BGM 配置                           |
-| `npm run test:record`   | record 录制与编码管线              |
-| `npm run test:renderer` | 渲染侧台词计时与口型               |
+| 命令                    | 验证内容                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `npm test`              | API 导出超时、AI 剧本、Irodori 请求、日文 TTS 预检、导出诊断、动作转换、背景/BGM 拉取                      |
+| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复                                                                         |
+| `npm run test:config`   | BGM 配置                                                                                                   |
+| `npm run test:record`   | record 录制与编码管线                                                                                      |
+| `npm run test:renderer` | 官方 60fps 时序、Talk 自动播放、布局矩阵、交叉淡化参数、非阻塞调度、剩余特效、自然动作、逐帧计划、导出日志 |
+| `npm run test:stories`  | 官方基线、AI 质量门、官方动作语义、328 集 scenario 批量审计（语料存在时）                                  |
 
 测试数量会随回归用例变化，以当前运行结果为准。纯逻辑测试不能代替实际视频验收。
 

@@ -538,7 +538,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           headers: payload.headers,
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
           body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined,
-          signal: AbortSignal.timeout(30000)
+          // Irodori 首次请求可能加载模型/多个 LoRA，30 秒会过早掐断；与 tts.timeoutMs 默认值一致。
+          signal: AbortSignal.timeout(120000)
         })
         const arrayBuffer = await response.arrayBuffer()
         res.setHeader('x-mss-status', String(response.status))

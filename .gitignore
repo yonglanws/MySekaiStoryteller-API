@@ -295,3 +295,6 @@ resources/audio/*
 !resources/audio/bgm/
 resources/audio/bgm/*
 !resources/audio/bgm/bgm.example.yaml
+
+# 云端资源下载缓存（moesekai 动作包，可断点续传；不进仓库）
+/cache/

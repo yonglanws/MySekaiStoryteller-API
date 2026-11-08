@@ -1,6 +1,6 @@
 import { AlphaFilter, Text, TextStyle } from 'pixi.js'
 import AnimationManager from '../managers/AnimationManager'
-import { TALK_DISPLAY_MS_PER_CHAR } from '../utils/TalkTiming'
+import { TALK_DISPLAY_MS_PER_CHAR, sliceVisibleText, visibleTextLength } from '../utils/TalkTiming'
 
 export default class UIText extends Text {
   public data: string = ''
@@ -51,7 +51,8 @@ export default class UIText extends Text {
   }
 
   public async startDisplayContent(): Promise<void> {
-    const contentLength = this.data.length
+    // 排版换行不计入官方 4 帧/字；长句被 sanitizeDisplayText 折行后仍保持原速。
+    const contentLength = visibleTextLength(this.data)
     const timeMS = contentLength * TALK_DISPLAY_MS_PER_CHAR
 
     if (contentLength === 0 || timeMS < 30) {
@@ -59,9 +60,12 @@ export default class UIText extends Text {
       return
     }
 
+    // 官方 PlayWords(startFirst: true)：第一次迭代就显示 1 个 UTF-16 单元，
+    // 之后每 4 帧（66.7ms）多显示一个。
+    this.text = sliceVisibleText(this.data, 1)
     await AnimationManager.linear((progress) => {
-      const charsToShow = Math.min(Math.floor(progress * contentLength), contentLength)
-      this.text = this.data.substring(0, charsToShow)
+      const charsToShow = Math.max(1, Math.min(Math.ceil(progress * contentLength), contentLength))
+      this.text = sliceVisibleText(this.data, charsToShow)
     }, timeMS)
   }
 }

@@ -7,10 +7,18 @@ resources/
 ├─ models/       Live2D 模型与 models.yaml
 ├─ images/       背景图 / 卡面与 images.yaml
 ├─ voices/       预录语音（API 导出限制见资源文档）
-├─ audio/bgm/    BGM 与 bgm.yaml
+├─ audio/bgm/    BGM、bgm.yaml 与 soundtracks.json（fetch:media 生成的曲名缓存）
 └─ stories/      *.sekai-story.json 剧本
 ```
 
 资源根可通过 `config.yaml` 的 `paths.resources` 或 `MSS_RESOURCE_DIR` 指定。
 三份 `*.example.yaml` 随仓库提供，复制为对应的 `models.yaml`、`images.yaml`、`bgm.yaml` 后编辑。
 正式清单与渲染资源不入库；BGM 设置修改后需要重启宿主。
+
+没有现成模型、背景或 BGM 时，可以从 Moesekai 拉取并自动登记（见 [云端资源获取](../doc/cloud-assets.md)）：
+
+```bash
+npm run fetch:models -- --characters mizuki,ena
+npm run fetch:media -- --kind backgrounds --limit 20
+npm run fetch:media -- --kind bgm --names bgm00003,bgm00006
+```

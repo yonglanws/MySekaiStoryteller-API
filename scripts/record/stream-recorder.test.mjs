@@ -167,9 +167,12 @@ test('slow host cannot accumulate an unbounded recording queue', async (t) => {
     release = resolve
   })
   await f.instance.startRecordingToSink(f.canvas, async () => gate)
-  f.recorder.ondataavailable({
-    data: { size: 65 * 1024 * 1024, arrayBuffer: async () => new ArrayBuffer(1) }
-  })
+  // 当前上限是 256 MiB；单块 65 MiB 不会触发，必须排在阻塞的 sink 后面累计超限。
+  for (let i = 0; i < 4; i++) {
+    f.recorder.ondataavailable({
+      data: { size: 65 * 1024 * 1024, arrayBuffer: async () => new ArrayBuffer(1) }
+    })
+  }
   release()
   await assert.rejects(f.instance.stopRecordingToSink(), /backlog/i)
 })

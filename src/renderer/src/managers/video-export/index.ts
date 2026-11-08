@@ -8,6 +8,22 @@ export type {
 } from './StreamRecorder'
 export { ExportLogger, LogLevel } from './ExportLogger'
 export type { ExportLogEntry } from './ExportLogger'
+export { ExportLogBus, exportLogBus } from './ExportLogBus'
+export type { ExportLogRecord, ExportLogLevel } from './ExportLogBus'
+export { MotionTraceCollector, motionTrace, exportTraceContext } from './MotionTraceCollector'
+export type { MotionTraceEvent, MotionTraceEventKind } from './MotionTraceCollector'
+export {
+  buildExportDiagnostics,
+  formatDiagnosticsText,
+  sanitizeDiagnostics
+} from './ExportDiagnostics'
+export type {
+  ExportDiagnostics,
+  ExportDiagnosticsInput,
+  DiagnosticSnippet,
+  DiagnosticTtsLine,
+  DiagnosticAction
+} from './ExportDiagnostics'
 export { CheckpointManager } from './CheckpointManager'
 export type { CheckpointData } from './CheckpointManager'
 export { ProgressTracker } from './ProgressTracker'

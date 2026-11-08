@@ -27,3 +27,8 @@ export function resolveBgmUrl(bgmPath: string): string {
   const stripped = bgmPath.replace(/^resources\/builtin\//, '').replace(/^resources\//, '')
   return resourceUrl(stripped)
 }
+
+/** SE 路径解析，规则与 BGM 一致。 */
+export function resolveSeUrl(sePath: string): string {
+  return resolveBgmUrl(sePath)
+}

@@ -2,6 +2,21 @@ import { Ticker, UPDATE_PRIORITY } from 'pixi.js'
 import getSubLogger from '../utils/Logger'
 import { ILogObj, Logger } from 'tslog'
 
+/**
+ * 帧步进：导出模式按真实 elapsed 推进（最多 1 秒），预览模式最多 250ms。
+ * 旧实现把 >100ms 的帧压成 20ms，导出负载高时动画会慢 5~10 倍。
+ */
+export function resolveFrameStepMs(
+  rawDeltaMs: number,
+  exporting: boolean,
+  elegant = false
+): number {
+  const maxStep = exporting ? 1000 : 250
+  let usedTime = Math.min(Math.max(0, rawDeltaMs), maxStep)
+  if (!exporting && elegant && usedTime > 30 && usedTime < 100) usedTime = 25
+  return usedTime
+}
+
 export default class AnimationManager {
   private static logger: Logger<ILogObj> = getSubLogger('AnimationManager').getSubLogger({
     name: 'WatchDog'
@@ -37,7 +52,7 @@ export default class AnimationManager {
     const interval = Math.max(Math.round(1000 / AnimationManager.exportTargetFPS), 8)
     let lastTime = performance.now()
     const startTime = performance.now()
-    const maxDuration = 15000
+    const maxDuration = 60_000
 
     await new Promise<void>((resolve) => {
       const step = (): void => {
@@ -82,7 +97,7 @@ export default class AnimationManager {
       ticker.maxFPS = AnimationManager.exportSpeedMultiplier > 1 ? 0 : 60
 
       const startTime = performance.now()
-      const maxDuration = 15000
+      const maxDuration = 60_000
       let timeoutId: ReturnType<typeof setTimeout> | null = null
 
       const tickerFn = (): void => {
@@ -129,13 +144,15 @@ export default class AnimationManager {
       await AnimationManager.in_ticker(
         (ticker) => {
           const rawDeltaTime = ticker.elapsedMS
-          let usedTime = rawDeltaTime
-          if (elegant && usedTime > 30 && usedTime < 100) {
-            usedTime = 25
-          }
-          if (usedTime > 100) {
-            this.logger.warn(`A frame time of up to ${rawDeltaTime.toFixed(2)}ms has been detected`)
-            usedTime = 20
+          // 导出时必须按真实帧间隔推进：旧实现把 >100ms 的帧截成 20ms，负载高时
+          // fade/move 会慢 5~10 倍，而 Live2D 动作仍按真实时间播放，两者不同步。
+          // 只保留 1 秒上限，防止切后台/断点恢复时一次跳完整段动画。
+          const usedTime = resolveFrameStepMs(rawDeltaTime, AnimationManager.isExportMode, elegant)
+          if (rawDeltaTime > 250) {
+            this.logger.warn(
+              `A frame time of up to ${rawDeltaTime.toFixed(2)}ms has been detected` +
+                (AnimationManager.isExportMode ? ' (using real elapsed time)' : ' (clamped)')
+            )
           }
 
           progress += usedTime / effectiveTime

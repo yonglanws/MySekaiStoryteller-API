@@ -60,7 +60,9 @@ export class StreamRecorder {
   private sinkError: Error | null = null
   private pendingSinkBytes = 0
   private disposed = false
-  private static readonly MAX_PENDING_SINK_BYTES = 64 * 1024 * 1024
+  // 1080p 长片在核显编码器上偶发积压；256 MiB 给编码器留出追赶时间，
+  // 超过才判定为真正的编码停滞（旧值 64 MiB 对 9 分钟长片过紧）。
+  private static readonly MAX_PENDING_SINK_BYTES = 256 * 1024 * 1024
 
   constructor(config: StreamRecorderConfig) {
     this.config = config
@@ -227,7 +229,9 @@ export class StreamRecorder {
     const sink = this.chunkSink
     if (!sink || this.disposed || this.sinkError) return
     if (this.pendingSinkBytes + chunk.size > StreamRecorder.MAX_PENDING_SINK_BYTES) {
-      this.sinkError = new Error('Record encoder backlog exceeded 64 MiB; reduce fps or resolution')
+      this.sinkError = new Error(
+        'Record encoder backlog exceeded 256 MiB; reduce fps or resolution'
+      )
       this.onErrorCallback?.(this.sinkError)
       return
     }

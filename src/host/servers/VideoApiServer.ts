@@ -4,7 +4,9 @@ import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { StorySchema, StoryData } from '../../common/types/Story'
+import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 import type { VideoSettings } from '../config'
+import { writeExportDiagnostics } from '../exportDiagnostics'
 
 export interface ApiExportRequest {
   story: StoryData
@@ -19,6 +21,11 @@ export interface ApiExportResponse {
   duration?: number
   frameCount?: number
   timings?: Record<string, number>
+  /** 导出诊断 JSON、可读日志与报告路径（与视频同目录） */
+  logPath?: string
+  logJsonPath?: string
+  reportPath?: string
+  diagnostics?: ExportDiagnostics
 }
 
 export interface VideoConfig {
@@ -78,7 +85,7 @@ const RATE_LIMIT_MAX_REQUESTS = 10
 const FILES_PAGE_SIZE_DEFAULT = 20
 const FILES_PAGE_SIZE_MAX = 100
 
-const CLEANUP_EXTENSIONS = new Set(['.mp4', '.json'])
+const CLEANUP_EXTENSIONS = new Set(['.mp4', '.json', '.log', '.txt'])
 
 /** 导出临时文件（录制 webm / 帧目录 / 混音 WAV）前缀，超过保留期后由宿主清扫 */
 const TEMP_SWEEP_PREFIXES = [
@@ -117,6 +124,8 @@ export class VideoApiServer {
   private readonly video: VideoSettings
   private readonly maxConcurrentExports: number
   private readonly fileRetentionMs: number
+  /** 导出前预处理（Irodori 日语 ttsText 预检等）；失败直接拒绝任务。 */
+  private readonly storyPreparer: ((story: StoryData) => Promise<void>) | null
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
   private lastCleanup: number | null = null
   private totalFilesCleaned: number = 0
@@ -140,6 +149,8 @@ export class VideoApiServer {
       maxConcurrentExports?: number
       /** 在 API 路由之后挂载额外路由（静态资源、桥接层等），共享同一端口 */
       registerExtraRoutes?: (app: express.Application) => void
+      /** 导出前预处理；抛错时 HTTP 返回 400，不进入渲染队列 */
+      prepareStory?: (story: StoryData) => Promise<void>
     }
   ) {
     this.logger = logger
@@ -152,6 +163,7 @@ export class VideoApiServer {
       options.maxConcurrentExports ?? DEFAULT_MAX_CONCURRENT_EXPORTS
     )
     this.fileRetentionMs = DEFAULT_FILE_RETENTION_MS
+    this.storyPreparer = options.prepareStory ?? null
     this.ensureOutputDir()
     this.app = express()
     this.setupMiddleware()
@@ -544,6 +556,152 @@ export class VideoApiServer {
     })
   }
 
+  private videoConfigFor(): VideoConfig {
+    return {
+      width: this.video.width,
+      height: this.video.height,
+      renderScale: this.video.renderScale,
+      fps: this.video.fps,
+      codec: 'h264',
+      crf: this.video.crf,
+      audioBitrate: this.video.audioBitrate,
+      watermark: this.video.watermark,
+      watermarkText: this.video.watermarkText,
+      exportMode: this.video.exportMode,
+      exportBitrate: this.video.exportBitrate,
+      exportFastEncoder: this.video.exportFastEncoder,
+      fastFps: this.video.fastFps,
+      idleChainGapSec: this.video.idleChainGapSec,
+      ttsMode: this.video.ttsMode
+    }
+  }
+
+  private async prepareStory(story: StoryData): Promise<void> {
+    if (!this.storyPreparer) return
+    await this.storyPreparer(story)
+  }
+
+  /** 登记并排队一个导出任务；HTTP 与 /api/v1/generate 共用同一条队列。 */
+  private registerExport(
+    story: StoryData,
+    timeoutMs: number
+  ): { taskId: string; outputPath: string; exportPromise: Promise<ApiExportResponse> } {
+    const taskId = `export-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+    const outputPath = path.join(this.outputDir, `${taskId}.mp4`)
+
+    this.logger.info(`[API] Export request received: ${taskId}`)
+    this.logger.info(`[API] Output path: ${outputPath}`)
+    this.logger.info(
+      `[API] Story: ${story.models.length} models, ${story.snippets.length} snippets`
+    )
+
+    const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {
+      this.pendingExports.set(taskId, {
+        resolve,
+        reject,
+        outputPath,
+        startTime: Date.now(),
+        timeoutMs
+      })
+      this.logger.info(`[API] Pending export registered: ${taskId}`)
+    })
+
+    const task: ExportTask = {
+      taskId,
+      story,
+      outputPath,
+      videoConfig: this.videoConfigFor(),
+      addedAt: Date.now(),
+      timeoutMs
+    }
+
+    this.exportQueue.push(task)
+    this.processQueue()
+    return { taskId, outputPath, exportPromise }
+  }
+
+  /**
+   * 程序内提交导出（供 /api/v1/generate 在剧本生成后直接渲染）。
+   *
+   * 与 POST /api/v1/export 使用同一条队列、同一个超时语义；失败以异常返回，
+   * 成功时带上 videoPath / fileSize / downloadUrl。
+   */
+  async exportStory(
+    story: StoryData,
+    timeoutMs = DEFAULT_EXPORT_TIMEOUT_MS,
+    signal?: AbortSignal
+  ): Promise<ApiExportResponse & { videoPath?: string; fileSize?: number; downloadUrl?: string }> {
+    if (!this.dispatcher) {
+      throw new Error('No render worker available. Please ensure the render pool is running.')
+    }
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_EXPORT_TIMEOUT_MS) {
+      throw new Error(`Invalid timeout: expected an integer between 1 and ${MAX_EXPORT_TIMEOUT_MS}`)
+    }
+
+    const parsedStory = StorySchema.parse(story)
+    await this.prepareStory(parsedStory)
+    const { taskId, exportPromise } = this.registerExport(parsedStory, timeoutMs)
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const onAbort = (): void => {
+      this.logger.warn(`[API] Client disconnected before export ${taskId}, cancelling`)
+      this.cancelExport(taskId)
+    }
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+
+    try {
+      const result = await Promise.race([
+        exportPromise,
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`Export timed out after ${timeoutMs / 1000} seconds`)),
+            timeoutMs
+          )
+        })
+      ])
+
+      if (!result.success || !result.videoPath) {
+        throw new Error(result.message || 'Export failed')
+      }
+      const normalizedPath = path.normalize(result.videoPath)
+      if (!fs.existsSync(normalizedPath)) {
+        throw new Error(`Video file not found at: ${normalizedPath}`)
+      }
+      let logPath: string | undefined
+      let logJsonPath: string | undefined
+      let reportPath: string | undefined
+      if (result.diagnostics) {
+        try {
+          const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
+          logPath = written.textPath
+          logJsonPath = written.jsonPath
+          reportPath = written.reportPath
+          this.logger.info(
+            `[API] Export diagnostics written: ${written.textPath} / ${written.jsonPath} / ${written.reportPath}`
+          )
+        } catch (error) {
+          this.logger.warn('[API] Failed to write export diagnostics', error)
+        }
+      }
+      return {
+        ...result,
+        success: true,
+        videoPath: normalizedPath,
+        fileSize: fs.statSync(normalizedPath).size,
+        logPath,
+        logJsonPath,
+        reportPath,
+        downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
+      }
+    } catch (error) {
+      this.cancelExport(taskId)
+      throw error
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+      signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
   private async handleExportRequest(req: Request, res: Response): Promise<void> {
     if (!this.dispatcher) {
       res.status(503).json({
@@ -589,57 +747,23 @@ export class VideoApiServer {
       return
     }
 
-    const taskId = `export-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
-    const outputPath = path.join(this.outputDir, `${taskId}.mp4`)
-
-    this.logger.info(`[API] Export request received: ${taskId}`)
-    this.logger.info(`[API] Output path: ${outputPath}`)
-    this.logger.info(
-      `[API] Story: ${parsedStory.models.length} models, ${parsedStory.snippets.length} snippets`
-    )
+    try {
+      await this.prepareStory(parsedStory)
+    } catch (error) {
+      this.logger.warn(
+        `[API] Export rejected by story preflight: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+      res.status(400).json({
+        success: false,
+        message: error instanceof Error ? error.message : String(error)
+      })
+      return
+    }
 
     const timeoutMs = body.timeout ?? DEFAULT_EXPORT_TIMEOUT_MS
-
-    const videoConfig: VideoConfig = {
-      width: this.video.width,
-      height: this.video.height,
-      renderScale: this.video.renderScale,
-      fps: this.video.fps,
-      codec: 'h264',
-      crf: this.video.crf,
-      audioBitrate: this.video.audioBitrate,
-      watermark: this.video.watermark,
-      watermarkText: this.video.watermarkText,
-      exportMode: this.video.exportMode,
-      exportBitrate: this.video.exportBitrate,
-      exportFastEncoder: this.video.exportFastEncoder,
-      fastFps: this.video.fastFps,
-      idleChainGapSec: this.video.idleChainGapSec,
-      ttsMode: this.video.ttsMode
-    }
-
-    const exportPromise = new Promise<ApiExportResponse>((resolve, reject) => {
-      this.pendingExports.set(taskId, {
-        resolve,
-        reject,
-        outputPath,
-        startTime: Date.now(),
-        timeoutMs
-      })
-      this.logger.info(`[API] Pending export registered: ${taskId}`)
-    })
-
-    const task: ExportTask = {
-      taskId,
-      story: parsedStory,
-      outputPath,
-      videoConfig,
-      addedAt: Date.now(),
-      timeoutMs
-    }
-
-    this.exportQueue.push(task)
-    this.processQueue()
+    const { taskId, exportPromise } = this.registerExport(parsedStory, timeoutMs)
 
     // 客户端断连（插件 httpx 超时普遍早于宿主 30 分钟上限）：任务跑完也没有
     // 接收方，继续渲染只是白占 worker/GPU，直接取消
@@ -671,6 +795,22 @@ export class VideoApiServer {
         if (fs.existsSync(normalizedPath)) {
           const stat = fs.statSync(normalizedPath)
           this.logger.info(`[API] File found: size=${stat.size} bytes`)
+          let logPath: string | undefined
+          let logJsonPath: string | undefined
+          let reportPath: string | undefined
+          if (result.diagnostics) {
+            try {
+              const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
+              logPath = written.textPath
+              logJsonPath = written.jsonPath
+              reportPath = written.reportPath
+              this.logger.info(
+                `[API] Export diagnostics written: ${written.textPath} / ${written.jsonPath} / ${written.reportPath}`
+              )
+            } catch (error) {
+              this.logger.warn('[API] Failed to write export diagnostics', error)
+            }
+          }
           res.json({
             success: true,
             message: 'Video exported successfully',
@@ -679,6 +819,9 @@ export class VideoApiServer {
             duration: result.duration,
             frameCount: result.frameCount,
             timings: result.timings,
+            logPath,
+            logJsonPath,
+            reportPath,
             downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
           })
         } else {
@@ -791,6 +934,7 @@ export class VideoApiServer {
       frameCount?: number
       outputSize?: number
       timings?: Record<string, number>
+      diagnostics?: ExportDiagnostics
     }
   ): void {
     const pending = this.pendingExports.get(taskId)
@@ -806,7 +950,8 @@ export class VideoApiServer {
         fileSize: result.outputSize,
         duration: result.duration,
         frameCount: result.frameCount,
-        timings: result.timings
+        timings: result.timings,
+        diagnostics: result.diagnostics
       })
       this.activeExports.delete(taskId)
       this.processQueue()

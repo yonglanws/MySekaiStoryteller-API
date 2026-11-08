@@ -178,7 +178,8 @@ export class SnippetTimestampRecorder {
         continue
       }
 
-      const videoRelativeStart = this.getVideoRelativeStartTimeMs(snippetIndex) + (ts.speechOffsetMs ?? 0)
+      const videoRelativeStart =
+        this.getVideoRelativeStartTimeMs(snippetIndex) + (ts.speechOffsetMs ?? 0)
       const ttsDurationMs = ttsResult.durationMs
       const snippetDurationMs = ts.wallDurationMs
 

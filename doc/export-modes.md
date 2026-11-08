@@ -58,6 +58,29 @@
 `renderScale`、`audioBitrate` 当前没有对应环境变量读取分支，应修改 YAML。
 整数类环境变量用 `parseInt` 解析，`MSS_EXPORT_BITRATE` 必须为正，`MSS_FAST_FPS` 至少为 `1`；不要填带单位的 `12Mbps`。
 
+## 导出日志
+
+每次成功导出都会在视频同目录生成三个文件，响应里同时返回 `logPath`（可读文本）、
+`logJsonPath`（完整 JSON）与 `reportPath`（报告）：
+
+- `<video>.log`：逐句 `planned/actual/drift`、动作 cue、60 fps 逐帧计划、
+  动作 request/loaded/started/interrupted 与 fade、TTS 日文标记与时长、异常列表、各模块日志。
+- `<video>.log.json`：同一份数据的结构化版本，`schemaVersion: 1`，便于脚本统计；
+  `plan` 节给出每句 `startFrame/endFrame`、Talk 的 typing/voice/gate 帧、布局 fade/move 帧。
+- `<video>.report.txt`：成片时长、逐帧计划总量、近似/未支持项与异常清单，适合随片交付。
+
+日志里的异常会直接指出：时间线漂移突然新增超过 100ms（长片里每句几毫秒的累计偏移不逐条刷屏）、
+Talk 动作不在句首、动作播放不足 400ms 就被打断（入场动作被第一句台词接管除外）、Irodori 句
+缺少日文 `ttsText`。`LayoutAppear` 没写 motion/facial 时会走 `startEntryMotion` 默认动作兜底，
+不再报“没有入场动作”。TTS 关闭时不会报 Irodori 文案/时长异常；`wait: false` 的片段在 `plan` 里
+`blocking: false`，时间线时长为 0，导出收尾统一等待其后台动画（Talk 仍按阻塞处理）。
+`BlackOut` / `BlackIn` / `Wipe` / `SideFade` 等显式毫秒时长按原值执行，不会被 500ms 下限拉长。
+逐帧计划也记录在场状态：已在场角色再次 `LayoutAppear` 只有 12 帧移动、`fade` 两帧均为 `null`；
+对不在场角色的 `LayoutClear` 时长为 0，`moveEnd` 等于该片段起点。
+排查“动作忽快忽慢”
+时优先看 motion trace 的 `load`/`played`/`clip` 三列：`load` 非 0 说明动作没预加载，
+`played` 远小于 `clip` 说明切换过于频繁。
+
 ## 参数在哪条路径生效
 
 | 参数或阶段                        | record                 | fast / WebCodecs                    | fast / frames                      |

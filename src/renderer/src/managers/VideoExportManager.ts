@@ -13,9 +13,17 @@ import {
   AudioMuxer,
   ConcurrentExportPipeline,
   SnippetTimestampRecorder,
-  AsyncFrameCapturer
+  AsyncFrameCapturer,
+  buildExportDiagnostics,
+  sanitizeDiagnostics,
+  exportLogBus,
+  motionTrace,
+  exportTraceContext,
+  type ExportDiagnostics
 } from './video-export'
 import { VirtualClockController } from './video-export/VirtualClockController'
+import { BgmPlan } from './video-export/BgmPlan'
+import { SePlan } from './video-export/SePlan'
 import { WebCodecsMp4Encoder } from './video-export/WebCodecsMp4Encoder'
 import { JpegFrameSink } from './video-export/JpegFrameSink'
 import { applyTalkPatch } from './video-export/talkPatch'
@@ -25,6 +33,7 @@ import type { SnippetData } from '../../../common/types/Story'
 import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
+import { TALK_WINDOW_OPEN_CLOSE_MS } from '../../../common/official/timing'
 import { webGLValidator } from '../utils/WebGLContextValidator'
 import { frameValidator } from '../utils/FrameContentValidator'
 import { resolveBgmUrl } from '../utils/ResourceUrl'
@@ -41,6 +50,14 @@ export interface ExportProgress {
 type ProgressCallback = (progress: ExportProgress) => void
 type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 
+interface TalkSnippetLike {
+  content: string
+  ttsText?: string
+  modelId: number
+  motion?: string
+  actions?: Array<{ at: number; modelId: number; motion?: string }>
+}
+
 export default class VideoExportManager {
   private readonly logger: ExportLogger
   private readonly checkpointManager: CheckpointManager
@@ -50,6 +67,8 @@ export default class VideoExportManager {
   private readonly app: App
   private isAborted: boolean = false
   private abortController: AbortController | null = null
+  /** Talk 索引 -> 动作收尾时间（ms，相对 Talk 开始），用于 diagnostics 的逐帧计划。 */
+  private talkSettleMsByIndex = new Map<number, number>()
 
   private static readonly DEFAULT_BATCH_SIZE = 30
 
@@ -90,11 +109,119 @@ export default class VideoExportManager {
     }
   }
 
+  /**
+   * 官方 AUTO 模式在语音结束后还要等身体动作播完，再停留 0.5s。
+   * 动作剪辑时长来自已预加载的 motionGroups；循环动作/未加载动作不参与（返回 0）。
+   */
+  private talkDurationWithMotionGate(
+    talk: TalkSnippetLike,
+    ttsDurationMs: number,
+    windowOpenMs = 0,
+    snippetIndex = -1
+  ): number {
+    const base = calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
+      windowOpenMs
+    })
+    if (!(ttsDurationMs > 0)) return base
+    const cues: Array<{ at: number; modelId: number; motion?: string }> = []
+    if (talk.motion) cues.push({ at: 0, modelId: talk.modelId, motion: talk.motion })
+    for (const action of talk.actions ?? []) {
+      if (action.motion) cues.push(action)
+    }
+    let settleMs = 0
+    for (const cue of cues) {
+      if (!cue.motion || !this.app.layerModel.isModelVisible(cue.modelId)) continue
+      try {
+        const clipMs = this.app.getModelById(cue.modelId).getMotionDurationMs(cue.motion)
+        if (clipMs > 0) settleMs = Math.max(settleMs, cue.at * base + clipMs)
+      } catch {
+        /* model not loaded; the gate cannot be planned */
+      }
+    }
+    if (settleMs > 0 && snippetIndex >= 0) this.talkSettleMsByIndex.set(snippetIndex, settleMs)
+    return settleMs > 0
+      ? calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
+          motionSettleMs: settleMs,
+          windowOpenMs
+        })
+      : base
+  }
+
+  /** 首个 Talk（或 HideTalk 后第一句）需要 0.2s 打开对话框；连续 Talk 不再加。 */
+  private talkWindowOpenMs(snippets: SnippetData[], index: number): number {
+    let open = false
+    for (let i = 0; i <= index; i++) {
+      if (snippets[i].type === 'Talk') {
+        if (!open) {
+          if (i === index) return TALK_WINDOW_OPEN_CLOSE_MS
+          open = true
+        }
+      } else if (snippets[i].type === 'HideTalk') {
+        open = false
+      }
+    }
+    return 0
+  }
+
   private resetState(): void {
     this.isAborted = false
     this.abortController = new AbortController()
     this.errorRecovery.reset()
     this.checkpointManager.clearCheckpoint()
+    // 每次导出都从空日志/动作追踪开始；落盘时才能按本次导出复原。
+    exportLogBus.reset()
+    motionTrace.reset()
+    exportTraceContext.reset()
+    this.talkSettleMsByIndex.clear()
+    this.app.snippetStrategyManager?.resetBackgroundSnippets()
+  }
+
+  private attachDiagnostics(
+    result: ExportResult,
+    snippets: SnippetData[],
+    timeline: SnippetTimelineEntry[],
+    timestampRecorder: SnippetTimestampRecorder,
+    ttsResults: Map<number, { durationMs: number; characterName: string; text: string }>,
+    mode: string,
+    options: VideoExportOptions,
+    ttsEnabled: boolean
+  ): ExportResult {
+    const story = this.app.storyManager?.storyData
+    const diagnostics: ExportDiagnostics = buildExportDiagnostics({
+      snippets,
+      timeline,
+      timestamps: timestampRecorder,
+      ttsResults,
+      motion: motionTrace.snapshot(),
+      logs: exportLogBus.snapshot(),
+      exportMeta: {
+        mode,
+        width: options.width,
+        height: options.height,
+        fps: options.fps,
+        frameCount: result.frameCount,
+        // result.duration 是导出墙钟耗时；报告要的是成片时长。
+        durationMs:
+          result.timings?.videoDurationMs ??
+          Math.round((result.frameCount / Math.max(1, options.fps)) * 1000),
+        ...(result.outputSize !== undefined ? { outputSize: result.outputSize } : {}),
+        ...(result.timings ? { timings: result.timings } : {})
+      },
+      provider: this.app.ttsManager?.getConfig().provider,
+      ttsEnabled,
+      storyCounts: story ? { models: story.models.length, images: story.images.length } : undefined,
+      motionSettleMs: this.talkSettleMsByIndex
+    })
+    // 日志 data 里可能有 Map/Error/循环引用；必须在通过 WebSocket 回传宿主前拍平。
+    result.diagnostics = sanitizeDiagnostics(diagnostics)
+    this.logger.info('Export diagnostics attached', {
+      snippets: diagnostics.summary.snippets,
+      talks: diagnostics.summary.talks,
+      anomalies: diagnostics.summary.anomalies,
+      motionEvents: diagnostics.summary.motionEvents,
+      logEntries: diagnostics.summary.logEntries
+    })
+    return result
   }
 
   private checkAborted(): void {
@@ -112,6 +239,10 @@ export default class VideoExportManager {
   }
 
   private async requestAnimationFrameOnce(): Promise<void> {
+    if (typeof window.requestAnimationFrame !== 'function') {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return
+    }
     return new Promise((resolve) => {
       window.requestAnimationFrame(() => resolve(undefined))
     })
@@ -130,22 +261,28 @@ export default class VideoExportManager {
     }
   }
 
-  private async executeSnippet(snippet: SnippetData): Promise<void> {
-    await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
+  private async executeSnippet(snippet: SnippetData, index = -1): Promise<void> {
+    await this.app.snippetStrategyManager.handleSnippetForExport(snippet, index)
   }
 
   private async processSnippetFrames(
     snippet: SnippetData,
-    _index: number,
+    index: number,
     fps: number,
     canvas: HTMLCanvasElement,
     capturer: AsyncFrameCapturer
   ): Promise<number> {
+    // ChangeBgm 是零时长的音频事件，不占用画面帧
+    if (snippet.type === 'ChangeBgm') {
+      await this.executeSnippet(snippet, index)
+      return 0
+    }
+
     const originalDurationMs = Math.round(snippet.delay * 1000)
     const frameIntervalMs = 1000 / fps
     const targetFrameCount = Math.max(1, Math.round(originalDurationMs / frameIntervalMs))
 
-    await this.executeSnippet(snippet)
+    await this.executeSnippet(snippet, index)
 
     const capturePromises: Promise<void>[] = []
     const batchLimit = 60
@@ -383,25 +520,39 @@ export default class VideoExportManager {
     }
     const bgmConfig = this.app.ttsManager?.getBGMConfig()
     const bgmEnabled = bgmConfig?.enabled ?? false
+    const bgmPlan = new BgmPlan(snippets)
+    const sePlan = new SePlan(snippets)
     const audioMuxer = new AudioMuxer()
-    if (ttsEnabled || bgmEnabled) {
+    if (ttsEnabled || bgmEnabled || sePlan.hasChanges) {
       await audioMuxer.initialize()
+    }
+
+    // 故事里出现带文件的 ChangeBgm 后，由剧本接管 BGM；否则沿用全局 bgm.yaml
+    const useGlobalBgm = bgmEnabled && !bgmPlan.hasStoryFiles
+    if (bgmEnabled && bgmPlan.hasStoryFiles) {
+      await bgmPlan.load(audioMuxer)
+    }
+    if (sePlan.hasChanges) {
+      await sePlan.load(audioMuxer)
     }
 
     let bgmBuffer: AudioBuffer | null = null
     if (bgmEnabled && bgmConfig) {
       audioMuxer.setBGMConfig(bgmConfig)
-      try {
-        const bgmPath = resolveBgmUrl(bgmConfig.path)
-        this.logger.info(`Loading BGM from: ${bgmPath}`)
-        bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
-        this.logger.info(
-          `BGM loaded: ${bgmBuffer ? 'success' : 'failed'}, duration: ${bgmBuffer ? bgmBuffer.duration.toFixed(2) : 0}s`
-        )
-      } catch (error) {
-        this.logger.warn(`Failed to load BGM: ${error}`)
+      if (useGlobalBgm) {
+        try {
+          const bgmPath = resolveBgmUrl(bgmConfig.path)
+          this.logger.info(`Loading BGM from: ${bgmPath}`)
+          bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
+          this.logger.info(
+            `BGM loaded: ${bgmBuffer ? 'success' : 'failed'}, duration: ${bgmBuffer ? bgmBuffer.duration.toFixed(2) : 0}s`
+          )
+        } catch (error) {
+          this.logger.warn(`Failed to load BGM: ${error}`)
+        }
       }
     }
+    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     const concurrentPipeline = new ConcurrentExportPipeline({
       ttsLookahead: 3,
@@ -563,6 +714,7 @@ export default class VideoExportManager {
         }
 
         const snippet = snippets[i]
+        exportTraceContext.setSnippet(i, snippet.type)
         const isTalk = snippet.type === 'Talk'
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
@@ -577,7 +729,12 @@ export default class VideoExportManager {
             timeline,
             i,
             ttsDurationMs,
-            calculateTalkDurationMs(talkData.content, ttsDurationMs, talkData.ttsText)
+            this.talkDurationWithMotionGate(
+              talkData as unknown as TalkSnippetLike,
+              ttsDurationMs,
+              this.talkWindowOpenMs(snippets, i),
+              i
+            )
           )
           if (ttsDurationMs > 0) {
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
@@ -616,7 +773,12 @@ export default class VideoExportManager {
           resolvedTalkDurationMs ??
           timelineEntry?.durationMs ??
           (snippet.type === 'Talk'
-            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            ? this.talkDurationWithMotionGate(
+                snippet.data as unknown as TalkSnippetLike,
+                0,
+                this.talkWindowOpenMs(snippets, i),
+                i
+              )
             : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
         await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
@@ -628,7 +790,7 @@ export default class VideoExportManager {
 
         // 渲染片段 - 片段间的延迟由 snippet.delay 控制，不由帧率控制器控制
         const snippetStartedAtMs = performance.now()
-        await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
+        await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
 
         if (i < 5 || (i + 1) % 30 === 0) {
           const frameValidation = frameValidator.validateFrame(canvas, i)
@@ -675,6 +837,8 @@ export default class VideoExportManager {
         }
       }
 
+      // 官方 WaitAllFinished：等 ProgressBehavior=0 的后台片段播完再停录。
+      await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
 
@@ -709,8 +873,19 @@ export default class VideoExportManager {
 
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
       this.logger.info(
-        `Audio check: ttsEnabled=${ttsEnabled}, ttsAudioResults=${ttsAudioResults.size}, hasTtsTracks=${hasTtsTracks}`
+        `Audio check: ttsEnabled=${ttsEnabled}, ttsAudioResults=${ttsAudioResults.size}, hasTtsTracks=${hasTtsTracks}, bgmActive=${bgmActive}`
       )
+
+      // record 模式用实际片段起始时间：包含 snippet.delay，音画对位比估算时间线准
+      const actualStartTimesMs = snippets.map((_, index) =>
+        timestampRecorder.getVideoRelativeStartTimeMs(index)
+      )
+      if (bgmPlan.hasChanges) {
+        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
+      }
+      if (sePlan.hasChanges) {
+        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
+      }
 
       let mergeMs = 0
       if (isApiMode) {
@@ -737,7 +912,7 @@ export default class VideoExportManager {
             `merge=${mergeMs.toFixed(0)}ms ` +
             `videoDuration=${(totalDurationMs / 1000).toFixed(1)}s`
         )
-      } else if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+      } else if (hasTtsTracks || bgmActive) {
         if (hasTtsTracks) {
           this.logger.info(
             `Mixing ${ttsAudioResults.size} audio tracks using timestamp-based placement...`
@@ -766,7 +941,7 @@ export default class VideoExportManager {
         }
 
         this.logger.info(
-          `Audio mixing: outputDuration=${totalDurationMs}ms, bgmBuffer=${bgmBuffer ? 'loaded' : 'none'}, bgmEnabled=${bgmEnabled}`
+          `Audio mixing: outputDuration=${totalDurationMs}ms, bgmBuffer=${bgmBuffer ? 'loaded' : 'none'}, bgmPlan=${bgmPlan.hasChanges ? bgmPlan.fileCount : 0} files, bgmEnabled=${bgmEnabled}`
         )
         const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
           totalDurationMs,
@@ -820,6 +995,16 @@ export default class VideoExportManager {
       }
 
       this.logger.info('Concurrent stream recording completed successfully', result)
+      this.attachDiagnostics(
+        result,
+        snippets,
+        timeline,
+        timestampRecorder,
+        ttsAudioResults,
+        'stream',
+        options,
+        ttsEnabled
+      )
 
       if (!isApiMode) {
         await this.showCompletionMessage(progressFill!, exportStatus!, onProgress)
@@ -968,21 +1153,34 @@ export default class VideoExportManager {
 
     const bgmConfig = this.app.ttsManager?.getBGMConfig()
     const bgmEnabled = bgmConfig?.enabled ?? false
+    const bgmPlan = new BgmPlan(snippets)
+    const sePlan = new SePlan(snippets)
     const audioMuxer = new AudioMuxer()
-    if (ttsEnabled || bgmEnabled) {
+    if (ttsEnabled || bgmEnabled || sePlan.hasChanges) {
       await audioMuxer.initialize()
+    }
+
+    const useGlobalBgm = bgmEnabled && !bgmPlan.hasStoryFiles
+    if (bgmEnabled && bgmPlan.hasStoryFiles) {
+      await bgmPlan.load(audioMuxer)
+    }
+    if (sePlan.hasChanges) {
+      await sePlan.load(audioMuxer)
     }
 
     let bgmBuffer: AudioBuffer | null = null
     if (bgmEnabled && bgmConfig) {
       audioMuxer.setBGMConfig(bgmConfig)
-      try {
-        const bgmPath = resolveBgmUrl(bgmConfig.path)
-        bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
-      } catch (error) {
-        this.logger.warn(`Failed to load BGM: ${error}`)
+      if (useGlobalBgm) {
+        try {
+          const bgmPath = resolveBgmUrl(bgmConfig.path)
+          bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
+        } catch (error) {
+          this.logger.warn(`Failed to load BGM: ${error}`)
+        }
       }
     }
+    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     const ttsAudioResults = new Map<
       number,
@@ -1202,6 +1400,7 @@ export default class VideoExportManager {
         if (pumpError) throw pumpError
 
         const snippet = snippets[i]
+        exportTraceContext.setSnippet(i, snippet.type)
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
         let resolvedTalkDurationMs: number | undefined
@@ -1221,7 +1420,12 @@ export default class VideoExportManager {
             timeline,
             i,
             ttsDurationMs,
-            calculateTalkDurationMs(talkData.content, ttsDurationMs, talkData.ttsText)
+            this.talkDurationWithMotionGate(
+              talkData as unknown as TalkSnippetLike,
+              ttsDurationMs,
+              this.talkWindowOpenMs(snippets, i),
+              i
+            )
           )
           if (ttsDurationMs > 0) {
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
@@ -1253,7 +1457,12 @@ export default class VideoExportManager {
           resolvedTalkDurationMs ??
           timelineEntry?.durationMs ??
           (snippet.type === 'Talk'
-            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            ? this.talkDurationWithMotionGate(
+                snippet.data as unknown as TalkSnippetLike,
+                0,
+                this.talkWindowOpenMs(snippets, i),
+                i
+              )
             : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
         pumpPaused = true
@@ -1266,7 +1475,7 @@ export default class VideoExportManager {
         })
 
         const snippetStartedAtMs = performance.now()
-        await this.app.snippetStrategyManager.handleSnippetForExport(snippet)
+        await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
         timestampRecorder.markSnippetEnd(
@@ -1276,6 +1485,9 @@ export default class VideoExportManager {
             : 0
         )
       }
+
+      // 官方 WaitAllFinished：后台片段（ProgressBehavior=0）播完才算收尾。
+      await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
 
       // 尾部追帧：让帧泵渲染到「最后一个片段的虚拟结束时间」，
       // 保证 TTS 尾垫与出场动画的最后一帧都在视频里
@@ -1306,8 +1518,18 @@ export default class VideoExportManager {
       const totalDurationMs = actualVideoDurationMs + 500
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
 
+      const actualStartTimesMs = snippets.map((_, index) =>
+        timestampRecorder.getVideoRelativeStartTimeMs(index)
+      )
+      if (bgmPlan.hasChanges) {
+        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
+      }
+      if (sePlan.hasChanges) {
+        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
+      }
+
       let audioFilePath: string | undefined
-      if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+      if (hasTtsTracks || bgmActive) {
         const audioStart = virtualClock.realTimeMs()
         if (hasTtsTracks) {
           const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
@@ -1407,6 +1629,16 @@ export default class VideoExportManager {
           `avgPumpFps=${pumpMs > 0 ? (frameIndex / (pumpMs / 1000)).toFixed(1) : '0'}`
       )
       this.logger.info('Fast export completed', result)
+      this.attachDiagnostics(
+        result,
+        snippets,
+        timeline,
+        timestampRecorder,
+        ttsAudioResults,
+        'fast',
+        options,
+        ttsEnabled
+      )
       return result
     } catch (error) {
       pumpDone = true
@@ -1500,7 +1732,37 @@ export default class VideoExportManager {
 
     this.logger.info('Pre-export validation passed')
 
+    // 第一次把角色加进舞台会触发纹理上传/着色器编译（约 50~120ms）。这发生在
+    // 第一条 LayoutAppear 的计时里，会表现成“第一次入场慢半拍”。在录制开始前
+    // 以 alpha=0.01 预画一帧，让 GPU 资源就绪，但不影响成片。
+    await this.prewarmStoryModels()
+
     return { canvas, snippets, captureFps }
+  }
+
+  private async prewarmStoryModels(): Promise<void> {
+    const models = this.app.storyManager?.storyData?.models ?? []
+    for (const descriptor of models) {
+      try {
+        const model = this.app.getModelById(descriptor.id)
+        if (!model?.internalModel) continue
+        this.app.layerModel.addModelToLayer(model)
+        const filter = (model.filters?.[0] ?? null) as { alpha?: number } | null
+        const previousAlpha = filter?.alpha
+        const previousVisible = model.visible
+        if (filter) filter.alpha = 0.01
+        model.visible = true
+        this.app.pixiApplication.renderer.render(this.app.pixiApplication.stage)
+        if (filter) filter.alpha = previousAlpha ?? 0
+        // 预画后必须恢复 visible=true：LayoutAppear 只做 alpha 淡入，不会再把
+        // visible 设回 true；留成 false 会让整场角色都不渲染。
+        model.visible = previousVisible
+        this.app.layerModel.removeModel(model)
+      } catch (error) {
+        this.logger.warn(`Model prewarm failed for id=${descriptor.id}`, error)
+      }
+    }
+    await this.requestAnimationFrameOnce()
   }
 
   private async initializeExport(
@@ -1627,25 +1889,38 @@ export default class VideoExportManager {
     const ttsEnabled = this.app.ttsManager?.isTTSEnabled() ?? false
     const bgmConfig = this.app.ttsManager?.getBGMConfig()
     const bgmEnabled = bgmConfig?.enabled ?? false
+    const bgmPlan = new BgmPlan(snippets)
+    const sePlan = new SePlan(snippets)
     const audioMuxer = new AudioMuxer()
-    if (ttsEnabled || bgmEnabled) {
+    if (ttsEnabled || bgmEnabled || sePlan.hasChanges) {
       await audioMuxer.initialize()
+    }
+
+    const useGlobalBgm = bgmEnabled && !bgmPlan.hasStoryFiles
+    if (bgmEnabled && bgmPlan.hasStoryFiles) {
+      await bgmPlan.load(audioMuxer)
+    }
+    if (sePlan.hasChanges) {
+      await sePlan.load(audioMuxer)
     }
 
     let bgmBuffer: AudioBuffer | null = null
     if (bgmEnabled && bgmConfig) {
       audioMuxer.setBGMConfig(bgmConfig)
-      try {
-        const bgmPath = resolveBgmUrl(bgmConfig.path)
-        this.logger.info(`Loading BGM from: ${bgmPath}`)
-        bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
-        this.logger.info(
-          `BGM loaded: ${bgmBuffer ? 'success' : 'failed'}, duration: ${bgmBuffer ? bgmBuffer.duration.toFixed(2) : 0}s`
-        )
-      } catch (error) {
-        this.logger.warn(`Failed to load BGM: ${error}`)
+      if (useGlobalBgm) {
+        try {
+          const bgmPath = resolveBgmUrl(bgmConfig.path)
+          this.logger.info(`Loading BGM from: ${bgmPath}`)
+          bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
+          this.logger.info(
+            `BGM loaded: ${bgmBuffer ? 'success' : 'failed'}, duration: ${bgmBuffer ? bgmBuffer.duration.toFixed(2) : 0}s`
+          )
+        } catch (error) {
+          this.logger.warn(`Failed to load BGM: ${error}`)
+        }
       }
     }
+    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     let timeline: SnippetTimelineEntry[] = []
 
@@ -1721,6 +1996,7 @@ export default class VideoExportManager {
         this.checkAborted()
 
         const snippet = snippets[i]
+        exportTraceContext.setSnippet(i, snippet.type)
         const timelineEntry = timeline[i]
         const safeTotal = totalSnippets || 1
         const pct = 10 + Math.round(((i + 1) / safeTotal) * 80)
@@ -1739,7 +2015,12 @@ export default class VideoExportManager {
         this.app.lastSnippetActualDurationMs =
           timelineEntry?.durationMs ??
           (snippet.type === 'Talk'
-            ? calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText)
+            ? this.talkDurationWithMotionGate(
+                snippet.data as unknown as TalkSnippetLike,
+                0,
+                this.talkWindowOpenMs(snippets, i),
+                i
+              )
             : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
 
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
@@ -1782,6 +2063,9 @@ export default class VideoExportManager {
           await this.yieldToBrowser()
         }
       }
+
+      // 后台片段播完后再 flush，否则尾帧会被截掉。
+      await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
     } catch (error) {
       this.logger.error('Frame capture loop failed, cleaning up resources', error)
       try {
@@ -1846,10 +2130,22 @@ export default class VideoExportManager {
     this.logger.info('Phase 3: Audio mixing', {
       hasTtsTracks,
       ttsCount: ttsAudioResults.size,
-      bgmEnabled
+      bgmEnabled,
+      bgmActive,
+      storyBgmFiles: bgmPlan.fileCount
     })
 
-    if ((hasTtsTracks || (bgmBuffer && bgmEnabled)) && (ttsEnabled || bgmEnabled)) {
+    const actualStartTimesMs = snippets.map((_, index) =>
+      timestampRecorder.getVideoRelativeStartTimeMs(index)
+    )
+    if (bgmPlan.hasChanges) {
+      audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
+    }
+    if (sePlan.hasChanges) {
+      audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
+    }
+
+    if ((hasTtsTracks || bgmActive) && (ttsEnabled || bgmEnabled)) {
       if (hasTtsTracks) {
         if (exportStatus)
           exportStatus.textContent = `正在混合音频 (${ttsAudioResults.size} 条音轨)...`
@@ -1873,7 +2169,7 @@ export default class VideoExportManager {
       }
 
       this.logger.info(
-        `Audio mixing: outputDuration=${totalDurationMs}ms, tracks=${ttsAudioResults.size}, bgm=${!!bgmBuffer}`
+        `Audio mixing: outputDuration=${totalDurationMs}ms, tracks=${ttsAudioResults.size}, bgm=${!!bgmBuffer}, storyBgmFiles=${bgmPlan.fileCount}`
       )
       const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
         totalDurationMs,
@@ -1920,11 +2216,21 @@ export default class VideoExportManager {
       capturerStats: capturer.stats
     })
 
-    return {
+    const result: ExportResult = {
       success: true,
       duration: (performance.now() - captureStartTime) / 1000,
       frameCount: capturedFrames
     }
+    return this.attachDiagnostics(
+      result,
+      snippets,
+      timeline,
+      timestampRecorder,
+      ttsAudioResults,
+      'frames',
+      options,
+      ttsEnabled
+    )
   }
 
   private getJpegQuality(quality: 'draft' | 'standard' | 'high'): number {
@@ -2070,10 +2376,11 @@ export default class VideoExportManager {
   ): Promise<{ frameCount: number; durationMs: number; fileSize: number }> {
     const audioBitrate = options.apiAudioBitrate ?? '128k'
     const outputPath = options.apiOutputPath ?? ''
+    const bgmActive = bgmEnabled && (bgmBuffer !== null || audioMuxer.hasBgmCues())
 
     let audioFilePath: string | undefined
 
-    if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+    if (hasTtsTracks || bgmActive) {
       if (exportStatus) exportStatus.textContent = 'API: 正在混合音频...'
       onProgress({
         stage: 'saving',
@@ -2184,12 +2491,13 @@ export default class VideoExportManager {
     const crf = options.apiCrf ?? 23
     const audioBitrate = options.apiAudioBitrate ?? '128k'
     const outputPath = options.apiOutputPath ?? ''
+    const bgmActive = bgmEnabled && (bgmBuffer !== null || audioMuxer.hasBgmCues())
 
     this.logger.info(`API save: outputPath=${outputPath}, crf=${crf}, audioBitrate=${audioBitrate}`)
 
     let audioData: ArrayBuffer | undefined
 
-    if (hasTtsTracks || (bgmBuffer && bgmEnabled)) {
+    if (hasTtsTracks || bgmActive) {
       if (exportStatus) exportStatus.textContent = 'API: 正在混合音频...'
       onProgress({
         stage: 'saving',

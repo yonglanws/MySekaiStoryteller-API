@@ -84,7 +84,10 @@ export function scheduleCharacterActions(
       const started = Promise.resolve(target.apply(action, controller.signal)).catch((error) => {
         if (!controller.signal.aborted) target.onError?.(error, action)
       })
-      if (action.at === 1) finalStarts.push(started)
+      // 等所有 cue 的“启动”Promise，而不只是 at=1。动作加载是异步的；如果
+      // 片段时长只有几毫秒（官方 ChangeMotion cue），提前 settle 会让调用方
+      // 的 cancel() 在 startMotion 之前 abort 掉信号，动作就永远不播。
+      finalStarts.push(started)
     } catch (error) {
       target.onError?.(error, action)
     }

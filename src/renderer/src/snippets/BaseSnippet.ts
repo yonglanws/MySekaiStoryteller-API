@@ -9,6 +9,8 @@ export default abstract class BaseSnippet implements Snippet {
   protected readonly app: App
   protected readonly logger: Logger<ILogObj>
   protected data!: SnippetData
+  /** 导出时由 SnippetStrategyManager 写入；后台片段记录动作追踪时用它标注来源。 */
+  public snippetIndex = -1
 
   constructor(app: App, data: SnippetData) {
     this.app = app

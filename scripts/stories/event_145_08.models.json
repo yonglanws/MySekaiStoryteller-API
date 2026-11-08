@@ -1,0 +1,54 @@
+{
+  "title": "ごめんね",
+  "models": {
+    "21": {
+      "name": "东云绘名",
+      "path": "v2_19ena_school01/v2_19ena_school_t08/v2_19ena_school_t08.model3.json"
+    },
+    "22": {
+      "name": "晓山瑞希",
+      "path": "v2_20mizuki_culture/v2_20mizuki_culture_t08/v2_20mizuki_culture_t08.model3.json"
+    },
+    "23": {
+      "name": "晓山瑞希",
+      "path": "v2_20mizuki_culture_02/v2_20mizuki_culture_02_t08/v2_20mizuki_culture_02_t08.model3.json"
+    },
+    "24": {
+      "name": "晓山瑞希",
+      "path": "v2_20mizuki_culture_back/v2_20mizuki_culture_back_t04/v2_20mizuki_culture_back_t04.model3.json",
+      "normal_scale": 1.05
+    }
+  },
+  "characterModels": {
+    "296": {
+      "default": 21,
+      "costumes": {
+        "v2_19ena_school01": 21
+      }
+    },
+    "297": {
+      "default": 22,
+      "costumes": {
+        "v2_20mizuki_culture": 22,
+        "v2_20mizuki_culture_02": 23
+      }
+    },
+    "360": {
+      "default": 24,
+      "costumes": {
+        "v2_20mizuki_culture_back": 24
+      }
+    },
+    "361": {
+      "default": 22,
+      "costumes": {
+        "v2_20mizuki_culture": 22
+      }
+    }
+  },
+  "images": {
+    "bg_a000507.webp": 1,
+    "bg_s000362.webp": 2,
+    "bg_a000000.webp": 3
+  }
+}

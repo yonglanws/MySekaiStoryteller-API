@@ -3,10 +3,18 @@ import path from 'node:path'
 import yaml from 'js-yaml'
 import { ILogObj, Logger } from 'tslog'
 import type { HostConfig } from '../config'
+import {
+  readSoundtrackIndex,
+  soundtrackKey,
+  soundtrackLabel,
+  type SoundtrackIndex
+} from '../assets/soundtracks'
 
 export interface CatalogModel {
   id: number
   name: string
+  /** 简称（提示词与说话人绑定用）；缺省回退 name */
+  shortName?: string
   /** 相对 resources/models/ 的 model3.json 路径 */
   path: string
   /** 动作名清单（model3.json FileReferences.Motions 中非 face_ 前缀的 key） */
@@ -147,15 +155,13 @@ export class ResourceCatalog {
       models.push({
         id: entry.id,
         name: entry.name,
+        shortName: entry.shortName || entry.name,
         path: entry.path,
         motions,
         facials,
         defaultMotion: pickPreferred(motions, DEFAULT_MOTION_PREFERENCE),
         defaultFacial: pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE)
       })
-      // shortName 透传给目录消费方（插件对照表用）
-      const model = models[models.length - 1]
-      ;(model as CatalogModel & { shortName?: string }).shortName = entry.shortName || entry.name
     }
 
     const listFiles = (relDir: string, extensions: Set<string>): string[] => {
@@ -195,6 +201,9 @@ export class ResourceCatalog {
   /**
    * 读取 BGM 清单（audio/bgm/bgm.yaml）。返回带描述的曲目列表，
    * 只保留在磁盘上真实存在的文件；未登记或格式非法时返回空列表。
+   *
+   * 清单里 name/description 为空时，用 fetch:media 缓存的官方曲名索引补全
+   * （bgm00003 → Slapstick!! / 剧情 BGM）；人工写过的字段优先，不覆盖。
    */
   private loadBgmDetails(resourcesDir: string, bgmFiles: string[]): CatalogBgm[] {
     const manifestPath = path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml')
@@ -210,6 +219,7 @@ export class ResourceCatalog {
       return []
     }
 
+    const soundtracks = this.loadSoundtracks(resourcesDir)
     const known = new Set(bgmFiles)
     const details: CatalogBgm[] = []
     for (const entry of manifest.bgm ?? []) {
@@ -219,13 +229,31 @@ export class ResourceCatalog {
         this.logger.warn(`[Catalog] bgm.yaml entry missing on disk, skipped: ${file}`)
         continue
       }
+
+      const soundtrack = soundtracks?.tracks.get(soundtrackKey(file))
+      const label = soundtrack ? soundtrackLabel(soundtrack) : null
+      const rawName = (entry.name || '').trim()
+      const rawDescription = (entry.description || '').trim()
+      const nameIsPlaceholder = !rawName || rawName === file || rawName === soundtrackKey(file)
+
       details.push({
         file,
-        name: (entry.name || file).trim(),
-        description: (entry.description || '').trim()
+        name: nameIsPlaceholder ? label?.name || file : rawName,
+        description: rawDescription || label?.description || ''
       })
     }
     return details
+  }
+
+  /** 读取 fetch:media 写下的官方曲名缓存；缺失或损坏时不阻断 catalog。 */
+  private loadSoundtracks(resourcesDir: string): SoundtrackIndex | null {
+    const file = path.join(resourcesDir, 'audio', 'bgm', 'soundtracks.json')
+    try {
+      return readSoundtrackIndex(file)
+    } catch (err) {
+      this.logger.warn('[Catalog] Failed to read audio/bgm/soundtracks.json', err)
+      return null
+    }
   }
 
   /**

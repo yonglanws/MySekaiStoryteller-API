@@ -12,6 +12,7 @@ import UILayer from '../layers/UILayer'
 import FontFaceObserver from 'fontfaceobserver'
 import { Application, Texture, Ticker } from 'pixi.js'
 import SpecialEffectLayer from '../layers/SpecialEffectLayer'
+import EnvironmentLayer from '../layers/EnvironmentLayer'
 import { configureCubism4 } from 'pixi-live2d-display-advanced'
 import VideoExportManager, {
   VideoExportOptions,
@@ -24,7 +25,9 @@ import type { LipSyncEnvelope } from '../utils/LipSyncEnvelope'
 /** 宿主统一下发的 TTS 配置（config.yaml 的 tts 节） */
 export interface ApiExportTtsConfig {
   enabled: boolean
+  provider: 'gpt-sovits' | 'irodori'
   apiBaseUrl: string
+  timeoutMs: number
   defaultRefAudioPath: string
   defaultPromptText: string
   promptLang: string
@@ -32,13 +35,41 @@ export interface ApiExportTtsConfig {
   speedFactor: number
   gptWeightsPath: string
   sovitsWeightsPath: string
+  irodori: {
+    model: string
+    responseFormat: 'wav' | 'mp3' | 'ogg'
+    numSteps: number
+    cfgScaleText: number
+    cfgScaleCaption: number
+    cfgScaleSpeaker: number
+    durationScale: number
+    chunkingEnabled: boolean
+    chunkMinChars: number
+    seed: number
+    defaultLoraAdapter: string
+    defaultCaption: string
+  }
   characters: Array<{
     characterName: string
     refAudioPath: string
+    refAudioPaths?: string[]
     promptText: string
     promptLang: string
     gptWeightsPath: string
     sovitsWeightsPath: string
+    loraAdapter?: string
+    caption?: string
+    speed?: number
+    numSteps?: number
+    emotions?: Array<{
+      emotion: string
+      refAudioPath?: string
+      refAudioPaths?: string[]
+      loraAdapter?: string
+      caption?: string
+      speed?: number
+      numSteps?: number
+    }>
   }>
 }
 
@@ -66,7 +97,17 @@ export class App {
   public layerModel!: ModelLayer
   public layerUI!: UILayer
   public layerSpecialEffect!: SpecialEffectLayer
+  public layerEnvironment!: EnvironmentLayer
   public ttsManager: TTSManager = new TTSManager()
+
+  /** 相机状态（PJSK ChangeCameraPosition / ChangeCameraZoomLevel） */
+  private cameraScale = 1
+  private cameraOffsetX = 0
+  private cameraOffsetY = 0
+  /** 震屏附加偏移，不改变相机基准值 */
+  private shakeOffsetX = 0
+  private shakeOffsetY = 0
+  private shakeGeneration = 0
 
   private models: Live2DModelMap[] = []
   private textures: TextureMap[] = []
@@ -207,8 +248,71 @@ export class App {
   public initializeLayers(): void {
     this.layerBackground = new BackgroundLayer(this.pixiApplication)
     this.layerModel = new ModelLayer(this.pixiApplication)
+    this.layerEnvironment = new EnvironmentLayer(this.pixiApplication)
     this.layerUI = new UILayer(this.pixiApplication)
     this.layerSpecialEffect = new SpecialEffectLayer(this.pixiApplication)
+  }
+
+  private applyViewTransform(): void {
+    // 与 sekai-viewer-reborn 的 set_style 一致：
+    // root.position = stage * (0.5 - posX / scale, 0.5 + posY / scale)
+    const [width, height] = this.stage_size
+    const offsetX = -(this.cameraOffsetX / this.cameraScale) * width + this.shakeOffsetX
+    const offsetY = (this.cameraOffsetY / this.cameraScale) * height + this.shakeOffsetY
+    this.layerBackground.setViewTransform(this.cameraScale, offsetX, offsetY)
+    this.layerModel.setViewTransform(this.cameraScale, offsetX, offsetY)
+  }
+
+  /** 相机平移：x/y 使用游戏 1920×1080 舞台像素。 */
+  public async cameraMove(x: number, y: number, durationMs: number): Promise<void> {
+    const toX = x / 1920
+    const toY = y / 1080
+    const fromX = this.cameraOffsetX
+    const fromY = this.cameraOffsetY
+    await AnimationManager.linear((progress) => {
+      this.cameraOffsetX = fromX + (toX - fromX) * progress
+      this.cameraOffsetY = fromY + (toY - fromY) * progress
+      this.applyViewTransform()
+    }, durationMs)
+  }
+
+  /** 相机缩放：scale 为绝对倍率，1 = 初始视角。 */
+  public async cameraZoom(scale: number, durationMs: number): Promise<void> {
+    const from = this.cameraScale
+    const to = Math.max(0.1, scale)
+    await AnimationManager.linear((progress) => {
+      this.cameraScale = from + (to - from) * progress
+      this.applyViewTransform()
+    }, durationMs)
+  }
+
+  /** 震屏：背景与人物一起抖动，UI 不动（PJSK ShakeScreen）。 */
+  public async shakeScreen(durationMs: number, amplitude: number): Promise<void> {
+    const height = this.stage_size[1]
+    const amp = Math.max(0, amplitude) * height
+    const duration = Math.max(1, durationMs)
+    const generation = ++this.shakeGeneration
+    await AnimationManager.linear((progress) => {
+      if (generation !== this.shakeGeneration) return
+      const elapsed = (progress * duration) / 1000
+      this.shakeOffsetX = (Math.sin(elapsed * 97.3) + Math.sin(elapsed * 41.7) * 0.6) * amp * 0.5
+      this.shakeOffsetY = (Math.sin(elapsed * 83.1) + Math.sin(elapsed * 53.9) * 0.6) * amp * 0.5
+      this.applyViewTransform()
+    }, duration)
+    // 被 StopShake 抢先归零时不要覆盖它的结果。
+    if (generation === this.shakeGeneration) {
+      this.shakeOffsetX = 0
+      this.shakeOffsetY = 0
+      this.applyViewTransform()
+    }
+  }
+
+  /** 官方 EffectType 25/26：StopShakeScreen / StopShakeWindow。 */
+  public stopShake(): void {
+    this.shakeGeneration++
+    this.shakeOffsetX = 0
+    this.shakeOffsetY = 0
+    this.applyViewTransform()
   }
 
   public getTextureById(id: number): Texture {
@@ -294,6 +398,7 @@ export class App {
             frameCount: result.frameCount,
             outputSize: result.outputSize,
             timings: result.timings,
+            diagnostics: result.diagnostics,
             error: result.error
           })
           this.logger.info(`api:export-result sent for taskId=${payload.taskId}`)
@@ -353,6 +458,7 @@ export class App {
     frameCount?: number
     outputSize?: number
     timings?: Record<string, number>
+    diagnostics?: import('../managers/video-export/ExportDiagnostics').ExportDiagnostics
     error?: string
   }> {
     const startTime = performance.now()
@@ -427,7 +533,8 @@ export class App {
         duration: (performance.now() - startTime) / 1000,
         frameCount: result.frameCount,
         outputSize: result.outputSize,
-        timings: result.timings
+        timings: result.timings,
+        diagnostics: result.diagnostics
       }
     } catch (error) {
       this.logger.error('API export failed during rendering', error)
@@ -456,7 +563,9 @@ export class App {
     if (ttsConfig) {
       this.ttsManager.updateConfig({
         enabled: ttsConfig.enabled,
+        provider: ttsConfig.provider || 'gpt-sovits',
         apiBaseUrl: ttsConfig.apiBaseUrl || 'http://127.0.0.1:9880',
+        timeoutMs: ttsConfig.timeoutMs || 120000,
         // 租约走宿主自己的 HTTP 端口；页面由宿主加载时 origin 就是宿主
         hostApiBaseUrl:
           typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
@@ -468,13 +577,21 @@ export class App {
         speedFactor: ttsConfig.speedFactor || 1.0,
         textLang: ttsConfig.textLang || 'ja',
         gptWeightsPath: ttsConfig.gptWeightsPath || '',
-        sovitsWeightsPath: ttsConfig.sovitsWeightsPath || ''
+        sovitsWeightsPath: ttsConfig.sovitsWeightsPath || '',
+        ...(ttsConfig.irodori ? { irodori: ttsConfig.irodori } : {})
       })
       for (const char of ttsConfig.characters || []) {
-        if (char.characterName && char.refAudioPath) {
+        const hasRef = Boolean(char.refAudioPath) || (char.refAudioPaths?.length ?? 0) > 0
+        if (char.characterName && hasRef) {
           this.ttsManager.setCharacterVoice(char.characterName, {
             characterName: char.characterName,
-            refAudioPath: char.refAudioPath,
+            refAudioPath: char.refAudioPath || '',
+            refAudioPaths: char.refAudioPaths,
+            loraAdapter: char.loraAdapter || undefined,
+            caption: char.caption || undefined,
+            speed: char.speed,
+            numSteps: char.numSteps,
+            emotions: char.emotions,
             promptText: char.promptText || ttsConfig.defaultPromptText || '',
             promptLang: char.promptLang || ttsConfig.promptLang || 'ja',
             gptWeightsPath: char.gptWeightsPath || undefined,

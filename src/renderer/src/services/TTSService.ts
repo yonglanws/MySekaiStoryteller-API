@@ -1,9 +1,23 @@
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../utils/Logger'
+import {
+  buildIrodoriSpeechRequest,
+  resolveIrodoriVoice,
+  type IrodoriDefaults,
+  type IrodoriEmotionConfig,
+  type IrodoriVoiceConfig
+} from '../../../common/tts/irodori'
+import { isJapaneseSpeechText } from '../../../common/tts/speechText'
+
+export type TtsProvider = 'gpt-sovits' | 'irodori'
 
 export interface TTSConfig {
   enabled: boolean
+  /** gpt-sovits：/tts + 权重租约；irodori：/v1/audio/speech */
+  provider: TtsProvider
   apiBaseUrl: string
+  /** 单次 TTS 请求超时（毫秒） */
+  timeoutMs: number
   /** 宿主 API 地址；用于申请 GSV 权重租约（空 = 不租约，直接合成） */
   hostApiBaseUrl: string
   textLang: string
@@ -18,6 +32,11 @@ export interface TTSConfig {
   fragmentInterval: number
   gptWeightsPath: string
   sovitsWeightsPath: string
+  /** Irodori 推理默认值与全局默认参考音频/caption */
+  irodori: IrodoriDefaults & {
+    defaultLoraAdapter: string
+    defaultCaption: string
+  }
 }
 
 export interface TranslationConfig {
@@ -62,18 +81,21 @@ export interface TTSRequest {
   sovits_weights?: string
 }
 
-export interface CharacterVoiceConfig {
+export interface CharacterVoiceConfig extends IrodoriVoiceConfig {
   characterName: string
   refAudioPath: string
   promptText: string
   promptLang: string
   gptWeightsPath?: string
   sovitsWeightsPath?: string
+  emotions?: IrodoriEmotionConfig[]
 }
 
 export const DEFAULT_TTS_CONFIG: TTSConfig = {
   enabled: false,
+  provider: 'gpt-sovits',
   apiBaseUrl: 'http://127.0.0.1:9880',
+  timeoutMs: 120000,
   hostApiBaseUrl: '',
   textLang: 'zh',
   promptLang: 'zh',
@@ -86,7 +108,21 @@ export const DEFAULT_TTS_CONFIG: TTSConfig = {
   mediaType: 'wav',
   fragmentInterval: 0.3,
   gptWeightsPath: '',
-  sovitsWeightsPath: ''
+  sovitsWeightsPath: '',
+  irodori: {
+    model: 'irodori-tts',
+    responseFormat: 'wav',
+    numSteps: 40,
+    cfgScaleText: 3.0,
+    cfgScaleCaption: 3.0,
+    cfgScaleSpeaker: 5.0,
+    durationScale: 1.0,
+    chunkingEnabled: true,
+    chunkMinChars: 80,
+    seed: -1,
+    defaultLoraAdapter: '',
+    defaultCaption: ''
+  }
 }
 
 export interface TTSResult {
@@ -207,11 +243,31 @@ export class TTSService {
   async synthesizeSpeech(
     text: string,
     characterName: string,
-    speedFactor?: number
+    speedFactor?: number,
+    emotion = ''
   ): Promise<TTSResult> {
     this.cleanupExpiredCache()
 
+    if (!this.config.enabled) {
+      return {
+        audioBuffer: new ArrayBuffer(0),
+        duration: 0,
+        success: false,
+        error: 'TTS is not enabled'
+      }
+    }
+
+    if (this.config.provider === 'irodori' && !isJapaneseSpeechText(text)) {
+      // 绝不把中文/非日文送去 Irodori：宁可这一句没有声音，也不能读出错误语言。
+      const message = `IrodoriTTS requires Japanese text; refusing non-Japanese line: "${text.slice(0, 30)}"`
+      this.logger.error(message)
+      return { audioBuffer: new ArrayBuffer(0), duration: 0, success: false, error: message }
+    }
+
     const charConfig = this.getCharacterVoice(characterName)
+    if (this.config.provider === 'irodori') {
+      return this.synthesizeIrodori(text, characterName, charConfig, speedFactor, emotion)
+    }
     const refAudioPath = charConfig?.refAudioPath || this.config.defaultRefAudioPath
     const promptText = charConfig?.promptText || this.config.defaultPromptText
     const promptLang = charConfig?.promptLang || this.config.promptLang
@@ -229,15 +285,6 @@ export class TTSService {
     if (cached) {
       cached.timestamp = Date.now()
       return cached.result
-    }
-
-    if (!this.config.enabled) {
-      return {
-        audioBuffer: new ArrayBuffer(0),
-        duration: 0,
-        success: false,
-        error: 'TTS is not enabled'
-      }
     }
 
     if (!refAudioPath) {
@@ -332,6 +379,97 @@ export class TTSService {
     } finally {
       if (lease) {
         await this.releaseTtsLease(lease.leaseId, releaseWeights)
+      }
+    }
+  }
+
+  /**
+   * Irodori-TTS：每句一个 `/v1/audio/speech` 请求，参考音频/LoRA/caption 都在请求体里。
+   * 服务端没有 GSV 那种全局权重状态，所以不需要权重租约。
+   */
+  private async synthesizeIrodori(
+    text: string,
+    characterName: string,
+    charConfig: CharacterVoiceConfig | undefined,
+    speedFactor: number | undefined,
+    emotion: string
+  ): Promise<TTSResult> {
+    const base: IrodoriVoiceConfig = {
+      refAudioPath: charConfig?.refAudioPath || this.config.defaultRefAudioPath,
+      refAudioPaths: charConfig?.refAudioPaths,
+      loraAdapter: charConfig?.loraAdapter || this.config.irodori.defaultLoraAdapter,
+      caption: charConfig?.caption || charConfig?.promptText || this.config.irodori.defaultCaption,
+      speed: charConfig?.speed,
+      numSteps: charConfig?.numSteps
+    }
+    const voice = resolveIrodoriVoice(base, charConfig?.emotions, emotion)
+    const refs = (voice.refAudioPaths ?? []).map((item) => item.trim()).filter(Boolean)
+    if (!refs.length && !voice.refAudioPath?.trim()) {
+      return {
+        audioBuffer: new ArrayBuffer(0),
+        duration: 0,
+        success: false,
+        error: `No reference audio configured for character: ${characterName}`
+      }
+    }
+
+    const cacheKey = [
+      'irodori',
+      characterName,
+      emotion,
+      speedFactor ?? this.config.speedFactor,
+      voice.refAudioPath ?? '',
+      refs.join(','),
+      voice.loraAdapter ?? '',
+      voice.caption ?? '',
+      voice.speed ?? '',
+      text
+    ].join(':')
+    const cached = this.audioCache.get(cacheKey)
+    if (cached) {
+      cached.timestamp = Date.now()
+      return cached.result
+    }
+
+    const baseUrl = this.normalizeBaseUrl(this.config.apiBaseUrl)
+    if (!baseUrl) {
+      return {
+        audioBuffer: new ArrayBuffer(0),
+        duration: 0,
+        success: false,
+        error: `Invalid TTS apiBaseUrl: ${this.config.apiBaseUrl}`
+      }
+    }
+
+    const payload = buildIrodoriSpeechRequest(
+      text,
+      voice,
+      this.config.irodori,
+      speedFactor ?? this.config.speedFactor
+    )
+    try {
+      const audioBuffer = await this.fetchAudio(`${baseUrl}/v1/audio/speech`, payload)
+      if (!audioBuffer || audioBuffer.byteLength === 0) {
+        return {
+          audioBuffer: new ArrayBuffer(0),
+          duration: 0,
+          success: false,
+          error: 'Irodori TTS returned empty audio data'
+        }
+      }
+      this.logger.info(`Irodori TTS returned audio: ${audioBuffer.byteLength} bytes`)
+      const duration = await this.calculateAudioDuration(audioBuffer)
+      const result: TTSResult = { audioBuffer, duration, success: true }
+      this.addToCache(cacheKey, result)
+      return result
+    } catch (error) {
+      return {
+        audioBuffer: new ArrayBuffer(0),
+        duration: 0,
+        success: false,
+        error: `Irodori TTS request failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
       }
     }
   }
@@ -551,23 +689,36 @@ export class TTSService {
   }
 
   private async fetchTTS(request: TTSRequest): Promise<ArrayBuffer> {
+    return this.fetchAudio(`${this.config.apiBaseUrl}/tts`, request)
+  }
+
+  /**
+   * 向 TTS 服务 POST JSON 并取回音频。直连失败（常见于服务端没有 CORS）时
+   * 走宿主桥接代理；Electron/开发环境没有桥接时明确报错，不再访问 undefined。
+   */
+  private async fetchAudio(url: string, payload: unknown): Promise<ArrayBuffer> {
+    const timeoutMs = this.config.timeoutMs || REQUEST_TIMEOUT_MS
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
-      const response = await fetch(`${this.config.apiBaseUrl}/tts`, {
+      const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(request),
+        body: JSON.stringify(payload),
         signal: controller.signal
       })
       clearTimeout(timeoutId)
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => null)
-        const errorMsg = errorData?.message || errorData?.Exception || `HTTP ${response.status}`
+        const errorMsg =
+          errorData?.error?.message ||
+          errorData?.message ||
+          errorData?.Exception ||
+          `HTTP ${response.status}`
         throw new Error(`TTS API error: ${errorMsg}`)
       }
 
@@ -577,29 +728,62 @@ export class TTSService {
         throw new Error('TTS request timed out')
       }
 
+      const ipc = typeof window !== 'undefined' ? window.electron?.ipcRenderer : undefined
+      if (!ipc?.invoke) throw fetchError
+
       this.logger.warn(
         `Direct fetch failed, trying IPC proxy: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
       )
 
-      const ipcResult = await Promise.race([
-        window.electron.ipcRenderer.invoke('electron:tts-fetch', {
-          url: `${this.config.apiBaseUrl}/tts`,
+      const ipcResult = (await Promise.race([
+        ipc.invoke('electron:tts-fetch', {
+          url,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify(request)
+          body: JSON.stringify(payload)
         }),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('TTS IPC proxy timed out')), REQUEST_TIMEOUT_MS)
+          setTimeout(() => reject(new Error('TTS IPC proxy timed out')), timeoutMs)
         )
-      ])
+      ])) as { ok: boolean; status: number; body: ArrayBuffer }
 
       if (!ipcResult.ok) {
         throw new Error(`TTS IPC error: HTTP ${ipcResult.status}`)
       }
 
       return ipcResult.body
+    }
+  }
+
+  private async testIrodoriConnection(): Promise<{
+    success: boolean
+    message: string
+    details?: string
+  }> {
+    const voice: IrodoriVoiceConfig = {
+      refAudioPath: this.config.defaultRefAudioPath || 'audio_ref.wav',
+      loraAdapter: this.config.irodori.defaultLoraAdapter,
+      caption: this.config.irodori.defaultCaption
+    }
+    const payload = buildIrodoriSpeechRequest('テスト', voice, this.config.irodori, 1.0)
+    try {
+      const audioData = await this.fetchAudio(`${this.config.apiBaseUrl}/v1/audio/speech`, payload)
+      return {
+        success: true,
+        message: 'Irodori TTS 服务连接成功',
+        details:
+          audioData.byteLength > 0
+            ? `Irodori API 正常响应，音频大小: ${(audioData.byteLength / 1024).toFixed(1)} KB`
+            : 'Irodori API 响应正常（音频数据为空，请检查参考音频路径配置）'
+      }
+    } catch (error) {
+      return {
+        success: false,
+        message: 'Irodori TTS 服务连接失败',
+        details: error instanceof Error ? error.message : String(error)
+      }
     }
   }
 
@@ -665,6 +849,9 @@ export class TTSService {
   }
 
   async testConnection(): Promise<{ success: boolean; message: string; details?: string }> {
+    if (this.config.provider === 'irodori') {
+      return this.testIrodoriConnection()
+    }
     const refAudioPath = this.config.defaultRefAudioPath || 'audio_ref.wav'
     const promptText = this.config.defaultPromptText || '测试'
     const promptLang = this.config.promptLang || 'zh'

@@ -1,5 +1,6 @@
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../../utils/Logger'
+import { exportLogBus } from './ExportLogBus'
 
 export enum LogLevel {
   DEBUG = 'DEBUG',
@@ -57,6 +58,9 @@ export class ExportLogger {
       message,
       data
     }
+
+    // 全局总线保留跨模块顺序，导出结束时落盘；各实例环形缓冲继续供本地查询。
+    exportLogBus.record(level, this.moduleName, message, data)
 
     if (this.historyLength < this.maxHistorySize) {
       if (this.logHistory.length < this.maxHistorySize) {

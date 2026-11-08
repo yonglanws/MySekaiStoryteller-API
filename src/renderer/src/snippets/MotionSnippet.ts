@@ -25,8 +25,11 @@ export default class MotionSnippet extends BaseSnippet {
           isVisible: (id) => this.app.layerModel.isModelVisible(id),
           apply: (action, signal) => {
             const model = this.app.getModelById(action.modelId)
-            return model.applyCharacterAction(action, signal, () =>
-              this.app.layerModel.isModelVisible(action.modelId)
+            return model.applyCharacterAction(
+              action,
+              signal,
+              () => this.app.layerModel.isModelVisible(action.modelId),
+              this.snippetIndex
             )
           },
           onError: (error, action) => this.logger.warn('Character action failed', action, error)
@@ -58,7 +61,8 @@ export default class MotionSnippet extends BaseSnippet {
     await model.applyAndWait(
       this.data.data.motion,
       this.data.data.facial,
-      this.data.data.facialFirst
+      this.data.data.facialFirst,
+      this.snippetIndex
     )
 
     await model.playMotionLastFrame(this.data.data.motion, this.data.data.facial)

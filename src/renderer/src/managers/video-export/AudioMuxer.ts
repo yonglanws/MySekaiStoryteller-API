@@ -1,4 +1,9 @@
 import { ExportLogger } from './ExportLogger'
+import { mixBgmCueSamples, type BgmCue, type BgmSampleCue } from '../../../../common/audio/bgm'
+import { mixSeCueSamples, type SeBufferCue } from '../../../../common/audio/se'
+
+export type BgmAudioCue = BgmCue<AudioBuffer>
+export type SeAudioCue = SeBufferCue
 
 export interface AudioTrackData {
   audioBuffer: ArrayBuffer
@@ -25,6 +30,8 @@ export class AudioMuxer {
   private audioContext: AudioContext | null = null
   private audioTracks: AudioTrackData[] = []
   private bgmConfig: BGMConfig | null = null
+  private bgmCues: BgmAudioCue[] = []
+  private seCues: SeAudioCue[] = []
   private readonly logger: ExportLogger = new ExportLogger('AudioMuxer')
   private decodedBufferCache: Map<string, AudioBuffer> = new Map()
 
@@ -32,6 +39,8 @@ export class AudioMuxer {
     this.audioContext = null
     this.audioTracks = []
     this.bgmConfig = null
+    this.bgmCues = []
+    this.seCues = []
   }
 
   async initialize(): Promise<void> {
@@ -61,6 +70,34 @@ export class AudioMuxer {
       path: bgmConfig.path,
       volume: bgmConfig.volume
     })
+  }
+
+  /** 故事级 BGM 时间点；非空时优先于全局 bgmBuffer。 */
+  setBgmCues(cues: BgmAudioCue[]): void {
+    this.bgmCues = cues
+    this.logger.info('BGM cues set', {
+      cues: cues.length,
+      files: cues.filter((cue) => !cue.stop).length,
+      stops: cues.filter((cue) => cue.stop).length
+    })
+  }
+
+  hasBgmCues(): boolean {
+    return this.bgmCues.some((cue) => !cue.stop && cue.buffer !== null)
+  }
+
+  /** 故事级 SE 时间点（PlaySe / StopSe）。 */
+  setSeCues(cues: SeAudioCue[]): void {
+    this.seCues = cues
+    this.logger.info('SE cues set', {
+      cues: cues.length,
+      plays: cues.filter((cue) => !cue.stop).length,
+      stops: cues.filter((cue) => cue.stop).length
+    })
+  }
+
+  hasSeCues(): boolean {
+    return this.seCues.some((cue) => !cue.stop && cue.channel0 !== null)
   }
 
   addAudioTrack(track: AudioTrackData): void {
@@ -151,11 +188,16 @@ export class AudioMuxer {
     const leftBuffer = new Float32Array(totalSamples)
     const rightBuffer = new Float32Array(totalSamples)
 
-    if (bgmBuffer && this.bgmConfig?.enabled) {
-      this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+    if (this.bgmConfig?.enabled) {
+      if (this.bgmCues.length > 0) {
+        this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate)
+      } else if (bgmBuffer) {
+        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+      }
     }
 
     await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
+    this.mixStorySe(leftBuffer, rightBuffer, sampleRate)
 
     const outputBuffer = this.audioContext!.createBuffer(numChannels, totalSamples, sampleRate)
     outputBuffer.getChannelData(0).set(leftBuffer)
@@ -211,6 +253,58 @@ export class AudioMuxer {
 
     const loopCount = Math.ceil(totalSamples / bgmTotalSamples)
     this.logger.info(`BGM mixing complete: volume=${bgmVolume}, loops=${loopCount}`)
+  }
+
+  /** 故事级 BGM：按 ChangeBgm 时间点循环、切歌、淡入淡出。 */
+  private mixStoryBGM(
+    leftBuffer: Float32Array,
+    rightBuffer: Float32Array,
+    totalSamples: number,
+    sampleRate: number
+  ): void {
+    const volume = this.bgmConfig?.volume ?? 0.1
+    const sampleCues: BgmSampleCue[] = this.bgmCues.map((cue) => {
+      if (!cue.buffer) {
+        return {
+          timeMs: cue.timeMs,
+          fadeMs: cue.fadeMs,
+          stop: cue.stop,
+          channel0: null,
+          channel1: null,
+          volume: cue.volume
+        }
+      }
+      const channel0 = cue.buffer.getChannelData(0)
+      const channel1 = cue.buffer.numberOfChannels > 1 ? cue.buffer.getChannelData(1) : channel0
+      return {
+        timeMs: cue.timeMs,
+        fadeMs: cue.fadeMs,
+        stop: cue.stop,
+        channel0,
+        channel1,
+        volume: cue.volume
+      }
+    })
+
+    const stats = mixBgmCueSamples(sampleCues, leftBuffer, rightBuffer, sampleRate, volume)
+    this.logger.info(
+      `Story BGM mixed: cues=${stats.cueCount}, segments=${stats.segments}, skipped=${stats.skipped}, volume=${volume}, outputSamples=${totalSamples}`
+    )
+  }
+
+  /** 故事级 SE：一次性音效、循环脚步、StopSe 淡出。 */
+  private mixStorySe(
+    leftBuffer: Float32Array,
+    rightBuffer: Float32Array,
+    sampleRate: number
+  ): void {
+    if (this.seCues.length === 0) return
+    // 与 TTS 的 0.5 缩放相比，SE 保持更接近游戏原声；最终输出仍会 clamp。
+    const volume = 0.6
+    const stats = mixSeCueSamples(this.seCues, leftBuffer, rightBuffer, sampleRate, volume)
+    this.logger.info(
+      `Story SE mixed: events=${stats.events}, oneShots=${stats.oneShots}, loops=${stats.loops}, skipped=${stats.skipped}, volume=${volume}`
+    )
   }
 
   private async mixTTSTracks(
@@ -384,11 +478,16 @@ export class AudioMuxer {
     const leftBuffer = new Float32Array(totalSamples)
     const rightBuffer = new Float32Array(totalSamples)
 
-    if (bgmBuffer && this.bgmConfig?.enabled) {
-      this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+    if (this.bgmConfig?.enabled) {
+      if (this.bgmCues.length > 0) {
+        this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate)
+      } else if (bgmBuffer) {
+        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+      }
     }
 
     await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
+    this.mixStorySe(leftBuffer, rightBuffer, sampleRate)
 
     const pcm = new Int16Array(totalSamples * 2)
     for (let i = 0; i < totalSamples; i++) {
@@ -527,6 +626,8 @@ export class AudioMuxer {
     }
     this.audioTracks = []
     this.bgmConfig = null
+    this.bgmCues = []
+    this.seCues = []
     this.decodedBufferCache.clear()
   }
 }

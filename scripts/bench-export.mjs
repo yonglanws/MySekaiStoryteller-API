@@ -20,7 +20,10 @@ function postExport(apiUrl, body, timeoutMs) {
         port: url.port,
         path: url.pathname,
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload)
+        },
         timeout: timeoutMs
       },
       (res) => {
@@ -30,7 +33,10 @@ function postExport(apiUrl, body, timeoutMs) {
           try {
             resolve({ status: res.statusCode, json: JSON.parse(data) })
           } catch {
-            resolve({ status: res.statusCode, json: { success: false, message: data.slice(0, 200) } })
+            resolve({
+              status: res.statusCode,
+              json: { success: false, message: data.slice(0, 200) }
+            })
           }
         })
       }
@@ -73,7 +79,11 @@ function ffprobe(file) {
 }
 
 const startedAt = Date.now()
-const { status, json: result } = await postExport(API_URL, { story, timeout: TIMEOUT_MS }, TIMEOUT_MS)
+const { status, json: result } = await postExport(
+  API_URL,
+  { story, timeout: TIMEOUT_MS },
+  TIMEOUT_MS
+)
 const elapsedMs = Date.now() - startedAt
 
 const line = {

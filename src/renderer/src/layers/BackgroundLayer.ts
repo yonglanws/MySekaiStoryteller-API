@@ -1,8 +1,9 @@
-import { Application, Sprite, Texture } from 'pixi.js'
+import { Application, BlurFilter, Sprite, Texture } from 'pixi.js'
 import BaseLayer from './BaseLayer'
 
 export default class BackgroundLayer extends BaseLayer {
   private readonly sprite!: Sprite
+  private readonly blurFilter = new BlurFilter(8, 4)
 
   constructor(app: Application) {
     super(app, -1)
@@ -14,6 +15,10 @@ export default class BackgroundLayer extends BaseLayer {
     this.sprite.anchor.set(0.5)
 
     this.layerContainer.addChild(this.sprite)
+  }
+
+  public setBlur(enabled: boolean): void {
+    this.sprite.filters = enabled ? [this.blurFilter] : []
   }
 
   private calcScale(texture: Texture): number {

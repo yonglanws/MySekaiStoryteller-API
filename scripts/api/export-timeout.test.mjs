@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -12,14 +12,15 @@ import { VideoApiServer } from '../../out-host/host/servers/VideoApiServer.js'
 const story = { models: [], images: [], snippets: [] }
 const DEFAULT_TIMEOUT = 1_800_000
 
-async function createFixture(t) {
+async function createFixture(t, options = {}) {
   const outputDir = mkdtempSync(path.join(tmpdir(), 'mss-api-test-'))
   const api = new VideoApiServer(new Logger({ type: 'hidden' }), {
     port: 0,
     host: '127.0.0.1',
     outputDir,
     video: { width: 1280, height: 720, fps: 30 },
-    maxConcurrentExports: 1
+    maxConcurrentExports: 1,
+    ...options
   })
   const dispatched = []
   const cancelled = []
@@ -120,6 +121,66 @@ test('successful export keeps the default timeout and clears its timer', async (
   assert.equal(fixture.clock.countTimers(), 0)
 })
 
+test('story preflight rejection returns 400 before dispatching', async (t) => {
+  const fixture = await createFixture(t, {
+    prepareStory: async () => {
+      throw new Error('IrodoriTTS 需要日文 ttsText')
+    }
+  })
+  const result = await fixture.request('export', { story }).response
+  assert.equal(result.status, 400)
+  assert.match(result.body.message, /日文 ttsText/)
+  assert.equal(fixture.dispatched.length, 0)
+  assert.equal(fixture.clock.countTimers(), 0)
+})
+
+test('resolveExport writes diagnostics next to the video and returns log paths', async (t) => {
+  const fixture = await createFixture(t)
+  const pending = fixture.request('export', { story })
+  await fixture.waitForStatus((status) => status.activeExports === 1)
+  const [task] = fixture.dispatched
+  writeFileSync(task.outputPath, 'test video')
+  const diagnostics = {
+    schemaVersion: 1,
+    generatedAt: '2026-11-08T00:00:00.000Z',
+    export: { mode: 'stream', width: 1280, height: 720, fps: 30, frameCount: 1, durationMs: 1 },
+    summary: {
+      models: 0,
+      images: 0,
+      snippets: 1,
+      talks: 0,
+      plannedDurationMs: 1,
+      actualDurationMs: 1,
+      avgAbsDriftMs: 0,
+      ttsLines: 0,
+      ttsTotalMs: 0,
+      motionEvents: 0,
+      motionStarts: 0,
+      motionInterrupts: 0,
+      layoutAppears: 0,
+      layoutClears: 0,
+      logEntries: 0,
+      anomalies: 0
+    },
+    snippets: [],
+    tts: [],
+    motions: [],
+    anomalies: [],
+    logs: []
+  }
+  fixture.api.resolveExport(task.taskId, {
+    success: true,
+    videoPath: task.outputPath,
+    diagnostics
+  })
+  const result = await pending.response
+  assert.equal(result.status, 200)
+  assert.equal(result.body.logPath, task.outputPath.replace(/\.mp4$/, '.log'))
+  assert.equal(result.body.logJsonPath, task.outputPath.replace(/\.mp4$/, '.log.json'))
+  assert.ok(existsSync(result.body.logPath))
+  assert.equal(JSON.parse(readFileSync(result.body.logJsonPath, 'utf8')).schemaVersion, 1)
+})
+
 test('worker failure clears the timeout and allows the next export to start', async (t) => {
   const fixture = await createFixture(t)
   const first = fixture.request('export', { story })
@@ -202,5 +263,36 @@ test('shutdown rejects pending requests and clears their timers', async (t) => {
   await fixture.waitForStatus((status) => status.activeExports === 1)
   fixture.api.stop()
   assert.match((await pending.response).body.message, /shutting down/)
+  assert.equal(fixture.clock.countTimers(), 0)
+})
+
+test('programmatic exportStory reuses the queue and returns download info', async (t) => {
+  const fixture = await createFixture(t)
+  const pending = fixture.api.exportStory(story, 5000)
+  await fixture.waitForStatus((status) => status.activeExports === 1)
+  const [task] = fixture.dispatched
+  writeFileSync(task.outputPath, 'video')
+  fixture.api.resolveExport(task.taskId, {
+    success: true,
+    videoPath: task.outputPath,
+    duration: 1,
+    frameCount: 30
+  })
+  const result = await pending
+  assert.equal(result.success, true)
+  assert.match(result.downloadUrl, /^\/api\/v1\/download\//)
+  assert.equal(result.fileSize, 5)
+  assert.equal(fixture.clock.countTimers(), 0)
+})
+
+test('exportStory aborts and cancels the queued export when its signal aborts', async (t) => {
+  const fixture = await createFixture(t)
+  const controller = new AbortController()
+  const pending = fixture.api.exportStory(story, 5000, controller.signal)
+  await fixture.waitForStatus((status) => status.activeExports === 1)
+  const [task] = fixture.dispatched
+  controller.abort()
+  await assert.rejects(pending, /cancelled/i)
+  assert.deepEqual(fixture.cancelled, [task.taskId])
   assert.equal(fixture.clock.countTimers(), 0)
 })

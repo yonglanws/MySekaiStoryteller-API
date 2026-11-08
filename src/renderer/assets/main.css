@@ -40,8 +40,13 @@
 
 body {
   font-family:
-    'MiSans Medium', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
-    'Helvetica Neue', sans-serif;
+    'MiSans Medium',
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Display',
+    'SF Pro Text',
+    'Helvetica Neue',
+    sans-serif;
   background-color: #1a1a2e;
   background-size: cover;
   background-position: center;

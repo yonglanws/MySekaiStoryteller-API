@@ -198,23 +198,37 @@ function fixture(t) {
 }
 
 const timingCases = [
-  ['20 characters without TTS', twentyChars, 0, '', 3460],
-  ['equivalent real speech', twentyChars, 2860, '', 3460],
-  ['longer real speech', twentyChars, 4000, '', 4600],
-  ['short text minimum', 'あ', 0, '', 1800],
-  ['empty text minimum', '', 0, '', 1800],
-  ['long text is not capped', 'あ'.repeat(300), 0, '', 43500],
-  ['audio over 30 seconds is not capped', 'あ', 60000, '', 60600],
-  ['ttsText replaces estimated speech', twentyChars, 0, 'い'.repeat(30), 4890],
-  ['short ttsText still waits for visible text', twentyChars, 0, 'い', 2200],
-  ['real speech replaces long ttsText estimate', twentyChars, 1000, 'い'.repeat(100), 2200],
-  ['UTF-16 length matches UIText', '😀'.repeat(10), 0, '', 3460],
-  ['NaN falls back to estimation', twentyChars, NaN, '', 3460],
-  ['Infinity falls back to estimation', twentyChars, Infinity, '', 3460],
-  ['negative duration falls back to estimation', twentyChars, -100, '', 3460]
+  ['20 characters without TTS', twentyChars, 0, '', 3333.333, 3533.333],
+  ['equivalent real speech', twentyChars, 2860, '', 3416.667, 3416.667],
+  ['longer real speech', twentyChars, 4000, '', 4550, 4550],
+  ['short text minimum', 'あ', 0, '', 2066.667, 2266.667],
+  ['empty text minimum', '', 0, '', 2000, 2200],
+  ['long text is not capped', 'あ'.repeat(300), 0, '', 22000, 22200],
+  ['audio over 30 seconds is not capped', 'あ', 60000, '', 60550, 60550],
+  [
+    'ttsText without a voice file stays silent pacing',
+    twentyChars,
+    0,
+    'い'.repeat(30),
+    3333.333,
+    3533.333
+  ],
+  ['short ttsText still waits for visible text', twentyChars, 0, 'い', 3333.333, 3533.333],
+  [
+    'real speech replaces long ttsText estimate',
+    twentyChars,
+    1000,
+    'い'.repeat(100),
+    1833.333,
+    2033.333
+  ],
+  ['UTF-16 length matches UIText', '😀'.repeat(10), 0, '', 3333.333, 3533.333],
+  ['NaN falls back to estimation', twentyChars, NaN, '', 3333.333, 3533.333],
+  ['Infinity falls back to estimation', twentyChars, Infinity, '', 3333.333, 3533.333],
+  ['negative duration falls back to estimation', twentyChars, -100, '', 3333.333, 3533.333]
 ]
 
-for (const [name, content, ttsDurationMs, ttsText, expected] of timingCases) {
+for (const [name, content, ttsDurationMs, ttsText, expected, withWindow] of timingCases) {
   test(`Talk timing: ${name}`, (t) => {
     const f = fixture(t)
     const calculator = f.load('utils/TimelineCalculator.ts')
@@ -223,7 +237,7 @@ for (const [name, content, ttsDurationMs, ttsText, expected] of timingCases) {
       [snippet],
       new Map([[0, { snippetIndex: 0, durationMs: ttsDurationMs }]])
     )
-    assert.equal(result.entries[0].durationMs, expected)
+    assert.equal(result.entries[0].durationMs, withWindow, 'Timeline includes the 0.2s window open')
     assert.equal(result.entries[0].hasTTS, Number.isFinite(ttsDurationMs) && ttsDurationMs > 0)
     assert.equal(typeof f.timing.calculateTalkDurationMs, 'function')
     assert.equal(f.timing.calculateTalkDurationMs(content, ttsDurationMs, ttsText), expected)
@@ -235,15 +249,33 @@ for (const [name, content, ttsDurationMs, ttsText, expected] of timingCases) {
 
 test('UIText keeps UTF-16 typewriter progress and shares the display constant', async (t) => {
   const f = fixture(t)
-  assert.equal(f.timing.TALK_DISPLAY_MS_PER_CHAR, 80)
+  assert.equal(f.timing.TALK_DISPLAY_MS_PER_CHAR, 66.667)
   assert.equal(f.timing.TALK_ESTIMATED_SPEECH_MS_PER_CHAR, 143)
-  assert.equal(f.timing.TALK_TAIL_MS, 600)
-  assert.equal(f.timing.MIN_TALK_DURATION_MS, 1800)
+  assert.equal(f.timing.TALK_TAIL_MS, 500)
+  assert.equal(f.timing.MIN_TALK_DURATION_MS, 0)
   f.uiText.data = '😀'.repeat(10)
   const run = f.uiText.startDisplayContent()
   await f.clock.tickAsync(800)
-  assert.equal(f.uiText.text.length, 10)
+  assert.equal(f.uiText.text.length, 12)
   await f.clock.tickAsync(800)
+  await run
+  assert.equal(f.uiText.text, f.uiText.data)
+})
+
+test('UIText counts visible characters, so layout newlines do not slow typing', async (t) => {
+  const f = fixture(t)
+  assert.equal(f.timing.visibleTextLength('あ\nい'), 2)
+  assert.equal(f.timing.sliceVisibleText('あ\nい', 1), 'あ\n')
+  assert.equal(f.timing.sliceVisibleText('あ\nい', 2), 'あ\nい')
+  assert.equal(f.timing.talkTypingDurationMs('あ\nい'), f.timing.talkTypingDurationMs('あい'))
+  assert.equal(
+    f.timing.calculateTalkDurationMs('あ\nい', 0),
+    f.timing.calculateTalkDurationMs('あい', 0)
+  )
+
+  f.uiText.data = `${'あ'.repeat(26)}\n${'い'.repeat(4)}`
+  const run = f.uiText.startDisplayContent()
+  await f.clock.tickAsync(30 * 66.667 + 20)
   await run
   assert.equal(f.uiText.text, f.uiText.data)
 })
@@ -258,7 +290,7 @@ test('non-Talk timeline and estimate rules are unchanged', (t) => {
   ]
   assert.deepEqual(
     Array.from(calculator.calculateTimeline(snippets).entries, (e) => e.durationMs),
-    [1400, 2000, 40000]
+    [2666.667, 2000, 40000]
   )
   assert.equal(calculator.estimateSnippetDuration(snippets[1]), 10000)
 })
@@ -271,17 +303,19 @@ for (const [name, envelope] of [
     { values: new Float32Array([0.4]), durationMs, frameMs: 20 }
   ])
 ]) {
-  test(`no mouth listener or parameter writes: ${name}`, async (t) => {
+  test(`text lip sync without a usable voice envelope: ${name}`, async (t) => {
     const f = fixture(t)
     f.app.currentTalkLipSync = envelope
     const model = f.models.get(1)
     const run = f.run(talk(twentyChars, { facial: 'smile', motion: 'wave' }))
     await f.clock.tickAsync(0)
-    assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
-    assert.equal(model.writes.length, 0, 'Do not lock an expression mouth even to zero')
+    assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 1)
+    model.internalModel.emit('beforeModelUpdate')
+    assert.ok(model.writes.length > 0, 'Official text lip sync writes LipLevels values')
+    assert.ok(model.writes.at(-1).value > 0)
     await f.clock.runAllAsync()
     await run
-    assert.equal(model.writes.length, 0)
+    assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
     assert.equal(f.actions.length, 1, 'Silent dialogue still starts body and facial actions')
     assert.equal(f.clock.countTimers(), 0)
   })
@@ -366,35 +400,38 @@ test('already destroyed models cannot acquire a mouth listener', async (t) => {
   await run
 })
 
-test('voiced to silent dialogue, including a speaker change, never reattaches old mouth updates', async (t) => {
+test('voiced to silent dialogue moves text lip sync to the current speaker only', async (t) => {
   const f = fixture(t)
   f.app.currentTalkLipSync = voicedEnvelope(f)
   let run = f.run(talk('あ'))
   await f.clock.runAllAsync()
   await run
   f.app.currentTalkLipSync = null
-  const previousWrites = f.models.get(1).writes.length
+  const previousWrites = new Map(Array.from(f.models, ([id, model]) => [id, model.writes.length]))
   for (const modelId of [1, 2]) {
     run = f.run(talk('あ', { modelId, facial: 'smile' }))
     await f.clock.tickAsync(0)
-    for (const model of f.models.values()) {
-      assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
+    for (const [id, model] of f.models) {
+      assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), id === modelId ? 1 : 0)
       model.internalModel.emit('beforeModelUpdate')
     }
     await f.clock.runAllAsync()
     await run
+    for (const model of f.models.values()) {
+      assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
+    }
   }
-  assert.equal(f.models.get(1).writes.length, previousWrites)
-  assert.equal(f.models.get(2).writes.length, 0)
+  assert.ok(f.models.get(1).writes.length > previousWrites.get(1))
+  assert.ok(f.models.get(2).writes.length > previousWrites.get(2))
   assert.equal(f.actions.length, 2)
 })
 
 for (const delay of [0, 1, 10]) {
-  test(`BaseSnippet applies ${delay}s delay once, outside the 3460ms dialogue deadline`, async (t) => {
+  test(`BaseSnippet applies ${delay}s delay once, outside the 3533ms dialogue deadline`, async (t) => {
     const f = fixture(t)
     const snippet = talk(twentyChars, { delay })
     const timeline = f.load('utils/TimelineCalculator.ts').calculateTimelineWithoutTTS([snippet])
-    assert.equal(timeline.entries[0].durationMs, 3460)
+    assert.equal(timeline.entries[0].durationMs, 3533.333)
     f.app.lastSnippetActualDurationMs = timeline.entries[0].durationMs
     let finished = false
     const run = f.run(snippet).then(() => {
@@ -408,12 +445,12 @@ for (const delay of [0, 1, 10]) {
       await f.clock.tickAsync(0)
     }
     assert.deepEqual(f.starts, [delay * 1000])
-    await f.clock.tickAsync(3459)
+    await f.clock.tickAsync(3533)
     assert.equal(finished, false)
     await f.clock.tickAsync(1)
     assert.equal(finished, true)
     await run
-    assert.equal(f.clock.now, delay * 1000 + 3460)
+    assert.ok(Math.abs(f.clock.now - (delay * 1000 + 3533.333)) <= 1, `finish ${f.clock.now}`)
   })
 }
 
@@ -440,7 +477,7 @@ for (const planned of [0, -1, NaN, Infinity]) {
     const run = f.run(talk(twentyChars, { delay: 10, ttsText: 'い' }))
     await f.clock.runAllAsync()
     await run
-    assert.equal(f.clock.now, 12200)
+    assert.equal(f.clock.now, 13334)
   })
 }
 
@@ -458,8 +495,8 @@ test('three consecutive silent lines use three independent body deadlines', asyn
   })()
   await f.clock.runAllAsync()
   await run
-  assert.deepEqual(f.starts, [0, 3460, 6920])
-  assert.deepEqual(ends, [3460, 6920, 10380])
+  assert.deepEqual(f.starts, [0, 3534, 6868])
+  assert.deepEqual(ends, [3534, 6868, 10202])
   assert.equal(f.clock.countTimers(), 0)
 })
 
@@ -609,6 +646,7 @@ function exportFixture(
     markRenderStart = noop
     markRenderEnd = noop
     waitForTTSReady = async (index) => results[index]
+    waitForTTSPipeline = async () => {}
     isTTSReady = () => true
     dispose = async () => {}
   }
@@ -638,7 +676,14 @@ function exportFixture(
     StreamRecorder,
     AudioMuxer,
     ConcurrentExportPipeline: Pipeline,
-    SnippetTimestampRecorder
+    SnippetTimestampRecorder,
+    exportTraceContext: { setSnippet() {}, reset() {} },
+    motionTrace: { reset() {}, snapshot: () => [] },
+    exportLogBus: { reset() {}, snapshot: () => [] },
+    buildExportDiagnostics: () => ({
+      summary: { snippets: 0, talks: 0, anomalies: 0, motionEvents: 0, logEntries: 0 }
+    }),
+    sanitizeDiagnostics: (value) => value
   })
   f.mocks.set('./video-export/VirtualClockController', { VirtualClockController: ClockBoundary })
   f.mocks.set('./video-export/JpegFrameSink', { JpegFrameSink: JpegSink })
@@ -670,6 +715,7 @@ function exportFixture(
     isTTSEnabled: () => enabled,
     checkTTSAvailability: async () => true,
     getBGMConfig: () => ({ enabled: false }),
+    getConfig: () => ({ provider: 'gpt-sovits' }),
     buildTimelineWithoutTTS: (data) =>
       missingTimeline ? [] : calculator.calculateTimelineWithoutTTS(data).entries,
     setTimeline: (value) => {
@@ -725,14 +771,14 @@ for (const mode of ['record', 'fast']) {
       ]
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [3460, 4600, 2200])
+    assert.deepEqual(f.planned, [3416.667, 4550, 3333.333])
     assert.equal(f.patchCalls.length, 3, 'Both real entry paths must reuse talkPatch')
     assert.deepEqual(
       f.patchCalls.map((args) => [args[1], args[2], args[3]]),
       [
-        [0, 2860, 3460],
-        [1, 4000, 4600],
-        [2, 0, 2200]
+        [0, 2860, 3416.667],
+        [1, 4000, 4550],
+        [2, 0, 3333.333]
       ]
     )
     assert.ok(
@@ -751,19 +797,19 @@ for (const mode of ['record', 'fast']) {
       missingTimeline: true
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [3460])
-    assert.equal(f.models.get(1).writes.length, 0)
+    assert.deepEqual(f.planned, [3533.333])
+    assert.ok(f.models.get(1).writes.length > 0, 'text lip sync writes mouth values')
   })
 
-  test(`${mode} decoding failure skips lip sync but retains real speech duration`, async (t) => {
+  test(`${mode} decoding failure falls back to text lip sync with real speech duration`, async (t) => {
     const f = exportFixture(t, {
       snippets: [talk()],
       results: [{ success: true, duration: 4000 }],
       decodeFails: true
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [4600])
-    assert.equal(f.models.get(1).writes.length, 0)
+    assert.deepEqual(f.planned, [4550])
+    assert.ok(f.models.get(1).writes.length > 0, 'text lip sync writes mouth values')
     assert.equal(f.models.get(1).internalModel.listenerCount('beforeModelUpdate'), 0)
     assert.ok(f.warnings.some(([message]) => /skipping lip sync/i.test(message)))
     assert.ok(f.warnings.every(([message]) => !/text rhythm/i.test(message)))

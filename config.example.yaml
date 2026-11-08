@@ -87,27 +87,57 @@ paths:
   webRenderer: out/webrenderer    # webrenderer 构建产物目录（npm run build:web 生成）
 
 # ---------------------------------------------------------------------------
-# TTS 语音合成（GPT-SoVITS）
+# TTS 语音合成（GPT-SoVITS / IrodoriTTS）
 # ---------------------------------------------------------------------------
 tts:
-  enabled: true                   # 关闭后导出仍会成功，只是没有角色配音
-  apiBaseUrl: http://127.0.0.1:9880   # GPT-SoVITS 服务地址（api_v2）
-  defaultRefAudioPath: ""         # 默认参考音频（GPT-SoVITS 服务端可访问的路径）
-  defaultPromptText: ""           # 默认参考音频的提示文本
-  promptLang: ja                  # 提示文本语言
-  textLang: ja                    # 合成文本语言
+  enabled: true                   # 关闭后导出仍会成功，只是没有角色配音（env: MSS_TTS_ENABLED）
+  provider: gpt-sovits            # gpt-sovits | irodori（env: MSS_TTS_PROVIDER）
+  apiBaseUrl: http://127.0.0.1:9880   # GSV: http://host:9880；Irodori: http://host:8088（env: MSS_TTS_API_BASE_URL）
+  timeoutMs: 120000               # 单次 TTS 请求超时（env: MSS_TTS_TIMEOUT_MS）
+  defaultRefAudioPath: ""         # 默认参考音频（TTS 服务端可访问的路径）
+  defaultPromptText: ""           # GSV 默认提示文本 / Irodori 默认 caption 的回退
+  promptLang: ja                  # GSV 提示文本语言
+  textLang: ja                    # GSV 合成文本语言
   speedFactor: 1.0                # 语速倍率
-  gptWeightsPath: ""              # 可选：全局默认 GPT 权重（GPT-SoVITS 服务端本地路径）
+  gptWeightsPath: ""              # 可选：全局默认 GPT 权重（GSV 服务端本地路径）
   sovitsWeightsPath: ""           # 可选：全局默认 SoVITS 权重
+  # IrodoriTTS 推理默认值（provider=irodori 时生效，env: MSS_IRODORI_MODEL / MSS_IRODORI_NUM_STEPS）
+  irodori:
+    model: irodori-tts
+    responseFormat: wav
+    numSteps: 40
+    cfgScaleText: 3.0
+    cfgScaleCaption: 3.0
+    cfgScaleSpeaker: 5.0
+    durationScale: 1.0
+    chunkingEnabled: true
+    chunkMinChars: 80
+    seed: -1                      # -1 = 每次随机
+    defaultLoraAdapter: ""        # 角色未填 loraAdapter 时的全局默认
+    defaultCaption: ""            # 角色未填 caption 时的全局默认
+    emotionLabels: [平静, 开心, 生气, 伤心, 害羞, 惊讶]
   # 角色专属声音（未列出的角色使用上方默认值）
   characters: []
   # characters:
   #   - characterName: 晓山瑞希
-  #     refAudioPath: /path/to/ref.wav    # GPT-SoVITS 服务端本地路径
-  #     promptText: 参考音频说的话
+  #     refAudioPath: /path/to/ref.wav    # GSV / Irodori 服务端本地路径
+  #     promptText: 参考音频说的话        # GSV 用；Irodori 无 caption 时回退到这里
   #     promptLang: ja
   #     gptWeightsPath: ""                # 可选：角色专属 GPT 权重
   #     sovitsWeightsPath: ""             # 可选：角色专属 SoVITS 权重
+  #     # 以下仅 Irodori 使用
+  #     loraAdapter: /path/to/lora_adapter
+  #     caption: 明るく軽い口調で話している。
+  #     refAudioPaths: []                 # 多参考音频；非空时优先于 refAudioPath
+  #     speed: 1.0
+  #     numSteps: 40
+  #     emotions:
+  #       - emotion: 平静
+  #         refAudioPath: /path/to/emotion_refs/calm.wav
+  #       - emotion: 开心
+  #         refAudioPath: /path/to/emotion_refs/happy.wav
+  #         caption: 嬉しそうに話している。
+  #         speed: 1.1
 
 # ---------------------------------------------------------------------------
 # 背景音乐
@@ -120,7 +150,70 @@ tts:
 #   volume: 0.2                # 音量 0.0 - 1.0
 #
 # 该文件不存在时，宿主回落到本文件的 bgm 节（enabled / path / volume）。
+# 剧本里的 ChangeBgm 片段可在场景内切歌/停止；出现带文件的 ChangeBgm 时，
+# path 的全局默认曲目不再混入，只加载被引用的 audio/bgm/<file>。
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 宿主内置 AI 剧本生成（OpenAI 兼容 Chat Completions）
+#
+# 客户端只提交一句场景描述，宿主完成「选角 → 台词 → 表演设计 → TTS 翻译」；
+# 密钥只从 apiKeyEnv 指定的环境变量读取，不写进本文件：
+#   export MSS_LLM_API_KEY=sk-...
+# baseUrl 可指向官方 OpenAI、new-api、Ollama（http://127.0.0.1:11434/v1）等。
+# ---------------------------------------------------------------------------
+llm:
+  enabled: true                   # 关闭后 /api/v1/script/generate 返回 422（env: MSS_LLM_ENABLED）
+  baseUrl: https://api.openai.com/v1   # 服务根地址，不要重复写 /chat/completions（env: MSS_LLM_BASE_URL）
+  apiKeyEnv: MSS_LLM_API_KEY      # 读取密钥的环境变量名（env: MSS_LLM_API_KEY_ENV）
+  model: gpt-4.1-mini             # 模型名（env: MSS_LLM_MODEL）
+  temperature: 0.85               # 台词创作温度（env: MSS_LLM_TEMPERATURE）
+  maxTokens: 8192                 # 单轮输出上限（env: MSS_LLM_MAX_TOKENS）
+  timeoutMs: 120000               # 单次 LLM 请求超时（env: MSS_LLM_TIMEOUT_MS）
+  retries: 2                      # 网络错误/429/5xx 重试次数（env: MSS_LLM_RETRIES）
+  repairRounds: 2                 # single 的校验失败重写轮数；staged 台词/表演各重试一次（env: MSS_LLM_REPAIR_ROUNDS）
+  # staged（默认）：选角 → 只写台词（只带入选角色的完整人设）→ 单独设计动作/表情/背景。
+  # single：一次调用写完整剧本；角色人设短、想省调用次数时用（env: MSS_LLM_PIPELINE）。
+  pipeline: staged
+  jsonMode: auto                  # auto = 先带 response_format 再回退；on = 必须；off = 不发送
+  translateForTts: true           # 把中文台词翻译成 ttsText 日文（env: MSS_LLM_TRANSLATE）
+  targetMinutes: 3                # 提示词里的目标成片时长（env: MSS_LLM_TARGET_MINUTES）
+  systemPrompt: ""                # single 覆盖内置系统提示词；staged 追加到每段系统提示词（env: MSS_LLM_SYSTEM_PROMPT）
+  extraBody: {}                   # 原样并入请求体，例如 {"thinking":{"type":"disabled"}}（env: MSS_LLM_EXTRA_BODY）
+  personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（文件名或 frontmatter name 为角色名）
+  personas: []                    # 内联人格：name / prompt / aliases / group
+  # personas:
+  #   - name: 晓山瑞希
+  #     aliases: [瑞希, mizuki]
+  #     prompt: |
+  #       外貌、性格、说话风格、口头禅、禁忌、表情倾向……
+
+# ---------------------------------------------------------------------------
+# 云端资源获取（Moesekai / pjsk.moe）
+#
+# 从公开剧情库拉取 Live2D 模型与动作，转换成宿主可直接渲染的资源目录。
+# 模型包本身没有 motion3：动作是 sse-motion.json，宿主按三次多项式无损转成
+# motion3 后写入模型包的 motions/，并自动登记到 models.yaml。
+# 常用命令：
+#   npm run fetch:models -- --characters mizuki,ena
+#   npm run fetch:models -- --characters all
+#   npm run fetch:models -- --models 20mizuki_normal_3.0_t04
+# ---------------------------------------------------------------------------
+assets:
+  source: moesekai                # 目前支持 moesekai
+  region: jp                      # jp | cn | tw | kr | en（env: MSS_ASSETS_REGION）
+  indexBase: https://assets.pjsk.moe/sekai-extra-assets/sekai-live2d/
+                                  # 模型索引：<indexBase><region>/models.json
+  libraryBase: https://assets.pjsk.moe/sekai-extra-assets/sekai-story/ripper/
+                                  # 剧情库：<libraryBase><region>/library/
+  assetBase: ""                   # 背景等普通资产；留空按 region 推导 storage.exmeaning.com
+  soundtrackBase: https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master/
+                                  # PJSK 官方 BGM 曲名索引；fetch:media 用它把 bgm00003 补成可读曲名
+                                  # 不通时可换 raw.githubusercontent.com 镜像（env: MSS_ASSETS_SOUNDTRACK_BASE）
+  cacheDir: cache/moesekai        # 动作包缓存（可断点续传，不进 Git；env: MSS_ASSETS_CACHE_DIR）
+  concurrency: 4                  # 并行下载数（env: MSS_ASSETS_CONCURRENCY）
+  timeoutMs: 180000               # 单个文件下载超时（env: MSS_ASSETS_TIMEOUT_MS）
+  retries: 3                      # 下载重试次数（env: MSS_ASSETS_RETRIES）
 
 # ---------------------------------------------------------------------------
 # 日志

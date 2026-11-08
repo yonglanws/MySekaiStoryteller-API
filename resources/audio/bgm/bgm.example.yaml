@@ -4,8 +4,9 @@
 # 改完重启宿主生效；bgm.yaml 不存在时，宿主回落 config.yaml 的 bgm 节（同样三个字段）。
 #
 # 本文件同时承担两件事：
-#   1. 全局默认 BGM（enabled/path/volume）：导出时混入的背景音乐（当前行为）
-#   2. 清单（bgm: 数组）：带描述的曲目登记，/api/v1/resources 返回给插件
+#   1. 全局默认 BGM（enabled/path/volume）：故事没有 ChangeBgm 时混入的背景音乐
+#   2. 清单（bgm: 数组）：带描述的曲目登记，/api/v1/resources 返回给插件，
+#      也是宿主内置 AI 选 BGM 的唯一候选列表（只有带 description 的条目会进提示词）
 #
 # 字段说明：
 #   enabled     导出时是否混入 BGM
@@ -15,7 +16,15 @@
 #   bgm[].name        曲名
 #   bgm[].description 曲风 / 情绪 / 适用场景，供 AI 按剧情氛围感知可选项
 #
-# 磁盘上有、清单未登记的曲目仍可被引用，但提示词里不会列出；
+# fetch:media 下载 BGM 时会读取 Sekai-World 的 musicSoundTracks.json，
+# 把 bgm00003 这类文件名补成官方曲名和分类（如 Slapstick!! / 剧情 BGM），
+# 精简缓存写在同目录 soundtracks.json（不入库）。资源目录会用它补全
+# name/description 为空的条目；人工写过的内容优先。
+# 官方索引没收录、也没手写描述的曲目不会进入 AI 候选列表。
+#
+# 剧本 ChangeBgm 可引用清单内曲目，在场景中切换/停止；出现带文件的 ChangeBgm
+# 后，全局 path 不再混入，只加载被引用的文件。AI 生成的剧本只接受清单内曲目，
+# 手工剧本仍可直接引用磁盘上的文件（提示词里不会列出未登记曲目）。
 # 清单有、磁盘没有的条目会被宿主忽略并在日志中警告。
 
 enabled: true
