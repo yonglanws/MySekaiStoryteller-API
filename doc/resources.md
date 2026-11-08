@@ -105,6 +105,8 @@ images:
 `GET /api/v1/resources` 的 `imageDetails` 里 `source: "cloud"` 的条目就是它们；剧本与 AI
 既可以写 `file`，也可以写 `id` 或 `name`。同名背景（多个「屋上」）按 id 排序取第一张，
 需要精确控制时写 id。没有地点名的云端背景仍可用 `bg_xxx` 引用，只是不进入选图清单。
+本地已有 `bg_a000301.webp` 这类文件但没写 `images.yaml` 时，宿主会把官方地点名贴到本地条目上，
+不会重复下载 `cloud/` 副本；BGM 同理（`bgm00003.mp3` 自动带官方曲名）。
 
 ### 目录刷新与排查
 

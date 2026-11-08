@@ -106,6 +106,11 @@ function pickPreferred(names: string[], preferences: string[]): string {
   return names[0] ?? ''
 }
 
+/** bg_a000301.webp → bg_a000301；用于把云端名字贴到本地同名资源上。 */
+function fileStem(file: string): string {
+  return path.basename(file).replace(/\.[^.]+$/, '')
+}
+
 /**
  * 资源目录：从 resources/ 构建模型/背景/语音/BGM 的全量清单。
  *
@@ -289,25 +294,56 @@ export class ResourceCatalog {
     cloud: CloudCatalogData
   ): void {
     const files = new Set(imageFiles.map((file) => file.toLowerCase()))
+    const localByStem = new Map(imageFiles.map((file) => [fileStem(file).toLowerCase(), file]))
+    const detailsByFile = new Map(imageDetails.map((detail) => [detail.file.toLowerCase(), detail]))
     const names = new Set(imageDetails.map((detail) => detail.name.toLowerCase()))
     for (const entry of cloud.backgrounds) {
       // 没有官方地点名的背景只保留在云端目录里，可用 id 直接引用；
       // 不放进 AI 候选/插件资源列表，避免 1300+ 条无语义条目刷屏。
       if (entry.name === entry.id) continue
+
+      const localFile = localByStem.get(entry.id.toLowerCase())
+      if (localFile) {
+        // 本地已有同一背景（常见于 fetch:media 下载的 bg_xxx.webp）：
+        // 不新增 cloud/ 副本，而是把官方地点名贴到本地条目上。
+        const detail = detailsByFile.get(localFile.toLowerCase())
+        if (detail) {
+          if (!detail.name || detail.name === detail.file) detail.name = entry.name
+          if (!detail.id) detail.id = entry.id
+          if (!detail.aliases?.length) detail.aliases = entry.aliases
+          if (!detail.description) detail.description = entry.description
+        } else {
+          const created: CatalogImage = {
+            file: localFile,
+            name: entry.name,
+            description: entry.description,
+            id: entry.id,
+            aliases: entry.aliases,
+            source: 'cloud'
+          }
+          imageDetails.push(created)
+          detailsByFile.set(localFile.toLowerCase(), created)
+        }
+        names.add(entry.name.toLowerCase())
+        continue
+      }
+
       const fileKey = entry.file.toLowerCase()
       const nameKey = entry.name.toLowerCase()
       if (files.has(fileKey) || names.has(nameKey)) continue
       files.add(fileKey)
       names.add(nameKey)
       imageFiles.push(entry.file)
-      imageDetails.push({
+      const created: CatalogImage = {
         file: entry.file,
         name: entry.name,
         description: entry.description,
         id: entry.id,
         aliases: entry.aliases,
         source: 'cloud'
-      })
+      }
+      imageDetails.push(created)
+      detailsByFile.set(entry.file.toLowerCase(), created)
     }
   }
 
@@ -317,12 +353,38 @@ export class ResourceCatalog {
     cloud: CloudCatalogData
   ): void {
     const files = new Set(bgmFiles.map((file) => file.toLowerCase()))
+    const localByStem = new Map(bgmFiles.map((file) => [fileStem(file).toLowerCase(), file]))
+    const detailsByFile = new Map(bgmDetails.map((detail) => [detail.file.toLowerCase(), detail]))
     const names = new Set(bgmDetails.map((detail) => detail.name.toLowerCase()))
     let cloudCount = 0
     for (const entry of cloud.bgm) {
       if (cloudCount >= 80) break
       // 官方曲名索引没覆盖的曲目只保留 id 能力，不进入候选。
       if (entry.name === entry.id && !entry.description) continue
+
+      const localFile = localByStem.get(entry.id.toLowerCase())
+      if (localFile) {
+        // 本地已有同一首曲子：只补曲名/分类，不新增 cloud/ 副本。
+        const detail = detailsByFile.get(localFile.toLowerCase())
+        if (detail) {
+          if (!detail.name || detail.name === detail.file) detail.name = entry.name
+          if (!detail.id) detail.id = entry.id
+          if (!detail.description) detail.description = entry.description
+        } else {
+          const created: CatalogBgm = {
+            file: localFile,
+            name: entry.name,
+            description: entry.description,
+            id: entry.id,
+            source: 'cloud'
+          }
+          bgmDetails.push(created)
+          detailsByFile.set(localFile.toLowerCase(), created)
+        }
+        names.add(entry.name.toLowerCase())
+        continue
+      }
+
       const fileKey = entry.file.toLowerCase()
       const nameKey = entry.name.toLowerCase()
       if (files.has(fileKey) || names.has(nameKey)) continue
@@ -330,13 +392,15 @@ export class ResourceCatalog {
       names.add(nameKey)
       cloudCount++
       bgmFiles.push(entry.file)
-      bgmDetails.push({
+      const created: CatalogBgm = {
         file: entry.file,
         name: entry.name,
         description: entry.description,
         id: entry.id,
         source: 'cloud'
-      })
+      }
+      bgmDetails.push(created)
+      detailsByFile.set(entry.file.toLowerCase(), created)
     }
   }
 

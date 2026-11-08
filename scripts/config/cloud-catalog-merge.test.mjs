@@ -128,3 +128,33 @@ test('local entries win over cloud entries with the same name', () => {
   assert.equal(data.models[0].source, 'local')
   assert.equal(data.models[0].path, '01ichika_local/01ichika.model3.json')
 })
+
+test('cloud names attach to matching local background and bgm files', () => {
+  const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-cloud-attach-'))
+  fs.mkdirSync(path.join(resourcesDir, 'images'), { recursive: true })
+  fs.mkdirSync(path.join(resourcesDir, 'audio', 'bgm'), { recursive: true })
+  fs.writeFileSync(path.join(resourcesDir, 'images', 'bg_a000301.webp'), '')
+  fs.writeFileSync(path.join(resourcesDir, 'audio', 'bgm', 'bgm00003.mp3'), '')
+
+  const catalog = new ResourceCatalog(
+    logger,
+    { paths: { resources: resourcesDir } },
+    () => cloudCatalog
+  )
+  const data = catalog.get()
+  assert.equal(data.images.length, 1, 'no cloud/ duplicate is added')
+  assert.equal(data.images[0], 'bg_a000301.webp')
+  assert.equal(data.imageDetails.length, 1)
+  assert.equal(data.imageDetails[0].name, '教室')
+  assert.equal(data.imageDetails[0].id, 'bg_a000301')
+
+  assert.equal(data.bgm.length, 1, 'no cloud/ duplicate is added')
+  assert.equal(data.bgm[0], 'bgm00003.mp3')
+  assert.equal(data.bgmDetails.length, 1)
+  assert.equal(data.bgmDetails[0].name, 'Slapstick!!')
+  assert.equal(data.bgmDetails[0].id, 'bgm00003')
+
+  const view = new CatalogView(data)
+  assert.equal(view.canonicalImage('教室'), 'bg_a000301.webp')
+  assert.equal(view.canonicalBgm('Slapstick!!'), 'bgm00003.mp3')
+})
