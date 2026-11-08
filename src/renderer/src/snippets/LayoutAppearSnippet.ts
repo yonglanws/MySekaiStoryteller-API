@@ -16,7 +16,13 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     if (this.data.type !== 'LayoutAppear') return
 
     const model = this.app.getModelById(this.data.data.modelId)
-    const wasShown = this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false
+    // 官方显示状态才是 Appear 分支的依据：后台还没淡完的 HideCharacter 已经
+    // 把 shown 置 false，此时 Appear 必须是 7 帧淡入，而不是按 alpha 走 0.2s 移动。
+    const wasShown = this.app.layerModel.markModelShown
+      ? this.app.layerModel.markModelShown(this.data.data.modelId)
+      : (this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false)
+    // 新 Appear 让所有更早的退场协程失效（停止写 alpha / 清理动作 / removeModel）。
+    const visibilityToken = model.beginVisibilityChange?.()
 
     this.app.layerModel.addModelToLayer(model)
 
@@ -59,6 +65,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     if (wasShown) {
       // 官方 AppearCharacter 对已在场的 view 走 CharacterMoveToCoroutine(side, 0.2)：
       // 不淡入，片段等这 0.2s 的滑动完成。
+      model.setOpacity?.(1)
       model.setPositionRel(this.app.stage_size, from)
       if (is_moved) {
         await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS)
@@ -91,7 +98,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       APPEAR_FADE_TOTAL_FRAMES - framesForSeconds(CHARACTER_FADE_MS / 1000)
     )
     if (holdFrames > 0) await AnimationManager.delay(holdFrames * FRAME_MS)
-    await model.show(CHARACTER_FADE_MS, this.data.data.hologram)
+    await model.show(CHARACTER_FADE_MS, this.data.data.hologram, visibilityToken)
 
     // 入场动作继续播放；body 通道交给 idle 续演逻辑，台词间隙不站桩。
     model.startBodyIdleLoop()

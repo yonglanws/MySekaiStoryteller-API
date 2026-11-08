@@ -95,12 +95,48 @@ export class FrameContentValidator {
       }
     }
 
-    const sampleWidth = Math.min(width, 64)
-    const sampleHeight = Math.min(height, 64)
-    const pixels = new Uint8Array(sampleWidth * sampleHeight * 4)
+    // 只读左下角 64x64 会把“深色背景 + 居中角色/字幕”误判成黑屏
+    // （例如 bg_a000000 这类纯黑背景，角色和字幕都不在左下角）。
+    // 改为在画面 3x3 网格上各读一块，覆盖角色、字幕和背景。
+    const tileSize = Math.max(1, Math.min(64, width, height))
+    const fractions = [0.1, 0.5, 0.9]
+    const offsets = (total: number): number[] =>
+      fractions.map((fraction) =>
+        Math.max(0, Math.min(total - tileSize, Math.round(total * fraction - tileSize / 2)))
+      )
+    const tileXs = offsets(width)
+    const tileYs = offsets(height)
+    const pixels = new Uint8Array(tileSize * tileSize * 4)
+
+    let totalBrightness = 0
+    let validPixelCount = 0
+    let hasContent = false
 
     try {
-      gl.readPixels(0, 0, sampleWidth, sampleHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+      for (const tileY of tileYs) {
+        for (const tileX of tileXs) {
+          gl.readPixels(tileX, tileY, tileSize, tileSize, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+          for (let y = 0; y < tileSize; y += this.SAMPLE_INTERVAL) {
+            for (let x = 0; x < tileSize; x += this.SAMPLE_INTERVAL) {
+              const idx = (y * tileSize + x) * 4
+              const r = pixels[idx]
+              const g = pixels[idx + 1]
+              const b = pixels[idx + 2]
+              const a = pixels[idx + 3]
+
+              if (a > 10) {
+                const brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
+                totalBrightness += brightness
+                validPixelCount++
+
+                if (brightness > 0.05) {
+                  hasContent = true
+                }
+              }
+            }
+          }
+        }
+      }
     } catch (e) {
       return {
         isValid: false,
@@ -108,30 +144,6 @@ export class FrameContentValidator {
         isBlackScreen: true,
         isBlankScreen: true,
         error: `Failed to read pixels: ${e instanceof Error ? e.message : String(e)}`
-      }
-    }
-
-    let totalBrightness = 0
-    let validPixelCount = 0
-    let hasContent = false
-
-    for (let y = 0; y < sampleHeight; y += this.SAMPLE_INTERVAL) {
-      for (let x = 0; x < sampleWidth; x += this.SAMPLE_INTERVAL) {
-        const idx = (y * sampleWidth + x) * 4
-        const r = pixels[idx]
-        const g = pixels[idx + 1]
-        const b = pixels[idx + 2]
-        const a = pixels[idx + 3]
-
-        if (a > 10) {
-          const brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
-          totalBrightness += brightness
-          validPixelCount++
-
-          if (brightness > 0.05) {
-            hasContent = true
-          }
-        }
       }
     }
 

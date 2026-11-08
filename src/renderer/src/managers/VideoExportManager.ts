@@ -50,6 +50,28 @@ export interface ExportProgress {
 type ProgressCallback = (progress: ExportProgress) => void
 type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 
+/**
+ * 这些片段结束时画面本来就可能没有内容：准备指令、脚本黑场/白场、
+ * 转场覆盖、镜头参数，以及把最后一个角色淡出后的 Clear。黑屏保护不能
+ * 把它们当成“模型没渲染”，否则官方冷开场和纯黑背景剧本会被误杀。
+ */
+const FRAME_VALIDATION_EXEMPT_SNIPPETS = new Set<string>([
+  'ChangeLayoutMode',
+  'ChangeBackgroundImage',
+  'ChangeBgm',
+  'PlaySe',
+  'StopSe',
+  'HideTalk',
+  'BlackIn',
+  'BlackOut',
+  'Wipe',
+  'FlashbackIn',
+  'FlashbackOut',
+  'CameraMove',
+  'CameraZoom',
+  'LayoutClear'
+])
+
 interface TalkSnippetLike {
   content: string
   ttsText?: string
@@ -792,7 +814,9 @@ export default class VideoExportManager {
         const snippetStartedAtMs = performance.now()
         await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
 
-        if (i < 5 || (i + 1) % 30 === 0) {
+        // 剧本本来就可能是黑场（EffectType 1~4）、纯黑背景，或者处于没有
+        // 画面内容的准备片段；这些片段不能拿来判定“模型没渲染”。
+        if (!FRAME_VALIDATION_EXEMPT_SNIPPETS.has(snippet.type) && (i < 5 || (i + 1) % 30 === 0)) {
           const frameValidation = frameValidator.validateFrame(canvas, i)
           if (!frameValidation.isValid && frameValidation.error) {
             throw new Error(

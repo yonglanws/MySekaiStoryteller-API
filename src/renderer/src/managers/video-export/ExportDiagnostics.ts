@@ -103,13 +103,10 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     if (driftMs !== null) {
       driftSum += Math.abs(driftMs)
       driftCount++
-      // 长片里 1~3ms/句的渲染开销会累积成 300~500ms 的固定偏移，这不是“某句卡住”。
-      // 只报突然新增的漂移（或超过 1s 的失控偏移），避免 3 分钟剧情刷 50 条假异常。
+      // 长片里 1~3ms/句的渲染开销会累积成 1~2s 的固定偏移，这不是“某句卡住”。
+      // 只报突然新增的漂移，避免 10 分钟剧情在超过 1s 后每句都刷一条假异常。
       const driftJumpMs = Math.abs(driftMs - previousDriftMs)
-      if (
-        snippet.type !== 'ChangeBgm' &&
-        ((Math.abs(driftMs) > 250 && driftJumpMs > 100) || Math.abs(driftMs) > 1000)
-      ) {
+      if (snippet.type !== 'ChangeBgm' && Math.abs(driftMs) > 250 && driftJumpMs > 100) {
         anomalies.push(
           `snippets[${index}] ${snippet.type} 时间线漂移 ${driftMs}ms（较上一句 +${driftJumpMs}ms，计划 ${plannedStartMs}ms，实际 ${actualStartMs}ms）`
         )

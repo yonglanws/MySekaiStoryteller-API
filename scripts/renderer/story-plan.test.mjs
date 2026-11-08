@@ -202,3 +202,47 @@ test('diagnostics carries the baked plan and approximation list', () => {
   assert.equal(report.plan.entries[0].talk.gateEndFrame, 175)
   assert.ok(report.approximations.some((item) => /PixiJS/.test(item)))
 })
+
+test('non-blocking clear still bakes its 15-frame fade; following appear is new', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const layout = (type, wait) => ({
+    type,
+    wait,
+    delay: 0,
+    data: {
+      modelId: 1,
+      from: { side: 'Center', offset: 0 },
+      to: { side: 'Center', offset: 0 },
+      moveSpeed: 'Normal',
+      ...(type === 'LayoutAppear' ? { motion: '', facial: '', hologram: false } : {})
+    }
+  })
+  const snippets = [
+    layout('LayoutAppear', true),
+    layout('LayoutClear', false),
+    layout('LayoutAppear', true),
+    layout('LayoutClear', true)
+  ]
+  const timeline = calculator.calculateTimeline(snippets, new Map())
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+
+  // 非阻塞 Clear 不推进 cursor，但后台淡出仍是 0.15s + 0.1s。
+  assert.equal(plan.entries[1].durationFrames, 0)
+  assert.equal(plan.entries[1].layout.fadeStartFrame, 7 + 9)
+  assert.equal(plan.entries[1].layout.fadeEndFrame, 7 + 15)
+  assert.ok(
+    plan.entries[1].layout.fadeStartFrame <= plan.entries[1].layout.fadeEndFrame,
+    'fadeStart must not exceed fadeEnd'
+  )
+
+  // Clear 在开始时就把角色标记为不在场，因此同一帧的 Appear 是新入场（7 帧淡入）。
+  assert.equal(plan.entries[2].layout.fadeStartFrame, 8)
+  assert.equal(plan.entries[2].layout.fadeEndFrame, 14)
+
+  // 后面的 Clear 重新看到“在场”，按原地 15 帧退场。
+  assert.equal(plan.entries[3].durationFrames, 15)
+  assert.equal(plan.entries[3].layout.fadeStartFrame, 14 + 9)
+  assert.equal(plan.entries[3].layout.fadeEndFrame, 14 + 15)
+})

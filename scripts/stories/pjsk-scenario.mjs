@@ -243,6 +243,9 @@ function main() {
         if (!talk) break
         const character2dId = talk.TalkCharacters?.[0]?.Character2dId
         const modelId = resolveModel(character2dId, '')
+        // 旁白/观众等没有动作的台词也要把说话模型带进 story.models，
+        // 否则渲染端会在解析 Talk.modelId 时报 "Model with id N not found"。
+        usedModels.add(modelId)
         const actions = (talk.Motions || [])
           .map((motion) => {
             const motionModel = resolveModel(motion.Character2dId, '')
@@ -355,11 +358,23 @@ function main() {
             push({ type: 'BlackOut', wait, delay, data: { duration: durationMs, color: 'white' } })
             break
           case 5:
-            push({ type: 'ShakeScreen', wait, delay, data: { duration: durationMs } })
+            // 官方用 9999 秒表示“一直抖到 StopShake”；ShakeScreen 的 schema 上限
+            // 是 30s，后续 EffectType 25/26 会立即停止，取上限即可。
+            push({
+              type: 'ShakeScreen',
+              wait,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
+            })
             break
           case 6:
             // ShakeWindow：宿主只有一个全屏震屏实现，按 ShakeScreen 近似。
-            push({ type: 'ShakeScreen', wait, delay, data: { duration: durationMs } })
+            push({
+              type: 'ShakeScreen',
+              wait,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
+            })
             break
           case 7:
             push({
@@ -571,6 +586,27 @@ function main() {
       }),
     images: [...imageIds.entries()].map(([file, id]) => ({ id, image: file })),
     snippets
+  }
+
+  // 渲染端要求每个被引用的 modelId 都在 story.models 里；转换阶段就自检，
+  // 避免导出跑起来才报 "Model with id N not found"。
+  const declaredModels = new Set(story.models.map((model) => model.id))
+  const referencedModels = new Set()
+  const collectModelIds = (value) => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      value.forEach(collectModelIds)
+      return
+    }
+    if (Number.isFinite(value.modelId)) referencedModels.add(value.modelId)
+    Object.values(value).forEach(collectModelIds)
+  }
+  snippets.forEach(collectModelIds)
+  const missingModels = [...referencedModels].filter((id) => !declaredModels.has(id))
+  if (missingModels.length > 0) {
+    throw new Error(
+      `snippets reference models missing from story.models: ${missingModels.join(', ')}`
+    )
   }
 
   fs.mkdirSync(path.dirname(args.out), { recursive: true })

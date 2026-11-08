@@ -274,6 +274,36 @@ test('steady cumulative drift is not reported once per snippet', () => {
   assert.match(driftLines[0], /较上一句 \+300ms/)
 })
 
+test('cumulative drift beyond 1s is reported once at the jump, not per snippet', () => {
+  const { buildExportDiagnostics } = loadDiagnostics()
+  const data = input()
+  data.snippets = data.snippets.slice(0, 3)
+  data.timeline = data.timeline.slice(0, 3)
+  data.motion = []
+  const planned = [
+    { start: 0, duration: 800 },
+    { start: 800, duration: 3100 },
+    { start: 3800, duration: 2100 }
+  ]
+  // 长片累计了 1.2s 固定偏移，每句只增加 2ms 的渲染抖动。
+  data.timestamps = {
+    getRenderStartWallMs: () => 1000,
+    getSnippetTimestamp: (index) => ({
+      snippetIndex: index,
+      snippetType: data.snippets[index].type,
+      wallStartMs: 1000 + planned[index].start + 1200 + index * 2,
+      wallEndMs: 1000 + planned[index].start + 1200 + index * 2 + planned[index].duration,
+      wallDurationMs: planned[index].duration
+    })
+  }
+  const report = buildExportDiagnostics(data)
+  const driftLines = report.anomalies.filter((line) => line.includes('时间线漂移'))
+  // 只报第一句的跳变；之后稳定在 1s 以上的累计偏移不再逐句刷屏。
+  assert.equal(driftLines.length, 1, driftLines.join('\n'))
+  assert.match(driftLines[0], /snippets\[0\]/)
+  assert.ok(report.snippets[2].driftMs > 1000, 'cumulative drift is still recorded per snippet')
+})
+
 test('buildExportDiagnostics tolerates motionless Appear and flags late cues/short interrupts', () => {
   const { buildExportDiagnostics } = loadDiagnostics()
   const report = buildExportDiagnostics(input())

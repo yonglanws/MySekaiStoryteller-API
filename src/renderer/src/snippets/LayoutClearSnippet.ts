@@ -11,11 +11,16 @@ export default class LayoutClearSnippet extends BaseSnippet {
 
     const model = this.app.getModelById(this.data.data.modelId)
     // 官方 HideCharacter：显示状态不是 Appear 时 OnFinished 立即触发。
-    const wasVisible = this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false
+    // 这里同时把逻辑状态置 false（不等后台淡出结束），与官方一致。
+    const wasVisible = this.app.layerModel.markModelHidden
+      ? this.app.layerModel.markModelHidden(this.data.data.modelId)
+      : (this.app.layerModel.isModelVisible?.(this.data.data.modelId) ?? false)
     if (!wasVisible) {
       this.app.layerModel.removeModel(model)
       return
     }
+    // 退场协程的代数：期间若有新的 Appear，本次淡出/清理必须整段作废。
+    const visibilityToken = model.currentVisibilityGeneration?.()
 
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
@@ -52,9 +57,14 @@ export default class LayoutClearSnippet extends BaseSnippet {
     const delay_ms = is_moved
       ? Math.max(0, move_duration_ms - CHARACTER_FADE_MS)
       : HIDE_DELAY_IN_PLACE_MS
-    if (delay_ms > 0) await AnimationManager.delay(delay_ms)
-    await model.hide(CHARACTER_FADE_MS)
+    if (delay_ms > 0) {
+      await AnimationManager.delay(delay_ms)
+      if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
+    }
+    await model.hide(CHARACTER_FADE_MS, visibilityToken)
+    if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
     if (move_task) await move_task
+    if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
 
     // 动画全部结束后再移出渲染层；提前移除会导致淡出/滑出不可见（硬切消失）
     this.app.layerModel.removeModel(model)

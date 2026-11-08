@@ -678,7 +678,13 @@ export default class AdvancedModel extends Live2DModel {
         loadMs: startedAt - requestedAt,
         clipDurationMs,
         fadeMs: Math.round(fadeSeconds * 1000),
-        reason: started ? undefined : 'motion manager refused the cue'
+        // 同一个表情已经播完但仍是 current group/index 时，manager 也会拒绝
+        // 重新 startMotion；视觉上没有变化，不应算成“拒绝”。
+        reason: started
+          ? undefined
+          : channel === 1 && name === this.currentFacialName
+            ? 'same facial already active'
+            : 'motion manager refused the cue'
       })
       if (started && channel === 0) {
         this.currentBodyMotion = name
@@ -795,7 +801,33 @@ export default class AdvancedModel extends Live2DModel {
     }
   }
 
-  public async show(time: number, hologram: boolean): Promise<void> {
+  /**
+   * 可见性代数：每次 LayoutAppear 递增，LayoutClear 在开始时捕获。
+   * ProgressBehavior=0 的退场协程可能在后台继续，新 Appear 到来后旧协程
+   * 必须停止写 alpha / 清理动作 / 移出渲染层，否则会把刚重新入场的角色淡没。
+   */
+  private visibilityGeneration = 0
+
+  public beginVisibilityChange(): number {
+    return ++this.visibilityGeneration
+  }
+
+  public currentVisibilityGeneration(): number {
+    return this.visibilityGeneration
+  }
+
+  public isVisibilityCurrent(generation: number): boolean {
+    return generation === this.visibilityGeneration
+  }
+
+  /** 直接设置淡入淡出 alpha；用于新 Appear 取消后台退场的残留淡出。 */
+  public setOpacity(alpha: number): void {
+    const alphaFilter = this.filters?.[0] as AlphaFilter | undefined
+    if (alphaFilter) alphaFilter.alpha = Math.max(0, Math.min(1, alpha))
+  }
+
+  public async show(time: number, hologram: boolean, generation?: number): Promise<void> {
+    if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     this.autoBlink = true
 
     if (hologram) {
@@ -805,18 +837,23 @@ export default class AdvancedModel extends Live2DModel {
     }
 
     await AnimationManager.linear((progress) => {
+      if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
       const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
       alpha_filter.alpha = progress
     }, time)
+    if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
     this.lastChangeBlinkTime = Date.now()
   }
 
-  public async hide(time: number): Promise<void> {
+  public async hide(time: number, generation?: number): Promise<void> {
+    if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     await AnimationManager.linear((progress) => {
+      if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
       const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
       alpha_filter.alpha = 1 - progress
     }, time)
+    if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
     if (this.inHologram) {
       this.inHologram = false

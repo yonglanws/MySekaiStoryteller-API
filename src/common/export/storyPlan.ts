@@ -242,10 +242,15 @@ export function bakeStoryPlan(
             moveEndFrame: startFrame + moveFrames
           }
         } else {
+          // 非阻塞 Clear 的 timeline durationFrames 是 0（不推进 cursor），
+          // 但后台淡出协程仍走 0.15s 延迟 + 0.1s 淡出；计划不能把 fadeEnd
+          // 算到 startFrame 上，否则会出现 fadeStart > fadeEnd。
+          const fadeFrames = framesForSeconds(CHARACTER_FADE_MS / 1000)
+          const hideDelayFrames = framesForSeconds(HIDE_DELAY_IN_PLACE_MS / 1000)
           layout = {
             kind: 'clear',
-            fadeStartFrame: startFrame + framesForSeconds(HIDE_DELAY_IN_PLACE_MS / 1000),
-            fadeEndFrame: startFrame + durationFrames,
+            fadeStartFrame: startFrame + hideDelayFrames,
+            fadeEndFrame: startFrame + hideDelayFrames + Math.max(1, fadeFrames),
             moveEndFrame: startFrame
           }
         }

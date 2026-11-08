@@ -192,8 +192,9 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
       滑动分支，未在场 `LayoutClear` 立即完成（0ms，无 fade / move 帧）。
 - [x] `storyPlan` 的 `LayoutAppear` / `LayoutClear` 用 `fadeStartFrame: null`、
       `fadeEndFrame: null` 表达“没有淡入淡出”，`moveEndFrame` 保持绝对帧。
-- [x] `LayoutClearSnippet` 用 `layerModel.isModelVisible(modelId)` 判定；不在场时只
-      `removeModel`，不启动退场动作、不移动、不淡出。
+- [x] `LayoutClearSnippet` 用 `layerModel.markModelHidden(modelId)` 读取并更新官方 shown
+      状态；不在场时只 `removeModel`，不启动退场动作、不移动、不淡出。
+      非阻塞退场期间的新 `LayoutAppear` 用可见性代数作废旧协程（Phase J）。
 - [x] `scripts/renderer/layout-matrix.test.mjs`：矩阵用例补前置 Appear 建立在场状态，
       并新增“重复 Appear 12 帧无 fade”“未在场 Clear 0 帧”断言。
 - [x] `scripts/renderer/layout-appear.test.mjs`：新增未在场 `LayoutClear` 只调用
@@ -201,6 +202,46 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
 - [x] 官方语料审计与 `event_116_06` 实导出改用可见性分支后复跑通过。
 - [x] 导出预检只在 `tts.enabled=true` 且 provider 为 Irodori 时要求日文 `ttsText`；
       TTS 关闭时不再因缺日文阻断纯画面导出（`needsJapaneseTtsPreflight` + 回归断言）。
+
+### Phase J：多剧本还原度实导出验收
+
+- [x] 官方语料抽 4 集特征互补剧本（TTS 关闭、仓库内替代模型/背景）：
+      `event_147_05`（68 句 / SideFade / 布局模式切换 / 无 15·16·19·22）、
+      `event_191_04`（73 句 / 14 模型 / 96 次 Appear+Clear / CameraMove·Zoom）、
+      `event_160_07`（114 句 / 23 种特效 / 28 次 SideFade / 9999s 震屏）、
+      `event_79_05`（122 句 / 21 次黑场 / 19 次背景切换 / 三人在场）。
+- [x] 转换器为没有动作的 Talk 说话者（观众、旁白）补 `story.models`，并在写出前
+      自检所有被引用的 `modelId` 都已声明；导出不再报 `Model with id N not found`。
+- [x] 官方 EffectType 5/6 的 9999 秒（“抖到 StopShake”）钳到 `ShakeScreen` 的 30s
+      上限，后续 25/26 仍按脚本立即停止；`event_160_07` 从 400 校验失败恢复为 200。
+- [x] 可见性改为官方 shown 状态 + 可见性代数：非阻塞 Clear 在后台淡出时，新 Appear
+      按 7 帧淡入处理，旧退场协程不再写 alpha / 清理动作 / `removeModel`。
+      `event_147_05` 的三个 250ms Clear 从 0ms 恢复为 253ms，Appear 从 218ms 回到 127ms；
+      原先 81~83s 台词期间消失的角色恢复可见（抽帧确认）。
+      依据：SSE `crates/sse-timeline` 的 Hide 分支在协程开始时就把 shown 置 false，
+      随后的 Appear 对非 shown 视图走 `FadeOpacity(1, 0.1)`；ournotes-player 的 `In`/`Out`
+      同样是注册后淡入、淡出后移除，确认退场应按异步协程处理。
+- [x] 黑屏保护改为画面 3x3 网格取样，并跳过准备片段、脚本黑/白场与覆盖转场；
+      `event_191_04` 不再因“纯黑背景 + 居中角色”被误杀（首轮 500 -> 复跑 200）。
+- [x] 长片累计漂移不再逐句记异常，只报突然新增 >100ms 的跳变；
+      `event_79_05` 的 204 条逐句漂移噪音降到 3 条真实事件。
+- [x] 四集最终实导出（最终构建，1920x1080 h264）：
+      `event_147_05` 318 段 / 68 句 / 9 模型：planned 316320ms、actual 317665ms、
+      avgAbsDrift 745ms、anomalies 0、成片 317.74s；
+      `event_191_04` 397 段 / 73 句 / 14 模型：planned 359612ms、actual 361097ms、
+      avgAbsDrift 802ms、anomalies 0、成片 361.49s；
+      `event_160_07` 423 段 / 114 句 / 8 模型：planned 493888ms、actual 495375ms、
+      avgAbsDrift 839ms、anomalies 0、成片 495.46s；
+      `event_79_05` 440 段 / 122 句 / 4 模型：planned 569546ms、actual 571842ms、
+      avgAbsDrift 926ms、anomalies 3（两次 +107/+153ms 跳变、一次 223ms 动作被后续
+      cue 接管）、成片 571.94s。
+      四集均无未执行片段、无 plan/log 逐条不对齐；动作 skip 均来自替代模型缺官方
+      动作名或同表情已激活，没有未知加载失败。
+- [x] 成片语义抽帧：入场角色可见、双人左右站位、Telop 文本、SideFade 遮挡、
+      EffectType 1~4 黑/白场末帧亮度 0/255、台词字幕与剧本一致。
+- [x] 回归：`pjsk-scenario.test.mjs`（Talk-only 模型声明）、`layout-visibility.test.mjs`
+      （Clear/Appear 竞态）、`frame-validator.test.mjs`（中央内容不再判黑）、
+      `story-plan` 非阻塞 Clear 用例、`export-diagnostics` 累计漂移用例。
 
 ## 4. 验收标准
 
@@ -307,3 +348,22 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
   - 同一故事把 `tts.enabled` 打开（`MSS_LLM_ENABLED=0`）：导出返回 400，
     报 `IrodoriTTS 需要日文 ttsText，但以下 Talk 仍未翻译：snippets[3], snippets[4], snippets[5]`。
     说明预检门槛只是跟随 `tts.enabled`，Irodori 开启时仍会拦截缺日文的剧本。
+
+- 2026-11-08：Phase J 完成（4 集官方语料还原度实导出与修复）。
+  - 首轮暴露 3 个真实问题：`event_191_04` 因黑屏保护只读左下角而被纯黑背景误杀；
+    `event_160_07` 因官方 9999 秒震屏超过 `ShakeScreen` 上限被 400 拒绝；
+    `event_147_05` 的非阻塞 Clear 与紧随的 Appear 竞争，导致 81~83s 台词期间角色消失、
+    后续 Clear 变成 0ms。修复后三集均导出成功。
+  - 最终四集（TTS 关闭、替代模型/背景，1920x1080 h264）：
+    `event_147_05` 318 段：planned 316320ms / actual 317665ms / avgAbsDrift 745ms / 0 异常；
+    `event_191_04` 397 段：planned 359612ms / actual 361097ms / avgAbsDrift 802ms / 0 异常；
+    `event_160_07` 423 段：planned 493888ms / actual 495375ms / avgAbsDrift 839ms / 0 异常；
+    `event_79_05` 440 段：planned 569546ms / actual 571842ms / avgAbsDrift 926ms / 3 异常
+    （两次 107/153ms 跳变、一次 223ms 动作被后续 cue 接管）。
+  - 成片自检：入场/双人左右站位、Telop、SideFade、台词字幕正常；
+    黑场末帧亮度 0、白场末帧亮度 255，与 EffectType 1~4 一致。
+  - 日志：`apifile/export-1794151256753-cwz7te.*`、`export-1794151578104-fnat19.*`、
+    `export-1794151942629-cqe3bv.*`、`export-1794152466943-voauz7.*`。
+  - 首轮失败与修复对照：`export-1794149760101-mrsbgp.*`（Talk-only 模型未声明，
+    `Model with id 1 not found`）、`export-1794150464053-trsu3r.*`（黑屏假阳性）、
+    `export-1794150551037-ys19yk.*`（修复前的 `event_79_05`，204 条漂移噪音）。
