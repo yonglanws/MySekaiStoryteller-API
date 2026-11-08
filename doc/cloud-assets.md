@@ -6,7 +6,48 @@
 模型拉取完成后不需要手工改模型文件：`models.yaml` 会自动登记，动作会写进模型包的 `motions/`；
 背景和 BGM 会分别追加到 `images.yaml` / `bgm.yaml`。
 
+从 2026-11 起，宿主还提供**云端目录**（`assets.cloudCatalog`，默认开启）：背景、BGM 与 Live2D
+模型不再要求先下载到本地或写 YAML 登记。宿主从公开资源站生成目录（背景 id → 官方剧情地点名、
+BGM id → 官方曲名、模型 id → 角色名/动作/表情），AI 与手写剧本都可以直接写背景名（如 `教室`）、
+曲名（如 `Slapstick!!`）或云端 id；导出前按需把真正用到的文件下载到资源根的 `cloud/` 子目录，
+之后命中缓存直接复用。目录缓存在 `assets.cacheDir/catalog.json`，默认 6 小时刷新一次，
+可用 `POST /api/v1/cloud/refresh` 手动刷新。
+
 资源版权归 Bushiroad / Craft Egg / SEGA 等原权利方所有。下载脚本只用于本地、非商业的渲染与测试；仓库不附带、也不再分发这些资源。部署与分享成片前请自行确认授权范围。
+
+## 云端目录与按需物化
+
+云端目录解决的是“每加一个背景/曲目都要先下载、再手写 YAML”的问题。开启后：
+
+| 资源   | 目录来源                                                                    | 剧本里可以写                                         | 物化位置                                   |
+| ------ | --------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------ |
+| 背景   | 资源站 `scenario/background/` bundle 列表 + 官方剧情 PlaceInfo/Telop 地点名 | `教室`、`司の部屋`、`bg_a000301`、`cloud/bg_a000301` | `resources/images/cloud/<id>.<ext>`        |
+| BGM    | 资源站 `sound/scenario/bgm/` + Sekai-World 官方曲名索引                     | `Slapstick!!`、`bgm00003`、`cloud/bgm00003.mp3`      | `resources/audio/bgm/cloud/<id>.mp3`       |
+| SE     | 资源站 `sound/scenario/se/`                                                 | `se_door.mp3` 等 cue 文件                            | `resources/audio/se/cloud/<file>`          |
+| Live2D | Moesekai 模型索引 + 动作包 `_ripper.json`                                   | `cloud/<模型 id>/<变体>/<model3.json>`               | `resources/models/cloud/<模型 id>/<变体>/` |
+
+行为约定：
+
+- **本地优先**：故事引用的文件如果已经在资源根下，宿主不会用云端文件替换，也不会重新下载。
+- **全局 BGM 也可以云端**：`bgm.path` 写的曲名/id 在本地不存在时，会解析成云端曲目并改写为
+  `audio/bgm/cloud/<id>.mp3`；已经是 http(s) URL 或站内绝对路径时保持原样。
+- **只物化用到的资源**：导出前扫描 `models`、`images`、`ChangeBgm`、`PlaySe`/`StopSe`；只有缺失的才下载。
+- **缓存复用**：物化结果就在资源根，第二次导出同一剧本直接读本地文件；删除 `cloud/` 即可重新拉取。
+- **目录刷新失败不影响出片**：启动时先读 `assets.cacheDir/catalog.json`，在线刷新失败沿用旧快照；
+  完全没有目录时回落到本地资源，云端引用会保留原值并报出具体路径。
+- **模型动作**：云端模型在目录阶段只读取包清单枚举动作/表情；真正下载时会转换 SSE 动作并补
+  `model3.json` 的 `FileReferences.Motions` 索引，渲染端不需要额外处理。
+- **背景名**：来自官方剧情中背景生效期间的地点标题，同名背景按 id 排序取第一张；没有地点名的背景
+  仍可用 id 引用，但不进入 AI 候选列表。地点名索引由
+  `scripts/assets/build-background-names.mjs` 生成，仓库内的索引只是离线基线。
+
+配置项（`config.yaml` 的 `assets` 节，全部有默认值）：
+
+```yaml
+assets:
+  cloudCatalog: true # 关闭后只使用本地资源与 YAML 登记
+  cloudCatalogTtlHours: 6 # 目录缓存有效期
+```
 
 ## 数据来源
 
@@ -189,6 +230,12 @@ curl -sS 'http://127.0.0.1:9881/api/v1/assets/moesekai/media?kind=backgrounds&re
 curl -sS -X POST http://127.0.0.1:9881/api/v1/assets/fetch \
   -H 'Content-Type: application/json' \
   -d '{"kind":"backgrounds","region":"jp","limit":20}'
+
+# 云端目录：查看合并后的资源目录（含 cloud 条目与 cloud 元信息）
+curl -sS 'http://127.0.0.1:9881/api/v1/resources'
+
+# 强制刷新云端目录（模型/背景/BGM 名称索引）
+curl -sS -X POST http://127.0.0.1:9881/api/v1/cloud/refresh
 ```
 
 模型接口返回体包含 `selected`、`models`、`skipped`、`added` 与 `errors`；
@@ -212,7 +259,20 @@ curl -sS -X POST http://127.0.0.1:9881/api/v1/assets/fetch \
 
 **渲染时动作名不对**：以 `GET /api/v1/resources` 返回的 `motions` / `facials` 为准；模型包的 `model3.json` 已经写入完整索引，不需要手工补。
 
-**AI 还是选不到云端 BGM**：先跑 `npm run fetch:media -- --kind bgm --metadata-only` 生成
-`resources/audio/bgm/soundtracks.json`，再确认 `bgm.yaml` 里有对应条目、`GET /api/v1/resources`
-的 `bgmDetails` 里 `description` 非空。`bgm00000` 是静音占位，默认不下载也不进候选；
-官方曲名索引没收录的曲目需要手写 `description`。`--no-metadata` 会跳过曲名补全，排查时不要加。
+**AI 还是选不到云端 BGM**：先看 `GET /api/v1/resources` 的 `cloud` 字段是否存在，再确认
+`bgmDetails` 里有 `source: "cloud"` 且 `description` 非空的条目。目录过期时用
+`POST /api/v1/cloud/refresh` 强制刷新；`bgm00000` 是静音占位，默认不进入候选；官方曲名索引没收录的
+曲目需要本地 `bgm.yaml` 手写描述，或者等曲名索引更新。
+
+## 实现状态（2026-11-09）
+
+- 云端目录：`src/host/assets/cloudCatalog.ts`，26 位角色模型、1372 个背景 bundle、395 个 BGM bundle；
+  背景地点名索引 146 条，来自 328 集官方剧情。
+- 按需物化：`src/host/assets/cloudAssets.ts`，背景/BGM/SE/模型统一落到 `resources/*/cloud/`，
+  导出前改写故事路径。
+- 目录合并：`src/host/resources/resourceCatalog.ts`，本地 YAML 可缺省，云端条目带 `source`/`id`。
+- 名称选择：`src/host/ai/prompt.ts` 的 `canonicalImage` / `canonicalBgm` 接受云端 id、文件名与可读名；
+  AI 提示词列出 `- 名字（id）`。
+- 真实导出验收：空资源目录 + 云端模型 `01ichika_normal` + 背景名 `司の部屋` + 曲名 `Slapstick!!`，
+  产出 1920x1080 H.264/AAC 视频；第二次导出命中 `cloud/` 缓存，无重复下载。
+- 回归：`npm run test:all` 297 项、`npm run test:stories` 6 项、`npm run typecheck` 全部通过。

@@ -243,18 +243,7 @@ function activeRole(value: unknown): string {
 function matchBackground(view: CatalogView, value: unknown): string {
   const text = str(value).trim()
   if (!text) return ''
-  const valid = view.validImages()
-  if (valid.has(text)) return text
-  const lower = text.toLowerCase()
-  for (const candidate of valid) {
-    if (candidate.toLowerCase() === lower) return candidate
-  }
-  for (const candidate of valid) {
-    if (candidate.toLowerCase().includes(lower) || lower.includes(candidate.toLowerCase())) {
-      return candidate
-    }
-  }
-  return ''
+  return view.canonicalImage(text) ?? ''
 }
 
 function normalizeBackground(view: CatalogView, value: unknown): string {
@@ -316,12 +305,13 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
     .join('\n')
 
   const backgrounds = view
-    .imageDetailsList()
+    .imagePromptChoices(120)
     .map((detail) => {
       const name = detail.name || detail.file
+      const ref = detail.id ?? detail.file
       return detail.description
-        ? `- ${detail.file}（${name}）：${detail.description}`
-        : `- ${detail.file}（${name}）`
+        ? `- ${name}（${ref}）：${detail.description}`
+        : `- ${name}（${ref}）`
     })
     .join('\n')
 
@@ -1201,12 +1191,13 @@ export function buildDirectionPrompt(
     .join('\n')
 
   const backgrounds = view
-    .imageDetailsList()
+    .imagePromptChoices(120)
     .map((detail) => {
       const name = detail.name || detail.file
+      const ref = detail.id ?? detail.file
       return detail.description
-        ? `- ${detail.file}（${name}）：${detail.description}`
-        : `- ${detail.file}（${name}）`
+        ? `- ${name}（${ref}）：${detail.description}`
+        : `- ${name}（${ref}）`
     })
     .join('\n')
 
@@ -1214,9 +1205,10 @@ export function buildDirectionPrompt(
     .bgmPromptChoices(40)
     .map((detail) => {
       const name = detail.name || detail.file
+      const ref = detail.id ?? detail.file
       return detail.description
-        ? `- ${detail.file}（${name}）：${detail.description}`
-        : `- ${detail.file}（${name}）`
+        ? `- ${name}（${ref}）：${detail.description}`
+        : `- ${name}（${ref}）`
     })
     .join('\n')
 
@@ -1292,7 +1284,7 @@ ${bgmChoices || '（目录暂未提供带描述的 BGM，bgm 留空）'}
 - 同一角色连续多句时换不同动作，不要每句重复同一个起手式；动作与表情同向。
 - 动作/表情必须来自对应角色的清单；不确定就省略，不要编造名称。省略动作优于编错。
 - 朝比奈真冬 / 真冬：表情克制，避免过于开心的表情与欢快动作。
-- 背景从清单选最贴合的一张；大多数场次整场只写这一张，不换背景。
+- 背景从清单选最贴合的一张；写背景名或 id 都可以，大多数场次整场只写这一张，不换背景。
 - 只有明确的时间/地点变化（白天→夜晚、室内→室外）才用第二张：顶层写 background2 和
   background2From（从哪一句 id 开始），两张都必须来自清单，最多两张。
 - 环境色：按场景时间写顶层 ambient：normal（白天/室内）、evening（黄昏）、night（夜晚）。

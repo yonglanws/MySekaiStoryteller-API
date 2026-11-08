@@ -6,33 +6,43 @@
 
 本文说明资源登记、路径和音频配置。仓库不附带模型、背景、语音、BGM 或示例剧本；没有现成模型、背景或 BGM 时可用 [云端资源获取](cloud-assets.md) 从 Moesekai 拉取。下列文件名、角色名和服务端路径均为占位示例，必须替换为你已有资源的真实值。
 
+启用云端目录（`assets.cloudCatalog`，默认开启）后，`models.yaml` / `images.yaml` / `bgm.yaml`
+都是**可选覆盖**：不写也能从云端目录获得 26 位角色模型、官方剧情地点名背景与官方曲名 BGM；
+本地文件仍然优先。按需下载的资源落在 `resources/{models,images,audio}/cloud/`。
+
 ## 资源目录
 
 ```text
 resources/                        默认资源根
-├─ models/models.yaml             模型登记表
+├─ models/models.yaml             模型登记表（可选；云端目录可完全替代）
 ├─ models/<角色>/<变体>/           model3.json、纹理、motions/ 等模型包内容
-├─ images/images.yaml             背景描述表；图片放 images/ 直属目录
+├─ models/cloud/                  云端按需下载的模型（可删）
+├─ images/images.yaml             背景描述表（可选）；图片放 images/ 直属目录
+├─ images/cloud/                  云端按需下载的背景（可删）
 ├─ voices/                        预录语音；当前 API 视频导出不混入 voice
-├─ audio/bgm/bgm.yaml              独立 BGM 设置
-├─ audio/bgm/soundtracks.json      fetch:media 生成的官方曲名缓存（可删）
+├─ audio/bgm/bgm.yaml              独立 BGM 设置（可选）
+├─ audio/bgm/soundtracks.json      fetch:media / 云端目录生成的官方曲名缓存（可删）
 ├─ audio/bgm/                     BGM 音频文件
+├─ audio/bgm/cloud/               云端按需下载的 BGM（可删）
+├─ audio/se/cloud/                云端按需下载的 SE（可删）
 └─ stories/                       *.sekai-story.json 故事文件
 ```
 
 ### 路径以哪里为基准
 
-| 配置或字段                               | 基准与正确形式                                                      |
-| ---------------------------------------- | ------------------------------------------------------------------- |
-| `paths.resources`                        | 相对宿主识别的仓库根，默认 `resources`；也支持宿主磁盘绝对路径      |
-| `MSS_RESOURCE_DIR`                       | 覆盖 `paths.resources`，再按同样规则解析                            |
-| `models.yaml` 的 `path`                  | 相对实际资源根的 `models/`，如 `example/normal/example.model3.json` |
-| `images.yaml` 的 `file`                  | 相对实际资源根的 `images/`，如 `room_day.jpg`                       |
-| 故事 `models[].model` / `images[].image` | 分别相对 `models/` / `images/`，不是把完整磁盘路径写进故事          |
-| `bgm.path`                               | 浏览器 URL 或资源根相对路径，具体限制见 BGM 节                      |
-| TTS 参考音频、权重路径                   | GPT-SoVITS 服务所在机器的文件路径，不以资源根为基准                 |
+| 配置或字段                               | 基准与正确形式                                                       |
+| ---------------------------------------- | -------------------------------------------------------------------- |
+| `paths.resources`                        | 相对宿主识别的仓库根，默认 `resources`；也支持宿主磁盘绝对路径       |
+| `MSS_RESOURCE_DIR`                       | 覆盖 `paths.resources`，再按同样规则解析                             |
+| `models.yaml` 的 `path`                  | 相对实际资源根的 `models/`，如 `example/normal/example.model3.json`  |
+| `images.yaml` 的 `file`                  | 相对实际资源根的 `images/`，如 `room_day.jpg`                        |
+| 故事 `images[].image` 的云端写法         | 云端 id `bg_a000301` 或官方地点名 `教室`；导出前落到 `images/cloud/` |
+| 故事 `models[].model` 的云端写法         | `cloud/<模型 id>/<变体>/<model3.json>`；导出前落到 `models/cloud/`   |
+| 故事 `models[].model` / `images[].image` | 分别相对 `models/` / `images/`，不是把完整磁盘路径写进故事           |
+| `bgm.path`                               | 浏览器 URL 或资源根相对路径，具体限制见 BGM 节                       |
+| TTS 参考音频、权重路径                   | GPT-SoVITS 服务所在机器的文件路径，不以资源根为基准                  |
 
-宿主先从编译产物位置推导仓库根，失败时才回退到进程工作目录。改资源根后，三份清单也必须放到新根对应位置。
+宿主先从编译产物位置推导仓库根，失败时才回退到进程工作目录。改资源根后，继续使用的本地清单也要放到新根对应位置；云端物化同样写进新根。
 静态 URL 始终是 `/resources/…`，不会因为磁盘目录改名而改变。路径建议用 `/`，大小写与真实文件一致。
 资源根会被静态托管，不要把密钥、私密配置或不希望公开的文件放进去；不入 Git 不等于不会通过 HTTP 暴露。
 
@@ -91,6 +101,11 @@ images:
 `voices/` 与 `audio/bgm/` 音频支持 `.mp3/.wav/.ogg/.flac`（扩展名不区分大小写）。
 未登记但存在的图片仍出现在 `images` 列表并可被引用，只是没有选图描述；登记了但不存在的图片会被跳过。
 
+云端目录会额外提供约一百个带官方地点名的背景（如 `教室`、`司の部屋`、`神山高校 屋上`）。
+`GET /api/v1/resources` 的 `imageDetails` 里 `source: "cloud"` 的条目就是它们；剧本与 AI
+既可以写 `file`，也可以写 `id` 或 `name`。同名背景（多个「屋上」）按 id 排序取第一张，
+需要精确控制时写 id。没有地点名的云端背景仍可用 `bg_xxx` 引用，只是不进入选图清单。
+
 ### 目录刷新与排查
 
 `GET /api/v1/resources` 返回 `models`、`images`、`imageDetails`、`voices`、`bgm`；它是目录，不是资源完整性证明。
@@ -98,6 +113,8 @@ images:
 模型文件读取失败时，该模型仍可能保留，但动作/表情为空；模型清单缺失或整次构建失败时沿用旧成功缓存，
 没有旧缓存才返回空目录。背景清单解析失败通常只失去描述表；具体原因查看 `[Catalog]` 日志。
 改清单通常只需等待下次重建；改资源根、TTS 或 BGM 配置则需重启宿主。插件另有自己的缓存策略。
+云端目录另有独立快照：`cloud.generatedAt` 是目录生成时间，启动时先读磁盘缓存、再在线上限 15 秒，
+过期后后台刷新；`POST /api/v1/cloud/refresh` 可立即重建。
 
 ## TTS 配音
 

@@ -210,22 +210,36 @@ async function bundleFiles(
   bundle: MediaBundle,
   options: RequestOptions
 ): Promise<MediaFile[]> {
-  const query = new URLSearchParams({ server: region, path: bundle.path })
-  const page = await fetchJson<AssetApiPage>(
-    `${origin}/api/assets/bundle-files?${query.toString()}`,
-    options
-  )
-  return (page.items ?? [])
-    .filter(
-      (item): item is AssetApiItem & { name: string; url: string } =>
-        item.type === 'asset' && typeof item.name === 'string' && typeof item.url === 'string'
+  const files: MediaFile[] = []
+  const seenCursors = new Set<string>()
+  let cursor: string | null = null
+  do {
+    const query = new URLSearchParams({
+      server: region,
+      path: bundle.path,
+      limit: String(PAGE_LIMIT)
+    })
+    if (cursor) query.set('cursor', cursor)
+    const page = await fetchJson<AssetApiPage>(
+      `${origin}/api/assets/bundle-files?${query.toString()}`,
+      options
     )
-    .map((item) => ({
-      name: item.name,
-      path: item.path ?? '',
-      url: item.url,
-      size: item.size ?? 0
-    }))
+    for (const item of page.items ?? []) {
+      if (item.type !== 'asset' || typeof item.name !== 'string' || typeof item.url !== 'string') {
+        continue
+      }
+      files.push({
+        name: item.name,
+        path: item.path ?? '',
+        url: item.url,
+        size: item.size ?? 0
+      })
+    }
+    cursor = page.nextCursor?.trim() || null
+    if (cursor && seenCursors.has(cursor)) break
+    if (cursor) seenCursors.add(cursor)
+  } while (cursor)
+  return files
 }
 
 function pickFile(files: MediaFile[], extensions: string[]): MediaFile | null {
@@ -347,6 +361,107 @@ async function fetchFiles(
       )
     }
   })
+}
+
+export interface DownloadMediaFileOptions {
+  kind: MediaKind
+  /** bundle 名，如 bg_a000301 / bgm00003 */
+  name: string
+  outDir: string
+  region: AssetRegion
+  assetBase?: string
+  /** 目标子目录（相对 images/ 或 audio/bgm/），云端按需物化用 'cloud' */
+  subdir?: string
+  force?: boolean
+  timeoutMs?: number
+  retries?: number
+}
+
+export interface DownloadedMediaFile {
+  /** 相对 outDir 的路径，如 images/cloud/bg_a000301.webp */
+  file: string
+  bytes: number
+  skipped: boolean
+}
+
+/**
+ * 下载单个背景/BGM bundle 里的首选文件（背景优先 webp，BGM 优先 mp3）。
+ * 只写文件，不碰 images.yaml / bgm.yaml —— 云端目录不需要本地登记。
+ */
+export async function downloadMediaFile(
+  options: DownloadMediaFileOptions
+): Promise<DownloadedMediaFile | null> {
+  const assetBase = normalizeAssetBase(options.assetBase)
+  const origin = apiOrigin(assetBase)
+  const requestOpts = requestOptions(options)
+  const prefix = prefixFor(options.kind, false)
+  const bundle: MediaBundle = {
+    kind: options.kind,
+    name: options.name,
+    path: `${prefix}${options.name}`,
+    bytes: 0,
+    files: 0,
+    prefix
+  }
+  const dir = path.join(targetDir(options.outDir, options.kind), options.subdir ?? '')
+  const extensions = options.kind === 'background' ? BACKGROUND_EXTS : BGM_EXTS
+  const files = await bundleFiles(origin, options.region, bundle, requestOpts)
+  const picked = pickFile(files, extensions)
+  if (!picked) return null
+
+  const target = path.join(dir, path.basename(picked.name))
+  if (fs.existsSync(target) && !options.force) {
+    return {
+      file: relativeTo(options.outDir, target),
+      bytes: fs.statSync(target).size,
+      skipped: true
+    }
+  }
+  const response = await request(new URL(picked.url, origin).href, requestOpts)
+  const buffer = Buffer.from(await response.arrayBuffer())
+  atomicWrite(target, buffer)
+  return { file: relativeTo(options.outDir, target), bytes: buffer.byteLength, skipped: false }
+}
+
+/**
+ * 按需下载剧情 SE：cue 名（se_door）在 sound/scenario/se/ 的若干包里，
+ * 逐个包查文件列表；找到后写到 audio/se/cloud/。
+ */
+export async function downloadSeFile(options: {
+  name: string
+  outDir: string
+  region: AssetRegion
+  assetBase?: string
+  force?: boolean
+  timeoutMs?: number
+  retries?: number
+}): Promise<DownloadedMediaFile | null> {
+  const desired = options.name.trim()
+  if (!desired) return null
+  const fileName = /\.(mp3|wav|ogg|flac)$/i.test(desired) ? desired : `${desired}.mp3`
+  const target = path.join(options.outDir, 'audio', 'se', 'cloud', fileName)
+  if (fs.existsSync(target) && !options.force) {
+    return {
+      file: relativeTo(options.outDir, target),
+      bytes: fs.statSync(target).size,
+      skipped: true
+    }
+  }
+
+  const assetBase = normalizeAssetBase(options.assetBase)
+  const origin = apiOrigin(assetBase)
+  const requestOpts = requestOptions(options)
+  const bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts)
+  for (const bundle of bundles) {
+    const files = await bundleFiles(origin, options.region, bundle, requestOpts)
+    const hit = files.find((file) => file.name.toLowerCase() === fileName.toLowerCase())
+    if (!hit) continue
+    const response = await request(new URL(hit.url, origin).href, requestOpts)
+    const buffer = Buffer.from(await response.arrayBuffer())
+    atomicWrite(target, buffer)
+    return { file: relativeTo(options.outDir, target), bytes: buffer.byteLength, skipped: false }
+  }
+  return null
 }
 
 /** 只列出资源站的背景/BGM bundle，不下载。 */

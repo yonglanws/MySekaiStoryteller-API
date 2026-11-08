@@ -9,6 +9,7 @@ import {
   soundtrackLabel,
   type SoundtrackIndex
 } from '../assets/soundtracks'
+import type { CloudCatalogData } from '../assets/cloudCatalog'
 
 export interface CatalogModel {
   id: number
@@ -23,18 +24,30 @@ export interface CatalogModel {
   facials: string[]
   defaultMotion: string
   defaultFacial: string
+  /** 条目来源：未标时为本地登记；cloud 表示从云端目录补齐 */
+  source?: 'local' | 'cloud'
+  /** 云端模型 id（source=cloud 时） */
+  cloudId?: string
 }
 
 export interface CatalogImage {
   file: string
   name: string
   description: string
+  /** 云端背景的稳定 id（source=cloud 时） */
+  id?: string
+  /** 官方剧情中同一背景出现过的其它地点名 */
+  aliases?: string[]
+  source?: 'local' | 'cloud'
 }
 
 export interface CatalogBgm {
   file: string
   name: string
   description: string
+  /** 云端 BGM 的稳定 id（source=cloud 时） */
+  id?: string
+  source?: 'local' | 'cloud'
 }
 
 export interface ResourceCatalogData {
@@ -46,6 +59,13 @@ export interface ResourceCatalogData {
   bgm: string[]
   /** 带描述的 BGM 清单（audio/bgm/bgm.yaml 登记时供 AI 了解可选项；未登记时为空） */
   bgmDetails: CatalogBgm[]
+  /** 云端目录状态；云端不可用时省略 */
+  cloud?: {
+    generatedAt: string
+    models: number
+    backgrounds: number
+    bgm: number
+  }
 }
 
 interface ModelManifest {
@@ -97,12 +117,18 @@ function pickPreferred(names: string[], preferences: string[]): string {
 export class ResourceCatalog {
   private readonly logger: Logger<ILogObj>
   private readonly config: HostConfig
+  private readonly cloud: (() => CloudCatalogData | null) | null
   private cache: ResourceCatalogData | null = null
   private cacheTime = 0
 
-  constructor(logger: Logger<ILogObj>, config: HostConfig) {
+  constructor(
+    logger: Logger<ILogObj>,
+    config: HostConfig,
+    cloud: (() => CloudCatalogData | null) | null = null
+  ) {
     this.logger = logger
     this.config = config
+    this.cloud = cloud
   }
 
   get(): ResourceCatalogData {
@@ -128,10 +154,22 @@ export class ResourceCatalog {
   private build(): ResourceCatalogData {
     const resourcesDir = this.config.paths.resources
     const modelsDir = path.join(resourcesDir, 'models')
+    const manifestPath = path.join(modelsDir, 'models.yaml')
 
-    const manifest = yaml.load(
-      fs.readFileSync(path.join(modelsDir, 'models.yaml'), 'utf-8')
-    ) as ModelManifest
+    // 云端模式下 models.yaml 可以完全不存在：本地清单是可选覆盖，
+    // 不是启动前提。
+    let manifest: ModelManifest = { models: [] }
+    if (fs.existsSync(manifestPath)) {
+      const loaded = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as unknown
+      if (loaded !== null && loaded !== undefined) {
+        if (typeof loaded !== 'object' || Array.isArray(loaded)) {
+          throw new Error(`models.yaml must be a key-value mapping: ${manifestPath}`)
+        }
+        manifest = loaded as ModelManifest
+      }
+    } else {
+      this.logger.info('[Catalog] models.yaml not found, using cloud catalog only')
+    }
 
     const models: CatalogModel[] = []
     for (const entry of manifest.models ?? []) {
@@ -160,7 +198,8 @@ export class ResourceCatalog {
         motions,
         facials,
         defaultMotion: pickPreferred(motions, DEFAULT_MOTION_PREFERENCE),
-        defaultFacial: pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE)
+        defaultFacial: pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE),
+        source: 'local'
       })
     }
 
@@ -188,13 +227,116 @@ export class ResourceCatalog {
     const bgmFiles = listFiles('audio/bgm', AUDIO_EXTENSIONS)
     const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
 
+    const cloud = this.cloud?.() ?? null
+    if (cloud) {
+      this.mergeCloudModels(models, cloud)
+      this.mergeCloudBackgrounds(imageFiles, imageDetails, cloud)
+      this.mergeCloudBgm(bgmFiles, bgmDetails, cloud)
+    }
+
     return {
       models,
       images: imageFiles,
       imageDetails,
       voices: listFiles('voices', AUDIO_EXTENSIONS),
       bgm: bgmFiles,
-      bgmDetails
+      bgmDetails,
+      ...(cloud
+        ? {
+            cloud: {
+              generatedAt: cloud.generatedAt,
+              models: cloud.models.length,
+              backgrounds: cloud.backgrounds.length,
+              bgm: cloud.bgm.length
+            }
+          }
+        : {})
+    }
+  }
+
+  /**
+   * 云端模型补进目录：本地已有同名角色时本地优先（用户明确下载过的模型
+   * 不应被云端首选服装替换）；数值 id 用 1000+characterId，避免和本地
+   * models.yaml 的 1..N 冲突。
+   */
+  private mergeCloudModels(models: CatalogModel[], cloud: CloudCatalogData): void {
+    const localNames = new Set(models.map((model) => model.name.toLowerCase()))
+    const usedIds = new Set(models.map((model) => model.id))
+    for (const entry of cloud.models) {
+      if (localNames.has(entry.name.toLowerCase())) continue
+      const numericId = entry.characterId ? 1000 + entry.characterId : 2000 + models.length
+      if (usedIds.has(numericId)) continue
+      usedIds.add(numericId)
+      localNames.add(entry.name.toLowerCase())
+      models.push({
+        id: numericId,
+        name: entry.name,
+        shortName: entry.shortName,
+        path: entry.path,
+        motions: entry.motions,
+        facials: entry.facials,
+        defaultMotion: entry.defaultMotion,
+        defaultFacial: entry.defaultFacial,
+        source: 'cloud',
+        cloudId: entry.id
+      })
+    }
+  }
+
+  private mergeCloudBackgrounds(
+    imageFiles: string[],
+    imageDetails: CatalogImage[],
+    cloud: CloudCatalogData
+  ): void {
+    const files = new Set(imageFiles.map((file) => file.toLowerCase()))
+    const names = new Set(imageDetails.map((detail) => detail.name.toLowerCase()))
+    for (const entry of cloud.backgrounds) {
+      // 没有官方地点名的背景只保留在云端目录里，可用 id 直接引用；
+      // 不放进 AI 候选/插件资源列表，避免 1300+ 条无语义条目刷屏。
+      if (entry.name === entry.id) continue
+      const fileKey = entry.file.toLowerCase()
+      const nameKey = entry.name.toLowerCase()
+      if (files.has(fileKey) || names.has(nameKey)) continue
+      files.add(fileKey)
+      names.add(nameKey)
+      imageFiles.push(entry.file)
+      imageDetails.push({
+        file: entry.file,
+        name: entry.name,
+        description: entry.description,
+        id: entry.id,
+        aliases: entry.aliases,
+        source: 'cloud'
+      })
+    }
+  }
+
+  private mergeCloudBgm(
+    bgmFiles: string[],
+    bgmDetails: CatalogBgm[],
+    cloud: CloudCatalogData
+  ): void {
+    const files = new Set(bgmFiles.map((file) => file.toLowerCase()))
+    const names = new Set(bgmDetails.map((detail) => detail.name.toLowerCase()))
+    let cloudCount = 0
+    for (const entry of cloud.bgm) {
+      if (cloudCount >= 80) break
+      // 官方曲名索引没覆盖的曲目只保留 id 能力，不进入候选。
+      if (entry.name === entry.id && !entry.description) continue
+      const fileKey = entry.file.toLowerCase()
+      const nameKey = entry.name.toLowerCase()
+      if (files.has(fileKey) || names.has(nameKey)) continue
+      files.add(fileKey)
+      names.add(nameKey)
+      cloudCount++
+      bgmFiles.push(entry.file)
+      bgmDetails.push({
+        file: entry.file,
+        name: entry.name,
+        description: entry.description,
+        id: entry.id,
+        source: 'cloud'
+      })
     }
   }
 

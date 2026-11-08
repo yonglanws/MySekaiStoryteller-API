@@ -27,6 +27,7 @@ API 没有内置鉴权，部署边界见 [安全提示](host-deployment.md#安�
 | GET  | `/api/v1/assets/moesekai/models` | 查看 Moesekai 云端模型索引           |
 | GET  | `/api/v1/assets/moesekai/media`  | 浏览 Moesekai 背景 / BGM bundle      |
 | POST | `/api/v1/assets/fetch`           | 从 Moesekai 拉取模型、背景或 BGM     |
+| POST | `/api/v1/cloud/refresh`          | 强制刷新云端资源目录                 |
 | GET  | `/api/v1/health`                 | 查看宿主、渲染池与清理状态           |
 | GET  | `/api/v1/status`                 | 查看队列与近期导出统计               |
 | POST | `/api/v1/cleanup`                | 立即执行一次过期导出文件清理         |
@@ -218,24 +219,83 @@ curl -fS 'http://127.0.0.1:9881/api/v1/download/export-1800000000000-demo01.mp4'
       "motions": ["w-normal-default01"],
       "facials": ["face_smile_01"],
       "defaultMotion": "w-normal-default01",
-      "defaultFacial": "face_smile_01"
+      "defaultFacial": "face_smile_01",
+      "source": "local"
+    },
+    {
+      "id": 1001,
+      "name": "云端示意角色",
+      "shortName": "示意",
+      "path": "cloud/demo/demo_v1/demo.model3.json",
+      "motions": ["w-normal-nod01"],
+      "facials": ["face_smile_01"],
+      "defaultMotion": "w-normal-nod01",
+      "defaultFacial": "face_smile_01",
+      "source": "cloud",
+      "cloudId": "demo"
     }
   ],
-  "images": ["demo-room.png"],
+  "images": ["demo-room.png", "cloud/bg_a000301"],
   "imageDetails": [
-    { "file": "demo-room.png", "name": "示意房间", "description": "仅演示字段结构" }
+    { "file": "demo-room.png", "name": "示意房间", "description": "仅演示字段结构" },
+    {
+      "file": "cloud/bg_a000301",
+      "name": "教室",
+      "description": "",
+      "id": "bg_a000301",
+      "aliases": [],
+      "source": "cloud"
+    }
   ],
   "voices": ["demo-line.wav"],
-  "bgm": ["demo-bgm.mp3"]
+  "bgm": ["demo-bgm.mp3", "cloud/bgm00003.mp3"],
+  "bgmDetails": [
+    {
+      "file": "cloud/bgm00003.mp3",
+      "name": "Slapstick!!",
+      "description": "剧情 BGM",
+      "id": "bgm00003",
+      "source": "cloud"
+    }
+  ],
+  "cloud": {
+    "generatedAt": "2026-01-01T00:00:00.000Z",
+    "models": 26,
+    "backgrounds": 1372,
+    "bgm": 395
+  }
 }
 ```
 
 - `models[].path` 相对资源根的 `models/`；`id` 是目录中的数字标识，`shortName` 未单独登记时回退为 `name`。
+  `source: "cloud"` 的模型由云端目录补齐，数字 id 从 `1000 + characterId` 起，`cloudId` 是上游模型 id。
 - `motions`、`facials` 是动作索引键名，不是文件 URL；`face_` 前缀归入表情。默认动作/表情从可用项中选择，列表为空时默认值为空字符串。
-- `images` 为资源根 `images/` 下的文件名；`imageDetails` 是其中已登记描述的子集，未登记时为空数组。
+- `images` 为资源根 `images/` 下的文件名，以及 `cloud/` 占位路径；`imageDetails` 是可选背景清单。
+  云端条目带 `id`（如 `bg_a000301`）与 `name`（官方剧情地点名），剧本写 `file`、`id` 或 `name` 都能解析。
+- `bgmDetails` 同理：云端条目带 `id` 与官方曲名，`ChangeBgm` 写曲名或 id 都能解析。
 - `voices`、`bgm` 分别来自资源根 `voices/`、`audio/bgm/`；只列直接子文件，不递归目录。图像扩展名支持 `.jpg/.jpeg/.png/.webp`，音频支持 `.mp3/.wav/.ogg/.flac`。
+- `cloud` 字段只在云端目录可用时出现；`generatedAt` 是目录快照时间，计数是云端全量条目数（背景候选只展示带地点名的子集）。
 - 目录使用 30 秒内存缓存；构建失败沿用旧缓存，无旧缓存时返回各目录空数组，外层仍为 `success: true`。空目录不等同于服务不可达。
+- 请求目录时宿主最多等待 2 秒让首轮云端刷新完成；超时先返回已有快照，刷新在后台继续。
 - 查询目录时可能补齐并回写模型缺失的动作索引，因此它不应被当作完全无磁盘副作用的探针。
+
+## 云端目录刷新：`POST /api/v1/cloud/refresh`
+
+无请求体。宿主重新拉取模型索引、背景 bundle 列表、BGM 列表与曲名索引，成功时写
+`assets.cacheDir/catalog.json` 并返回：
+
+```json
+{
+  "success": true,
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "models": 26,
+  "backgrounds": 1372,
+  "bgm": 395
+}
+```
+
+`assets.cloudCatalog` 关闭时返回 409；刷新失败且没有任何可用快照时返回 502，有旧快照时返回 200
+并继续使用旧数据。目录生成期间宿主最多等 15 秒，超过后先启动服务、刷新在后台继续。
 
 ## 健康检查：`GET /api/v1/health`
 

@@ -135,7 +135,7 @@ function indexUrlFor(settings: AssetsSettings, region: AssetRegion): string {
   return `${withSlash(settings.indexBase)}${region}/models.json`
 }
 
-function libraryRootFor(
+export function libraryRootFor(
   index: MoesekaiIndex,
   settings: AssetsSettings,
   region: AssetRegion
@@ -278,7 +278,7 @@ export function selectModels(
   return [...selected.values()]
 }
 
-async function ripperManifest(
+export async function ripperManifest(
   libraryRoot: string,
   bundle: string,
   options: RequestOptions
@@ -334,8 +334,11 @@ function displayFor(entry: MoesekaiIndexEntry): { name: string; shortName: strin
  *
  * 目录布局与现有资源一致：
  *   models/<模型 id>/<model3 文件名去后缀>/<model3 文件名>
+ *
+ * `modelsDir` 传 `resources/models` 时是 fetch:models 的常规落盘；云端按需物化
+ * 传 `resources/models/cloud`，两条路径共用同一套下载/动作转换逻辑。
  */
-async function downloadModel(
+export async function downloadModel(
   entry: MoesekaiIndexEntry,
   libraryRoot: string,
   modelsDir: string,

@@ -80,21 +80,34 @@
 本文除完整结构示例外，JSON 块均标明为“单片段”或“片段数组”，应放进完整故事的 `snippets`，不能直接当作故事提交。
 所有模型路径、图片名、动作名、表情名和参数 ID 都是格式示意，不保证本地存在；请替换成实际可用值。
 
-| 字段                    | 类型 / 默认值      | 含义                                                   |
-| ----------------------- | ------------------ | ------------------------------------------------------ |
-| `models[].id`           | 必填 number        | 故事内模型 ID；建议使用唯一整数，与 `modelId` 一致     |
-| `models[].model`        | 必填 string        | 相对资源根 `models/` 的模型入口文件路径                |
-| `models[].normal_scale` | number，默认 `2.1` | `Normal` 布局的模型缩放乘数，不是像素高度              |
-| `models[].small_scale`  | number，默认 `1.8` | `Three` 布局的模型缩放乘数                             |
-| `models[].anchor`       | number，默认 `0.5` | 模型纵向锚点；横向锚点固定 `0.5`，通常在 `0..1` 内调节 |
-| `images[].id`           | 必填 number        | 故事内图片 ID；建议在图片数组内唯一                    |
-| `images[].image`        | 必填 string        | 相对资源根 `images/` 的图片路径，无默认值              |
+| 字段                    | 类型 / 默认值      | 含义                                                      |
+| ----------------------- | ------------------ | --------------------------------------------------------- |
+| `models[].id`           | 必填 number        | 故事内模型 ID；建议使用唯一整数，与 `modelId` 一致        |
+| `models[].model`        | 必填 string        | 相对资源根 `models/` 的模型入口文件路径，或云端模型路径   |
+| `models[].normal_scale` | number，默认 `2.1` | `Normal` 布局的模型缩放乘数，不是像素高度                 |
+| `models[].small_scale`  | number，默认 `1.8` | `Three` 布局的模型缩放乘数                                |
+| `models[].anchor`       | number，默认 `0.5` | 模型纵向锚点；横向锚点固定 `0.5`，通常在 `0..1` 内调节    |
+| `images[].id`           | 必填 number        | 故事内图片 ID；建议在图片数组内唯一                       |
+| `images[].image`        | 必填 string        | 相对资源根 `images/` 的图片路径、云端背景 id 或官方地点名 |
 
 - 模型路径 `20mizuki/20mizuki_normal/20mizuki_normal.model3.json` 会请求 `/resources/models/20mizuki/20mizuki_normal/20mizuki_normal.model3.json`。
 - 图片路径 `bg_c000101.jpg` 会请求 `/resources/images/bg_c000101.jpg`；两者均相对宿主资源根，不相对剧本文件目录。
 - 宿主将资源根挂载到 `/resources/`。路径使用 `/`；不要填 Windows 绝对路径、完整 URL，或重复写 `models/`、`images/`、`resources/` 前缀。
 - 模型引用的纹理、动作等配套文件也必须可访问。`motion` / `facial` 填模型支持的动作组名称，不填任意磁盘文件路径。
 - 默认值只在字段缺失时补入，`null` 不表示“使用默认值”。Schema 不检查 ID 唯一性、资源存在性或模型是否支持动作。
+
+### 云端背景与模型（可选）
+
+宿主启用 `assets.cloudCatalog`（默认开启）时，`images[].image` 还可以写：
+
+- 云端背景 id：`bg_a000301`；
+- 官方剧情里显示的地点名：`教室`、`司の部屋`、`神山高校 屋上` 等（同名背景按 id 排序取第一张）。
+
+`models[].model` 可以写 `cloud/<模型 id>/<变体>/<model3.json>`，例如
+`cloud/01ichika_normal/01ichika_normal_3.0_f_t04/01ichika_normal_3.0_f_t04.model3.json`。
+导出前宿主会把云端背景/模型下载到 `resources/images/cloud/`、`resources/models/cloud/`，
+并把故事改写成普通相对路径；本地已有同名文件时永远优先，不覆盖。
+云端目录不可用时保留原值，由渲染端报出具体的加载失败路径。
 
 ## 通用字段、单位与导出顺序
 
@@ -122,24 +135,24 @@
 
 以下均描述 `data` 字段；标“必填”的项没有 Schema 默认值。位置对象的 `side` 必填，`offset` 默认 `0`。
 
-| `type`                  | `data` 字段、默认值与用途                                                                                                   |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `ChangeLayoutMode`      | `mode` 必填：`Normal` / `Three`；设置后续位置换算和登场缩放模式                                                             |
-| `ChangeBackgroundImage` | `imageId` 必填 number；立即换成 `images` 中的图片，本身不做淡入淡出                                                         |
-| `ChangeBgm`             | `file` 默认 `""`（相对 `resources/audio/bgm/`）；`stop=false`；`fadeMs=600`；切歌 / 停 BGM，零时长，不影响画面节奏          |
-| `LayoutAppear`          | `modelId`、`from`、`to`、`motion`、`facial`、`moveSpeed` 必填；无动作可给空字符串；`facialFirst=true`、`hologram=false`     |
-| `LayoutClear`           | `modelId`、`from`、`to`、`moveSpeed` 必填；`motion=""`、`facial=""`；完成退场后移出模型层                                   |
-| `Move`                  | `modelId`、`from`、`to`、`moveSpeed` 必填；只移动，不负责登场或退场                                                         |
-| `Motion`                | `modelId` 必填；`motion=""`、`facial=""`、`facialFirst=true`；可选 `actions`、`duration`，详见下文                          |
-| `Talk`                  | `speaker`、`content` 必填 string；`modelId=-1`；`voice`、`ttsText`、`emotion`、`motion`、`facial` 默认 `""`；`actions` 可选 |
-| `HideTalk`              | **没有 `data`**；隐藏对话框，不隐藏角色                                                                                     |
-| `Telop`                 | `content` 必填 string；显示居中场景字幕；官方节奏 0.333s in + 2s 停留 + 0.333s out                                          |
-| `BlackOut`              | `duration` 必填，毫秒；黑色遮罩淡入，画面变黑                                                                               |
-| `BlackIn`               | `duration` 必填，毫秒；黑色遮罩淡出，露出场景                                                                               |
-| `SideFade`              | `edge`：`left`/`right`/`top`/`bottom`；`mode`：`out` 覆盖 / `in` 露出；`duration` 必填毫秒                                  |
-| `BackgroundBlur`        | `enabled` 必填 boolean；背景模糊开关（官方 EffectType 44）                                                                  |
-| `StopShake`             | **没有 `data`**；立即停止当前震屏（官方 EffectType 25/26）                                                                  |
-| `DoParam`               | `modelId`、`params` 必填；每项必填 `paramId`、`start`、`end`、`curve`、`duration`，详见下文                                 |
+| `type`                  | `data` 字段、默认值与用途                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `ChangeLayoutMode`      | `mode` 必填：`Normal` / `Three`；设置后续位置换算和登场缩放模式                                                                       |
+| `ChangeBackgroundImage` | `imageId` 必填 number；立即换成 `images` 中的图片，本身不做淡入淡出                                                                   |
+| `ChangeBgm`             | `file` 默认 `""`（相对 `resources/audio/bgm/`，也接受云端曲名/id）；`stop=false`；`fadeMs=600`；切歌 / 停 BGM，零时长，不影响画面节奏 |
+| `LayoutAppear`          | `modelId`、`from`、`to`、`motion`、`facial`、`moveSpeed` 必填；无动作可给空字符串；`facialFirst=true`、`hologram=false`               |
+| `LayoutClear`           | `modelId`、`from`、`to`、`moveSpeed` 必填；`motion=""`、`facial=""`；完成退场后移出模型层                                             |
+| `Move`                  | `modelId`、`from`、`to`、`moveSpeed` 必填；只移动，不负责登场或退场                                                                   |
+| `Motion`                | `modelId` 必填；`motion=""`、`facial=""`、`facialFirst=true`；可选 `actions`、`duration`，详见下文                                    |
+| `Talk`                  | `speaker`、`content` 必填 string；`modelId=-1`；`voice`、`ttsText`、`emotion`、`motion`、`facial` 默认 `""`；`actions` 可选           |
+| `HideTalk`              | **没有 `data`**；隐藏对话框，不隐藏角色                                                                                               |
+| `Telop`                 | `content` 必填 string；显示居中场景字幕；官方节奏 0.333s in + 2s 停留 + 0.333s out                                                    |
+| `BlackOut`              | `duration` 必填，毫秒；黑色遮罩淡入，画面变黑                                                                                         |
+| `BlackIn`               | `duration` 必填，毫秒；黑色遮罩淡出，露出场景                                                                                         |
+| `SideFade`              | `edge`：`left`/`right`/`top`/`bottom`；`mode`：`out` 覆盖 / `in` 露出；`duration` 必填毫秒                                            |
+| `BackgroundBlur`        | `enabled` 必填 boolean；背景模糊开关（官方 EffectType 44）                                                                            |
+| `StopShake`             | **没有 `data`**；立即停止当前震屏（官方 EffectType 25/26）                                                                            |
+| `DoParam`               | `modelId`、`params` 必填；每项必填 `paramId`、`start`、`end`、`curve`、`duration`，详见下文                                           |
 
 ## 舞台位置、布局与缩放
 
@@ -346,7 +359,7 @@ Schema 不检查参数是否存在或数值是否在模型范围内；动作、�
 
 `ChangeBgm` 只影响混音，不占时间线时长：
 
-- `data.file` 是相对 `resources/audio/bgm/` 的文件名（也接受 `audio/bgm/xxx.mp3` 写法），文件必须存在于该目录。
+- `data.file` 是相对 `resources/audio/bgm/` 的文件名（也接受 `audio/bgm/xxx.mp3` 写法），文件必须存在于该目录；启用云端目录时也可以写官方曲名（如 `Slapstick!!`）或云端 id（如 `bgm00003`），导出前自动下载到 `resources/audio/bgm/cloud/`。
 - 新曲从该片段的时间点开始循环播放，直到下一次 `ChangeBgm`。
 - 下一次切歌或停止时，旧曲按本次 `fadeMs` 淡出，新曲同时淡入；`fadeMs` 单位毫秒，默认 `600`，最大 `10000`。
 - `data.stop: true` 停止当前 BGM；停止时 `file` 会被忽略。
@@ -383,19 +396,19 @@ Schema 不检查参数是否存在或数值是否在模型范围内；动作、�
 完整示例可直接交给 `StorySchema.parse`；单片段先装入 `snippets: [片段]`，片段数组直接用作 `snippets`，再与 `models`、`images` 组成故事对象。
 仅验证结构时两个资源数组可以为空；真正导出前必须补齐被引用资源并安排登场。**Schema 通过不等于可完成渲染。**
 
-| 现象 / 易错项                                               | 检查方法                                                                      |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| 缺少 `wait`、`delay`、顶层数组或必要 `data`                 | 三个通用字段没有默认值；`HideTalk` 除外，其余片段需 `data`                    |
-| `Left` 写成 `left`，速度写 `Medium`                         | 枚举区分大小写；布局、方向、速度和曲线只能使用本文列出的值                    |
-| 数字写成字符串、用 `null` 请求默认值                        | ID、时长、偏移必须是 number；有默认值的字段应省略而非设为 `null`              |
-| 登场省略 `motion` / `facial`                                | `LayoutAppear` 两项必填，可写 `""`；不要套用 `Motion` 的默认规则              |
-| 事件 `at: 40`、只含 `at` 和 ID、动作名为空                  | `at` 应写 `0.4`；至少一个非空动作 / 表情；事件 ID 要求整数，最多 24 项        |
-| `Motion.duration` 为 0、负数或大于 120                      | 该字段只接受有限正数且最多 120；不写 `actions` 时也不会按它延长动作           |
-| 加入 `Wait`、`Pause`、`Transition` 或 `PlayAudio` 片段      | 当前 Schema 不支持；停顿用前置 `delay` 或有有效模型的空动作序列               |
-| `ChangeBgm` 没有声音、曲目被忽略                            | 文件必须放在 `resources/audio/bgm/` 且登记在 `bgm.yaml`；不存在的文件会被跳过 |
-| 自定义字段似乎被忽略                                        | Zod 对象默认去除未知字段；通过校验不代表拼错的字段或自加 `duration` 会生效    |
-| `Model with id … not found` / `Texture with id … not found` | 引用未声明；重复 ID 不会报 Schema 错误，但查找只取第一个，应避免              |
-| 资源加载失败、动作未生效、听者没反应                        | 检查路径前缀、资源实际存在性、动作组名和登场状态；不可见动作事件会跳过        |
-| 500 秒长停顿、黑屏不恢复或人物跳位                          | 分别检查秒 / 毫秒混用、是否缺 `BlackIn`、`Move.from` 是否接上上一位置         |
+| 现象 / 易错项                                               | 检查方法                                                                                                                 |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 缺少 `wait`、`delay`、顶层数组或必要 `data`                 | 三个通用字段没有默认值；`HideTalk` 除外，其余片段需 `data`                                                               |
+| `Left` 写成 `left`，速度写 `Medium`                         | 枚举区分大小写；布局、方向、速度和曲线只能使用本文列出的值                                                               |
+| 数字写成字符串、用 `null` 请求默认值                        | ID、时长、偏移必须是 number；有默认值的字段应省略而非设为 `null`                                                         |
+| 登场省略 `motion` / `facial`                                | `LayoutAppear` 两项必填，可写 `""`；不要套用 `Motion` 的默认规则                                                         |
+| 事件 `at: 40`、只含 `at` 和 ID、动作名为空                  | `at` 应写 `0.4`；至少一个非空动作 / 表情；事件 ID 要求整数，最多 24 项                                                   |
+| `Motion.duration` 为 0、负数或大于 120                      | 该字段只接受有限正数且最多 120；不写 `actions` 时也不会按它延长动作                                                      |
+| 加入 `Wait`、`Pause`、`Transition` 或 `PlayAudio` 片段      | 当前 Schema 不支持；停顿用前置 `delay` 或有有效模型的空动作序列                                                          |
+| `ChangeBgm` 没有声音、曲目被忽略                            | 本地文件必须放在 `resources/audio/bgm/` 且登记在 `bgm.yaml`；云端曲名/id 需要 `assets.cloudCatalog` 开启且目录里有该曲目 |
+| 自定义字段似乎被忽略                                        | Zod 对象默认去除未知字段；通过校验不代表拼错的字段或自加 `duration` 会生效                                               |
+| `Model with id … not found` / `Texture with id … not found` | 引用未声明；重复 ID 不会报 Schema 错误，但查找只取第一个，应避免                                                         |
+| 资源加载失败、动作未生效、听者没反应                        | 检查路径前缀、资源实际存在性、动作组名和登场状态；不可见动作事件会跳过                                                   |
+| 500 秒长停顿、黑屏不恢复或人物跳位                          | 分别检查秒 / 毫秒混用、是否缺 `BlackIn`、`Move.from` 是否接上上一位置                                                    |
 
 AstrBot 插件可能对人物数量、登退场顺序及动作事件施加更严格校验；不要把插件生成约束当成渲染 Schema 的全部规则。

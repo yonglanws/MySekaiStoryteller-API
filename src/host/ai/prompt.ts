@@ -38,6 +38,15 @@ function summarize(names: string[], prefix: (name: string) => string, limit: num
     .join('，')
 }
 
+/** 背景引用清洗：统一分隔符、去掉多余空白；空值返回空串。 */
+function cleanPath(value: unknown): string {
+  return String(value ?? '')
+    .replace(/\\/g, '/')
+    .replace(/\s*\.\s*/g, '.')
+    .replace(/\s*\/\s*/g, '/')
+    .trim()
+}
+
 function fillTemplate(template: string, mapping: Record<string, string>): string {
   const keys = Object.keys(mapping).sort((a, b) => b.length - a.length)
   const pattern = new RegExp(
@@ -104,6 +113,18 @@ export class CatalogView {
   }
 
   /**
+   * 提示词里列出的背景：本地登记的全部保留，云端条目只列有可读名字的
+   * （未覆盖到的背景仍可用 id 引用，但不占据提示词）。云端背景有几百个，
+   * 全量塞进提示词既贵又稀释重点，默认最多 120 条。
+   */
+  imagePromptChoices(limit = 120): CatalogImage[] {
+    const details = this.imageDetailsList().filter(
+      (detail) => detail.source !== 'cloud' || (detail.name && detail.name !== detail.id)
+    )
+    return limit > 0 ? details.slice(0, limit) : details
+  }
+
+  /**
    * 所有 description 非空的 BGM 登记项。描述可以来自人工填写，也可以来自
    * fetch:media 缓存的官方曲名索引（bgm00003 → Slapstick!! / 剧情 BGM）。
    *
@@ -118,6 +139,9 @@ export class CatalogView {
   /**
    * 把 AI 写的 BGM 名收束到 bgm.yaml 登记的文件名；未登记返回 null。
    * 只接受 bgmDetails，不把磁盘上碰巧存在的音频暴露成候选。
+   *
+   * 云端条目可以只写 id（bgm00003）、曲名（Slapstick!!）或
+   * `cloud/bgm00003.mp3`，都收束到登记项 file。
    */
   canonicalBgm(value: unknown): string | null {
     const raw = normalizeBgmFile(value)
@@ -125,11 +149,18 @@ export class CatalogView {
     const details = this.bgmDetailsList()
     if (details.length === 0) return null
 
-    const exact = details.find((detail) => detail.file === raw)
+    const exact = details.find((detail) => detail.file === raw || detail.id === raw)
     if (exact) return exact.file
 
     const lower = raw.toLowerCase()
-    const byFile = details.find((detail) => detail.file.toLowerCase() === lower)
+    const stem = lower.replace(/\.[^.]+$/, '')
+    const byFile = details.find(
+      (detail) =>
+        detail.file.toLowerCase() === lower ||
+        detail.id?.toLowerCase() === lower ||
+        detail.id?.toLowerCase() === stem ||
+        (detail.file.toLowerCase().split('/').pop() ?? '').replace(/\.[^.]+$/, '') === stem
+    )
     if (byFile) return byFile.file
 
     const base = lower.split('/').pop() ?? lower
@@ -142,6 +173,48 @@ export class CatalogView {
       (detail) => detail.name.toLowerCase() === lower || detail.file.toLowerCase().includes(lower)
     )
     return byName.length === 1 ? byName[0].file : null
+  }
+
+  /**
+   * 背景选择：本地文件、云端 id（bg_a000301）与可读名（教室）都接受。
+   * 返回登记项本身，调用方可拿到 file 与展示名。
+   */
+  canonicalImageEntry(value: unknown): CatalogImage | null {
+    const raw = cleanPath(value)
+    if (!raw) return null
+    const details = this.imageDetailsList()
+    if (details.length === 0) return null
+
+    const lower = raw.toLowerCase()
+    const base = lower.split('/').pop() ?? lower
+    const stem = base.replace(/\.[^.]+$/, '')
+    const exact = details.find(
+      (detail) =>
+        detail.file.toLowerCase() === lower ||
+        detail.id?.toLowerCase() === lower ||
+        detail.id?.toLowerCase() === stem ||
+        (detail.file.toLowerCase().split('/').pop() ?? '').replace(/\.[^.]+$/, '') === stem
+    )
+    if (exact) return exact
+
+    const byName = details.filter(
+      (detail) =>
+        detail.name.toLowerCase() === lower ||
+        detail.name.toLowerCase().includes(lower) ||
+        (detail.aliases ?? []).some((alias) => alias.toLowerCase() === lower)
+    )
+    if (byName.length === 1) return byName[0]
+    if (byName.length > 1) return byName[0]
+
+    const byFile = details.filter(
+      (detail) =>
+        detail.file.toLowerCase().includes(lower) || lower.includes(detail.file.toLowerCase())
+    )
+    return byFile.length === 1 ? byFile[0] : null
+  }
+
+  canonicalImage(value: unknown): string | null {
+    return this.canonicalImageEntry(value)?.file ?? null
   }
 
   defaultImage(): string {
@@ -249,14 +322,15 @@ export class CatalogView {
   }
 
   imageList(): string {
-    const details = this.imageDetailsList()
+    const details = this.imagePromptChoices(120)
     if (details.length === 0) return '（目录暂未提供背景）'
     return details
       .map((detail) => {
         const name = detail.name || detail.file
+        const ref = detail.id ?? detail.file
         return detail.description
-          ? `- ${detail.file}（${name}）：${detail.description}`
-          : `- ${detail.file}（${name}）`
+          ? `- ${name}（${ref}）：${detail.description}`
+          : `- ${name}（${ref}）`
       })
       .join('\n')
   }
@@ -267,9 +341,10 @@ export class CatalogView {
     return details
       .map((detail) => {
         const name = detail.name || detail.file
+        const ref = detail.id ?? detail.file
         return detail.description
-          ? `- ${detail.file}（${name}）：${detail.description}`
-          : `- ${detail.file}（${name}）`
+          ? `- ${name}（${ref}）：${detail.description}`
+          : `- ${name}（${ref}）`
       })
       .join('\n')
   }
@@ -547,15 +622,15 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 ## 可用表情（按角色分组；必须用完整表情名）
 {facial_list}
 
-## 可用背景（按场景内容自行选择 file 名写入 images[].image）
+## 可用背景（按场景内容选择名字或 id 写入 images[].image）
 {image_list}
 
-根据场景从上方清单选最贴合的背景；需要换场景时 images 可列多张，snippets 里用对应 imageId。必须使用清单中的 file 名。
+根据场景从上方清单选最贴合的背景；需要换场景时 images 可列多张，snippets 里用对应 imageId。写清单里的名字（如「教室」）或 id（如 bg_a000301）都可以，不要编造。
 
 ## 可用背景音乐（可选；只在场景/背景切换处换曲）
 {bgm_list}
 
-想要 BGM 时在顶层增加 "bgm" 数组，长度与 images 对齐：第一个元素是开场曲，第二个元素在 images[1] 对应的背景切换时接上（整场最多换一次）。元素必须是上方清单里的 file 名。
+想要 BGM 时在顶层增加 "bgm" 数组，长度与 images 对齐：第一个元素是开场曲，第二个元素在 images[1] 对应的背景切换时接上（整场最多换一次）。元素写清单里的曲名或 id 都可以。
 没有合适的就省略该字段，沿用管理员配置的全局 BGM；不要编造曲目，也不要给每句台词换曲。
 
 ## 输出要求
@@ -566,10 +641,10 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 5. 每条 Talk 含 content、ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可）；动作幅度小而自然，禁止大动作；动作/表情必须来自各自角色清单
 6. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 26 字宽、每条最多 3 行；超行拆成连续多条 Talk，话量不减
 7. delay 用 0、0.05、0.1、0.15、0.2
-8. 背景必须从「可用背景」清单按场景内容选择，禁止编造不存在的文件名
+8. 背景必须从「可用背景」清单按场景内容选择，写名字或 id 均可，禁止编造不存在的背景
 9. 成片约 {target_minutes} 分钟的短戏：只演一件事就收，禁止超长剧情
 10. 真冬禁止过于开心的表情与欢快动作
-11. 可选 BGM：顶层 "bgm" 数组与 images 对齐，只能写「可用背景音乐」清单里的 file 名；整场最多换一次，不需要就省略
+11. 可选 BGM：顶层 "bgm" 数组与 images 对齐，写「可用背景音乐」清单里的曲名或 id；整场最多换一次，不需要就省略
 
 场景：{scene}`
 
@@ -608,15 +683,15 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - 可用动作：{motion_list}
 - 可用表情：{facial_list}
 
-## 可用背景（按对话氛围自行选择 file 名写入 images[].image）
+## 可用背景（按对话氛围选择名字或 id 写入 images[].image）
 {image_list}
 
-根据「用户说」的内容从上方清单选最贴合的一张；必须使用清单中的 file 名。
+根据「用户说」的内容从上方清单选最贴合的一张；写名字或 id 都可以，不要编造。
 
 ## 可用背景音乐（可选）
 {bgm_list}
 
-想要 BGM 时在顶层增加 "bgm": ["<file>"]，整场只放一首；必须是上方清单里的 file 名。
+想要 BGM 时在顶层增加 "bgm": ["<曲名或 id>"]，整场只放一首；写清单里的曲名或 id 都可以。
 没有合适的就省略该字段，沿用管理员配置的全局 BGM；不要编造曲目。
 
 ## JSON 结构
@@ -658,10 +733,10 @@ ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear
 2. 开场与退场序列完整；LayoutAppear 从同侧画外滑入、LayoutClear 向同侧画外滑出（wait:true、moveSpeed="Normal"，入场/退场动作禁用 default 站姿）；任意时刻最多两人在场
 3. speaker 与 modelId 必须来自对照表；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可），动作幅度小而自然，禁止大动作
 4. models=[{"id":<所选角色modelId>,"model":"<对照表中的model路径>","normal_scale":2.1,"small_scale":1.8,"anchor":0.5}]（多角色按登场顺序排列）
-5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的 file 名>"}]
+5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的背景名或 id>"}]
 6. delay 用 0、0.05、0.1、0.15、0.2；换气的 Talk 之间 delay 取 0.1~0.2
 7. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 26 字宽、每条最多 3 行；超行拆成连续多条 Talk，话量不减
-8. 可选 BGM：顶层 "bgm": ["<file>"] 只能写「可用背景音乐」清单里的 file 名；不需要就省略
+8. 可选 BGM：顶层 "bgm": ["<曲名或 id>"] 只能写「可用背景音乐」清单里的曲名或 id；不需要就省略
 
 历史对话：
 {chat_history}

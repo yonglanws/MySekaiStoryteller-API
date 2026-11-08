@@ -646,17 +646,10 @@ export function validateAndFixStory(
   }
 
   // ---- images -----------------------------------------------------------------------------------------------
-  const validImages = view.validImages()
   const fixImage = (value: unknown): string => {
-    const cleaned = cleanPath(value)
-    if (validImages.has(cleaned)) return cleaned
-    const lower = cleaned.toLowerCase()
-    for (const candidate of validImages) {
-      if (candidate.toLowerCase().includes(lower) || lower.includes(candidate.toLowerCase())) {
-        return candidate
-      }
-    }
-    return view.defaultImage()
+    // 背景可以写本地文件名、云端 id（bg_a000301）或可读名（教室）；
+    // canonicalImage 统一收束到目录里的 file。
+    return view.canonicalImage(cleanPath(value)) ?? view.defaultImage()
   }
 
   if (!Array.isArray(story.images) || story.images.length === 0) {

@@ -227,7 +227,14 @@ const AssetsSchema = z.object({
   cacheDir: z.string().default('cache/moesekai'),
   concurrency: z.number().default(4),
   timeoutMs: z.number().default(180_000),
-  retries: z.number().default(3)
+  retries: z.number().default(3),
+  /**
+   * 云端资源目录：背景/BGM/Live2D 模型不要求本地预下载或 YAML 登记，
+   * 由宿主从公开资源站生成目录并按需物化。默认开启。
+   */
+  cloudCatalog: z.boolean().default(true),
+  /** 云端目录缓存有效期（小时）；过期后后台刷新，失败沿用旧快照 */
+  cloudCatalogTtlHours: z.number().default(6)
 })
 
 /**
@@ -493,6 +500,15 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_ASSETS_RETRIES) {
     const v = parseInt(env.MSS_ASSETS_RETRIES, 10)
     if (Number.isFinite(v) && v >= 0) config.assets.retries = v
+  }
+  if (env.MSS_ASSETS_CLOUD_CATALOG !== undefined) {
+    config.assets.cloudCatalog = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_ASSETS_CLOUD_CATALOG.toLowerCase()
+    )
+  }
+  if (env.MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS) {
+    const v = parseInt(env.MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS, 10)
+    if (Number.isFinite(v) && v > 0) config.assets.cloudCatalogTtlHours = v
   }
 
   // log

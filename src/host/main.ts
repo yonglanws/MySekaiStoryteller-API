@@ -14,6 +14,8 @@ import { LlmClient } from './ai/llm'
 import { StoryWriter, StoryGenerationError, type GenerateStoryResult } from './ai/storyWriter'
 import { fetchModels, loadMoesekaiIndex, selectModels } from './assets/moesekai'
 import { fetchMedia, listMedia, type MediaKind } from './assets/media'
+import { CloudCatalogService } from './assets/cloudCatalog'
+import { resolveGlobalBgm, resolveStoryCloudAssets } from './assets/cloudAssets'
 import { loadSoundtrackIndex } from './assets/soundtracks'
 import { collectEmotionLabels } from '../common/tts/irodori'
 import { needsJapaneseTtsPreflight } from '../common/tts/speechText'
@@ -86,7 +88,27 @@ async function bootstrap(): Promise<void> {
     onWorkerDisconnected: (workerId) => pool.handleWorkerDisconnected(workerId)
   })
 
-  const resourceCatalog = new ResourceCatalog(logger, config)
+  const cloudCatalog = new CloudCatalogService(logger, config.assets, {
+    ttlMs: Math.max(1, config.assets.cloudCatalogTtlHours) * 60 * 60 * 1000
+  })
+  if (config.assets.cloudCatalog) {
+    // 先读磁盘缓存，再等在线上限 15 秒：离线/资源站慢时不让宿主启动卡死，
+    // 目录刷新会继续在后台跑，导出时再按需物化。
+    fs.mkdirSync(config.paths.resources, { recursive: true })
+    cloudCatalog.loadFromCache()
+    await cloudCatalog.ensure(15_000)
+    const refreshTimer = setInterval(
+      () => void cloudCatalog.refresh(),
+      Math.max(1, config.assets.cloudCatalogTtlHours) * 60 * 60 * 1000
+    )
+    refreshTimer.unref?.()
+  }
+
+  const resourceCatalog = new ResourceCatalog(
+    logger,
+    config,
+    config.assets.cloudCatalog ? () => cloudCatalog.get() : null
+  )
 
   // 宿主内置 AI 剧本生成：LLM 客户端 + 资源目录提示词/校验
   const llmClient = new LlmClient(config.llm, logger)
@@ -110,21 +132,58 @@ async function bootstrap(): Promise<void> {
     outputDir: config.paths.output,
     video: config.video,
     maxConcurrentExports: config.render.workers,
-    // IrodoriTTS 只接受日文：导出前把空/中文 ttsText 补成日文，补不齐直接 400。
-    // TTS 关闭时 ttsText 不进入音轨，不应为了合成约束阻断纯画面导出。
-    prepareStory: needsJapaneseTtsPreflight(config.tts)
-      ? async (story) => {
-          const translated = await storyWriter.ensureJapaneseTtsText(story)
-          if (translated > 0) {
-            logger.info(`[TTS] Export preflight translated ${translated} lines to Japanese`)
-          }
+    // 云端资源物化：故事里的背景名/ID、BGM、Live2D 模型在这里变成
+    // resources/cloud/ 下的真实文件；本地已有文件优先，不覆盖用户资源。
+    prepareStory: async (story) => {
+      if (config.assets.cloudCatalog) {
+        await cloudCatalog.ensure(5_000)
+        const cloudContext = {
+          settings: config.assets,
+          resourcesDir: config.paths.resources,
+          catalog: cloudCatalog.get(),
+          logger
         }
-      : undefined,
+        await resolveGlobalBgm(config.bgm, cloudContext)
+        await resolveStoryCloudAssets(story, cloudContext)
+      }
+      // IrodoriTTS 只接受日文：导出前把空/中文 ttsText 补成日文，补不齐直接 400。
+      // TTS 关闭时 ttsText 不进入音轨，不应为了合成约束阻断纯画面导出。
+      if (needsJapaneseTtsPreflight(config.tts)) {
+        const translated = await storyWriter.ensureJapaneseTtsText(story)
+        if (translated > 0) {
+          logger.info(`[TTS] Export preflight translated ${translated} lines to Japanese`)
+        }
+      }
+    },
     registerExtraRoutes: (app) => {
       app.use('/bridge', createBridgeRouter({ logger, config }))
-      // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单
-      app.get('/api/v1/resources', (_req, res) => {
+      // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
+      // 云端目录第一次刷新可能还在进行，这里最多等 2 秒（有缓存时立即返回）。
+      app.get('/api/v1/resources', async (_req, res) => {
+        if (config.assets.cloudCatalog) {
+          await cloudCatalog.ensure(2_000)
+        }
         res.json({ success: true, ...resourceCatalog.get() })
+      })
+
+      // 手动刷新云端目录（模型/背景/BGM 名称索引）。
+      app.post('/api/v1/cloud/refresh', async (_req, res) => {
+        if (!config.assets.cloudCatalog) {
+          res.status(409).json({ success: false, error: 'cloud catalog is disabled' })
+          return
+        }
+        const catalog = await cloudCatalog.refresh()
+        if (!catalog) {
+          res.status(502).json({ success: false, error: 'cloud catalog refresh failed' })
+          return
+        }
+        res.json({
+          success: true,
+          generatedAt: catalog.generatedAt,
+          models: catalog.models.length,
+          backgrounds: catalog.backgrounds.length,
+          bgm: catalog.bgm.length
+        })
       })
 
       // ---- 云端资源（moesekai / pjsk.moe） ------------------------------------------------------------

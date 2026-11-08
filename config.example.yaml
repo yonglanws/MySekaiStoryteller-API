@@ -214,6 +214,11 @@ assets:
   concurrency: 4                  # 并行下载数（env: MSS_ASSETS_CONCURRENCY）
   timeoutMs: 180000               # 单个文件下载超时（env: MSS_ASSETS_TIMEOUT_MS）
   retries: 3                      # 下载重试次数（env: MSS_ASSETS_RETRIES）
+  cloudCatalog: true              # 云端目录：背景/BGM/Live2D 自动发现，无需本地 YAML 登记
+                                  # 剧本可写背景名（教室）、曲名（Slapstick!!）或云端 id；
+                                  # 导出前按需下载到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_CATALOG）
+  cloudCatalogTtlHours: 6         # 目录缓存有效期（小时）；过期后台刷新，失败沿用旧快照
+                                  # （env: MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS）
 
 # ---------------------------------------------------------------------------
 # 日志
