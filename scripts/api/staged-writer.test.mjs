@@ -282,6 +282,140 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
   assert.ok(directionRequest.messages[1].content.includes('bgm00003.mp3'))
 })
 
+test('staged pipeline translates dialogue while the direction stage is running', async () => {
+  const events = []
+  let releaseTranslation
+  const translationGate = new Promise((resolve) => {
+    releaseTranslation = resolve
+  })
+  const chatResult = (content) => ({
+    content: JSON.stringify(content),
+    model: 'fake-model',
+    usage: null,
+    latencyMs: 1
+  })
+  const llm = {
+    model: 'fake-model',
+    enabled: true,
+    async chat(messages) {
+      const stage = stageOf(messages[0].content)
+      events.push(`start:${stage}`)
+      if (stage === 'cast') return chatResult(castReply)
+      if (stage === 'dialogue') return chatResult(dialogueReply)
+      if (stage === 'direction') {
+        events.push('end:direction')
+        releaseTranslation()
+        return chatResult(directionReply)
+      }
+      throw new Error(`unexpected stage: ${stage}`)
+    },
+    async chatJson(messages) {
+      const stage = stageOf(messages[0].content)
+      events.push(`start:${stage}`)
+      if (stage === 'translate') {
+        // 表演段结束前不应解锁：证明翻译与 direction 同时在进行
+        await translationGate
+        events.push('end:translate')
+        return {
+          data: ['今日も一緒に練習しよう。', 'うん。\nどの曲から始める？', '……どれでもいいよ。'],
+          result: chatResult([])
+        }
+      }
+      throw new Error(`unexpected json stage: ${stage}`)
+    }
+  }
+
+  const writer = new StoryWriter(
+    llm,
+    makeSettings('http://127.0.0.1:1/v1'),
+    catalog,
+    new Logger({ type: 'hidden' })
+  )
+  const result = await writer.generate({ prompt: '放学后聊天', targetMinutes: 0.3 })
+
+  assert.ok(events.includes('start:translate'))
+  assert.ok(
+    events.indexOf('start:translate') < events.indexOf('start:direction'),
+    '翻译应在表演段之前启动'
+  )
+  assert.ok(
+    events.indexOf('end:translate') > events.indexOf('start:direction'),
+    '翻译应跨越整个表演段而不是先完成'
+  )
+  assert.ok(events.indexOf('end:translate') > events.indexOf('end:direction'))
+  assert.equal(result.meta.ttsTranslated, 3)
+  const talks = result.story.snippets.filter((snippet) => snippet.type === 'Talk')
+  assert.deepEqual(
+    talks.map((talk) => talk.data.ttsText),
+    ['今日も一緒に練習しよう。', 'うん。\nどの曲から始める？', '……どれでもいいよ。']
+  )
+})
+
+test('staged pipeline labels emotions while the direction stage is running', async () => {
+  const events = []
+  let releaseEmotion
+  const emotionGate = new Promise((resolve) => {
+    releaseEmotion = resolve
+  })
+  const chatResult = (content) => ({
+    content: JSON.stringify(content),
+    model: 'fake-model',
+    usage: null,
+    latencyMs: 1
+  })
+  const llm = {
+    model: 'fake-model',
+    enabled: true,
+    async chat(messages) {
+      const stage = stageOf(messages[0].content)
+      events.push(`start:${stage}`)
+      if (stage === 'cast') return chatResult(castReply)
+      if (stage === 'dialogue') return chatResult(dialogueReply)
+      if (stage === 'emotion') {
+        await emotionGate
+        events.push('end:emotion')
+        return chatResult({ segments: [{ from: 'l1', to: 'l3', emotion: '开心' }] })
+      }
+      if (stage === 'direction') {
+        // 表演段应看到没有情绪标签的台词稿
+        assert.ok(!messages[1].content.includes('〔'))
+        events.push('end:direction')
+        releaseEmotion()
+        return chatResult(directionReply)
+      }
+      throw new Error(`unexpected stage: ${stage}`)
+    },
+    async chatJson() {
+      throw new Error('unexpected json request')
+    }
+  }
+
+  const writer = new StoryWriter(
+    llm,
+    makeSettings('http://127.0.0.1:1/v1'),
+    catalog,
+    new Logger({ type: 'hidden' }),
+    ['平静', '开心']
+  )
+  const result = await writer.generate({
+    prompt: '两个人聊天',
+    translateForTts: false,
+    targetMinutes: 0.3
+  })
+
+  assert.ok(events.indexOf('start:emotion') < events.indexOf('start:direction'))
+  assert.ok(events.indexOf('end:emotion') > events.indexOf('start:direction'))
+  assert.ok(events.indexOf('end:emotion') > events.indexOf('end:direction'))
+  const stageNames = result.meta.stages.map((stage) => stage.stage)
+  assert.deepEqual(stageNames.slice(0, 3), ['cast', 'dialogue', 'emotion'])
+  assert.equal(stageNames[stageNames.length - 1], 'direction')
+  const talks = result.story.snippets.filter((snippet) => snippet.type === 'Talk')
+  assert.deepEqual(
+    talks.map((talk) => talk.data.emotion),
+    ['开心', '开心', '开心']
+  )
+})
+
 test('staged pipeline falls back to catalog order when casting fails', async (t) => {
   const mock = await startMockLlm(({ system }) => {
     switch (stageOf(system)) {

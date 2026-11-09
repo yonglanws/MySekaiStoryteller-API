@@ -172,8 +172,8 @@ llm:
   timeoutMs: 120000               # 单次 LLM 请求超时（env: MSS_LLM_TIMEOUT_MS）
   retries: 2                      # 网络错误/429/5xx 重试次数（env: MSS_LLM_RETRIES）
   repairRounds: 2                 # single 的校验失败重写轮数；staged 台词/表演各重试一次（env: MSS_LLM_REPAIR_ROUNDS）
-  # staged（默认）：选角 → 只写台词（只带入选角色的完整人设）→ 单独设计动作/表情/背景。
-  # single：一次调用写完整剧本；角色人设短、想省调用次数时用（env: MSS_LLM_PIPELINE）。
+  # staged（默认）：选角 → 只写台词（只带入选角色的核心人设段落）→ 单独设计动作/表情/背景。
+  # single：先快速选角，再一次调用写完整剧本；想压缩调用次数时用（env: MSS_LLM_PIPELINE）。
   pipeline: staged
   jsonMode: auto                  # auto = 先带 response_format 再回退；on = 必须；off = 不发送
   translateForTts: true           # 把中文台词翻译成 ttsText 日文（env: MSS_LLM_TRANSLATE）
@@ -181,6 +181,7 @@ llm:
   systemPrompt: ""                # single 覆盖内置系统提示词；staged 追加到每段系统提示词（env: MSS_LLM_SYSTEM_PROMPT）
   extraBody: {}                   # 原样并入请求体，例如 {"thinking":{"type":"disabled"}}（env: MSS_LLM_EXTRA_BODY）
   personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（文件名或 frontmatter name 为角色名）
+                                  # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
   personas: []                    # 内联人格：name / prompt / aliases / group
   # personas:
   #   - name: 晓山瑞希

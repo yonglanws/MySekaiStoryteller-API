@@ -298,3 +298,9 @@ resources/audio/bgm/*
 
 # 云端资源下载缓存（moesekai 动作包，可断点续传；不进仓库）
 /cache/
+
+# 本地工具与会话状态（不进仓库）
+.mimosa/
+
+# 插件打包产物（根目录临时文件，不进仓库）
+astrbot_plugin_msst.zip

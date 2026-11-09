@@ -5,37 +5,145 @@ import type {
   ResourceCatalogData
 } from '../resources/resourceCatalog'
 import { normalizeBgmFile } from '../../common/audio/bgm'
-import { GENERIC_PROFILE, personaFor, type PersonaEntry } from './personas'
+import { GENERIC_PROFILE, dialoguePersonaPrompt, personaFor, type PersonaEntry } from './personas'
 
-const MAX_FULL_MOTIONS = 60
-const MAX_FULL_FACIALS = 60
+// 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
+// 全量清单会占掉提示词绝大部分，而且长编号列表会诱导模型拼出不存在的名称。
+// 这里按语义挑出覆盖常见情绪的完整名称：既小又准，模型不必猜编号。
+const MOTION_PROMPT_LIMIT = 34
+const FACIAL_PROMPT_LIMIT = 28
+const MOTION_PROMPT_KINDS: Array<[string, number]> = [
+  ['nod', 2],
+  ['tilthead', 2],
+  ['glad', 2],
+  ['sad', 2],
+  ['trouble', 2],
+  ['shakehead', 1],
+  ['surprise', 1],
+  ['shy', 1],
+  ['blushed', 1],
+  ['sigh', 1],
+  ['relief', 1],
+  ['think', 1],
+  ['lookaway', 1],
+  ['lookdown', 1],
+  ['lookup', 1],
+  ['angry', 1],
+  ['forward', 1],
+  ['fidget', 1],
+  ['greeting', 1],
+  ['smug', 1],
+  ['wink', 1],
+  ['scared', 1],
+  ['serious', 1],
+  ['sleep', 1],
+  ['delicious', 1],
+  ['pose', 1],
+  ['default', 1]
+]
+const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
+  ['face_normal', 1],
+  ['face_smile', 2],
+  ['face_sad', 2],
+  ['face_trouble', 2],
+  ['face_angry', 2],
+  ['face_surprise', 1],
+  ['face_shy', 1],
+  ['face_closeeye', 1],
+  ['face_cry', 1],
+  ['face_serious', 1],
+  ['face_sleepy', 1],
+  ['face_sparkling', 1],
+  ['face_disgust', 1],
+  ['face_scared', 1],
+  ['face_smug', 1],
+  ['face_wink', 1],
+  ['face_shock', 1],
+  ['face_worry', 1],
+  ['face_tired', 1],
+  ['face_lookaway', 1],
+  ['face_blushed', 1],
+  ['face_smallmouth', 1],
+  ['face_play', 1],
+  ['face_sing', 1],
+  ['face_baffling', 1]
+]
 
-const MODEL_MOTION_PREFIX = (name: string): string => {
+function motionKind(name: string): string {
+  const segment = name.split('-').pop() ?? name
+  return segment
+    .replace(/\d+[a-z]?$/i, '')
+    .replace(/[A-Z]$/, '')
+    .toLowerCase()
+}
+
+function facialKind(name: string): string {
+  return name.replace(/_\d+$/, '').toLowerCase()
+}
+
+function motionStyle(name: string): string {
   const parts = name.split('-')
-  return parts.length > 1 ? `${parts.slice(0, -1).join('-')}-` : name
+  return parts.length > 2 ? parts[1].toLowerCase() : ''
 }
 
-const FACIAL_PREFIX = (name: string): string => {
-  const index = name.lastIndexOf('_')
-  return index > 0 ? name.slice(0, index) : name
+function comparePromptNames(a: string, b: string): number {
+  const rank = (name: string): [number, number, number, number, string] => {
+    const style = motionStyle(name)
+    const styleRank = style.startsWith('normal')
+      ? 0
+      : style.startsWith('cute') || style.startsWith('happy')
+        ? 1
+        : 2
+    const mirrored = /\d+[a-zA-Z]$/.test(name) ? 1 : 0
+    const numberMatch = /(\d+)[a-z]?$/.exec(name)
+    const number = numberMatch ? Number(numberMatch[1]) : 99
+    return [styleRank, mirrored, number === 1 ? 0 : 1, name.length, name]
+  }
+  const left = rank(a)
+  const right = rank(b)
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] < right[index]) return -1
+    if (left[index] > right[index]) return 1
+  }
+  return 0
 }
 
-function summarize(names: string[], prefix: (name: string) => string, limit: number): string {
-  if (names.length === 0) return '（目录暂未提供）'
-  if (names.length <= limit) return [...names].sort().join('，')
+function curateNames(
+  names: string[],
+  kindOf: (name: string) => string,
+  priorities: Array<[string, number]>,
+  limit: number,
+  defaultName = ''
+): string[] {
+  if (names.length === 0) return []
   const groups = new Map<string, string[]>()
   for (const name of names) {
-    const key = prefix(name)
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key)!.push(name)
+    const kind = kindOf(name)
+    const list = groups.get(kind)
+    if (list) list.push(name)
+    else groups.set(kind, [name])
   }
-  return [...groups.keys()]
-    .sort()
-    .map((key) => {
-      const items = groups.get(key)!.sort()
-      return `${key}*（${items.length}个，如 ${items.slice(0, 2).join('、')}）`
-    })
-    .join('，')
+
+  const picked: string[] = []
+  for (const [kind, wanted] of priorities) {
+    const candidates = (groups.get(kind) ?? []).slice().sort(comparePromptNames)
+    if (candidates.length === 0) continue
+    // 同一语义的多个变体只在同一套动作风格里取，避免 normal 服装配 happy 套的动作
+    const style = motionStyle(candidates[0])
+    let count = 0
+    for (const name of candidates) {
+      if (count >= wanted) break
+      if (motionStyle(name) !== style) continue
+      if (!picked.includes(name)) {
+        picked.push(name)
+        count += 1
+      }
+    }
+  }
+  if (defaultName && names.includes(defaultName) && !picked.includes(defaultName)) {
+    picked.push(defaultName)
+  }
+  return limit > 0 ? picked.slice(0, limit) : picked
 }
 
 /** 背景引用清洗：统一分隔符、去掉多余空白；空值返回空串。 */
@@ -303,21 +411,69 @@ export class CatalogView {
     return this.models.map((model) => `${this.shortName(model)}=${model.id}`).join(', ')
   }
 
+  promptMotions(model: CatalogModel): string[] {
+    return curateNames(
+      model.motions ?? [],
+      motionKind,
+      MOTION_PROMPT_KINDS,
+      MOTION_PROMPT_LIMIT,
+      model.defaultMotion ?? ''
+    )
+  }
+
+  promptFacials(model: CatalogModel): string[] {
+    return curateNames(
+      model.facials ?? [],
+      facialKind,
+      FACIAL_PROMPT_KINDS,
+      FACIAL_PROMPT_LIMIT,
+      model.defaultFacial ?? ''
+    )
+  }
+
+  /** 示例/入场兜底动作：优先语义明确的小动作，绝不选 default 站姿。 */
+  exampleMotion(modelId: number): string {
+    const model = this.modelById(modelId) ?? this.defaultModel()
+    if (!model) return ''
+    const names = this.promptMotions(model)
+    for (const kind of ['nod', 'tilthead', 'glad']) {
+      for (const name of names) {
+        if (motionKind(name) === kind && !name.toLowerCase().includes('default')) return name
+      }
+    }
+    return (
+      names.find((name) => !name.toLowerCase().includes('default')) ?? this.defaultMotion(modelId)
+    )
+  }
+
+  /** 示例表情：平静或微笑优先，避免示例与示例台词的情绪相反。 */
+  exampleFacial(modelId: number): string {
+    const model = this.modelById(modelId) ?? this.defaultModel()
+    if (!model) return ''
+    const names = this.promptFacials(model)
+    for (const kind of ['face_normal', 'face_smile']) {
+      for (const name of names) {
+        if (facialKind(name) === kind) return name
+      }
+    }
+    return names[0] ?? this.defaultFacial(modelId)
+  }
+
   motionList(): string {
     return this.models
-      .map(
-        (model) =>
-          `${this.shortName(model)}(${model.id})：${summarize(model.motions ?? [], MODEL_MOTION_PREFIX, MAX_FULL_MOTIONS)}`
-      )
+      .map((model) => {
+        const names = this.promptMotions(model)
+        return `${this.shortName(model)}(${model.id})：${names.length ? names.join('，') : '（目录暂未提供）'}`
+      })
       .join('\n')
   }
 
   facialList(): string {
     return this.models
-      .map(
-        (model) =>
-          `${this.shortName(model)}(${model.id})：${summarize(model.facials ?? [], FACIAL_PREFIX, MAX_FULL_FACIALS)}`
-      )
+      .map((model) => {
+        const names = this.promptFacials(model)
+        return `${this.shortName(model)}(${model.id})：${names.length ? names.join('，') : '（目录暂未提供）'}`
+      })
       .join('\n')
   }
 
@@ -349,13 +505,18 @@ export class CatalogView {
       .join('\n')
   }
 
-  characterPool(personas: PersonaEntry[]): string {
+  /**
+   * 角色档案。剧本只带核心段落；聊天保留完整人设（共情/交互协议对角色回复有用），
+   * 但调用方已先做快速选角，池子里通常只有 1~2 人。
+   */
+  characterPool(personas: PersonaEntry[], compact = true): string {
     if (this.models.length === 0) return '（资源目录为空，请检查渲染宿主）'
     return this.models
       .map((model) => {
         const persona = personaFor(personas, model)
+        const prompt = compact ? dialoguePersonaPrompt(persona) : (persona?.prompt?.trim() ?? '')
         return `**${this.shortName(model)}** — modelId:${model.id}, model:${model.path}\n${
-          persona?.prompt ?? GENERIC_PROFILE
+          prompt || GENERIC_PROFILE
         }`
       })
       .join('\n\n')
@@ -374,39 +535,18 @@ export function buildActingExample(view: CatalogView): string {
   if (models.length === 0) return '{}'
   const ids = models.map((model) => model.id)
 
-  const stageMotion = (modelId: number): string => {
-    const model = view.modelById(modelId)
-    const names = model?.motions ?? []
-    return (
-      names.find(
-        (name) => !name.toLowerCase().includes('default') && !name.toLowerCase().includes('stand')
-      ) ?? view.defaultMotion(modelId)
-    )
-  }
+  const stageMotion = (modelId: number): string => view.exampleMotion(modelId)
 
-  const paired = (modelId: number, at: number, index = 0): Record<string, unknown> => {
-    const model = view.modelById(modelId)
-    const names = [
-      ...new Set(
-        (model?.motions ?? []).filter(
-          (name) => !name.toLowerCase().includes('default') && !name.toLowerCase().includes('stand')
-        )
-      )
-    ]
-    const motion = names[index] ?? names[0] ?? view.defaultMotion(modelId)
-    const facials = model?.facials ?? []
-    return {
-      at,
-      modelId,
-      motion,
-      facial: facials[0] ?? view.defaultFacial(modelId)
-    }
-  }
+  const paired = (modelId: number, at: number): Record<string, unknown> => ({
+    at,
+    modelId,
+    motion: view.exampleMotion(modelId),
+    facial: view.exampleFacial(modelId)
+  })
 
   const talk = (
     modelId: number,
     content: string,
-    ttsText: string,
     actions: Array<Record<string, unknown>>,
     delay = 0
   ): Record<string, unknown> => ({
@@ -416,14 +556,16 @@ export function buildActingExample(view: CatalogView): string {
     data: {
       speaker: view.shortName(view.modelById(modelId) ?? models[0]),
       content,
-      ttsText,
       modelId,
       actions
     }
   })
 
   const snippets: Array<Record<string, unknown>> = [
-    { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } }
+    { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+    { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } },
+    { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+    { type: 'BlackIn', wait: true, delay: 0, data: { duration: 800 } }
   ]
 
   if (ids.length === 1) {
@@ -437,14 +579,12 @@ export function buildActingExample(view: CatalogView): string {
         from: { side: 'Right', offset: 100 },
         to: { side: 'Center', offset: 0 },
         motion: stageMotion(id),
-        facial: view.defaultFacial(id),
+        facial: view.exampleFacial(id),
         facialFirst: true,
         moveSpeed: 'Normal'
       }
     })
-    snippets.push(
-      talk(id, '今天也想和你多聊一会儿。', '今日も、もう少し話したいな。', [paired(id, 0.1, 1)])
-    )
+    snippets.push(talk(id, '今天也想和你多聊一会儿。', [paired(id, 0)]))
     snippets.push({
       type: 'LayoutClear',
       wait: true,
@@ -454,7 +594,7 @@ export function buildActingExample(view: CatalogView): string {
         from: { side: 'Center', offset: 0 },
         to: { side: 'Center', offset: 100 },
         motion: stageMotion(id),
-        facial: view.defaultFacial(id),
+        facial: view.exampleFacial(id),
         moveSpeed: 'Normal'
       }
     })
@@ -473,26 +613,14 @@ export function buildActingExample(view: CatalogView): string {
           from: { side, offset },
           to: { side, offset: 0 },
           motion: stageMotion(modelId),
-          facial: view.defaultFacial(modelId),
+          facial: view.exampleFacial(modelId),
           facialFirst: true,
           moveSpeed: 'Normal'
         }
       })
     }
-    snippets.push(
-      talk(first, '今天也想和你多聊一会儿。', '今日も、もう少し話したいな。', [
-        paired(first, 0.1, 1)
-      ])
-    )
-    snippets.push(
-      talk(
-        second,
-        '嗯，今天也请多指教。',
-        'うん、今日もよろしくね。',
-        [paired(second, 0.1, 1)],
-        0.1
-      )
-    )
+    snippets.push(talk(first, '今天也想和你多聊一会儿。', [paired(first, 0)]))
+    snippets.push(talk(second, '嗯，今天也请多指教。', [paired(second, 0)], 0.1))
     for (const [index, modelId] of ids.entries()) {
       const side = index === 0 ? 'Left' : 'Right'
       snippets.push({
@@ -504,7 +632,7 @@ export function buildActingExample(view: CatalogView): string {
           from: { side, offset: 0 },
           to: { side, offset: index === 1 ? 100 : -100 },
           motion: stageMotion(modelId),
-          facial: view.defaultFacial(modelId),
+          facial: view.exampleFacial(modelId),
           moveSpeed: 'Normal'
         }
       })
@@ -576,9 +704,9 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 - 旧 motion/facial 字段可选，仅作 at=0 起始姿态兜底；不要与 actions 重复安排同一变化。只需换表情时省略 motion。
 - 表情跟随情绪转折而非逐句重置；允许整段安静倾听。
 - 句间静默续演才用独立 Motion.data.actions，wait:true，duration 为秒（默认 2，必须 >0 且 <=120）；at 同样按该 duration 的比例。演静默拍前可以先 HideTalk 收起对话框，演完下一句 Talk 会自动重新显示；一场最多一两次。不能用它替代 Talk 内听者反应。
-- 动作/表情须来自对应 modelId 的完整名称，清单的前缀 * 只是分组，不是资源名；仅用明确列出的完整样例或默认值，不猜编号。
+- 动作/表情须来自对应 modelId 的清单，写完整名称；不确定就省略，不要猜编号。
 - **台词之间要有呼吸间隔**：换人 delay 取 0.1~0.2；同一人连续说话 delay 取 0.15~0.2
-- 每个 Talk 含 content（中文）和 ttsText（日文翻译），排版必须遵守下方「台词排版硬规则」
+- 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。排版必须遵守下方「台词排版硬规则」
 - 对话以短句往返为主：同一角色连续说话多为 1~2 句，偶尔 3 句；不要 4 句以上独白，也不要机械一人一句；话量跟随角色性格，不额外规定多少；排版拆条只是换行方式，不减少总话量
 - **朝比奈真冬 / 真冬**：表情克制，禁止过于开心的表情（如 face_smile、face_sparkling、face_wink 及同类灿烂笑）；用 face_normal、face_sad 等平静或淡漠表情。动作同样避免 happy/cute/glad 一类欢快肢体
 
@@ -596,7 +724,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 2. **禁止连续两个及以上 \\n**（不允许空行）；台词首尾不得有换行或空格
 3. 每行不超过 26 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
 4. 每条 Talk **最多 3 行**（最多 2 个 \\n）——这只是排版规则，**不是话量限制**：话多的角色照样多说，把话**拆成同角色的连续多条 Talk**（delay 取 0.15~0.2）即可；禁止为了塞进一条而删减、缩短台词，也禁止写出超过 3 行的单条 Talk
-5. ttsText 的换行位置与 content 保持一致
+5. 不要写 ttsText；宿主会按 content 逐条补日文翻译
 
 ## 成片时长
 
@@ -616,10 +744,14 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 {acting_example}
 \`\`\`
 
-## 可用动作（按角色分组；必须用对应角色的完整动作名）
+## 动作/表情关键词（名称由英文语义 + 编号组成；直接输出完整名称）
+- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 表情：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
+
+## 可用动作（按角色分组；直接输出完整名称）
 {motion_list}
 
-## 可用表情（按角色分组；必须用完整表情名）
+## 可用表情（按角色分组；直接输出完整名称）
 {facial_list}
 
 ## 可用背景（按场景内容选择名字或 id 写入 images[].image）
@@ -638,7 +770,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 2. 开场与退场序列完整；LayoutAppear 从同侧画外滑入、LayoutClear 向同侧画外滑出（wait:true、moveSpeed="Normal"，入场/退场动作禁用 default 站姿）；任意时刻最多两人在场
 3. models 的 id 和路径必须与对照表一致，多角色绝不能写成同一个模型；数组顺序与登场顺序一致
 4. 所有 Talk/Motion/LayoutAppear/LayoutClear 的 modelId：{id_mapping}
-5. 每条 Talk 含 content、ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可）；动作幅度小而自然，禁止大动作；动作/表情必须来自各自角色清单
+5. 每条 Talk 只写 content、不要写 ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可）；动作幅度小而自然，禁止大动作；动作/表情必须来自各自角色清单
 6. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 26 字宽、每条最多 3 行；超行拆成连续多条 Talk，话量不减
 7. delay 用 0、0.05、0.1、0.15、0.2
 8. 背景必须从「可用背景」清单按场景内容选择，写名字或 id 均可，禁止编造不存在的背景
@@ -679,7 +811,9 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - **默认只演说话者**：听者大多数时候安静倾听，可以每隔 3~4 句只换一次表情（不配身体动作），被台词明显触动时才加一个轻微动作，整场几次即可，每句最多 1 项；听者只做动作表情，不伪造嘴型或加假台词；不要在 Talk 后插 Motion(wait:false) 冒充说话期间的反应。
 - **动作要有语义、幅度克制**：动作贴说话内容和情节（说到某物指一指、被戳中时惊讶、安心时松口气），选幅度小而自然的动作（点头、歪头、小手势、轻摆），**禁止幅度过大的动作**（大挥臂、夸张甩头、大幅度摇晃一类）。动作与表情同向：点头/歪头配微笑或平静，叹气/垂眼配为难或低落，惊讶配瞪眼，生气配皱眉。同一角色连续多句时每句换一个不同动作，不要每句摆回同一个起手式；禁止与台词无关的乱动、机关枪式换动作、每句重播同一动作，也不要把动作均匀铺满整句。
 - 旧 motion/facial 可选，作 at=0 的起始姿态兜底；不要与 actions 重复。句间静默续演才用 Motion.data.actions（wait:true，duration 秒数 >0 且 <=120，默认 2），不能替代 Talk 内听者反应。
-- 只使用对应角色清单里明确列出的完整名称；前缀 * 是分组，不是动作名，不要猜编号。
+- 只使用对应角色清单里明确列出的完整名称；不确定就省略，不要猜编号。
+- 动作关键词：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 表情关键词：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
 - 可用动作：{motion_list}
 - 可用表情：{facial_list}
 
@@ -695,14 +829,14 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 没有合适的就省略该字段，沿用管理员配置的全局 BGM；不要编造曲目。
 
 ## JSON 结构
-每个 Talk 必须包含 content（中文）和 ttsText（日文翻译）。
+每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
 
 ### 台词排版硬规则（防止字幕溢出，违反必被退回修正）
 1. content 是 JSON 字符串：换行只能写成转义符 \\n，字符串内部**禁止直接回车**
 2. **禁止连续两个及以上 \\n**（不允许空行）；台词首尾不得有换行或空格
 3. 每行不超过 26 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
 4. 每条 Talk **最多 3 行**（最多 2 个 \\n）——这只是排版规则，**不是话量限制**：话多的角色照样多说，把话**拆成同角色的连续多条 Talk**（delay 取 0.15~0.2）即可；禁止为了塞进一条而删减、缩短台词，也禁止写出超过 3 行的单条 Talk
-5. ttsText 的换行位置与 content 保持一致
+5. 不要写 ttsText；宿主会按 content 逐条补日文翻译
 
 开场滑入 + 对话表演 + 结尾滑出退场：
 \`\`\`
@@ -731,7 +865,7 @@ ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear
 ## 输出要求
 1. 只输出合法 JSON，无额外文字；含 models、images、snippets，可选顶层 bgm
 2. 开场与退场序列完整；LayoutAppear 从同侧画外滑入、LayoutClear 向同侧画外滑出（wait:true、moveSpeed="Normal"，入场/退场动作禁用 default 站姿）；任意时刻最多两人在场
-3. speaker 与 modelId 必须来自对照表；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可），动作幅度小而自然，禁止大动作
+3. speaker 与 modelId 必须来自对照表；每条 Talk 只写 content、不写 ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可），动作幅度小而自然，禁止大动作
 4. models=[{"id":<所选角色modelId>,"model":"<对照表中的model路径>","normal_scale":2.1,"small_scale":1.8,"anchor":0.5}]（多角色按登场顺序排列）
 5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的背景名或 id>"}]
 6. delay 用 0、0.05、0.1、0.15、0.2；换气的 Talk 之间 delay 取 0.1~0.2
@@ -802,7 +936,7 @@ export function buildChatPrompt(
 
   const user = fillTemplate(CHAT_PROMPT, {
     '{target_minutes}': String(options.targetMinutes),
-    '{character_pool}': view.characterPool(options.personas),
+    '{character_pool}': view.characterPool(options.personas, false),
     '{model_table}': view.modelTable(),
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),

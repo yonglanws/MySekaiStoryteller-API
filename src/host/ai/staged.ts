@@ -1,5 +1,5 @@
 import type { CatalogModel } from '../resources/resourceCatalog'
-import { GENERIC_PROFILE, personaFor, type PersonaEntry } from './personas'
+import { GENERIC_PROFILE, dialoguePersonaPrompt, personaFor, type PersonaEntry } from './personas'
 import type { CatalogView } from './prompt'
 
 /**
@@ -40,6 +40,8 @@ export interface StagedDialogueLine {
   content: string
   /** TTS 情绪标签；未配置情绪时为空 */
   emotion?: string
+  /** 日文配音文本；翻译段提前并行填写，合成时写入 Talk */
+  ttsText?: string
 }
 
 export interface StagedDialogue {
@@ -270,13 +272,6 @@ function castBlock(plan: StagedCastPlan): string {
     .join('\n')
 }
 
-function fullNameList(names: string[], limit = 320): string {
-  if (names.length === 0) return '（无）'
-  const sorted = [...new Set(names)].sort()
-  if (sorted.length <= limit) return sorted.join('、')
-  return `${sorted.slice(0, limit).join('、')}（其余 ${sorted.length - limit} 个省略）`
-}
-
 function lineBudget(targetMinutes: number): number {
   // 官方 40 句 / 约 746 字 ≈ 3 分钟，折算 16 句/分钟。台词轮已经要求平均 17~20 字，
   // 再按 18 句/分钟给预算会写到 4 分钟；这里留一点余量，由长度保护兜底补写。
@@ -365,6 +360,35 @@ ${JSON.stringify(example, null, 2)}
   }
 }
 
+export interface QuickCastOptions {
+  scene: string
+  personas: PersonaEntry[]
+  history?: Array<{ role: string; content: string }>
+}
+
+/**
+ * 快速选角：single/chat 只有一次主生成，先把 26 人缩到 1~2 人，
+ * 避免把 26 份完整人设（约 22 万字符）全部塞进主提示词。
+ */
+export function buildQuickCastPrompt(view: CatalogView, options: QuickCastOptions): StagedMessages {
+  const roster = view.models
+    .map((model) => {
+      const persona = personaFor(options.personas, model)
+      const summary = personaSummary(persona)
+      return `- modelId=${model.id} ${view.shortName(model)}${summary ? `：${summary}` : ''}`
+    })
+    .join('\n')
+  const history = (options.history ?? [])
+    .slice(-4)
+    .map((message) => `${message.role}: ${message.content}`)
+    .join('\n')
+  return {
+    system:
+      '你是角色选择器。根据用户消息从角色池选 1 个最合适的角色；只有用户明确描述两人互动时才选 2 个。只输出 JSON：{"cast":[modelId,...]}。',
+    user: `用户说：${options.scene}\n${history ? `最近对话：\n${history}\n` : ''}\n可选角色：\n${roster}\n\n只输出 JSON。`
+  }
+}
+
 export function normalizeCastPlan(
   raw: unknown,
   view: CatalogView,
@@ -446,7 +470,7 @@ export function buildDialoguePrompt(
     .map((member) => {
       const model = view.modelById(member.modelId)
       const persona = model ? personaFor(options.personas, model) : null
-      const prompt = persona?.prompt?.trim()
+      const prompt = dialoguePersonaPrompt(persona)
       return [
         `### ${member.name}（say: "${member.name}"）`,
         member.role ? `本场功能：${member.role}` : '',
@@ -1176,17 +1200,22 @@ export function buildDirectionPrompt(
     )
     .join('\n')
 
+  // 情绪标注和表演设计并行时台词上还没有〔情绪〕标签，提示词改用按台词语气判断的写法。
+  const hasEmotionTags = dialogue.lines.some((line) => line.emotion)
+
   const motionLines = plan.cast
     .map((member) => {
       const model = view.modelById(member.modelId)
-      return `${member.name}(${member.modelId})：${fullNameList(model?.motions ?? [])}`
+      const names = model ? view.promptMotions(model) : []
+      return `${member.name}(${member.modelId})：${names.length ? names.join('，') : '（无）'}`
     })
     .join('\n')
 
   const facialLines = plan.cast
     .map((member) => {
       const model = view.modelById(member.modelId)
-      return `${member.name}(${member.modelId})：${fullNameList(model?.facials ?? [])}`
+      const names = model ? view.promptFacials(model) : []
+      return `${member.name}(${member.modelId})：${names.length ? names.join('，') : '（无）'}`
     })
     .join('\n')
 
@@ -1216,8 +1245,8 @@ export function buildDirectionPrompt(
   const second = plan.cast[1]
   const firstModel = view.modelById(first.modelId)
   const secondModel = second ? view.modelById(second.modelId) : null
-  const firstMotion = firstModel?.motions.find((name) => !isStandingMotion(name)) ?? ''
-  const firstFacial = firstModel?.facials[0] ?? ''
+  const firstMotion = firstModel ? view.exampleMotion(firstModel.id) : ''
+  const firstFacial = firstModel ? view.exampleFacial(firstModel.id) : ''
   const bgmChoicesList = view.bgmPromptChoices(40)
   const firstBgm = bgmChoicesList[0]?.file ?? ''
   const secondBgmChoice = bgmChoicesList.find((choice) => choice.file !== firstBgm)?.file ?? ''
@@ -1234,8 +1263,8 @@ export function buildDirectionPrompt(
         id: dialogue.lines[0]?.id ?? 'l1',
         ...(firstMotion ? { motion: firstMotion } : {}),
         ...(firstFacial ? { facial: firstFacial } : {}),
-        ...(secondModel?.facials[0]
-          ? { listener: { modelId: secondModel.id, facial: secondModel.facials[0] } }
+        ...(secondModel
+          ? { listener: { modelId: secondModel.id, facial: view.exampleFacial(secondModel.id) } }
           : {})
       }
     ]
@@ -1259,6 +1288,10 @@ ${castLines}
 ## 台词稿（逐字，只能引用 id，不能改字）
 ${dialogueLines}
 
+## 动作/表情关键词（名称由英文语义 + 编号组成；直接输出完整名称）
+- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 表情：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
+
 ## 可用动作（必须使用对应角色的完整名称）
 ${motionLines}
 
@@ -1277,9 +1310,7 @@ ${bgmChoices || '（目录暂未提供带描述的 BGM，bgm 留空）'}
   只有情绪明显转折时才给同一句第 2 个动作，但输出格式只保留 1 个说话者主动作。
 - 听者反应：约 1/5 的句子给听者 1 个表情（可带一个轻微动作），优先放在换人说话和情绪转折处；
   其余句子让听者安静倾听，不要每句都反应。
-- 表情跟该句的〔情绪〕同向：平静段以 normal / smallmouth / closeeye 为主，不要每句都笑；
-  开心段再用 smile；伤心段用 sad / cry；生气段用 angry / sharp；惊讶/害羞只在对应段用。
-  同一情绪段内不要频繁换相反表情。
+- 表情${hasEmotionTags ? '跟该句的〔情绪〕同向：平静段以 normal / smallmouth / closeeye 为主，不要每句都笑；\n  开心段再用 smile；伤心段用 sad / cry；生气段用 angry / sharp；惊讶/害羞只在对应段用。\n  同一情绪段内不要频繁换相反表情。' : '跟该句的语气同向：日常陈述用 normal / smallmouth / closeeye，不要每句都笑；\n  明显开心用 smile；失落/回忆用 sad / cry；争执用 angry / sharp；突然的揭示或意外才用\n  surprise；被夸/慌张用 shy。相邻句子不要频繁换相反表情。'}
 - 动作贴台词语义，幅度小而自然（点头、歪头、抬手、轻叹、垂眼）；禁止大挥臂、夸张甩头、跑跳。
 - 同一角色连续多句时换不同动作，不要每句重复同一个起手式；动作与表情同向。
 - 动作/表情必须来自对应角色的清单；不确定就省略，不要编造名称。省略动作优于编错。
@@ -1762,7 +1793,7 @@ export function composeStory(
       data: {
         speaker: member.name,
         content: line.content,
-        ttsText: '',
+        ttsText: line.ttsText ?? '',
         emotion: line.emotion ?? '',
         modelId: member.modelId,
         ...(actions.length > 0 ? { actions } : {})

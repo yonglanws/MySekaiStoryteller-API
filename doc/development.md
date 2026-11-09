@@ -8,7 +8,6 @@
 
 ```text
 config.example.yaml   配置样例（复制为 config.yaml，正式配置不入库）
-CHANGELOG.md          版本变更记录
 src/host/             Node 宿主：API / 静态托管 / 桥接层 / 渲染池 / ffmpeg 编码
 src/host/ai/          宿主内置 AI：LLM 客户端、提示词、剧本校验与 TTS 翻译
 src/host/assets/      Moesekai 模型索引、下载、sse-motion 转 motion3、清单更新
@@ -21,7 +20,6 @@ resources/            模型、背景、语音、BGM 与剧本；渲染资源不
 out/webrenderer/      网页渲染端构建产物
 out-host/             宿主编译产物
 doc/                  使用与开发文档
-docs/                 旧版部署文档的兼容入口
 documents/assets/     README 使用的图片
 deploy/               systemd 单元
 scripts/              测试与工具脚本

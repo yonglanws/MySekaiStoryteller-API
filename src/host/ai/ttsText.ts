@@ -11,6 +11,16 @@ export function isJapaneseText(text: string): boolean {
   return /[\u3040-\u30ff\u31f0-\u31ff]/.test(text)
 }
 
+/**
+ * 是否含需要翻译的语言内容。
+ *
+ * 只有标点/符号/空白的 Talk（如「……」「——」「♪」）没有可翻译的语义，
+ * 也不该因为没有假名被当成“漏翻”阻断整次导出。
+ */
+export function hasTranslationContent(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text)
+}
+
 export interface TtsTarget {
   snippetIndex: number
   content: string
@@ -24,6 +34,7 @@ export function collectTtsTargets(story: StoryData): TtsTarget[] {
     if (snippet.type !== 'Talk') return
     const data = snippet.data as { ttsText?: string; content: string }
     if (!data.content?.trim()) return
+    if (!hasTranslationContent(data.content)) return
     if (isJapaneseText(data.ttsText ?? '')) return
     targets.push({ snippetIndex, content: data.content, data: data as TtsTarget['data'] })
   })
@@ -51,54 +62,95 @@ export class TtsTextTranslationError extends Error {
   }
 }
 
+export interface EnsureJapaneseTtsOptions {
+  chunkSize?: number
+  /** 同一轮内同时发出的翻译批次数（默认 3；1 = 串行） */
+  concurrency?: number
+  /** 仍有缺失时额外补翻的轮数（默认 1；每轮批量会缩小，便于定位到具体台词） */
+  retries?: number
+  strict?: boolean
+}
+
+/** 固定并发跑完一组任务；单个任务内部自己处理错误。 */
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  const limit = Math.max(1, Math.min(Math.floor(concurrency) || 1, items.length))
+  let cursor = 0
+  const runners = Array.from({ length: limit }, async () => {
+    while (cursor < items.length) {
+      const index = cursor
+      cursor += 1
+      await worker(items[index])
+    }
+  })
+  await Promise.all(runners)
+}
+
 /**
  * 批量补齐日文 ttsText。
  *
  * - 已有日文（含假名）的句子原样保留，不重复翻译；
- * - 翻译结果必须仍是长度相同的数组，否则整块放弃并记 missing；
+ * - 只有标点/符号的 Talk 不需要翻译，也不计入缺失；
+ * - 翻译结果必须仍是长度相同的数组，否则整块放弃并进入下一轮补翻；
  * - strict=true 时，仍有缺失就抛 TtsTextTranslationError（导出前预检用）。
  */
 export async function ensureJapaneseTtsText(
   story: StoryData,
   translate: TtsBatchTranslator,
   logger: Pick<Logger<ILogObj>, 'info' | 'warn'>,
-  options: { chunkSize?: number; strict?: boolean } = {}
+  options: EnsureJapaneseTtsOptions = {}
 ): Promise<EnsureJapaneseTtsResult> {
-  const targets = collectTtsTargets(story)
-  if (targets.length === 0) return { translated: 0, missing: [] }
-
-  const chunkSize = Math.max(1, options.chunkSize ?? 20)
+  const baseChunkSize = Math.max(1, options.chunkSize ?? 20)
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 3))
+  const retries = Math.max(0, Math.floor(options.retries ?? 1))
   let translated = 0
 
-  for (let offset = 0; offset < targets.length; offset += chunkSize) {
-    const chunk = targets.slice(offset, offset + chunkSize)
-    const input = chunk.map((target) => target.content)
-    try {
-      const output = await translate(input)
-      if (!Array.isArray(output) || output.length !== input.length) {
-        logger.warn(
-          `[TTS] 日文翻译数量不匹配（期望 ${input.length}，收到 ${
-            Array.isArray(output) ? output.length : 0
-          }），保留缺失 ttsText`
-        )
-        continue
-      }
-      for (let index = 0; index < chunk.length; index++) {
-        const value = output[index]
-        if (typeof value !== 'string' || !value.trim() || !isJapaneseText(value)) {
-          logger.warn(`[TTS] snippets[${chunk[index].snippetIndex}] 翻译结果不是日文，已忽略`)
-          continue
-        }
-        chunk[index].data.ttsText = value.trim()
-        translated += 1
-      }
-    } catch (error) {
-      logger.warn(
-        `[TTS] 日文翻译失败（${offset + 1}-${offset + chunk.length}）：${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
+  // 第一轮按正常批量翻译；仍缺时再补翻，批量缩小以降低“一条坏掉整块丢弃”的影响。
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const targets = collectTtsTargets(story)
+    if (targets.length === 0) break
+    const chunkSize = attempt === 0 ? baseChunkSize : Math.max(1, Math.min(5, baseChunkSize))
+    if (attempt > 0) {
+      logger.info(`[TTS] 仍有 ${targets.length} 条缺少日文 ttsText，开始第 ${attempt + 1} 轮补翻`)
     }
+
+    const chunks: TtsTarget[][] = []
+    for (let offset = 0; offset < targets.length; offset += chunkSize) {
+      chunks.push(targets.slice(offset, offset + chunkSize))
+    }
+    // 各批次互不依赖，并发发送；长台词分 3 批时翻译时间和单批持平。
+    await runWithConcurrency(chunks, concurrency, async (chunk) => {
+      const input = chunk.map((target) => target.content)
+      try {
+        const output = await translate(input)
+        if (!Array.isArray(output) || output.length !== input.length) {
+          logger.warn(
+            `[TTS] 日文翻译数量不匹配（期望 ${input.length}，收到 ${
+              Array.isArray(output) ? output.length : 0
+            }），保留缺失 ttsText`
+          )
+          return
+        }
+        for (let index = 0; index < chunk.length; index++) {
+          const value = output[index]
+          if (typeof value !== 'string' || !value.trim() || !isJapaneseText(value)) {
+            logger.warn(`[TTS] snippets[${chunk[index].snippetIndex}] 翻译结果不是日文，已忽略`)
+            continue
+          }
+          chunk[index].data.ttsText = value.trim()
+          translated += 1
+        }
+      } catch (error) {
+        logger.warn(
+          `[TTS] 日文翻译失败（${chunk[0]?.snippetIndex ?? 0} 起 ${chunk.length} 条）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+    })
   }
 
   const missing = collectTtsTargets(story).map((target) => target.snippetIndex)
