@@ -4,8 +4,6 @@
 
 **无头纯 API 的 Project SEKAI 风格 Live2D 视频渲染框架**
 
-当前版本 2.0.0
-
 <a href="#项目简介">项目简介</a> ·
 <a href="#快速开始">快速开始</a> ·
 <a href="#api-接口">API 接口</a> ·
@@ -13,8 +11,6 @@
 <a href="#相关内容">相关内容</a>
 
 </div>
-
-> 这个项目疑似过于史山了...
 
 > [!IMPORTANT]
 > 本项目基于 [Untitled-Story/MySekaiStoryteller](https://github.com/Untitled-Story/MySekaiStoryteller) **二次开发**，
