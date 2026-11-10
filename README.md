@@ -17,8 +17,6 @@
 > 如需桌面编辑器，请访问原项目。
 > 感谢原作者 [GuangChen2333](https://github.com/GuangChen2333) 与 [Untitled-Story](https://github.com/Untitled-Story) 组织。
 
-[示例成片 (2026-9-20)](https://share.fnnas.net/s/7cefbd92baf04955b3)（由 DeepSeek V4.1 Flash & [AstrBot 插件](https://github.com/yonglanws/astrbot_plugin_msst) 一句话生成）
-
 ## 项目简介
 
 接收 `*.sekai-story.json` 剧本，通过 HTTP API 渲染并导出 Project SEKAI 风格的 Live2D MP4 视频。
