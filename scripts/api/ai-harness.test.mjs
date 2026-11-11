@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import { Logger } from 'tslog'
 import { LlmClient } from '../../out-host/host/ai/llm.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
-import { CatalogView, buildActingExample } from '../../out-host/host/ai/prompt.js'
+import { CatalogView, buildActingExample, buildStoryPrompt } from '../../out-host/host/ai/prompt.js'
 import { dialoguePersonaPrompt } from '../../out-host/host/ai/personas.js'
 import { buildDirectionPrompt } from '../../out-host/host/ai/staged.js'
 
@@ -196,6 +196,52 @@ test('direction prompt stays small with two full-size cloud characters', () => {
   assert.ok(total < 12000, `direction prompt ${total} chars`)
   assert.ok(!messages.user.includes('（其余 '))
   assert.ok(messages.user.includes('动作/表情关键词'))
+})
+
+test('background prompts keep the time of day consistent and prefer described entries', () => {
+  const view = new CatalogView({
+    ...catalogData,
+    images: ['bg_room.jpg', 'cloud/bg_a000501'],
+    imageDetails: [
+      { file: 'bg_room.jpg', name: '瑞希房间·夜晚', description: '夜晚的卧室' },
+      {
+        file: 'cloud/bg_a000501',
+        name: '神山高校',
+        description: '',
+        id: 'bg_a000501',
+        source: 'cloud'
+      }
+    ]
+  })
+  const story = buildStoryPrompt(view, {
+    scene: '两人在夜晚的房间里聊天',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(story.user.includes('时段（白天/黄昏/夜晚）'))
+  assert.ok(story.user.includes('优先选有描述的条目'))
+  assert.ok(story.user.includes('瑞希房间·夜晚'))
+  assert.ok(story.user.includes('神山高校'))
+
+  const plan = {
+    title: '测试',
+    event: '夜晚的房间里聊天',
+    logline: '',
+    outline: [],
+    cast: [{ modelId: 1, name: '瑞希', fullName: '晓山瑞希', path: models[0].path, role: '发起' }],
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: [{ id: 'l1', speaker: '瑞希', content: '今晚的月亮好亮。' }]
+  }
+  const direction = buildDirectionPrompt(view, plan, dialogue, {
+    scene: '夜晚的房间里聊天',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(direction.user.includes('时段（白天/黄昏/夜晚）'))
+  assert.ok(direction.user.includes('优先选有描述的条目'))
 })
 
 test('acting example includes the background sequence and no ttsText', () => {
