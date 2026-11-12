@@ -48,6 +48,7 @@
 
 - **Irodori LoRA 缓存 8 → 3**（`/etc/systemd/system/irodori-tts.service.d/lora-cache.conf`）。重启后空闲显存 5.4 GB → 2.2 GB，加载 3 个 adapter 后约 3.4 GB，给双并发渲染留出约 4 GB 余量。代价是第 4 个角色起需要从磁盘重新加载 adapter（prepare 约 0.2 s + 读盘），对 2-3 人剧本无影响。
 - **健康看门狗**：`render-healthcheck.timer` 每 2 分钟探测 `:9881/api/v1/health` 与 `:9882/api/v1/health`；连续 3 次失败才重启对应 unit，避免单次慢响应误杀。安装在 `/usr/local/bin/render-healthcheck.sh`、`/etc/systemd/system/render-healthcheck.{service,timer}`。
+- **帧目录兜底清扫**：`mss-temp-clean.timer` 每 15 分钟删除 30 分钟未被写入的 `/tmp/mss-hf-*`。宿主进程升级到含即时清理的版本后，这层只是崩溃兜底。
 
 ## 3. 并发与容量结论
 
