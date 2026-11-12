@@ -23,6 +23,7 @@
 5. Irodori 是**共享瓶颈**：聊天 TTS 稳定在每分钟 7-9 个请求，单合成槽位 FIFO。视频 TTS 每句要排队 30-70 秒，58 句剧本的导出在 TTS 阶段就超过 8 分钟。
 6. MSST 的桥接 TTS 代理写死 120 秒超时，而宿主 `tts.timeoutMs` 是 180 秒。Irodori 排队超过 120 秒时，桥接先返回 TimeoutError，渲染端重试两次后把该句当静音跳过；日志表现为每 2 分钟一条 `[Bridge] TTS proxy fetch failed TimeoutError`。这是高峰时“视频没声音”的直接原因。
 7. ournotes 的 `tts.timeoutMs` 同样是 180 秒。实测 4 句台词在混合负载下 line 3 连续超时两次后被跳过，成片缺一句。
+8. MSST fast 导出的 JPEG 帧序列（每份 50-400MB）在成功后没有删除，只靠宿主的 6 小时 temp sweep 兜底。实测 1 小时留下 5 份、约 1.4GB；`/` 只有 12GB 可用，连续运行会填满根分区。
 
 ## 2. 已实施改动
 
@@ -32,6 +33,7 @@
 - **导出并发与 worker 数解耦**：新增 `render.maxConcurrentExports`（0 = 跟随 workers，env `MSS_MAX_CONCURRENT_EXPORTS`）。服务器配置 `workers: 3`、`maxConcurrentExports: 2`：2 个并发导出 + 1 个热备 worker，单个 worker 崩溃或回收时不必等新浏览器启动。
 - **页面回收**：`workerRecycleExports: 5 → 3`，降低 Live2D/字体/纹理的内存累积。
 - **桥接 TTS 超时与宿主对齐**：`/bridge/proxy/tts-fetch` 的 `AbortSignal.timeout` 从写死 120 秒改为 `max(120s, tts.timeoutMs)`。服务器 `tts.timeoutMs` 设为 600 秒，覆盖 Irodori 最长 300 秒排队 + 合成 + 编码。
+- **帧序列即时清理**：fast 导出编码成功后删除 `/tmp/mss-hf-*` 的 JPEG 帧与空父目录；失败时保留给 6 小时 sweep 兜底（便于排查）。实测一次清理约 1.4GB 积压。
 - 服务器配置见 `/vol2/1000/MySekaiStoryteller/config.yaml`（不入库）。
 
 ### 2.2 ournotes-player

@@ -340,6 +340,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           `[Bridge] API frames-encode: framesDir=${payload.framesDir}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
         )
 
+        let encoded = false
         try {
           const channelStart = Date.now()
           const outputDir = path.dirname(payload.outputPath)
@@ -386,6 +387,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             `[Bridge] API frames-encode: Video exported successfully: ${payload.outputPath}, ` +
               `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
+          encoded = true
           return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
         } catch (error) {
           logger.error('[Bridge] API frames-encode failed', error)
@@ -398,6 +400,16 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
           } catch {
             /* cleanup */
+          }
+          // 成片已写出，JPEG 帧序列不再需要；每份 50-400MB，放着会把 /tmp 撑满（6 小时的清扫兜底太慢）。
+          if (encoded) {
+            try {
+              await fs.promises.rm(payload.framesDir, { recursive: true, force: true })
+              const parent = path.dirname(payload.framesDir)
+              if (path.basename(parent).startsWith('mss-hf-')) await fs.promises.rmdir(parent)
+            } catch {
+              /* 目录可能已被清扫或仍被占用 */
+            }
           }
         }
       }
