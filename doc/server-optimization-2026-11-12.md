@@ -57,7 +57,7 @@
 - 两个宿主**同时**各跑 2 个任务时，4 核 CPU 与单 GPU 会同时饱和，单个任务耗时约为独占时的 2-3 倍。这是 8 GB 显卡 + 4 核 CPU 的硬件上限，不是配置问题。上线后按“各 2 并发、其余排队”运行即可，不建议再提高并发。
 - Irodori 是跨项目共享瓶颈。实测合成吞吐约 5-7 个请求/分钟；在 2 个 MSST 导出 + 1 个 ournotes 渲染同时排队时，单句 TTS 的 `elapsed` 达到 170-284 秒（其中大部分是排队）。聊天 TTS 插件的 `auto.tts_prob` 为 1.0（每条回复都配音），是队列的主要来源。
 - 结论：**两个宿主同时各跑 2 个任务时，导出会成功但非常慢（16 句的 MSST 导出实测 9.6-21.5 分钟）**。如果要把视频耗时压到 5 分钟级，需要降低聊天 TTS 的发声比例（例如 `tts_prob` 0.3-0.5）或给视频请求单独分配 TTS 容量；仅靠宿主侧并发参数无法解决。
-- 实测极端情况：聊天高峰 + 2 个视频导出并发时，一个长剧本在 3600 秒（插件 `export_timeout`）处被取消；宿主正常取消并释放 worker，没有崩溃或残留。上线前如果仍维持 `tts_prob=1.0`，长剧本会重复出现这种超时，建议把 `max_lines` 降到 24-30 或降低聊天发声比例。
+- 实测极端情况：聊天高峰 + 2 个视频导出并发时，一个 47-59 句的长剧本会撞上导出超时（先在 3600 秒处观察到两次，宿主正常取消并释放 worker，没有崩溃或残留）；两个插件已把 `export_timeout` 提到 7200 秒，同时建议把 `max_lines` 降到 24-30 或降低聊天发声比例，否则单条视频可能等待 1 小时以上。
 - **不要在 Irodori 饱和时启用 MSST 的 `ttsMode: concurrent`**：该模式的 TTS lookahead 超时为 15 秒，队列等待会触发缺句/静音回退。
 
 ## 4. 稳定性保障
@@ -66,7 +66,7 @@
 - 看门狗覆盖“进程还活着但 HTTP 不响应”的场景。
 - ournotes：客户端断连会 abort 剧本生成并取消渲染任务；排队中/运行中取消都会计数并释放 Chrome。
 - MSST：客户端断连会取消导出（`res.on('close')`）；worker 崩溃/断连会重启浏览器并把任务标记失败；回收与重派发由池统一管理。
-- 超时：MSST 默认导出超时 30 分钟、插件 `export_timeout` 应不低于 3600 秒；ournotes 任务超时 2 小时、插件 `export_timeout` 建议 3600 秒。
+- 超时：MSST 默认导出超时 30 分钟；实测聊天高峰下 47 句剧本会超过 60 分钟，因此两个插件的 `export_timeout` 统一设为 **7200 秒**（2 小时）。ournotes 任务超时 2 小时、`render.taskTimeoutMs` 30 分钟。若更希望快速失败而不是长时间等待，可把插件 `export_timeout` 调回 3600。
 
 ## 5. 测试计划
 
@@ -96,4 +96,4 @@
 - [ ] MSST 空闲时 `nvidia-smi pmon` 中 Chrome SM 为 `-`（0%），GPU 仅被 Irodori 占用
 - [ ] ournotes 成片码率约 1.3 Mbps（crf28 + NVENC），无 `encoder ... failed` 日志
 - [ ] 取消任务后 60 秒内 worker 释放、无孤儿 Chrome
-- [ ] AstrBot 插件 `export_timeout >= 3600`，`max_concurrent_requests=2`
+- [ ] AstrBot 插件 `export_timeout = 7200`，`max_concurrent_requests=2`
