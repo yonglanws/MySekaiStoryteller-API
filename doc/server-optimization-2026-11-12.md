@@ -85,7 +85,8 @@
 - TTS 超时：修复前 10 分钟内 5 次 `[Bridge] TTS proxy fetch failed TimeoutError`；修复后同样负载下 0 次。
 - ournotes 故障注入：渲染中 `kill -9` Chrome 主进程，任务在 5 秒内失败（`the browser closed before the render page reported a result`），队列立即释放；随后新任务 54 s 成功。
 - MSST 故障注入：杀掉空闲 worker w3，1.5 s 内重启并就绪；杀掉正在导出的 w1，仅该任务失败，另一个导出继续，w1 1.2 s 后就绪。
-- 空闲占用：MSST 三个空闲 worker 的 Chrome GPU SM 占用为 0%；Irodori 空闲显存 5.4 GB → 2.2 GB（加载 3 个 adapter 后约 3.4 GB）。
+- 2+2 混合压测：MSST 2 个导出 + ournotes 2 个渲染同时提交，4/4 成功；MSST 各 133.5 s（14 秒成片，3.7-3.8 fps），ournotes 各 71.6 s（9 秒成片）；显存峰值 6.29 GB，无 OOM；结束后 `/tmp/mss-hf-*` 为 0。
+- 空闲占用：MSST 三个空闲 worker 的 Chrome GPU SM 占用为 0%（整卡 0%、约 16 W）；Irodori 空闲显存 5.4 GB → 2.2 GB（加载 3 个 adapter 后约 3.4 GB）。
 
 结论：稳定性目标（崩溃隔离、取消、超时、看门狗、显存余量）达到；吞吐受 4 核 CPU 与共享 Irodori 限制，2 并发的实际意义是排队而非翻倍，79 秒视频在 2 并发 + 聊天 TTS 下约 10 分钟。
 
