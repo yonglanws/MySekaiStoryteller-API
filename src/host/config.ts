@@ -89,6 +89,11 @@ const VideoSchema = z.object({
 
 const RenderSchema = z.object({
   workers: z.number().default(2),
+  /**
+   * 同时进行的导出上限（0 = 跟随 workers）。可以保留比并发上限更多的常驻
+   * worker 作为热备：某个 worker 崩溃或按次数回收时，不必等新浏览器启动才接单。
+   */
+  maxConcurrentExports: z.number().default(0),
   workerRecycleExports: z.number().default(5),
   browserChannels: z.array(z.string()).default(['msedge', 'chrome', 'chromium']),
   browserExecutablePath: z.string().default(''),
@@ -397,6 +402,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_WORKERS) {
     const v = parseInt(env.MSS_WORKERS, 10)
     if (Number.isFinite(v)) config.render.workers = Math.max(1, v)
+  }
+  if (env.MSS_MAX_CONCURRENT_EXPORTS) {
+    const v = parseInt(env.MSS_MAX_CONCURRENT_EXPORTS, 10)
+    if (Number.isFinite(v)) config.render.maxConcurrentExports = Math.max(0, v)
   }
   if (env.MSS_WORKER_RECYCLE_EXPORTS) {
     const v = parseInt(env.MSS_WORKER_RECYCLE_EXPORTS, 10)

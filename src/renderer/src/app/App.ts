@@ -377,6 +377,13 @@ export class App {
 
         this.apiExportInProgress = true
         this.logger.info(`API export started: taskId=${payload.taskId}`)
+        // 快导出结束后主 ticker 会恢复运行；空闲 worker 若继续按 60fps 渲染已加载的 Live2D 场景，
+        // 会把 GPU 长期打满（实测空闲 99% SM）。导出前再启动，其余时间停掉。
+        try {
+          this.pixiApplication.ticker.start()
+        } catch {
+          /* pixi may not be ready yet; export path starts its own ticker */
+        }
 
         try {
           const result = await this.runApiExport(
@@ -412,6 +419,12 @@ export class App {
         } finally {
           this.apiExportInProgress = false
           this.pendingAbortTaskId = null
+          // 结果已回传，worker 回到空闲：停止预览渲染，避免空闲页面持续占用 GPU。
+          try {
+            this.pixiApplication.ticker.stop()
+          } catch {
+            /* renderer may already be destroyed */
+          }
         }
       }
     )

@@ -131,7 +131,7 @@ async function bootstrap(): Promise<void> {
     host: config.server.host,
     outputDir: config.paths.output,
     video: config.video,
-    maxConcurrentExports: config.render.workers,
+    maxConcurrentExports: config.render.maxConcurrentExports || config.render.workers,
     // 云端资源物化：故事里的背景名/ID、BGM、Live2D 模型在这里变成
     // resources/cloud/ 下的真实文件；本地已有文件优先，不覆盖用户资源。
     prepareStory: async (story) => {

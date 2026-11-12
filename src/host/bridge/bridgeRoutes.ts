@@ -34,7 +34,7 @@ function randomSuffix(): string {
  * 渲染页面 ↔ 宿主的桥接层。
  * 通道语义与原 Electron IpcHandler 对齐：
  * - api-export-video-from-files：ffmpeg 转码/合流后删除输入文件
- * - tts-fetch：30s 超时代理；translation-fetch：无超时代理
+ * - tts-fetch：受 tts.timeoutMs 控制的代理；translation-fetch：无超时代理
  * 配置（TTS/BGM）由宿主在任务下发时注入 payload，不再走配置文件通道。
  */
 export function createBridgeRouter(deps: BridgeDeps): Router {
@@ -538,8 +538,9 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           headers: payload.headers,
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
           body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined,
-          // Irodori 首次请求可能加载模型/多个 LoRA，30 秒会过早掐断；与 tts.timeoutMs 默认值一致。
-          signal: AbortSignal.timeout(120000)
+          // Irodori 在聊天高峰会排队数分钟；代理超时必须跟 tts.timeoutMs 一致，
+          // 否则会出现“宿主还没超时、桥接先掐断”的静音/重试行。
+          signal: AbortSignal.timeout(Math.max(120000, config.tts.timeoutMs))
         })
         const arrayBuffer = await response.arrayBuffer()
         res.setHeader('x-mss-status', String(response.status))
