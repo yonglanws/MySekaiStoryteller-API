@@ -1,6 +1,7 @@
 import BaseSnippet from './BaseSnippet'
 import type { CharacterAction } from '../../../common/types/Story'
 import { scheduleCharacterActions } from '../utils/CharacterActionScheduler'
+import { nowMs, recordMotionSettledAt } from './stageTiming'
 
 export default class MotionSnippet extends BaseSnippet {
   protected async handleSnippet(): Promise<void> {
@@ -23,14 +24,20 @@ export default class MotionSnippet extends BaseSnippet {
         (data.duration ?? 2) * 1000,
         {
           isVisible: (id) => this.app.layerModel.isModelVisible(id),
-          apply: (action, signal) => {
+          apply: async (action, signal) => {
             const model = this.app.getModelById(action.modelId)
-            return model.applyCharacterAction(
+            await model.applyCharacterAction(
               action,
               signal,
               () => this.app.layerModel.isModelVisible(action.modelId),
               this.snippetIndex
             )
+            if (action.motion && !model.isMotionLooping?.(action.motion)) {
+              const clipMs = model.getMotionDurationMs?.(action.motion) ?? 0
+              if (clipMs > 0) {
+                recordMotionSettledAt(this.app, action.modelId, nowMs() + clipMs)
+              }
+            }
           },
           onError: (error, action) => this.logger.warn('Character action failed', action, error)
         },
@@ -49,22 +56,17 @@ export default class MotionSnippet extends BaseSnippet {
       return
     }
 
-    // Preserve legacy scalar Motion behavior, including its wait/last-frame semantics.
+    // 官方 Action=4（CharacterMotion）：立即触发动作，0 帧阻塞片段本身，
+    // 并在 ModelLayer 登记身体动作收尾时刻供 Talk Gate 检查。
     const model = this.app.getModelById(data.modelId)
-    this.app.layerModel.addModelToLayer(model)
-
-    model.internalModel?.parallelMotionManager[0]?.stopAllMotions()
-    model.internalModel?.parallelMotionManager[1]?.stopAllMotions()
-
-    await new Promise((resolve) => requestAnimationFrame(resolve))
-
-    await model.applyAndWait(
-      this.data.data.motion,
-      this.data.data.facial,
-      this.data.data.facialFirst,
-      this.snippetIndex
-    )
-
-    await model.playMotionLastFrame(this.data.data.motion, this.data.data.facial)
+    await model.startMotions(data.motion || undefined, data.facial || undefined, data.facialFirst, {
+      traceSnippetIndex: this.snippetIndex
+    })
+    if (data.motion && !model.isMotionLooping?.(data.motion)) {
+      const clipMs = model.getMotionDurationMs?.(data.motion) ?? 0
+      if (clipMs > 0) {
+        recordMotionSettledAt(this.app, data.modelId, nowMs() + clipMs)
+      }
+    }
   }
 }

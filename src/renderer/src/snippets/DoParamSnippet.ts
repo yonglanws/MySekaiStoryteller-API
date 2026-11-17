@@ -2,6 +2,7 @@ import BaseSnippet from './BaseSnippet'
 import { Cubism2InternalModel, Cubism4InternalModel } from 'pixi-live2d-display-advanced'
 import AnimationManager from '../managers/AnimationManager'
 import { Curves } from '../../../common/types/Story'
+import { resolveProgressBehavior } from '../../../common/export/snippetSemantics'
 import AdvancedModel from '../model/AdvancedModel'
 
 export default class DoParamSnippet extends BaseSnippet {
@@ -20,7 +21,7 @@ export default class DoParamSnippet extends BaseSnippet {
       )
     )
 
-    if (this.data.wait) {
+    if (resolveProgressBehavior(this.data) === 'WaitFinished') {
       await Promise.all(tasks)
     }
   }

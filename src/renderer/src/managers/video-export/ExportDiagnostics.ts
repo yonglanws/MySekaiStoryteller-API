@@ -4,7 +4,6 @@ import type { SnippetTimestampRecorder } from './SnippetTimestampRecorder'
 import type { MotionTraceEvent } from './MotionTraceCollector'
 import type { ExportLogRecord } from './ExportLogBus'
 import { isJapaneseSpeechText } from '../../../../common/tts/speechText'
-import { snippetBlocksTimeline } from '../../../../common/export/snippetSemantics'
 import { bakeStoryPlan } from '../../../../common/export/storyPlan'
 import type {
   DiagnosticAction,
@@ -77,20 +76,19 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
   let ttsTotalMs = 0
   let layoutAppears = 0
   let layoutClears = 0
-  // TimelineCalculator 的 startTime 只累计片段 body；BaseSnippet 在 handle 前还会
-  // 单独 delay，因此实际墙钟包含 delay。诊断把 delay 累加进 planned，才能与
-  // timestampRecorder 的实际起点/时长对齐。
-  let cumulativeDelayMs = 0
   let previousDriftMs = 0
 
   input.snippets.forEach((snippet, index) => {
     const planned = timelineByIndex.get(index)
     const actual = input.timestamps.getSnippetTimestamp(index)
-    const blocking = snippetBlocksTimeline(snippet)
-    const delayMs = blocking ? Math.round((Number(snippet.delay) || 0) * 1000) : 0
-    const plannedStartMs = (planned?.startTimeMs ?? 0) + cumulativeDelayMs
-    const plannedDuration = blocking ? (planned?.durationMs ?? 0) + delayMs : 0
-    cumulativeDelayMs += delayMs
+    const delayMs = Math.round(Math.max(0, Number(snippet.delay) || 0) * 1000)
+    // TimelineCalculator 已把前置栅栏与 snippet.delay 烘焙进 startTimeMs；
+    // VideoExportManager 的 timestampRecorder 在 runDelay 之前打起点标记，
+    // 所以墙钟起点对应 delayStartTimeMs = startTimeMs - delayMs，墙钟时长包含 delayMs + durationMs。
+    const rawDelayStart = (planned as { delayStartTimeMs?: number } | undefined)?.delayStartTimeMs
+    const plannedStartMs =
+      rawDelayStart !== undefined ? rawDelayStart : Math.max(0, (planned?.startTimeMs ?? 0) - delayMs)
+    const plannedDuration = (planned?.durationMs ?? 0) + delayMs
     const actualStartMs = actual
       ? Math.round(Math.max(0, actual.wallStartMs - input.timestamps.getRenderStartWallMs()))
       : null
@@ -142,8 +140,8 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     const actions = snippetActions(snippet, actualDuration ?? plannedDuration)
     if (snippet.type === 'Talk') {
       for (const action of actions) {
-        if (action.at !== 0) {
-          anomalies.push(`snippets[${index}] Talk 动作 at=${action.at}，官方在句首 at=0`)
+        if (!Number.isFinite(action.at) || action.at < 0 || action.at > 1) {
+          anomalies.push(`snippets[${index}] Talk 动作 at=${action.at} 超出 [0, 1] 范围`)
         }
       }
     }
@@ -155,12 +153,14 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     if (snippet.type === 'Talk') {
       ttsTotalMs += ttsDurationMs
       const ttsText = typeof data.ttsText === 'string' ? data.ttsText : ''
+      const content = typeof data.content === 'string' ? data.content : ''
+      const hasSpokenContent = /[\p{L}\p{N}]/u.test(content || ttsText)
       const japanese = isJapaneseSpeechText(ttsText)
       const ttsActive = input.ttsEnabled !== false
-      if (ttsActive && input.provider === 'irodori' && !japanese) {
+      if (ttsActive && input.provider === 'irodori' && hasSpokenContent && !japanese) {
         anomalies.push(`snippets[${index}] Talk 缺少日文 ttsText，Irodori 会拒绝合成`)
       }
-      if (ttsActive && input.provider === 'irodori' && ttsDurationMs <= 0) {
+      if (ttsActive && input.provider === 'irodori' && hasSpokenContent && ttsDurationMs <= 0) {
         anomalies.push(`snippets[${index}] Talk 没有 TTS 时长，Irodori 合成可能失败`)
       }
       tts.push({
@@ -204,7 +204,7 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     `剧情时钟 60 fps，编码 ${input.exportMeta.fps} fps；导出仍是单浏览器实时录制/虚拟时钟，未实现 --jobs N 分段并行`,
     '未实现 3D MV、完整 UGUI 图集、S3 资产库与硬件编码选择',
     '动作收尾闸门按已预加载的非循环剪辑时长估算；循环动作不参与',
-    'ProgressBehavior=0 的片段在后台并发执行；Talk 仍串行以保证 TTS/字幕对位',
+    'ProgressBehavior=0 的片段与前置任务同帧并发；Talk 仍触发前置栅栏以保证 TTS/字幕对位',
     '物理摆动由依赖的 model3.json 驱动，未逐帧复刻 SSE 的确定性物理积分'
   ]
 

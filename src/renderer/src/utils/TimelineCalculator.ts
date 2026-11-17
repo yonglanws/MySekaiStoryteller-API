@@ -1,28 +1,44 @@
 import type { SnippetData } from '../../../common/types/Story'
 import { snippetBlocksTimeline } from '../../../common/export/snippetSemantics'
 import { calculateTalkDurationMs } from './TalkTiming'
+import { visibleTextLength } from '../../../common/official/text'
 import {
   APPEAR_FADE_TOTAL_MS,
   APPEAR_SHOWN_MOVE_MS,
   CHARACTER_FADE_MS,
+  CHARACTER_SHAKE_MS,
+  FLASHBACK_DEFAULT_MS,
+  FULLSCREEN_BARS_MS,
+  FULLSCREEN_CHAR_FADE_MS,
+  FULLSCREEN_TEXT_HOLD_MS,
+  FULLSCREEN_TEXT_PRE_DELAY_MS,
   HIDE_IN_PLACE_TOTAL_MS,
   MOVE_DURATION_FAST_MS,
   MOVE_DURATION_NORMAL_MS,
   MOVE_DURATION_SLOW_MS,
+  PLACE_INFO_TRANSITION_MS,
+  SEKAI_IN_PRE_DELAY_MS,
+  SEKAI_OUT_PRE_DELAY_MS,
+  SEPIA_DEFAULT_MS,
+  SIMPLE_SELECTABLE_TOTAL_MS,
   TALK_WINDOW_OPEN_CLOSE_MS,
   TELOP_TOTAL_MS,
+  framesForSeconds,
+  framesToMs,
+  normalizeEffectDurationMs,
   quantizeMsToFrame
 } from '../../../common/official/timing'
 
 export interface TimelineEntry {
   snippetIndex: number
   snippetType: string
+  delayStartTimeMs?: number
   startTimeMs: number
   durationMs: number
   endTimeMs: number
   ttsDurationMs: number
   hasTTS: boolean
-  /** 官方 ProgressBehavior=1：调度器等它结束；false 时片段在后台跑、时间线 0ms。 */
+  /** 官方 ProgressBehavior=1（或 Talk）：触发前置栅栏；false 时与前一条同帧并发。 */
   blocking: boolean
   speaker?: string
   content?: string
@@ -96,18 +112,28 @@ const SNIPPET_TYPE_DEFAULTS: Record<string, number> = {
   LayoutAppear: APPEAR_FADE_TOTAL_MS,
   LayoutClear: HIDE_IN_PLACE_TOTAL_MS,
   Move: MOVE_DURATION_NORMAL_MS,
-  Motion: 100,
+  Motion: 0,
   HideTalk: 1,
   DoParam: 400,
   PlaySe: 0,
   StopSe: 0,
   ShakeScreen: 500,
-  FlashbackIn: 100,
-  FlashbackOut: 100,
+  ShakeWindow: 500,
+  StopShakeScreen: 0,
+  StopShakeWindow: 0,
+  StopShake: 1,
+  FlashbackIn: FLASHBACK_DEFAULT_MS,
+  FlashbackOut: FLASHBACK_DEFAULT_MS,
+  SepiaIn: SEPIA_DEFAULT_MS,
+  SepiaOut: SEPIA_DEFAULT_MS,
   Wipe: 500,
   CameraMove: 0,
   CameraZoom: 0,
-  AmbientColor: 1
+  DollyZoom: 500,
+  AmbientColor: 1,
+  CharacterShake: CHARACTER_SHAKE_MS,
+  PlaceInfo: PLACE_INFO_TRANSITION_MS,
+  SimpleSelectable: SIMPLE_SELECTABLE_TOTAL_MS
 }
 
 /** 这些片段不走 MIN_DURATION_MS 的 500ms 下限：它们的真实耗时由转场/语音决定。 */
@@ -117,9 +143,34 @@ const FAST_DURATION_TYPES = new Set([
   'ChangeLayoutMode',
   'LayoutAppear',
   'LayoutClear',
+  'LayoutDepth',
+  'CharacterShake',
+  'CostumeChange',
   'Move',
+  'Motion',
   'HideTalk',
-  'AmbientColor'
+  'AmbientColor',
+  'PlaceInfo',
+  'FullScreenText',
+  'SimpleSelectable',
+  'SepiaIn',
+  'SepiaOut',
+  'SekaiIn',
+  'SekaiOut',
+  'SideFade',
+  'AttachCharacterShader',
+  'PlayScenarioEffect',
+  'StopScenarioEffect',
+  'BlurIn',
+  'BlurOut',
+  'BackgroundBlur',
+  'DollyZoom',
+  'ShakeWindow',
+  'StopShakeWindow',
+  'StopShakeScreen',
+  'StopShake',
+  'BgmVolume',
+  'Movie'
 ])
 
 // 必须与 StageUtils.move_speed_to_num 完全一致，否则 LayoutAppear/LayoutClear/Move
@@ -141,6 +192,24 @@ function clampDuration(ms: number): number {
   return Math.min(Math.max(ms, MIN_DURATION_MS), MAX_DURATION_MS)
 }
 
+function estimateFullScreenTextMs(text: string, keepBars?: boolean): number {
+  const barMs = keepBars ? 0 : FULLSCREEN_BARS_MS * 2
+  const textFadeMs = visibleTextLength(text) * FULLSCREEN_CHAR_FADE_MS
+  return barMs + FULLSCREEN_TEXT_PRE_DELAY_MS + textFadeMs + FULLSCREEN_TEXT_HOLD_MS
+}
+
+function layoutPositionMoved(
+  from: { side?: string; offset?: number; under?: boolean } | undefined,
+  to: { side?: string; offset?: number; under?: boolean } | undefined
+): boolean {
+  if (!from || !to) return false
+  return (
+    (from.side ?? 'Center') !== (to.side ?? 'Center') ||
+    (Number(from.offset) || 0) !== (Number(to.offset) || 0) ||
+    Boolean(from.under) !== Boolean(to.under)
+  )
+}
+
 function calculatePathA_ContentBased(snippet: SnippetData): {
   durationMs: number
   source: DurationSource
@@ -149,7 +218,15 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
   switch (snippet.type) {
     case 'ChangeBgm':
     case 'PlaySe':
-    case 'StopSe': {
+    case 'StopSe':
+    case 'BgmVolume':
+    case 'LayoutDepth':
+    case 'CostumeChange':
+    case 'AttachCharacterShader':
+    case 'PlayScenarioEffect':
+    case 'StopScenarioEffect':
+    case 'StopShakeScreen':
+    case 'StopShakeWindow': {
       return {
         durationMs: 0,
         source: 'data_duration',
@@ -175,6 +252,100 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
         detail: `Telop: in/out 0.333s + auto hold 2s = ${TELOP_TOTAL_MS}ms`
       }
     }
+    case 'PlaceInfo': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const ms =
+        dataDur !== undefined && dataDur > 0
+          ? normalizeEffectDurationMs(dataDur, PLACE_INFO_TRANSITION_MS)
+          : PLACE_INFO_TRANSITION_MS
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `PlaceInfo: ${ms}ms`
+      }
+    }
+    case 'FullScreenText': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const ms =
+        dataDur !== undefined && dataDur > 0
+          ? normalizeEffectDurationMs(dataDur)
+          : estimateFullScreenTextMs(
+              String(getSnippetDataField(snippet, 'text') ?? ''),
+              Boolean(getSnippetDataField(snippet, 'keepBars'))
+            )
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `FullScreenText: ${ms}ms`
+      }
+    }
+    case 'SimpleSelectable': {
+      return {
+        durationMs: SIMPLE_SELECTABLE_TOTAL_MS,
+        source: 'data_duration',
+        detail: `SimpleSelectable: ${SIMPLE_SELECTABLE_TOTAL_MS}ms`
+      }
+    }
+    case 'CharacterShake': {
+      return {
+        durationMs: CHARACTER_SHAKE_MS,
+        source: 'data_duration',
+        detail: `CharacterShake: ${CHARACTER_SHAKE_MS}ms`
+      }
+    }
+    case 'SekaiIn':
+    case 'SekaiOut': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const fadeMs =
+        dataDur !== undefined ? normalizeEffectDurationMs(dataDur, 500) : 500
+      const preDelayMs =
+        snippet.type === 'SekaiIn' ? SEKAI_IN_PRE_DELAY_MS : SEKAI_OUT_PRE_DELAY_MS
+      const ms = preDelayMs + fadeMs
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `${snippet.type}: preDelay ${preDelayMs}ms + fade ${fadeMs}ms = ${ms}ms`
+      }
+    }
+    case 'SepiaIn':
+    case 'SepiaOut':
+    case 'BlurIn':
+    case 'BlurOut':
+    case 'DollyZoom':
+    case 'ShakeWindow': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const def = SNIPPET_TYPE_DEFAULTS[snippet.type] ?? 300
+      const ms = dataDur !== undefined ? normalizeEffectDurationMs(dataDur, def) : def
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `${snippet.type}: ${ms}ms`
+      }
+    }
+    case 'Movie': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const ms =
+        typeof dataDur === 'number' && dataDur > 0
+          ? dataDur > 300
+            ? dataDur
+            : dataDur * 1000
+          : 0
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `Movie: ${ms}ms`
+      }
+    }
+    case 'BackgroundBlur': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const ms =
+        typeof dataDur === 'number' && dataDur > 0 ? normalizeEffectDurationMs(dataDur, 1) : 1
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `BackgroundBlur: ${ms}ms`
+      }
+    }
     case 'BlackOut':
     case 'BlackIn':
     case 'ShakeScreen':
@@ -185,11 +356,10 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'CameraMove':
     case 'CameraZoom': {
       const dataDur = getSnippetDataField(snippet, 'duration')
-      if (dataDur && dataDur > 0) {
+      if (dataDur !== undefined && dataDur > 0) {
         // 官方 scenario 的 Duration 是秒（0.1/0.5/2），本项目 Story 用毫秒（100/500/2000）。
-        // 以 10 为界：>=10 视为毫秒，<10 视为秒。旧阈值为 100，会把官方 0.1s
-        // 转成的 100ms 再乘 1000 变成 100 秒。
-        const ms = dataDur > 10 ? dataDur : dataDur * 1000
+        // 以 10 为界：>=10 视为毫秒，<10 视为秒。
+        const ms = normalizeEffectDurationMs(dataDur)
         return {
           durationMs: ms,
           source: 'data_duration',
@@ -212,10 +382,9 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     }
     case 'ChangeLayoutMode':
     case 'ChangeBackgroundImage':
-    case 'BackgroundBlur':
     case 'StopShake':
     case 'AmbientColor': {
-      // 只改状态，不做过渡；实际耗时约 0ms（保留 1ms 让时间线完整性校验通过）。
+      // 只改状态/异步切换背景；实际片段不阻塞（保留 1ms 让旧时间线检查通过）。
       return {
         durationMs: 1,
         source: 'data_duration',
@@ -234,20 +403,16 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'LayoutClear': {
       const speed = getSnippetDataField(snippet, 'moveSpeed')
       const from = getSnippetDataField(snippet, 'from') as
-        | { side?: string; offset?: number }
+        | { side?: string; offset?: number; under?: boolean }
         | undefined
       const to = getSnippetDataField(snippet, 'to') as
-        | { side?: string; offset?: number }
+        | { side?: string; offset?: number; under?: boolean }
         | undefined
-      const moved = Boolean(
-        from &&
-        to &&
-        (from.side !== to.side || (Number(from.offset) || 0) !== (Number(to.offset) || 0))
-      )
+      const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
       if (snippet.type === 'LayoutAppear') {
         // 官方 Appear 在 1 帧 alpha=0 + 0.1s 淡入后就算完成；CharacterMoveTo 的滑入
-        // 继续在后台播放，不阻塞下一条 Talk。
+        // 继续在后台播放，不阻塞下一条，但仍在 Talk Gate 里等待。
         return {
           durationMs: APPEAR_FADE_TOTAL_MS,
           source: 'content_estimation',
@@ -301,10 +466,11 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
           detail: `Motion sequence: duration=${duration}s`
         }
       }
+      // 官方 CharacterMotion（Action=4）：触发动作即刻结束（0 帧阻塞）。
       return {
-        durationMs: SNIPPET_TYPE_DEFAULTS.Motion,
-        source: 'type_default',
-        detail: `Motion: type default=${SNIPPET_TYPE_DEFAULTS.Motion}ms`
+        durationMs: 0,
+        source: 'data_duration',
+        detail: 'Motion: immediate cue (0ms)'
       }
     }
     case 'DoParam': {
@@ -330,7 +496,7 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     default: {
       const type = String((snippet as { type?: unknown }).type ?? 'unknown')
       const def = SNIPPET_TYPE_DEFAULTS[type]
-      if (def) {
+      if (def !== undefined) {
         return {
           durationMs: def,
           source: 'type_default',
@@ -371,7 +537,8 @@ function crossValidate(
   pathB: { durationMs: number; source: DurationSource; detail: string },
   snippet: SnippetData,
   ttsMapping: TTSMapping | undefined,
-  windowOpenMs = 0
+  windowOpenMs = 0,
+  layoutRunningMs = 0
 ): {
   finalDurationMs: number
   selectedSource: DurationSource
@@ -399,7 +566,8 @@ function crossValidate(
     return {
       finalDurationMs: calculateTalkDurationMs(content, ttsDurationMs, ttsText, {
         hasVoice: Boolean(voice),
-        windowOpenMs
+        windowOpenMs,
+        layoutRunningMs
       }),
       selectedSource: hasTTS ? 'tts_audio' : 'content_estimation',
       decisionReason: 'Shared dialogue body timing; pre-dialogue delay is handled separately',
@@ -409,19 +577,14 @@ function crossValidate(
     const diff = Math.abs(pathA.durationMs - pathB.durationMs)
 
     if (pathA.source === 'data_duration') {
-      // data_duration 是精确值，优先使用
       finalDurationMs = pathA.durationMs
       selectedSource = pathA.source
       decisionReason = `PathA has data_duration(${pathA.durationMs}ms), using exact value`
     } else if (pathA.source === 'content_estimation') {
-      // 布局/转场的 content_estimation 已经是按官方常量算出的精确 body 时长；
-      // snippet.delay 是 BaseSnippet 在 body 之前的独立等待，不能拿来平均，
-      // 否则 Clear 750ms + delay 500ms 会被折成 633ms，淡出帧还会越过 endFrame。
       finalDurationMs = pathA.durationMs
       selectedSource = pathA.source
       decisionReason = `Using PathA content estimation(${pathA.durationMs}ms)`
     } else if (pathA.source === 'type_default') {
-      // type_default 时，如果delay合理则使用delay
       if (pathB.durationMs >= 200 && pathB.durationMs < pathA.durationMs * 2) {
         finalDurationMs = pathB.durationMs
         selectedSource = pathB.source
@@ -448,8 +611,6 @@ function crossValidate(
     }
   }
 
-  // data_duration 是官方精确值：WhiteIn/WhiteOut 常见 0.1s，Wipe 0.4s，CameraMove/Zoom
-  // 甚至 0s。旧逻辑把它们统一钳到 500ms，画面已经结束但时间线还在等，逐句累积漂移。
   if (pathA.source === 'data_duration') {
     finalDurationMs = Math.max(0, finalDurationMs)
   } else if (
@@ -458,7 +619,21 @@ function crossValidate(
   ) {
     finalDurationMs = clampDuration(finalDurationMs)
   } else if (FAST_DURATION_TYPES.has(snippet.type)) {
-    finalDurationMs = Math.max(1, finalDurationMs)
+    finalDurationMs =
+      snippet.type === 'Motion' ||
+      snippet.type === 'Move' ||
+      snippet.type === 'LayoutClear' ||
+      snippet.type === 'LayoutDepth' ||
+      snippet.type === 'CostumeChange' ||
+      snippet.type === 'AttachCharacterShader' ||
+      snippet.type === 'PlayScenarioEffect' ||
+      snippet.type === 'StopScenarioEffect' ||
+      snippet.type === 'StopShakeWindow' ||
+      snippet.type === 'StopShakeScreen' ||
+      snippet.type === 'BgmVolume' ||
+      snippet.type === 'Movie'
+        ? Math.max(0, finalDurationMs)
+        : Math.max(1, finalDurationMs)
   }
 
   return { finalDurationMs, selectedSource, decisionReason, warnings }
@@ -471,14 +646,16 @@ export function calculateTimeline(
   const entries: TimelineEntry[] = []
   const traceLog: TimelineTraceRecord[] = []
   const anomalies: string[] = []
-  let currentTimeMs = 0
+  let cursorMs = 0
+  let runningEndMs = 0
+  let activeLayoutEndMs = 0
   let talkSnippetCount = 0
   let ttsSnippetCount = 0
   let totalTtsDurationMs = 0
   let validCount = 0
   let warningCount = 0
   let errorCount = 0
-  // TalkWindow 初始关闭；HideTalk 关闭；首句/关闭后第一句要等 0.2s 打开动画。
+  // TalkWindow 初始关闭；HideTalk / closeWindowOnFinish 关闭；关闭后第一句要等 0.2s 打开动画。
   let windowOpen = false
   // 官方 Appear/Hide 分支依赖角色当前是否在场：已在场 Appear 只滑 0.2s，
   // 未在场 Clear 直接 onFinished。时间线必须和运行时使用同一份在场状态。
@@ -510,6 +687,18 @@ export function calculateTimeline(
     const hasTTS =
       isTalk && !!ttsMapping && Number.isFinite(ttsMapping.durationMs) && ttsMapping.durationMs > 0
 
+    // 官方 PlayCore 前置栅栏：WaitFinished（及 Talk）在启动和 delay 开始前，
+    // 先等所有正在运行的后台任务结束；之后立即推进到下一条（Now 同帧并发）。
+    const blocking = snippetBlocksTimeline(snippet)
+    if (blocking) {
+      cursorMs = Math.max(cursorMs, runningEndMs)
+    }
+
+    const delaySeconds = Math.max(0, Number(snippet.delay) || 0)
+    const delayMs = framesToMs(framesForSeconds(delaySeconds))
+    const delayStartTimeMs = cursorMs
+    const startTimeMs = delayStartTimeMs + delayMs
+
     const pathA = calculatePathA_ContentBased(snippet)
     const pathB = calculatePathB_DelayBased(snippet)
 
@@ -522,7 +711,19 @@ export function calculateTimeline(
       windowOpen = false
     }
 
-    const crossResult = crossValidate(pathA, pathB, snippet, ttsMapping, windowOpenMs)
+    const layoutRunningMs = isTalk ? Math.max(0, activeLayoutEndMs - startTimeMs) : 0
+    const crossResult = crossValidate(
+      pathA,
+      pathB,
+      snippet,
+      ttsMapping,
+      windowOpenMs,
+      layoutRunningMs
+    )
+
+    if (isTalk && snippet.data.closeWindowOnFinish) {
+      windowOpen = false
+    }
 
     let ttsDurationMs = 0
     if (hasTTS) {
@@ -553,56 +754,68 @@ export function calculateTimeline(
       anomalies.push(`Snippet[${i}] ${snippet.type}: emergency fallback used, both paths failed`)
     }
 
-    if (i > 0) {
-      const prevEntry = entries[i - 1]
-      if (Math.abs(prevEntry.endTimeMs - currentTimeMs) > 1) {
-        anomalies.push(
-          `Snippet[${i}] time gap: prev endTime=${prevEntry.endTimeMs}ms vs current start=${currentTimeMs}ms`
-        )
-      }
-    }
-
-    // 剧情按 60 fps 运行；非零时长统一量化到帧，计划与实际共用同一时间基。
-    // 1ms 的状态 cue 保持 1ms，避免为了对齐帧而制造 16ms 的假转场。
-    const blocking = snippetBlocksTimeline(snippet)
     // 官方 Appear/Hide 的在场分支：已在场 Appear 只滑 0.2s；未在场 Clear 立即完成。
     let layoutDurationMs: number | null = null
     let layoutDecision = ''
     if (snippet.type === 'LayoutAppear') {
       const modelId = Number(getSnippetDataField(snippet, 'modelId'))
       const shown = visibleModels.has(modelId)
+      const speed = getSnippetDataField(snippet, 'moveSpeed')
+      const from = getSnippetDataField(snippet, 'from')
+      const to = getSnippetDataField(snippet, 'to')
+      const moved = layoutPositionMoved(from, to)
+      const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
       layoutDurationMs = shown ? APPEAR_SHOWN_MOVE_MS : APPEAR_FADE_TOTAL_MS
       layoutDecision = shown
         ? 'LayoutAppear: character already shown, CharacterMoveTo 0.2s'
         : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade'
+      const slideMs = shown
+        ? APPEAR_SHOWN_MOVE_MS
+        : Math.max(APPEAR_FADE_TOTAL_MS, moved ? moveMs : 0)
+      activeLayoutEndMs = Math.max(
+        activeLayoutEndMs,
+        startTimeMs + (slideMs >= 30 ? quantizeMsToFrame(slideMs) : slideMs)
+      )
       visibleModels.add(modelId)
     } else if (snippet.type === 'LayoutClear') {
       const modelId = Number(getSnippetDataField(snippet, 'modelId'))
       const shown = visibleModels.has(modelId)
       layoutDurationMs = shown ? null : 0
       layoutDecision = shown ? '' : 'LayoutClear: character not shown, OnFinished immediately'
+      if (shown) {
+        const clearMs =
+          crossResult.finalDurationMs >= 30
+            ? quantizeMsToFrame(crossResult.finalDurationMs)
+            : crossResult.finalDurationMs
+        activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + clearMs)
+      }
       visibleModels.delete(modelId)
+    } else if (snippet.type === 'Move') {
+      const moveMs =
+        crossResult.finalDurationMs >= 30
+          ? quantizeMsToFrame(crossResult.finalDurationMs)
+          : crossResult.finalDurationMs
+      activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + moveMs)
     }
 
     const baseDurationMs = layoutDurationMs ?? crossResult.finalDurationMs
-    const finalDurationMs = blocking
-      ? baseDurationMs >= 30
-        ? quantizeMsToFrame(baseDurationMs)
-        : baseDurationMs
-      : 0
+    const finalDurationMs =
+      baseDurationMs >= 30 ? quantizeMsToFrame(baseDurationMs) : baseDurationMs
+    const endTimeMs = startTimeMs + finalDurationMs
 
     const entry: TimelineEntry = {
       snippetIndex: i,
       snippetType: snippet.type,
-      startTimeMs: currentTimeMs,
+      delayStartTimeMs,
+      startTimeMs,
       durationMs: finalDurationMs,
-      endTimeMs: currentTimeMs + finalDurationMs,
+      endTimeMs,
       ttsDurationMs,
       hasTTS,
       blocking,
       speaker: isTalk ? getSnippetDataField(snippet, 'speaker') : undefined,
       content: isTalk ? getSnippetDataField(snippet, 'content') : undefined,
-      delay: snippet.delay,
+      delay: snippet.delay ?? 0,
       durationSource: crossResult.selectedSource,
       validationStatus,
       validationDetails
@@ -623,18 +836,19 @@ export function calculateTimeline(
         ? layoutDecision
         : blocking
           ? crossResult.decisionReason
-          : 'ProgressBehavior=0: snippet runs in background; scheduler does not wait',
+          : 'ProgressBehavior=0: starts immediately alongside active tasks',
       timestamp: Date.now()
     })
 
-    currentTimeMs += finalDurationMs
+    runningEndMs = Math.max(runningEndMs, endTimeMs)
   }
 
   const crossValidationPassed = errorCount === 0
+  const totalDurationMs = Math.max(cursorMs, runningEndMs)
 
   return {
     entries,
-    totalDurationMs: currentTimeMs,
+    totalDurationMs,
     talkSnippetCount,
     ttsSnippetCount,
     totalTtsDurationMs,
@@ -722,7 +936,7 @@ export function remapAudioTracksToTimeline(
   const lastTrack = audioTracks[audioTracks.length - 1]
   if (!lastTrack) return audioTracks
 
-  const timelineTotalMs = timeline.length > 0 ? timeline[timeline.length - 1].endTimeMs : 0
+  const timelineTotalMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
   const originalTtsEndMs = lastTrack.endTime
 
   if (originalTtsEndMs <= 0 || timelineTotalMs <= 0) return audioTracks
@@ -774,30 +988,23 @@ export function validateTimelineIntegrity(entries: TimelineEntry[]): {
     return { valid: true, errors: [] }
   }
 
-  if (entries[0].startTimeMs !== 0) {
-    errors.push(`First entry startTimeMs=${entries[0].startTimeMs}, expected 0`)
+  if (entries[0].startTimeMs < 0) {
+    errors.push(`First entry startTimeMs=${entries[0].startTimeMs}, expected >= 0`)
   }
 
-  for (let i = 1; i < entries.length; i++) {
-    const prev = entries[i - 1]
+  for (let i = 0; i < entries.length; i++) {
     const curr = entries[i]
 
     if (curr.snippetIndex !== i) {
       errors.push(`Entry[${i}] snippetIndex=${curr.snippetIndex}, expected ${i}`)
     }
 
-    if (Math.abs(curr.startTimeMs - prev.endTimeMs) > 1) {
-      errors.push(`Entry[${i}] startTimeMs=${curr.startTimeMs} != prev endTimeMs=${prev.endTimeMs}`)
+    if (curr.startTimeMs < 0) {
+      errors.push(`Entry[${i}] startTimeMs=${curr.startTimeMs} < 0`)
     }
 
-    if (
-      curr.durationMs <= 0 &&
-      curr.snippetType !== 'ChangeBgm' &&
-      curr.snippetType !== 'LayoutClear' &&
-      curr.durationSource !== 'data_duration' &&
-      curr.blocking
-    ) {
-      errors.push(`Entry[${i}] durationMs=${curr.durationMs} <= 0`)
+    if (curr.durationMs < 0) {
+      errors.push(`Entry[${i}] durationMs=${curr.durationMs} < 0`)
     }
 
     if (Math.abs(curr.endTimeMs - (curr.startTimeMs + curr.durationMs)) > 1) {

@@ -13,13 +13,20 @@ import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
 import type { AssetsSettings } from '../config'
 import type { StoryData } from '../../common/types/Story'
+import { atomicWrite, request } from './http'
 import type {
   CloudBackgroundEntry,
   CloudBgmEntry,
   CloudCatalogData,
-  CloudModelEntry
+  CloudModelEntry,
+  CloudSeEntry
 } from './cloudCatalog'
-import { downloadMediaFile, downloadSeFile } from './media'
+import {
+  downloadMediaFile,
+  downloadSeFile,
+  extractAudioLoopMetadata,
+  writeAudioLoopSidecar
+} from './media'
 import { downloadModel, type MoesekaiIndexEntry } from './moesekai'
 
 const IMAGE_EXTENSIONS = ['.webp', '.png', '.jpg', '.jpeg']
@@ -172,10 +179,151 @@ async function ensureBackground(
   return `cloud/${path.basename(downloaded.file)}`
 }
 
+export const DEFAULT_INAPP_VERSION = 'jp-7.0.0'
+export const DEFAULT_INAPP_CDN_BASE = 'https://assets.pjsk.moe/sekai-extra-assets/inapp'
+
+export const INAPP_UI_ASSET_PATHS = [
+  'player/loose/Sprite/bg_story_adv.png',
+  'player/loose/Sprite/bg_base_half_r8_wh.png',
+  'player/loose/Sprite/bg_base_round_h48_wh.png',
+  'player/loose/Sprite/icon_triangle_h22_wh.png',
+  'player/loose/Sprite/btn_circle_h80_wh.png',
+  'player/loose/Sprite/icon_menu_story_wh.png',
+  'player/loose/Sprite/icon_pageForward_gn.png',
+  'player/loose/Sprite/btn_round_h80_wh.png',
+  'player/loose/Sprite/eff_btn_round_h80_a70_wh.png',
+  'player/loose/Texture2D/tex_transition_left.png',
+  'player/loose/Texture2D/tex_transition_top.png',
+  'player/loose/Texture2D/tex_common_tri_01.png',
+  'player/loose/Texture2D/holo.png',
+  'audio/MenuCommon/SE_AREA_TRANSITION_SEKAI.wav',
+  'audio/MenuCommon/SE_UI_CHOICES_OPEN.wav',
+  'audio/MenuCommon/SE_UI_CHOICES_DECIDE.wav',
+  'audio/MenuCommon_Built_in/SE_DECIDE1.wav'
+] as const
+
+export interface EnsureInappAssetsOptions {
+  version?: string
+  inappBase?: string
+  paths?: readonly string[]
+  force?: boolean
+  timeoutMs?: number
+  retries?: number
+}
+
+export interface EnsureInappAssetsResult {
+  version: string
+  rootDir: string
+  cached: number
+  downloaded: number
+  failed: string[]
+  offlineFallback: boolean
+}
+
+const inappInflights = new Map<string, Promise<EnsureInappAssetsResult>>()
+
+export function resolveInappAssetPath(
+  resourcesDir: string,
+  relPath: string,
+  version = DEFAULT_INAPP_VERSION
+): string {
+  const clean = relPath.replace(/^\/+/, '')
+  return path.join(resourcesDir, 'inapp', version, ...clean.split('/'))
+}
+
+/**
+ * 拉取并缓存官方 `inapp/jp-7.0.0` UI/FX 贴图与通用 UI 音效到 `resources/inapp/<version>/`；
+ * 离线或单文件失败时绝不阻断流程，由渲染端矢量 fallback（A3）自动兜底。
+ */
+export async function ensureInappUiAssets(
+  ctx: Pick<CloudAssetContext, 'resourcesDir' | 'settings' | 'logger'>,
+  options: EnsureInappAssetsOptions = {}
+): Promise<EnsureInappAssetsResult> {
+  const version = options.version ?? DEFAULT_INAPP_VERSION
+  const baseUrl = (options.inappBase ?? `${DEFAULT_INAPP_CDN_BASE}/${version}`).replace(/\/+$/, '')
+  const paths = options.paths ?? INAPP_UI_ASSET_PATHS
+  const key = `${ctx.resourcesDir}::${version}::${paths.length}`
+  const existingLock = !options.force ? inappInflights.get(key) : undefined
+  if (existingLock) return existingLock
+
+  const work = (async (): Promise<EnsureInappAssetsResult> => {
+    const rootDir = path.join(ctx.resourcesDir, 'inapp', version)
+    const timeoutMs = options.timeoutMs ?? Math.min(ctx.settings.timeoutMs, 15_000)
+    const retries = options.retries ?? Math.min(ctx.settings.retries, 1)
+    let cached = 0
+    let downloaded = 0
+    const failed: string[] = []
+
+    for (const relPath of paths) {
+      const localPath = resolveInappAssetPath(ctx.resourcesDir, relPath, version)
+      if (!options.force && fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
+        cached++
+        continue
+      }
+      const url = `${baseUrl}/${relPath.replace(/^\/+/, '')}`
+      try {
+        const resp = await request(url, { timeoutMs, retries })
+        const buffer = Buffer.from(await resp.arrayBuffer())
+        if (buffer.byteLength === 0) throw new Error('empty body')
+        atomicWrite(localPath, buffer)
+        downloaded++
+      } catch {
+        failed.push(relPath)
+      }
+    }
+
+    if (downloaded > 0 || failed.length > 0) {
+      ctx.logger.info(
+        `[Cloud] inapp/${version}: cached=${cached}, downloaded=${downloaded}, fallback=${failed.length}`
+      )
+    }
+    return {
+      version,
+      rootDir,
+      cached,
+      downloaded,
+      failed,
+      offlineFallback: failed.length > 0
+    }
+  })()
+
+  inappInflights.set(key, work)
+  try {
+    return await work
+  } finally {
+    inappInflights.delete(key)
+  }
+}
+
+export function findCloudSe(
+  catalog: CloudCatalogData,
+  query: string
+): CloudSeEntry | null {
+  const entries = catalog.se ?? []
+  if (entries.length === 0) return null
+  const q = query.trim().toLowerCase()
+  if (!q) return null
+  const stemQ = q.replace(/^cloud\//, '').replace(/\.(mp3|wav|ogg|flac|hca)$/i, '')
+  return (
+    entries.find((e) => e.id.toLowerCase() === stemQ) ??
+    entries.find((e) => e.file.toLowerCase() === q) ??
+    entries.find((e) => e.id.toLowerCase() === stemQ.replace(/_b$/, '')) ??
+    entries.find((e) => e.description.toLowerCase().includes(q) || e.tags.some((t) => t.toLowerCase() === stemQ)) ??
+    null
+  )
+}
+
 async function ensureBgm(entry: CloudBgmEntry, ctx: CloudAssetContext): Promise<string> {
   const bgmDir = path.join(ctx.resourcesDir, 'audio', 'bgm', 'cloud')
   const existing = existsWithExtensions(bgmDir, entry.id, AUDIO_EXTENSIONS)
-  if (existing) return `cloud/${path.basename(existing)}`
+  if (existing) {
+    const loop = extractAudioLoopMetadata(existing)
+    if (loop) {
+      entry.loopStartMs = loop.loopStartMs
+      entry.loopEndMs = loop.loopEndMs
+    }
+    return `cloud/${path.basename(existing)}`
+  }
 
   ctx.logger.info(`[Cloud] 下载 BGM ${entry.id}（${entry.name}）…`)
   const downloaded = await downloadMediaFile({
@@ -189,6 +337,18 @@ async function ensureBgm(entry: CloudBgmEntry, ctx: CloudAssetContext): Promise<
     retries: ctx.settings.retries
   })
   if (!downloaded) throw new Error(`cloud bgm not found: ${entry.id}`)
+  if (downloaded.loop) {
+    entry.loopStartMs = downloaded.loop.loopStartMs
+    entry.loopEndMs = downloaded.loop.loopEndMs
+  } else {
+    const localTarget = path.join(ctx.resourcesDir, ...downloaded.file.split('/'))
+    const loop = extractAudioLoopMetadata(localTarget)
+    if (loop) {
+      entry.loopStartMs = loop.loopStartMs
+      entry.loopEndMs = loop.loopEndMs
+      writeAudioLoopSidecar(localTarget, loop)
+    }
+  }
   ctx.logger.info(
     `[Cloud] BGM ${entry.id} → ${downloaded.file}（${(downloaded.bytes / 1024 / 1024).toFixed(1)} MB）`
   )
@@ -202,9 +362,26 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
   const local = existsWithExtensions(seDir, stem(name), AUDIO_EXTENSIONS)
   if (local) return `cloud/${path.basename(local)}`
 
-  ctx.logger.info(`[Cloud] 下载 SE ${name} …`)
+  const inappCandidate = INAPP_UI_ASSET_PATHS.find(
+    (p) => p.startsWith('audio/') && stem(path.posix.basename(p)).toLowerCase() === stem(name).toLowerCase()
+  )
+  if (inappCandidate) {
+    await ensureInappUiAssets(ctx, { paths: [inappCandidate], timeoutMs: Math.min(ctx.settings.timeoutMs, 10_000) })
+    const inappLocal = resolveInappAssetPath(ctx.resourcesDir, inappCandidate)
+    if (fs.existsSync(inappLocal)) {
+      fs.mkdirSync(seDir, { recursive: true })
+      const destName = path.basename(inappLocal)
+      fs.copyFileSync(inappLocal, path.join(seDir, destName))
+      return `cloud/${destName}`
+    }
+  }
+
+  const catalogMatch = ctx.catalog ? findCloudSe(ctx.catalog, name) : undefined
+  const targetCue = catalogMatch?.id ?? name
+
+  ctx.logger.info(`[Cloud] 下载 SE ${targetCue} …`)
   const downloaded = await downloadSeFile({
-    name,
+    name: targetCue,
     outDir: ctx.resourcesDir,
     region: ctx.settings.region,
     assetBase: ctx.settings.assetBase || undefined,
@@ -213,7 +390,7 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
   })
   if (!downloaded) return null
   ctx.logger.info(
-    `[Cloud] SE ${name} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
+    `[Cloud] SE ${targetCue} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
   )
   return `cloud/${path.basename(downloaded.file)}`
 }
@@ -350,6 +527,9 @@ export async function resolveStoryCloudAssets(
     }
   }
 
+  const neededInapp = new Set<string>()
+  const modelById = new Map(story.models.map((m) => [m.id, m]))
+
   for (const snippet of story.snippets) {
     if (snippet.type === 'ChangeBgm') {
       if (snippet.data.stop) continue
@@ -385,7 +565,61 @@ export async function resolveStoryCloudAssets(
         ctx.logger.error(`[Cloud] SE ${ref} 物化失败：${String(error)}`)
         result.missing.push(`se:${ref}`)
       }
+      continue
     }
+
+    if (snippet.type === 'CostumeChange') {
+      const targetModel = modelById.get(snippet.data.modelId)
+      const costumeRef = targetModel?.costumes?.[snippet.data.costume] ?? snippet.data.costume
+      if (costumeRef && !localModelExists(ctx.resourcesDir, costumeRef)) {
+        const entry = findCloudModel(ctx.catalog, costumeRef)
+        if (entry) {
+          try {
+            const resolved = await ensureModel(entry, ctx)
+            if (targetModel) {
+              targetModel.costumes = { ...(targetModel.costumes ?? {}), [snippet.data.costume]: resolved }
+            }
+            result.models++
+          } catch (error) {
+            ctx.logger.error(`[Cloud] 服装模型 ${costumeRef} 物化失败：${String(error)}`)
+          }
+        }
+      }
+      continue
+    }
+
+    if (snippet.type === 'SekaiIn' || snippet.type === 'SekaiOut') {
+      neededInapp.add('player/loose/Texture2D/tex_common_tri_01.png')
+      neededInapp.add('audio/MenuCommon/SE_AREA_TRANSITION_SEKAI.wav')
+    } else if (snippet.type === 'SideFade') {
+      neededInapp.add('player/loose/Texture2D/tex_transition_left.png')
+      neededInapp.add('player/loose/Texture2D/tex_transition_top.png')
+    } else if (snippet.type === 'AttachCharacterShader' && (snippet.data.shader === 'hologram' || snippet.data.shader === 'monitor')) {
+      neededInapp.add('player/loose/Texture2D/holo.png')
+    } else if (snippet.type === 'SimpleSelectable') {
+      neededInapp.add('player/loose/Sprite/btn_round_h80_wh.png')
+      neededInapp.add('player/loose/Sprite/eff_btn_round_h80_a70_wh.png')
+      neededInapp.add('audio/MenuCommon/SE_UI_CHOICES_OPEN.wav')
+      neededInapp.add('audio/MenuCommon/SE_UI_CHOICES_DECIDE.wav')
+      neededInapp.add('audio/MenuCommon_Built_in/SE_DECIDE1.wav')
+    } else if (snippet.type === 'Talk' || snippet.type === 'PlaceInfo') {
+      neededInapp.add('player/loose/Sprite/bg_story_adv.png')
+      neededInapp.add('player/loose/Sprite/bg_base_half_r8_wh.png')
+      neededInapp.add('player/loose/Sprite/bg_base_round_h48_wh.png')
+      neededInapp.add('player/loose/Sprite/icon_triangle_h22_wh.png')
+      neededInapp.add('player/loose/Sprite/btn_circle_h80_wh.png')
+      neededInapp.add('player/loose/Sprite/icon_menu_story_wh.png')
+      neededInapp.add('player/loose/Sprite/icon_pageForward_gn.png')
+    }
+  }
+
+  const isLocalTestMock = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(ctx.settings.assetBase || '')
+  if (neededInapp.size > 0 && !isLocalTestMock) {
+    await ensureInappUiAssets(ctx, {
+      paths: [...neededInapp],
+      timeoutMs: Math.min(ctx.settings.timeoutMs, 5_000),
+      retries: 0
+    }).catch(() => undefined)
   }
 
   if (result.models + result.images + result.bgm + result.se > 0) {

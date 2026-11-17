@@ -6,6 +6,7 @@ import type {
 } from '../resources/resourceCatalog'
 import { normalizeBgmFile } from '../../common/audio/bgm'
 import { GENERIC_PROFILE, dialoguePersonaPrompt, personaFor, type PersonaEntry } from './personas'
+import { CURATED_SCENARIO_SES, resolveScenarioSe, sePromptList } from './scenarioCues'
 
 // 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
 // 全量清单会占掉提示词绝大部分，而且长编号列表会诱导模型拼出不存在的名称。
@@ -164,8 +165,16 @@ function fillTemplate(template: string, mapping: Record<string, string>): string
   return template.replace(pattern, (match) => mapping[match] ?? match)
 }
 
+export interface CatalogSe {
+  file: string
+  id?: string
+  name: string
+  category?: string
+  description: string
+}
+
 /**
- * 资源目录的提示词视图：把 ResourceCatalog 的原始数据整理成模型/动作/表情/背景/BGM 文本，
+ * 资源目录的提示词视图：把 ResourceCatalog 的原始数据整理成模型/动作/表情/背景/BGM/SE 文本，
  * 并提供校验所需的精确名称与模糊修复。
  */
 export class CatalogView {
@@ -173,12 +182,14 @@ export class CatalogView {
   readonly images: string[]
   readonly imageDetails: CatalogImage[]
   readonly bgmDetails: CatalogBgm[]
+  readonly seDetails: CatalogSe[]
 
-  constructor(data: ResourceCatalogData) {
+  constructor(data: ResourceCatalogData & { seDetails?: CatalogSe[] }) {
     this.models = data.models.filter((model) => Boolean(model.path))
     this.images = data.images ?? []
     this.imageDetails = (data.imageDetails ?? []).filter((item) => Boolean(item.file))
     this.bgmDetails = (data.bgmDetails ?? []).filter((item) => Boolean(item.file))
+    this.seDetails = (data.seDetails ?? []).filter((item) => Boolean(item.file))
   }
 
   withModels(models: CatalogModel[]): CatalogView {
@@ -505,6 +516,46 @@ export class CatalogView {
       .join('\n')
   }
 
+  seDetailsList(): CatalogSe[] {
+    if (this.seDetails.length > 0) return this.seDetails
+    return CURATED_SCENARIO_SES.map((cue) => ({
+      file: cue.file,
+      id: cue.id,
+      name: cue.id,
+      category: cue.category,
+      description: cue.description
+    }))
+  }
+
+  canonicalSe(value: unknown): string | null {
+    const raw = cleanPath(value)
+    if (!raw) return null
+    const lower = raw.toLowerCase()
+    const base = lower.split('/').pop() ?? lower
+    const stem = base.replace(/\.[^.]+$/, '')
+
+    for (const entry of this.seDetails) {
+      const eFile = entry.file.toLowerCase()
+      const eId = (entry.id ?? '').toLowerCase()
+      const eStem = (eFile.split('/').pop() ?? eFile).replace(/\.[^.]+$/, '')
+      if (eFile === lower || eId === lower || eId === stem || eStem === stem) {
+        return entry.file
+      }
+    }
+    const curated = resolveScenarioSe(raw)
+    return curated ? curated.file : null
+  }
+
+  seList(): string {
+    if (this.seDetails.length > 0) {
+      return this.seDetails
+        .slice(0, 30)
+        .map((detail) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
+        .join('\n')
+    }
+    return sePromptList()
+  }
+
   /**
    * 角色档案。剧本只带核心段落；聊天保留完整人设（共情/交互协议对角色回复有用），
    * 但调用方已先做快速选角，池子里通常只有 1~2 人。
@@ -524,10 +575,10 @@ export class CatalogView {
 }
 
 const STORY_SYSTEM_PROMPT =
-  '你是视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，不要连续比划。'
+  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。入场/退场默认原地淡入淡出，禁止 ±100px Slow 滑行；93% 台词 delay 为 0。'
 
 const CHAT_SYSTEM_PROMPT =
-  '你是视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，不要连续比划。'
+  '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，入场/退场默认原地淡入淡出。'
 
 /** 用当前目录里真实存在的模型/动作/背景生成一段可执行的示例。 */
 export function buildActingExample(view: CatalogView): string {
@@ -536,6 +587,12 @@ export function buildActingExample(view: CatalogView): string {
   const ids = models.map((model) => model.id)
 
   const stageMotion = (modelId: number): string => view.exampleMotion(modelId)
+
+  const facialOnly = (modelId: number, at: number): Record<string, unknown> => ({
+    at,
+    modelId,
+    facial: view.exampleFacial(modelId)
+  })
 
   const paired = (modelId: number, at: number): Record<string, unknown> => ({
     at,
@@ -548,24 +605,27 @@ export function buildActingExample(view: CatalogView): string {
     modelId: number,
     content: string,
     actions: Array<Record<string, unknown>>,
-    delay = 0
+    options: { delay?: number; closeWindowOnFinish?: boolean } = {}
   ): Record<string, unknown> => ({
     type: 'Talk',
-    wait: false,
-    delay,
+    wait: true,
+    progressBehavior: 'WaitFinished',
+    delay: options.delay ?? 0,
     data: {
       speaker: view.shortName(view.modelById(modelId) ?? models[0]),
       content,
       modelId,
+      ...(options.closeWindowOnFinish ? { closeWindowOnFinish: true } : {}),
       actions
     }
   })
 
   const snippets: Array<Record<string, unknown>> = [
-    { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
-    { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } },
-    { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
-    { type: 'BlackIn', wait: true, delay: 0, data: { duration: 800 } }
+    { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+    { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 500 } },
+    { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+    { type: 'BlackIn', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } },
+    { type: 'PlaceInfo', wait: false, progressBehavior: 'Now', delay: 0, data: { text: '放学后的教室' } }
   ]
 
   if (ids.length === 1) {
@@ -573,10 +633,11 @@ export function buildActingExample(view: CatalogView): string {
     snippets.push({
       type: 'LayoutAppear',
       wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: {
         modelId: id,
-        from: { side: 'Right', offset: 100 },
+        from: { side: 'Center', offset: 0 },
         to: { side: 'Center', offset: 0 },
         motion: stageMotion(id),
         facial: view.exampleFacial(id),
@@ -584,63 +645,88 @@ export function buildActingExample(view: CatalogView): string {
         moveSpeed: 'Normal'
       }
     })
-    snippets.push(talk(id, '今天也想和你多聊一会儿。', [paired(id, 0)]))
+    snippets.push(talk(id, '今天也想和你多聊一会儿。', [facialOnly(id, 0)], { closeWindowOnFinish: true }))
     snippets.push({
       type: 'LayoutClear',
       wait: true,
-      delay: 0.1,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
       data: {
         modelId: id,
         from: { side: 'Center', offset: 0 },
-        to: { side: 'Center', offset: 100 },
-        motion: stageMotion(id),
-        facial: view.exampleFacial(id),
+        to: { side: 'Center', offset: 0 },
+        motion: '',
+        facial: '',
         moveSpeed: 'Normal'
       }
     })
   } else {
     const [first, second] = ids
-    for (const [modelId, side, offset] of [
-      [first, 'Left', -100],
-      [second, 'Right', 100]
-    ] as const) {
-      snippets.push({
-        type: 'LayoutAppear',
-        wait: true,
-        delay: 0,
-        data: {
-          modelId,
-          from: { side, offset },
-          to: { side, offset: 0 },
-          motion: stageMotion(modelId),
-          facial: view.exampleFacial(modelId),
-          facialFirst: true,
-          moveSpeed: 'Normal'
-        }
-      })
-    }
-    snippets.push(talk(first, '今天也想和你多聊一会儿。', [paired(first, 0)]))
-    snippets.push(talk(second, '嗯，今天也请多指教。', [paired(second, 0)], 0.1))
-    for (const [index, modelId] of ids.entries()) {
-      const side = index === 0 ? 'Left' : 'Right'
-      snippets.push({
-        type: 'LayoutClear',
-        wait: true,
-        delay: 0.1,
-        data: {
-          modelId,
-          from: { side, offset: 0 },
-          to: { side, offset: index === 1 ? 100 : -100 },
-          motion: stageMotion(modelId),
-          facial: view.exampleFacial(modelId),
-          moveSpeed: 'Normal'
-        }
-      })
-    }
+    snippets.push({
+      type: 'LayoutAppear',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: {
+        modelId: first,
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Left', offset: 0 },
+        motion: stageMotion(first),
+        facial: view.exampleFacial(first),
+        facialFirst: true,
+        moveSpeed: 'Normal'
+      }
+    })
+    snippets.push({
+      type: 'LayoutAppear',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {
+        modelId: second,
+        from: { side: 'Right', offset: 0 },
+        to: { side: 'Right', offset: 0 },
+        motion: stageMotion(second),
+        facial: view.exampleFacial(second),
+        facialFirst: true,
+        moveSpeed: 'Normal'
+      }
+    })
+    snippets.push(talk(first, '今天也想和你多聊一会儿。', [facialOnly(first, 0)]))
+    snippets.push(
+      talk(second, '嗯，今天也请多指教。', [paired(second, 0)], { closeWindowOnFinish: true })
+    )
+    snippets.push({
+      type: 'LayoutClear',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: {
+        modelId: first,
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Left', offset: 0 },
+        motion: '',
+        facial: '',
+        moveSpeed: 'Normal'
+      }
+    })
+    snippets.push({
+      type: 'LayoutClear',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {
+        modelId: second,
+        from: { side: 'Right', offset: 0 },
+        to: { side: 'Right', offset: 0 },
+        motion: '',
+        facial: '',
+        moveSpeed: 'Normal'
+      }
+    })
   }
 
-  snippets.push({ type: 'HideTalk', wait: true, delay: 0.2 })
-  snippets.push({ type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } })
+  snippets.push({ type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } })
 
   const exampleBgm = view.bgmPromptChoices()[0]?.file
   return JSON.stringify({
@@ -660,83 +746,63 @@ export function buildActingExample(view: CatalogView): string {
 // 提示词与 AstrBot 插件保持同一套实测规则；{占位符} 用单遍替换，避免人格文本注入。
 const STORY_PROMPT = `# 视觉小说剧本生成
 
-你是视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏，完整、自然，但不要写成超长剧情。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
+你是 Project SEKAI 风格视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏，完整、自然，但不要写成超长剧情。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数。一场只演完一件事或一个情绪转折就退场，禁止把整段人生、多条支线或连续多场戏塞进这一次。
-表演克制、贴近原作：角色开口时做一个自然的小动作，然后保持到这句说完；不要每句连续比划，也不要把动作铺满整句。
+表演克制、贴近原作：93% 的台词 delay 为 0，入场/退场默认原地淡入淡出（from == to, offset: 0），禁止 ±100px Slow 滑行。
 
 ## 角色池
 
 {character_pool}
 
-> 根据场景从角色池选角：独白/个人感想用 1 人，对话/互动用两人。优先选场景点名的角色；整场可有更多角色轮换，但任意时刻最多两人在场。
+> 根据场景从角色池选角：独白用 1 人，双人对话用 2 人，团体/活动场景可选 3~5 人。优先选场景点名的角色；Normal 模式最多 2 人同台（Left/Right 或单人 Center），Three 模式允许 3 人同台（Left/Center/Right）。
 
 ## modelId 对照表（不可混淆）
 {model_table}
 
 Talk.modelId 必须与 speaker 对应：{id_mapping}
 
-## 布局
+## 布局与舞台规则
 
-- ChangeLayoutMode.data.mode 只写 "Normal"。双人分别占用 Left / Right，单人可用 Center；禁止两人同侧或 Center 与另一槽混用。
+- ChangeLayoutMode.data.mode：1~2 人用 "Normal"（Left / Right 或单人 Center），3 人同台前切为 "Three"（Left / Center / Right）；严禁 4 人以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
-- **替换角色**：HideTalk → 旧角色 LayoutClear(wait:true) 完全滑出 → 新角色 LayoutAppear(wait:true) 从画外滑入刚释放的同一槽。禁止第三人先入场、交叉淡化重叠三人、瞬移或偷偷删除角色/台词。
-- **角色不必整场站齐**：完成自己的戏份、暂时退出对话时可以 LayoutClear 滑出，之后再需要时重新 LayoutAppear 入场；不要让不参与的角色长期站在台上当背景板（原作角色平均只在自己说话前后停留 1~2 句）。
+- **双人全片同场原则**：当整场只有 2 名角色时，保持两人在场（Left/Right），不要每句来回切人淡入淡出。当整场 >=3 名角色时，可按幕次分组切换（或用 ThreeMode 三人同框）。
+- **入场/退场动画规则（99% 原地淡入淡出）**：
+  - 默认原地淡入淡出：LayoutAppear 的 from 与 to 写相同槽位且 offset=0（如 {"side":"Left","offset":0} -> {"side":"Left","offset":0}）；双人/三人同入时第一条 progressBehavior="WaitFinished" (wait:true)，其余 progressBehavior="Now" (wait:false)。
+  - 仅在明确“走入/走离”镜头时，才用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
+  - LayoutAppear 若已带入场动作（禁止 default 站姿），紧接着 0.4s 内的该角色首句 Talk 不要再重复触发 body motion（可只改 facial）。
+  - LayoutClear 默认原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
+- 可用 Move 做小幅跨步/移近（offset ±80~150 或单人移至 Center），用 CharacterShake（X/Y）演受惊，用 AttachCharacterShader（hologram）演虚拟歌手投影/通话。
 - Talk 的说话者和 actions 的目标都必须在场；旁白可用 modelId=-1，但不能给 -1 安排动作。
 
-## 开场序列
+## 开场与转场序列
 
-ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个开场在场的角色一条 LayoutAppear
+ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可选 Telop / PlaceInfo）→ LayoutAppear...
+- 支持 Telop（居中小标题，如时间/地点/回忆提示）、PlaceInfo（左上角地点条，下句说完自动关闭）、SideFade（Out/In 方向擦除转场）、WhiteOut -> FlashbackIn -> WhiteIn（回忆滤镜，结束前必配 FlashbackOut）、SekaiOut/SekaiIn（出入 SEKAI）、ShakeWindow / ShakeScreen + StopShakeScreen、CameraZoom / CameraMove（转场或结尾前复位）。
+- 转场、Telop 或静默 Move/Motion 前的最后一句 Talk 必须设 \`closeWindowOnFinish: true\`（或插 HideTalk）。
 
-若某角色只在中后段参与，可以让他在第一次说话前再滑入，不必开场就站齐；角色中途退场后需要再登场，也要重新 LayoutAppear 滑入，但 Talk 的说话者必须已经在场。
+## 对话与表演规范
 
-**入场/退场是独立的动画系统（滑入滑出+动作表演），与黑屏淡入淡出并存；角色永远不原地闪现**：
-- LayoutAppear 滑入：from 为同侧画外（Left:-100 / Right:+100；单人 Center 槽则 from 写 {"side":"Right","offset":100}），to 为槽位（offset:0），moveSpeed="Normal"，wait:true。角色滑入、入场动作播完后对话才开始。
-- 入场动作要小而有情绪：歪头、点头、抬眼、轻叹、犹豫、松口气等，按角色性格与场景情绪选，**禁止 default 站姿类动作滑入**——站姿滑入等于站桩；表情按入场情绪选。不要大挥手、小跑、夸张转身。
-- LayoutClear 滑出：from 为角色当前槽位（offset:0），to 为同侧画外（Left:-100 / Right:+100 / Center:+100），moveSpeed="Normal"，wait:true；motion/facial 填从简的退场动作与表情（点头、垂眼、轻叹、转身、抬手示意等），同样禁止 default 站姿退场，不要大幅挥手或跑跳。
-
-## 对话规范
-
-- **每句台词以 1 个身体动作为主**：[{"at":0.1,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}, ...]。at 是该 Talk 实际时长的 0..1 比例，不是秒；动作在开口时（at 0~0.2）触发，让角色边说边做一个与台词语义相符的小动作，然后自然保持到这句说完。表情和动作优先写在同一项里，同点切换。
-- **不是每句都必须动**：约一成的台词可以只换表情或安静说完；其余绝大多数台词各配 1 个自然手势。不要因为台词短就省略动作——短促应答也可以点头、歪头或抬眼。入场动作本身已经是一拍表演，紧接着的第一句可以不再加动作。身体动作是"说这句话时的一个自然手势"，不是连续广播体操。
-- **只有情绪明显转折或需要分两拍表演时，才在同句补第 2 个身体动作**（at 取 0.5~0.75）；同一角色同一句最多 2 个身体动作，禁止 3 个以上。相邻 at 间隔 ≥0.2。
-- **默认只演说话者**：同一 Talk.actions 里以说话者为主；听者大多数时候安静倾听，可以每隔 3~4 句只换一次表情（不配身体动作），被台词明显触动时才加一个轻微动作，整场几次即可；每句最多 1 项。听者只做动作表情，不伪造嘴型或添加假台词；不要在 Talk 后加 Motion(wait:false) 冒充说话期间反应。
-- **动作要有语义、幅度克制**：动作贴台词内容和情节（说到某物时指一指、被戳中时惊讶、安心时松口气），选幅度小而自然的动作（点头、歪头、小手势、轻摆），**禁止幅度过大的动作**（大挥臂、夸张甩头、大幅度摇晃一类）。动作与表情同向：点头/歪头配微笑或平静，叹气/垂眼配为难或低落，惊讶配瞪眼，生气配皱眉；不要用开心的表情去做叹气、垂眼一类动作。按角色性格选动作：冷静的角色多用垂眼、叹气，活泼的角色多用歪头、点头，不要把同一套动作套给所有人。不要每句都摆回同一个起手式；同一角色连续多句时每句换一个不同动作（原作连续两句动作名重复仅约 5%）。禁止与台词无关的乱动、机关枪式切换、每句重播同一动作，也不要把动作均匀铺满整句（0.15/0.5/0.8 三连发）。
-- 旧 motion/facial 字段可选，仅作 at=0 起始姿态兜底；不要与 actions 重复安排同一变化。只需换表情时省略 motion。
-- 表情跟随情绪转折而非逐句重置；允许整段安静倾听。
-- 句间静默续演才用独立 Motion.data.actions，wait:true，duration 为秒（默认 2，必须 >0 且 <=120）；at 同样按该 duration 的比例。演静默拍前可以先 HideTalk 收起对话框，演完下一句 Talk 会自动重新显示；一场最多一两次。不能用它替代 Talk 内听者反应。
-- 动作/表情须来自对应 modelId 的清单，写完整名称；不确定就省略，不要猜编号。
-- **台词之间要有呼吸间隔**：换人 delay 取 0.1~0.2；同一人连续说话 delay 取 0.15~0.2
-- 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。排版必须遵守下方「台词排版硬规则」
-- 对话以短句往返为主：同一角色连续说话多为 1~2 句，偶尔 3 句；不要 4 句以上独白，也不要机械一人一句；话量跟随角色性格，不额外规定多少；排版拆条只是换行方式，不减少总话量
-- **朝比奈真冬 / 真冬**：表情克制，禁止过于开心的表情（如 face_smile、face_sparkling、face_wink 及同类灿烂笑）；用 face_normal、face_sad 等平静或淡漠表情。动作同样避免 happy/cute/glad 一类欢快肢体
-
-## 台词风格（贴近原作）
-
-- **一条 Talk 以一句话为主**（原作约八成台词只有一句）：两句话就拆成同角色的连续两条 Talk（delay 0.15~0.2），不要把长段落塞进一条。
-- 以口语短句为主：单句平均约 20~25 字，1~2 行为主，偶尔 3 行；约两成台词在 10 字以内。
-- 多用省略号、破折号、感叹、反问和半截话；允许打断、重复、欲言又止。不要每句都写成完整书面句，也不要每句都解释前因后果。
-- 偶尔用（……）整句写内心独白，约一成台词即可；不要把每句都写成内心解说。
-- 让角色用自己的口吻回应，少写旁白式交代；一场戏只推进一个事件或一个情绪转折。
+- **每句台词以 1 个身体动作为主**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}, ...]。常规句动作在 at=0 触发；约 20% 带有语气转折或长句可在句中停顿处补第 2 拍身体动作（at 取 0.45~0.75，相邻间隔 >=0.2）。
+- **短促反应句不要剥夺表情**：哪怕只有两三个字的短反应（如「……嗯？」「啊。」）也应保留 facial 表情变化；只把约 15%~20% 的承接句或刚入场首句设为无动作。
+- **听者反应**：约 15%~20% 的台词可附带听者反应（以 facial 为主，或轻微动作）。
+- **动作要有语义、幅度克制**：动作与表情同向；同一角色连续多句换不同动作；**朝比奈真冬 / 真冬**保持克制表情与动作。
+- **停顿节奏**：93% 的 Talk 设 \`delay: 0\`；仅在重大沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
+- 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
+- 站内固定译名：凤笑梦口号写 **Wonderhoy**，草薙宁宁机器人写 **宁宁号**。
 
 ## 台词排版硬规则（防止字幕溢出，违反必被退回修正）
 
 1. content 是 JSON 字符串：换行只能写成转义符 \\n，字符串内部**禁止直接回车**
 2. **禁止连续两个及以上 \\n**（不允许空行）；台词首尾不得有换行或空格
-3. 每行不超过 26 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
-4. 每条 Talk **最多 3 行**（最多 2 个 \\n）——这只是排版规则，**不是话量限制**：话多的角色照样多说，把话**拆成同角色的连续多条 Talk**（delay 取 0.15~0.2）即可；禁止为了塞进一条而删减、缩短台词，也禁止写出超过 3 行的单条 Talk
+3. 每行不超过 30 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
+4. 每条 Talk **最多 3 行**（最多 2 个 \\n）——超长请拆成同角色连续多条 Talk（delay=0）
 5. 不要写 ttsText；宿主会按 content 逐条补日文翻译
-
-## 成片时长
-
-这是一场约 {target_minutes} 分钟的短戏（含开场滑入、对话、退场），不是长篇。口语节奏下整场大约三分钟说完就收：尽快入戏，说完一个完整小事件或一个情绪转折立刻退场。宁可略短，也不要写成能演很久的连续剧。禁止大段铺垫、连续多场景跳转、多人轮番独白、重复确认同一句意思。如果剧情确实需要，可以在中段换一次背景（整场最多两张图）：BlackOut → ChangeBackgroundImage → BlackIn 再继续，不要连续跳场景。话量仍跟人设走，但整场体量必须按三分钟短戏来写。按中文 TTS 约每字 0.15 秒估算，整场台词总量以三分钟能念完为准。
 
 ## 退场序列
 
-剧情结束时在场角色必须依次带动画退场，禁止无动画消失或站到黑屏：
-
-1. HideTalk（wait:true, delay 0.2）
-2. 每个在场角色一条 LayoutClear（wait:true, delay 0.1）：from 为角色当前槽位（offset:0），to 为同侧画外（Left:-100 / Right:+100 / Center:+100），moveSpeed="Normal"，motion/facial 填从简的退场动作与表情（点头、垂眼、轻叹、转身等；禁止 default 站姿退场，但不要大幅挥手或跑跳）；不要清除已离场角色
-3. BlackOut（duration 500~800）收尾。不使用 Telop。
+1. 末句 Talk 设 \`closeWindowOnFinish: true\`（或 HideTalk wait:true）
+2. 每个在场角色 LayoutClear（首条 wait:true / progressBehavior="WaitFinished"，其余 wait:false / progressBehavior="Now"，默认原地淡出 from == to）
+3. 确认 FlashbackOut / StopShakeScreen / Camera 复位后再 BlackOut（duration 500~800）收尾。
 
 ## 结构示例（目录中的真实 ID/资源；只参考字段，不机械照抄表演）
 
@@ -760,24 +826,23 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → 每个�
 根据场景从上方清单选最贴合的背景；需要换场景时 images 可列多张，snippets 里用对应 imageId。写清单里的名字（如「教室」）或 id（如 bg_a000301）都可以，不要编造。
 背景名里的时段（白天/黄昏/夜晚）和室内外必须和台词写的时间、天气一致；台词不要出现和所选背景矛盾的「夕阳/深夜/下雨」。优先选有描述的条目；只有名字、没有描述的条目只在地点完全吻合时使用。清单里没有的地点不要写出来。
 
-## 可用背景音乐（可选；只在场景/背景切换处换曲）
+## 可用背景音乐与音效（可选）
 {bgm_list}
 
-想要 BGM 时在顶层增加 "bgm" 数组，长度与 images 对齐：第一个元素是开场曲，第二个元素在 images[1] 对应的背景切换时接上（整场最多换一次）。元素写清单里的曲名或 id 都可以。
-没有合适的就省略该字段，沿用管理员配置的全局 BGM；不要编造曲目，也不要给每句台词换曲。
+想要 BGM 时在顶层增加 "bgm" 数组，或用 ChangeBgm（静音切停写 {"stop":true}）。可在关键动作/转场处点缀少数 PlaySe（约每 40 句 2~4 次），可选常用音效：
+{se_list}
 
 ## 输出要求
 1. 只输出合法 JSON，无 markdown、无解释；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear 从同侧画外滑入、LayoutClear 向同侧画外滑出（wait:true、moveSpeed="Normal"，入场/退场动作禁用 default 站姿）；任意时刻最多两人在场
+2. 开场与退场序列完整；LayoutAppear/LayoutClear 默认原地淡入淡出（from == to, offset: 0），仅物理走入用 LeftOver/RightOver；Normal 最多 2 人，Three 最多 3 人
 3. models 的 id 和路径必须与对照表一致，多角色绝不能写成同一个模型；数组顺序与登场顺序一致
 4. 所有 Talk/Motion/LayoutAppear/LayoutClear 的 modelId：{id_mapping}
-5. 每条 Talk 只写 content、不要写 ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可）；动作幅度小而自然，禁止大动作；动作/表情必须来自各自角色清单
-6. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 26 字宽、每条最多 3 行；超行拆成连续多条 Talk，话量不减
-7. delay 用 0、0.05、0.1、0.15、0.2
-8. 背景必须从「可用背景」清单按场景内容选择，写名字或 id 均可，禁止编造不存在的背景
-9. 成片约 {target_minutes} 分钟的短戏：只演一件事就收，禁止超长剧情
-10. 真冬禁止过于开心的表情与欢快动作
-11. 可选 BGM：顶层 "bgm" 数组与 images 对齐，写「可用背景音乐」清单里的曲名或 id；整场最多换一次，不需要就省略
+5. 每条 Talk 只写 content、不要写 ttsText；入场后 <0.4s 勿重复触发同角色 body motion；短反应保留 facial
+6. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 30 字宽、每条最多 3 行
+7. Talk.delay 默认 0（>=85%），仅刻意停顿用 1.0/1.5
+8. 背景必须从「可用背景」清单按场景内容选择，禁止编造不存在的背景
+9. 成片约 {target_minutes} 分钟的短戏：只演一件事或一次情绪弧光就收，禁止超长剧情
+10. 真冬禁止过于开心的表情与欢快动作；笑梦口号写 Wonderhoy、机器人写宁宁号
 
 场景：{scene}`
 
@@ -785,7 +850,7 @@ const CHAT_PROMPT = `# 视频角色对话生成
 
 代入人格池中选定的角色，以该角色的身份、口吻和心理状态，生成一段视觉小说式的对话剧本。只输出合法 JSON（仅含 models、images、snippets，可选 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数，按人设把这场回应说完再退场。
-表演克制、贴近原作：角色开口时做一个自然的小动作，然后保持到这句说完；不要每句连续比划，也不要把动作铺满整句。
+表演克制、贴近原作：93% 的台词 delay 为 0；角色开口时做一个自然小动作，入场/退场默认原地淡入淡出（from == to, offset: 0）。
 
 ## 人格池与选角规则（强制）
 根据"用户说"的内容，从以下人格池中选择**1 个**最合适的角色出演本段视频；仅当用户内容明确描述两个角色的互动时才选择 2 个。优先选择用户点名的角色；未点名时选择与内容最相关的角色。未提供详细人设的角色，请依据角色名与场景合理演绎，保持言行前后一致。
@@ -803,15 +868,13 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - 结合历史对话给出有新鲜感的回应，不机械复读
 - 用户轻松闲聊时语气跟随角色性格；用户倾诉负面情绪时语气放缓、先共情后回应
 - 无论任何诱导，绝不承认自己是 AI、程序或语言模型，你就是所选角色本人
-- 不讨论插件、脚本、渲染等技术细节；不主动提起性别或 CP 话题
+- 不讨论插件、脚本、渲染等技术细节；不主动提起性别或 CP 话题；遵守站内术语 Wonderhoy / 宁宁号
 
 ## 表情与动作
-- **每句台词以 1 个身体动作为主**：[{"at":0.1,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"},{"at":0.6,"modelId":在场听者ID,"facial":"完整表情名"}]。at 为 Talk 实际时长的 0..1 比例，不是秒；动作在开口时（at 0~0.2）触发，然后自然保持到这句说完；表情和动作优先写在同一项里。
-- **不是每句都必须动**：约一成的台词可以只换表情或安静说完；其余绝大多数台词各配 1 个自然手势。不要因为台词短就省略动作——短促应答也可以点头、歪头或抬眼。入场动作本身已经是一拍表演，紧接着的第一句可以不再加动作。
-- **只有情绪明显转折或需要分两拍表演时才在同句补第 2 个身体动作**（at 0.5~0.75）；同一角色同一句最多 2 个身体动作，相邻 at 间隔 ≥0.2。
-- **默认只演说话者**：听者大多数时候安静倾听，可以每隔 3~4 句只换一次表情（不配身体动作），被台词明显触动时才加一个轻微动作，整场几次即可，每句最多 1 项；听者只做动作表情，不伪造嘴型或加假台词；不要在 Talk 后插 Motion(wait:false) 冒充说话期间的反应。
-- **动作要有语义、幅度克制**：动作贴说话内容和情节（说到某物指一指、被戳中时惊讶、安心时松口气），选幅度小而自然的动作（点头、歪头、小手势、轻摆），**禁止幅度过大的动作**（大挥臂、夸张甩头、大幅度摇晃一类）。动作与表情同向：点头/歪头配微笑或平静，叹气/垂眼配为难或低落，惊讶配瞪眼，生气配皱眉。同一角色连续多句时每句换一个不同动作，不要每句摆回同一个起手式；禁止与台词无关的乱动、机关枪式换动作、每句重播同一动作，也不要把动作均匀铺满整句。
-- 旧 motion/facial 可选，作 at=0 的起始姿态兜底；不要与 actions 重复。句间静默续演才用 Motion.data.actions（wait:true，duration 秒数 >0 且 <=120，默认 2），不能替代 Talk 内听者反应。
+- **每句台词以 1 个身体动作为主**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。at 为 Talk 实际时长的 0..1 比例；常规句在 at=0 触发，句中语气明显转折可补第 2 拍（at 取 0.45~0.75，间隔 >=0.2）。
+- **入场去重**：LayoutAppear 已播放入场动作时，紧接 0.4s 内的第一句 Talk 不要重复发 body motion（可仅换 facial）。短促反应句保留 facial 表情变化。
+- **默认只演说话者**：听者大多数时候安静倾听，偶有表情/轻微动作，每句最多 1 项。
+- **动作要有语义、幅度克制**：动作与表情同向，禁止大动作；同一角色连续多句换不同动作。
 - 只使用对应角色清单里明确列出的完整名称；不确定就省略，不要猜编号。
 - 动作关键词：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
 - 表情关键词：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
@@ -835,42 +898,39 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 ### 台词排版硬规则（防止字幕溢出，违反必被退回修正）
 1. content 是 JSON 字符串：换行只能写成转义符 \\n，字符串内部**禁止直接回车**
 2. **禁止连续两个及以上 \\n**（不允许空行）；台词首尾不得有换行或空格
-3. 每行不超过 26 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
-4. 每条 Talk **最多 3 行**（最多 2 个 \\n）——这只是排版规则，**不是话量限制**：话多的角色照样多说，把话**拆成同角色的连续多条 Talk**（delay 取 0.15~0.2）即可；禁止为了塞进一条而删减、缩短台词，也禁止写出超过 3 行的单条 Talk
+3. 每行不超过 30 个字宽（全角字=1，半角字=0.5）；一行写不下，就在最近的标点或词组后换 \\n
+4. 每条 Talk **最多 3 行**（最多 2 个 \\n）；超长请拆成连续多条 Talk（delay=0）
 5. 不要写 ttsText；宿主会按 content 逐条补日文翻译
 
-开场滑入 + 对话表演 + 结尾滑出退场：
+开场原地淡入 + 对话表演 + 结尾原地淡出退场：
 \`\`\`
-ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(滑入+入场动作) -> Talk(actions)... -> HideTalk -> LayoutClear(滑出+退场动作) -> BlackOut
+ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(原地淡入) -> Talk(actions)... -> HideTalk/closeWindowOnFinish -> LayoutClear(原地淡出) -> BlackOut
 \`\`\`
 
 **舞台与替换规则**：
-- ChangeLayoutMode.data.mode 只写 "Normal"。单人用 Center，两人用 Left / Right，不能同侧，也不能 Center 与另一槽混用。
-- 始终维护在场名单：models 是整场演员表，不是在场名单。任意时刻最多两人；只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位。背景/黑屏不会清除角色。
-- **入场/退场是独立的动画系统（滑入滑出+动作表演），与黑屏淡入淡出并存；角色永远不原地闪现**：
-  - LayoutAppear 滑入：from 为同侧画外（Left:-100 / Right:+100；单人 Center 槽则 from 写 {"side":"Right","offset":100}），to 为槽位（offset:0），moveSpeed="Normal"、wait:true。入场动作要小而有情绪（歪头、点头、抬眼、轻叹、犹豫等），**禁止 default 站姿滑入**；不要大挥手、小跑、夸张转身。
-  - LayoutClear 滑出：from 为角色当前槽位（offset:0），to 为同侧画外（Left:-100 / Right:+100 / Center:+100），moveSpeed="Normal"，motion/facial 填从简的退场动作与表情（点头、垂眼、轻叹、转身等），禁止 default 站姿退场，不要大幅挥手或跑跳。
-- 换人必须 HideTalk → 旧角色 LayoutClear(wait:true) 完全滑出 → 新角色从画外滑入已释放槽位 LayoutAppear(wait:true)；禁止第三人先出现或两次渐变重叠成三人在场。
+- ChangeLayoutMode.data.mode 写 "Normal"。单人用 Center，两人用 Left / Right，不能同侧，也不能 Center 与另一槽混用。
+- 始终维护在场名单：models 是整场演员表，不是在场名单。任意时刻最多两人；只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位。
+- **入场/退场默认原地淡入淡出（from == to, offset: 0）**：禁止 ±100px 偏移滑行。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
 - Talk 和 actions 只指向已入场角色；旁白可用 modelId=-1，但不能给 -1 配动作。
 
 **结尾退场序列（缺一不可）：**
-1. HideTalk（wait:true, delay:0.2）
-2. 每个仍在场角色 LayoutClear（wait:true, delay:0.1）：from 为当前槽位（offset:0），to 为同侧画外（Center:+100 / Left:-100 / Right:+100），moveSpeed="Normal"，motion/facial 填退场动作表情
-3. BlackOut（wait:true, duration:600）。不使用 Telop。
+1. 末句 Talk 设 closeWindowOnFinish: true（或 HideTalk wait:true）
+2. 每个仍在场角色 LayoutClear（首条 wait:true / progressBehavior="WaitFinished"，其余 wait:false / progressBehavior="Now"，from == to, offset: 0）
+3. BlackOut（wait:true, duration:600）。
 
-### 结构示例（目录真实资源；每句一个动作，听者默认安静，勿机械照抄）
+### 结构示例（目录真实资源；勿机械照抄）
 \`\`\`json
 {acting_example}
 \`\`\`
 
 ## 输出要求
 1. 只输出合法 JSON，无额外文字；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear 从同侧画外滑入、LayoutClear 向同侧画外滑出（wait:true、moveSpeed="Normal"，入场/退场动作禁用 default 站姿）；任意时刻最多两人在场
-3. speaker 与 modelId 必须来自对照表；每条 Talk 只写 content、不写 ttsText；**说话者以每句 1 个身体动作为主、最多 2 个**（情绪明显转折才补第 2 个；动作与表情同点写；听者整场几次即可），动作幅度小而自然，禁止大动作
+2. 开场与退场序列完整；LayoutAppear/LayoutClear 原地淡入淡出（from == to, offset: 0）；任意时刻最多两人在场
+3. speaker 与 modelId 必须来自对照表；每条 Talk 只写 content、不写 ttsText；动作幅度小而自然，禁止大动作
 4. models=[{"id":<所选角色modelId>,"model":"<对照表中的model路径>","normal_scale":2.1,"small_scale":1.8,"anchor":0.5}]（多角色按登场顺序排列）
 5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的背景名或 id>"}]
-6. delay 用 0、0.05、0.1、0.15、0.2；换气的 Talk 之间 delay 取 0.1~0.2
-7. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 26 字宽、每条最多 3 行；超行拆成连续多条 Talk，话量不减
+6. Talk.delay 默认 0（>=85%）；仅刻意停顿用 1.0/1.5
+7. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 30 字宽、每条最多 3 行
 8. 可选 BGM：顶层 "bgm": ["<曲名或 id>"] 只能写「可用背景音乐」清单里的曲名或 id；不需要就省略
 
 历史对话：
@@ -915,6 +975,7 @@ export function buildStoryPrompt(
     '{facial_list}': view.facialList(),
     '{image_list}': view.imageList(),
     '{bgm_list}': view.bgmList(),
+    '{se_list}': view.seList(),
     '{scene}': options.scene
   })
   return {

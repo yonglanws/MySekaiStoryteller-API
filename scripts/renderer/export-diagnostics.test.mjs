@@ -98,8 +98,8 @@ function input() {
           ttsText: '今日も一緒に練習しよう。',
           modelId: 1,
           actions: [
-            { at: 0.1, modelId: 1, motion: 'w-normal-nod01' },
-            { at: 0, modelId: 2, facial: 'face_smile_01' }
+            { at: 0.5, modelId: 1, motion: 'w-normal-nod01' },
+            { at: 1.4, modelId: 2, facial: 'face_smile_01' }
           ]
         }
       },
@@ -141,9 +141,9 @@ function input() {
       {
         snippetIndex: 1,
         snippetType: 'Talk',
-        startTimeMs: 800,
+        startTimeMs: 900,
         durationMs: 3000,
-        endTimeMs: 3800,
+        endTimeMs: 3900,
         ttsDurationMs: 3000,
         hasTTS: true,
         durationSource: 'tts_audio'
@@ -151,9 +151,9 @@ function input() {
       {
         snippetIndex: 2,
         snippetType: 'Talk',
-        startTimeMs: 3800,
+        startTimeMs: 4000,
         durationMs: 2000,
-        endTimeMs: 5800,
+        endTimeMs: 6000,
         ttsDurationMs: 0,
         hasTTS: false,
         durationSource: 'content_estimation'
@@ -221,8 +221,8 @@ test('buildExportDiagnostics records per-line timing, tts and action cues', () =
   assert.equal(talk.ttsDurationMs, 3000)
   assert.equal(talk.japaneseTts, true)
   assert.equal(talk.actions.length, 2)
-  assert.equal(talk.actions[0].at, 0.1)
-  assert.equal(talk.actions[0].cueAtMs, 300)
+  assert.equal(talk.actions[0].at, 0.5)
+  assert.equal(talk.actions[0].cueAtMs, 1500)
   assert.equal(report.tts[0].contentChars, 8)
   assert.equal(report.tts[0].japanese, true)
   assert.deepEqual(
@@ -313,8 +313,13 @@ test('buildExportDiagnostics tolerates motionless Appear and flags late cues/sho
     'Appear 会走 startEntryMotion 兜底，不能逐条报异常'
   )
   assert.ok(
-    report.anomalies.some((line) => line.includes('Talk 动作 at=0.1')),
+    report.anomalies.some((line) => line.includes('Talk 动作 at=1.4')),
     report.anomalies.join('\n')
+  )
+  assert.equal(
+    report.anomalies.some((line) => line.includes('Talk 动作 at=0.5')),
+    false,
+    '合法句中 2 拍 cue (0<=at<=1) 不应报异常'
   )
   assert.ok(
     report.anomalies.some(
@@ -334,9 +339,112 @@ test('formatDiagnosticsText produces a readable per-snippet log', () => {
   assert.match(text, /=== MySekaiStoryteller export diagnostics ===/)
   assert.match(text, /--- snippets ---/)
   assert.match(text, /\[001\] Talk/)
-  assert.match(text, /action at=0\.1 cue=300ms model=1 motion=w-normal-nod01/)
+  assert.match(text, /action at=0\.5 cue=1500ms model=1 motion=w-normal-nod01/)
   assert.match(text, /--- motion trace ---/)
   assert.match(text, /interrupted w-normal-nod01/)
   assert.match(text, /--- anomalies ---/)
   assert.match(text, /--- logs \(1\) ---/)
+})
+
+test('buildExportDiagnostics aligns real pre-fenced delays & Now durations without double-counting', () => {
+  const { buildExportDiagnostics } = loadDiagnostics()
+  const report = buildExportDiagnostics({
+    snippets: [
+      { type: 'SideFade', progressBehavior: 'Now', wait: false, delay: 0.2, data: { direction: 'Left', mode: 'In', duration: 0.5 } },
+      {
+        type: 'Talk',
+        progressBehavior: 'WaitFinished',
+        wait: true,
+        delay: 1.0,
+        data: { speaker: '瑞希', content: 'あ', ttsText: 'あ。', modelId: 1 }
+      }
+    ],
+    timeline: [
+      {
+        snippetIndex: 0,
+        snippetType: 'SideFade',
+        startTimeMs: 200,
+        durationMs: 500,
+        endTimeMs: 700,
+        ttsDurationMs: 0,
+        hasTTS: false,
+        durationSource: 'data_duration'
+      },
+      {
+        snippetIndex: 1,
+        snippetType: 'Talk',
+        startTimeMs: 1700,
+        durationMs: 2266.667,
+        endTimeMs: 3966.667,
+        ttsDurationMs: 0,
+        hasTTS: false,
+        durationSource: 'content_estimation'
+      }
+    ],
+    timestamps: {
+      getRenderStartWallMs: () => 5000,
+      getSnippetTimestamp: (idx) =>
+        idx === 0
+          ? { snippetIndex: 0, snippetType: 'SideFade', wallStartMs: 5000, wallEndMs: 5700, wallDurationMs: 700 }
+          : { snippetIndex: 1, snippetType: 'Talk', wallStartMs: 5700, wallEndMs: 8967, wallDurationMs: 3267 }
+    },
+    ttsResults: new Map(),
+    motion: [],
+    logs: [],
+    exportMeta: { mode: 'fast', width: 1280, height: 720, fps: 60, frameCount: 240, durationMs: 3967 },
+    ttsEnabled: false
+  })
+
+  // Now 片段不再被归零为 0ms；delay 不再被 cumulativeDelayMs 二次累加
+  assert.equal(report.snippets[0].plannedStartMs, 0)
+  assert.equal(report.snippets[0].plannedDurationMs, 700)
+  assert.equal(report.snippets[0].driftMs, 0)
+  assert.equal(report.snippets[0].durationDriftMs, 0)
+  assert.equal(report.snippets[1].plannedStartMs, 700)
+  assert.equal(Math.round(report.snippets[1].plannedDurationMs), 3267)
+  assert.equal(report.snippets[1].driftMs, 0)
+  assert.equal(report.anomalies.length, 0)
+})
+
+test('punctuation-only Talk does not trigger missing Irodori ttsText or duration anomalies', () => {
+  const { buildExportDiagnostics } = loadDiagnostics()
+  const data = input()
+  data.snippets = [
+    {
+      type: 'Talk',
+      wait: true,
+      delay: 0,
+      data: { speaker: '绘名', content: '……！', ttsText: '', modelId: 2 }
+    }
+  ]
+  data.timeline = [
+    {
+      snippetIndex: 0,
+      snippetType: 'Talk',
+      startTimeMs: 0,
+      durationMs: 1200,
+      endTimeMs: 1200,
+      ttsDurationMs: 0,
+      hasTTS: false,
+      durationSource: 'content_estimation'
+    }
+  ]
+  data.motion = []
+  data.ttsResults = new Map()
+  data.timestamps = {
+    getRenderStartWallMs: () => 1000,
+    getSnippetTimestamp: () => ({
+      snippetIndex: 0,
+      snippetType: 'Talk',
+      wallStartMs: 1000,
+      wallEndMs: 2200,
+      wallDurationMs: 1200
+    })
+  }
+  const report = buildExportDiagnostics(data)
+  assert.equal(
+    report.anomalies.some((line) => /TTS 时长|日文 ttsText/.test(line)),
+    false,
+    report.anomalies.join('\n')
+  )
 })

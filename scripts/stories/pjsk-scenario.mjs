@@ -54,30 +54,32 @@ const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'))
  * 官方枚举：0 None / 1 Left / 2 LeftOver / 3 LeftInside / 4 Center /
  * 5 Right / 6 RightOver / 7 RightInside / 8 LeftUnder / 9 LeftInsideUnder /
  * 10 CenterUnder / 11 RightUnder / 12 RightInsideUnder。
- * LeftInside 与 Left、RightInside 与 Right 的 x 相同；Over 位在画外
- * （contentWidth/2 + 819.2），用 Left/Right 加偏移表示。Under 的 y 偏移
- * 当前宿主格式没有字段，按同 x 处理。
+ * LeftInside 与 Left、RightInside 与 Right 的 x 相同；LeftOver/RightOver 与
+ * *Under 标记直接透传给 StageUtils / StorySchema。
  */
 export function sideOf(side, offset) {
   const extra = Number(offset) || 0
   switch (Number(side)) {
     case 1:
     case 3:
-    case 8:
-    case 9:
       return { side: 'Left', offset: extra }
+    case 2:
+      return { side: 'LeftOver', offset: extra }
     case 5:
     case 7:
+      return { side: 'Right', offset: extra }
+    case 6:
+      return { side: 'RightOver', offset: extra }
+    case 8:
+    case 9:
+      return { side: 'Left', offset: extra, under: true }
+    case 10:
+      return { side: 'Center', offset: extra, under: true }
     case 11:
     case 12:
-      return { side: 'Right', offset: extra }
-    case 2:
-      return { side: 'Left', offset: extra - 1429.2 }
-    case 6:
-      return { side: 'Right', offset: extra + 1429.2 }
+      return { side: 'Right', offset: extra, under: true }
     case 0:
     case 4:
-    case 10:
     default:
       return { side: 'Center', offset: extra }
   }
@@ -122,10 +124,10 @@ function emotionOf(facial) {
   return '平静'
 }
 
-const TALK_LINE_WIDTH_UNITS = 26
+const TALK_LINE_WIDTH_UNITS = 30
 const charWidthUnits = (char) => (char.codePointAt(0) >= 0x2e80 ? 1 : 0.5)
 
-/** 与宿主 sanitizeDisplayText 相同的 26 字宽折行：渲染端只按空格折行，中文长句需要预折。 */
+/** 官方 1368.3px 文本框对应的 30 字宽折行：渲染端按空格/换行排版，中文长句需要预折。 */
 function wrapDisplayText(text) {
   const cleaned = String(text || '')
     .replace(/\r\n/g, '\n')
@@ -182,6 +184,11 @@ function main() {
     Object.entries(config.models).map(([id, model]) => [Number(id), { ...model, id: Number(id) }])
   )
   const currentModel = new Map()
+  const currentCostume = new Map()
+  const hasMappedCostume = (character2dId, costume) => {
+    const entry = config.characterModels?.[String(character2dId)]
+    return Boolean(costume && entry?.costumes?.[costume])
+  }
   const resolveModel = (character2dId, costume) => {
     const entry = config.characterModels?.[String(character2dId)]
     if (!entry) throw new Error(`no model mapping for Character2dId ${character2dId}`)
@@ -193,22 +200,53 @@ function main() {
 
   const snippets = []
   const usedModels = new Set()
-  const bgmSnippetByIndex = new Map()
 
   const push = (snippet) => {
     snippets.push(snippet)
     return snippets.length - 1
   }
 
+  const depthOf = (value) => {
+    switch (Number(value)) {
+      case 1:
+        return 'Front'
+      case 2:
+        return 'Back'
+      case 3:
+        return 'Reset'
+      default:
+        return null
+    }
+  }
+
+  const parseDollyParams = (raw) => {
+    let zoom = null
+    let blur = null
+    let dist = null
+    for (const part of String(raw || '').replace(/：/g, ':').split(',')) {
+      const idx = part.indexOf(':')
+      if (idx < 0) continue
+      const key = part.slice(0, idx).trim().toLowerCase()
+      const value = Number.parseFloat(part.slice(idx + 1).trim())
+      if (!Number.isFinite(value)) continue
+      if (key === 'zoom') zoom = value
+      else if (key === 'blur') blur = value
+      else if (key === 'dist') dist = value
+    }
+    return { zoom, blur, dist }
+  }
+
   push({
     type: 'ChangeLayoutMode',
     wait: false,
+    progressBehavior: 'Now',
     delay: 0,
     data: { mode: layoutModeOf(scenario.FirstCharacterLayoutMode) }
   })
   push({
     type: 'ChangeBackgroundImage',
     wait: false,
+    progressBehavior: 'Now',
     delay: 0,
     data: { imageId: imageId(scenario.FirstBackground) }
   })
@@ -216,12 +254,11 @@ function main() {
     push({
       type: 'ChangeBgm',
       wait: false,
+      progressBehavior: 'Now',
       delay: 0,
       data: { file: `${scenario.FirstBgm}.mp3`, fadeMs: 600 }
     })
   }
-
-  let lastBgmSnippet = -1
 
   const addMotion = (modelId, motion, facial) => {
     usedModels.add(modelId)
@@ -234,7 +271,8 @@ function main() {
   }
 
   for (const snippet of scenario.Snippets) {
-    const wait = snippet.ProgressBehavior === 1
+    const progressBehavior = Number(snippet.ProgressBehavior) === 1 ? 'WaitFinished' : 'Now'
+    const wait = progressBehavior === 'WaitFinished'
     const delay = Number(snippet.Delay) || 0
 
     switch (snippet.Action) {
@@ -254,9 +292,16 @@ function main() {
           })
           .filter(Boolean)
         const speakerFacial = talk.Motions?.[0]?.FacialName || ''
+        const talkEffect =
+          Number(talk.RequirePlayEffect) === 1
+            ? 'Internal'
+            : Number(talk.RequirePlayEffect) === 2
+              ? 'Overlap'
+              : undefined
         push({
           type: 'Talk',
           wait,
+          progressBehavior,
           delay,
           data: {
             speaker: translate(talk.WindowDisplayName) || talk.WindowDisplayName,
@@ -264,6 +309,8 @@ function main() {
             ttsText: talk.Body,
             modelId,
             emotion: emotionOf(speakerFacial),
+            ...(talk.WhenFinishCloseWindow ? { closeWindowOnFinish: true } : {}),
+            ...(talkEffect ? { effect: talkEffect } : {}),
             ...(actions.length > 0 ? { actions } : {})
           }
         })
@@ -274,15 +321,30 @@ function main() {
         const layout = scenario.LayoutData[snippet.ReferenceIndex]
         if (!layout) break
         const modelId = resolveModel(layout.Character2dId, layout.CostumeType)
+        usedModels.add(modelId)
+        const maybeEmitCostumeChange = () => {
+          const costume = String(layout.CostumeType || '').trim()
+          if (!costume || hasMappedCostume(layout.Character2dId, costume)) return
+          if (currentCostume.get(modelId) === costume) return
+          currentCostume.set(modelId, costume)
+          push({
+            type: 'CostumeChange',
+            wait: false,
+            progressBehavior: 'Now',
+            delay,
+            data: { modelId, costume }
+          })
+        }
         if (snippet.Action === 4 || layout.Type === 0) {
+          maybeEmitCostumeChange()
           if (!layout.MotionName && !layout.FacialName) break
-          usedModels.add(modelId)
           // 官方 ChangeMotion 在 type 分支前启动动作，协程本身立即结束；即使
           // ProgressBehavior=1 也不等剪辑播完。用 0.1s 的 actions 序列表达“只发 cue”，
           // 避免旧标量 Motion 把整段 1~4s 动作当成阻塞时间。
           push({
             type: 'Motion',
             wait,
+            progressBehavior,
             delay,
             data: {
               modelId,
@@ -293,10 +355,11 @@ function main() {
           break
         }
         if (layout.Type === 2) {
-          usedModels.add(modelId)
+          maybeEmitCostumeChange()
           push({
             type: 'LayoutAppear',
             wait,
+            progressBehavior,
             delay,
             data: {
               modelId,
@@ -307,11 +370,22 @@ function main() {
               moveSpeed: speedOf(layout.MoveSpeedType)
             }
           })
+          const appearDepth = depthOf(layout.DepthType)
+          if (appearDepth === 'Front' || appearDepth === 'Back') {
+            push({
+              type: 'LayoutDepth',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: { modelId, depth: appearDepth }
+            })
+          }
         } else if (layout.Type === 3) {
-          usedModels.add(modelId)
+          maybeEmitCostumeChange()
           push({
             type: 'LayoutClear',
             wait,
+            progressBehavior,
             delay,
             data: {
               modelId,
@@ -321,10 +395,11 @@ function main() {
             }
           })
         } else if (layout.Type === 1) {
-          usedModels.add(modelId)
+          maybeEmitCostumeChange()
           push({
             type: 'Move',
             wait,
+            progressBehavior,
             delay,
             data: {
               modelId,
@@ -335,6 +410,51 @@ function main() {
               facial: layout.FacialName || ''
             }
           })
+        } else if (layout.Type === 4 || layout.Type === 5) {
+          maybeEmitCostumeChange()
+          if (layout.MotionName || layout.FacialName) {
+            push({
+              type: 'Motion',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: {
+                modelId,
+                duration: 0.1,
+                actions: [addMotion(modelId, layout.MotionName || '', layout.FacialName || '')]
+              }
+            })
+          }
+          push({
+            type: 'CharacterShake',
+            wait,
+            progressBehavior,
+            delay,
+            data: { modelId, axis: layout.Type === 4 ? 'X' : 'Y' }
+          })
+        } else if (layout.Type === 6) {
+          maybeEmitCostumeChange()
+          if (layout.MotionName || layout.FacialName) {
+            push({
+              type: 'Motion',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: {
+                modelId,
+                duration: 0.1,
+                actions: [addMotion(modelId, layout.MotionName || '', layout.FacialName || '')]
+              }
+            })
+          }
+          const depth = depthOf(layout.DepthType) || 'Reset'
+          push({
+            type: 'LayoutDepth',
+            wait,
+            progressBehavior,
+            delay,
+            data: { modelId, depth }
+          })
         }
         break
       }
@@ -342,36 +462,76 @@ function main() {
         const effect = scenario.SpecialEffectData[snippet.ReferenceIndex]
         if (!effect) break
         const durationMs = Math.round((Number(effect.Duration) || 0) * 1000)
-        switch (Number(effect.EffectType)) {
+        const effectType = Number(effect.EffectType)
+        switch (effectType) {
+          case 0:
+          case 11:
+          case 17:
+            // 官方 Noop / 等候占位指令
+            break
           case 1:
-            push({ type: 'BlackIn', wait, delay, data: { duration: durationMs, color: 'black' } })
+            push({
+              type: 'BlackIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'black' }
+            })
             break
           case 2:
-            push({ type: 'HideTalk', wait: true, delay: 0 })
-            push({ type: 'BlackOut', wait, delay, data: { duration: durationMs, color: 'black' } })
+            push({
+              type: 'HideTalk',
+              wait: true,
+              progressBehavior: 'WaitFinished',
+              delay: 0
+            })
+            push({
+              type: 'BlackOut',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'black' }
+            })
             break
           case 3:
-            push({ type: 'BlackIn', wait, delay, data: { duration: durationMs, color: 'white' } })
+            push({
+              type: 'BlackIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'white' }
+            })
             break
           case 4:
-            push({ type: 'HideTalk', wait: true, delay: 0 })
-            push({ type: 'BlackOut', wait, delay, data: { duration: durationMs, color: 'white' } })
+            push({
+              type: 'HideTalk',
+              wait: true,
+              progressBehavior: 'WaitFinished',
+              delay: 0
+            })
+            push({
+              type: 'BlackOut',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'white' }
+            })
             break
           case 5:
-            // 官方用 9999 秒表示“一直抖到 StopShake”；ShakeScreen 的 schema 上限
-            // 是 30s，后续 EffectType 25/26 会立即停止，取上限即可。
+            // 官方用 9999 秒表示“一直抖到 StopShakeScreen”；schema 上限为 30s。
             push({
               type: 'ShakeScreen',
               wait,
+              progressBehavior,
               delay,
               data: { duration: Math.min(durationMs, 30000) }
             })
             break
           case 6:
-            // ShakeWindow：宿主只有一个全屏震屏实现，按 ShakeScreen 近似。
             push({
-              type: 'ShakeScreen',
+              type: 'ShakeWindow',
               wait,
+              progressBehavior,
               delay,
               data: { duration: Math.min(durationMs, 30000) }
             })
@@ -380,62 +540,215 @@ function main() {
             push({
               type: 'ChangeBackgroundImage',
               wait,
+              progressBehavior,
               delay,
-              data: { imageId: imageId(effect.StringValSub || effect.StringVal) }
+              data: {
+                imageId: imageId(effect.StringValSub || effect.StringVal),
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
             })
             break
           case 8:
-            // ScenarioTelopPlayer：文本本身是 StringVal。
-            push({ type: 'Telop', wait, delay, data: { content: effect.StringVal || '' } })
+            push({
+              type: 'Telop',
+              wait,
+              progressBehavior,
+              delay,
+              data: { content: translate(effect.StringVal || '') || effect.StringVal || '' }
+            })
             break
           case 18:
-            // PlaceInfo：地点标题，用 Telop 近似。
-            push({ type: 'Telop', wait, delay, data: { content: effect.StringVal || '' } })
+            push({
+              type: 'PlaceInfo',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                text: translate(effect.StringVal || '') || effect.StringVal || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
             break
           case 9:
             push({
               type: 'FlashbackIn',
               wait,
+              progressBehavior,
               delay,
-              data: { duration: Math.max(100, durationMs), alpha: 0.3 }
+              data: { duration: Math.min(Math.max(100, durationMs), 10000), alpha: 0.3 }
             })
             break
           case 10:
             push({
               type: 'FlashbackOut',
               wait,
+              progressBehavior,
               delay,
-              data: { duration: Math.max(100, durationMs) }
+              data: { duration: Math.min(Math.max(100, durationMs), 10000) }
             })
             break
           case 12:
-            push({ type: 'AmbientColor', wait, delay, data: { mode: 'normal' } })
+            push({
+              type: 'AmbientColor',
+              wait,
+              progressBehavior,
+              delay,
+              data: { mode: 'normal' }
+            })
             break
           case 13:
-            push({ type: 'AmbientColor', wait, delay, data: { mode: 'evening' } })
+            push({
+              type: 'AmbientColor',
+              wait,
+              progressBehavior,
+              delay,
+              data: { mode: 'evening' }
+            })
             break
           case 14:
-            push({ type: 'AmbientColor', wait, delay, data: { mode: 'night' } })
+            push({
+              type: 'AmbientColor',
+              wait,
+              progressBehavior,
+              delay,
+              data: { mode: 'night' }
+            })
+            break
+          case 15:
+            push({
+              type: 'PlayScenarioEffect',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                effectName: effect.StringVal || effect.StringValSub || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
+            break
+          case 16:
+            push({
+              type: 'StopScenarioEffect',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                effectName: effect.StringVal || effect.StringValSub || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
+            break
+          case 19:
+            push({
+              type: 'Movie',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                file: effect.StringVal || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 600000) } : {})
+              }
+            })
             break
           case 20:
           case 21:
           case 40:
           case 41:
-            // SekaiTransition：偶数 = In（覆盖），奇数 = Out（露出）。
             push({
-              type: 'Wipe',
+              type: effectType % 2 === 0 ? 'SekaiIn' : 'SekaiOut',
               wait,
+              progressBehavior,
               delay,
               data: {
-                mode: Number(effect.EffectType) % 2 === 0 ? 'in' : 'out',
-                direction: 'right',
-                duration: durationMs
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}),
+                variant: effectType >= 40 ? 'v2' : 'v1'
+              }
+            })
+            break
+          case 22: {
+            const rawShader = String(effect.StringVal || '').trim().toLowerCase()
+            if (!['hologram', 'monitor', 'blur', 'none'].includes(rawShader)) break
+            const charId = Number(effect.IntVal)
+            const hasChar = Number.isFinite(charId) && config.characterModels?.[String(charId)]
+            const shaderLevel = Number.parseFloat(effect.StringValSub)
+            const levelOption =
+              rawShader === 'blur' && Number.isFinite(shaderLevel)
+                ? { level: Math.min(3, Math.max(1, shaderLevel)) }
+                : {}
+            if (hasChar) {
+              const targetModel = resolveModel(charId, '')
+              usedModels.add(targetModel)
+              push({
+                type: 'AttachCharacterShader',
+                wait,
+                progressBehavior,
+                delay,
+                data: { modelId: targetModel, shader: rawShader, ...levelOption }
+              })
+            } else if (rawShader === 'none') {
+              const fallbackIds = usedModels.size > 0 ? [...usedModels] : [...models.keys()].slice(0, 1)
+              for (const targetModel of fallbackIds) {
+                usedModels.add(targetModel)
+                push({
+                  type: 'AttachCharacterShader',
+                  wait,
+                  progressBehavior,
+                  delay,
+                  data: { modelId: targetModel, shader: 'none' }
+                })
+              }
+            }
+            break
+          }
+          case 23:
+            push({
+              type: 'SimpleSelectable',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                choices: String(effect.StringVal || '')
+                  .split('/')
+                  .map((choice) => translate(choice) || choice)
+              }
+            })
+            break
+          case 24:
+            push({
+              type: 'FullScreenText',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                text: translate(effect.StringVal || '') || effect.StringVal || '',
+                ...(effect.StringValSub ? { voice: effect.StringValSub } : {}),
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 120000) } : {})
               }
             })
             break
           case 25:
+            push({ type: 'StopShakeScreen', wait, progressBehavior, delay, data: {} })
+            break
           case 26:
-            push({ type: 'StopShake', wait, delay })
+            push({ type: 'StopShakeWindow', wait, progressBehavior, delay, data: {} })
+            break
+          case 27:
+            push({
+              type: 'SepiaIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}
+            })
+            break
+          case 28:
+            push({
+              type: 'SepiaOut',
+              wait,
+              progressBehavior,
+              delay,
+              data: durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}
+            })
             break
           case 29:
           case 30:
@@ -446,27 +759,56 @@ function main() {
           case 35:
           case 36: {
             const { edge, mode } = sideFadeOf(effect.EffectType)
-            push({ type: 'SideFade', wait, delay, data: { edge, mode, duration: durationMs } })
+            push({
+              type: 'SideFade',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                edge,
+                direction: `${edge[0].toUpperCase()}${edge.slice(1)}`,
+                mode: mode === 'in' ? 'In' : 'Out',
+                duration: Math.min(durationMs, 10000)
+              }
+            })
             break
           }
+          case 37:
+            console.warn(`skip unsupported 3D MV effect type 37 (snippet ${snippet.Index})`)
+            break
           case 38:
+            push({
+              type: 'BlurIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
+            })
+            break
           case 39:
-            // BlurIn/BlurOut：宿主用背景模糊开关近似。
+            push({
+              type: 'BlurOut',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
+            })
+            break
+          case 44: {
+            const enabled = /^(1|true|on)$/i.test(String(effect.StringVal || ''))
             push({
               type: 'BackgroundBlur',
               wait,
+              progressBehavior,
               delay,
-              data: { enabled: Number(effect.EffectType) === 38 }
+              data: {
+                mode: enabled ? 'In' : 'Out',
+                enabled,
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 10000) } : {})
+              }
             })
             break
-          case 44:
-            push({
-              type: 'BackgroundBlur',
-              wait,
-              delay,
-              data: { enabled: /^(1|true|on)$/i.test(String(effect.StringVal || '')) }
-            })
-            break
+          }
           case 42: {
             const [x, y] = String(effect.StringVal || '0, 0')
               .split(',')
@@ -474,8 +816,14 @@ function main() {
             push({
               type: 'CameraMove',
               wait,
+              progressBehavior,
               delay,
-              data: { x, y, duration: durationMs }
+              data: {
+                x,
+                y,
+                duration: Math.min(durationMs, 30000),
+                ...(effect.StringValSub ? { ease: effect.StringValSub } : {})
+              }
             })
             break
           }
@@ -483,10 +831,31 @@ function main() {
             push({
               type: 'CameraZoom',
               wait,
+              progressBehavior,
               delay,
-              data: { scale: Number.parseFloat(effect.StringVal) || 1, duration: durationMs }
+              data: {
+                scale: Number.parseFloat(effect.StringVal) || 1,
+                duration: Math.min(durationMs, 30000),
+                ...(effect.StringValSub ? { ease: effect.StringValSub } : {})
+              }
             })
             break
+          case 45: {
+            const { zoom } = parseDollyParams(effect.StringVal)
+            const safeZoom = Number.isFinite(zoom) && zoom > 0 ? Math.min(zoom, 10) : 1
+            push({
+              type: 'DollyZoom',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                duration: Math.min(durationMs, 30000),
+                zoom: safeZoom,
+                ...(effect.StringValSub ? { ease: effect.StringValSub } : {})
+              }
+            })
+            break
+          }
           default:
             console.warn(`skip effect type ${effect.EffectType} (snippet ${snippet.Index})`)
         }
@@ -499,6 +868,7 @@ function main() {
         push({
           type: 'ChangeLayoutMode',
           wait,
+          progressBehavior,
           delay,
           data: { mode: layoutModeOf(mode) }
         })
@@ -507,48 +877,72 @@ function main() {
       case 7: {
         const sound = scenario.SoundData[snippet.ReferenceIndex]
         if (!sound) break
+        const playMode = Number(sound.PlayMode) || 0
         const fadeMs = Math.round((Number(sound.Duration) || 0) * 1000)
-        if (Number(sound.PlayMode) === 4) {
-          const target = snippets[lastBgmSnippet]
-          if (target && target.type === 'ChangeBgm') {
-            target.data.volume = Number(sound.Volume) || 1
-          }
-        } else if (sound.Bgm === 'bgm00000') {
+        const volume = Number.isFinite(Number(sound.Volume)) ? Number(sound.Volume) : 1
+        if (playMode === 4) {
           push({
-            type: 'ChangeBgm',
+            type: 'BgmVolume',
             wait,
+            progressBehavior,
             delay,
-            data: { stop: true, fadeMs }
+            data: { volume: Math.min(2, Math.max(0, volume)), duration: Math.min(Math.max(0, fadeMs), 30000) }
           })
-          lastBgmSnippet = -1
-        } else if (sound.Bgm) {
-          lastBgmSnippet = push({
-            type: 'ChangeBgm',
-            wait,
-            delay,
-            data: { file: `${sound.Bgm}.mp3`, fadeMs, volume: Number(sound.Volume) || 1 }
-          })
-        } else if (sound.Se) {
-          if (Number(sound.PlayMode) === 3) {
+          break
+        }
+        if (playMode === 3) {
+          if (sound.Se) {
             push({
               type: 'StopSe',
               wait,
+              progressBehavior,
               delay,
-              data: { file: `${sound.Se}.mp3`, fadeMs }
-            })
-          } else {
-            push({
-              type: 'PlaySe',
-              wait,
-              delay,
-              data: {
-                file: `${sound.Se}.mp3`,
-                volume: Number(sound.Volume) || 1,
-                loop: Number(sound.PlayMode) === 2,
-                fadeMs
-              }
+              data: { file: `${sound.Se}.mp3`, fadeMs: Math.min(Math.max(0, fadeMs), 10000) }
             })
           }
+          if (sound.Bgm) {
+            push({
+              type: 'ChangeBgm',
+              wait,
+              progressBehavior,
+              delay,
+              data: { stop: true, fadeMs: Math.max(0, fadeMs) }
+            })
+          }
+          break
+        }
+        if (sound.Bgm === 'bgm00000') {
+          push({
+            type: 'ChangeBgm',
+            wait,
+            progressBehavior,
+            delay,
+            data: { stop: true, fadeMs: Math.max(0, fadeMs) }
+          })
+        } else if (sound.Bgm) {
+          push({
+            type: 'ChangeBgm',
+            wait,
+            progressBehavior,
+            delay,
+            data: { file: `${sound.Bgm}.mp3`, fadeMs: Math.max(0, fadeMs), volume }
+          })
+        }
+        if (sound.Se) {
+          const isLoop = playMode === 2
+          const deferredSec = !isLoop ? Math.max(0, Number(sound.Duration) || 0) : 0
+          push({
+            type: 'PlaySe',
+            wait,
+            progressBehavior,
+            delay: delay + deferredSec,
+            data: {
+              file: `${sound.Se}.mp3`,
+              volume,
+              loop: isLoop,
+              fadeMs: isLoop ? Math.min(Math.max(0, fadeMs), 10000) : 0
+            }
+          })
         }
         break
       }

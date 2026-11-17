@@ -3,117 +3,172 @@ import { App } from '../app/App'
 import ChangeBackgroundImageSnippet from '../snippets/ChangeBackgroundImageSnippet'
 import ChangeBgmSnippet from '../snippets/ChangeBgmSnippet'
 import { SnippetData } from '../../../common/types/Story'
-import { snippetBlocksTimeline } from '../../../common/export/snippetSemantics'
+import { snippetHasPreFence } from '../../../common/export/snippetSemantics'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import ChangeLayoutModeSnippet from '../snippets/ChangeLayoutModeSnippet'
 import LayoutAppearSnippet from '../snippets/LayoutAppearSnippet'
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../utils/Logger'
 import LayoutClearSnippet from '../snippets/LayoutClearSnippet'
+import LayoutDepthSnippet from '../snippets/LayoutDepthSnippet'
+import CharacterShakeSnippet from '../snippets/CharacterShakeSnippet'
+import CostumeChangeSnippet from '../snippets/CostumeChangeSnippet'
 import TalkSnippet from '../snippets/TalkSnippet'
 import HideTalkSnippet from '../snippets/HideTalkSnippet'
 import MoveSnippet from '../snippets/MoveSnippet'
 import MotionSnippet from '../snippets/MotionSnippet'
 import TelopSnippet from '../snippets/TelopSnippet'
+import PlaceInfoSnippet from '../snippets/PlaceInfoSnippet'
+import FullScreenTextSnippet from '../snippets/FullScreenTextSnippet'
+import SimpleSelectableSnippet from '../snippets/SimpleSelectableSnippet'
 import BlackOutSnippet from '../snippets/BlackOutSnippet'
 import BlackInSnippet from '../snippets/BlackInSnippet'
 import DoParamSnippet from '../snippets/DoParamSnippet'
 import PlaySeSnippet from '../snippets/PlaySeSnippet'
 import StopSeSnippet from '../snippets/StopSeSnippet'
 import ShakeScreenSnippet from '../snippets/ShakeScreenSnippet'
+import StopShakeScreenSnippet from '../snippets/StopShakeScreenSnippet'
+import ShakeWindowSnippet from '../snippets/ShakeWindowSnippet'
+import StopShakeWindowSnippet from '../snippets/StopShakeWindowSnippet'
 import FlashbackInSnippet from '../snippets/FlashbackInSnippet'
 import FlashbackOutSnippet from '../snippets/FlashbackOutSnippet'
+import SepiaInSnippet from '../snippets/SepiaInSnippet'
+import SepiaOutSnippet from '../snippets/SepiaOutSnippet'
+import SekaiInSnippet from '../snippets/SekaiInSnippet'
+import SekaiOutSnippet from '../snippets/SekaiOutSnippet'
 import WipeSnippet from '../snippets/WipeSnippet'
 import CameraMoveSnippet from '../snippets/CameraMoveSnippet'
 import CameraZoomSnippet from '../snippets/CameraZoomSnippet'
+import DollyZoomSnippet from '../snippets/DollyZoomSnippet'
 import AmbientColorSnippet from '../snippets/AmbientColorSnippet'
 import SideFadeSnippet from '../snippets/SideFadeSnippet'
+import AttachCharacterShaderSnippet from '../snippets/AttachCharacterShaderSnippet'
+import PlayScenarioEffectSnippet from '../snippets/PlayScenarioEffectSnippet'
+import StopScenarioEffectSnippet from '../snippets/StopScenarioEffectSnippet'
+import BlurInSnippet from '../snippets/BlurInSnippet'
+import BlurOutSnippet from '../snippets/BlurOutSnippet'
 import BackgroundBlurSnippet from '../snippets/BackgroundBlurSnippet'
 import StopShakeSnippet from '../snippets/StopShakeSnippet'
+import BgmVolumeSnippet from '../snippets/BgmVolumeSnippet'
+import MovieSnippet from '../snippets/MovieSnippet'
+import { resetStageTiming } from '../snippets/stageTiming'
 import { BackgroundSnippetTasks } from '../utils/BackgroundSnippetTasks'
 
 export default class SnippetStrategyManager {
   private readonly app: App
   private readonly logger: Logger<ILogObj> = getSubLogger('SnippetStrategyManager')
   private readonly snippets!: { [key: string]: new (app: App, data: SnippetData) => Snippet }
-  /** ProgressBehavior=0 的协程：导出时不阻塞下一条，收尾统一等待。 */
-  private readonly backgroundSnippets = new BackgroundSnippetTasks()
+  /** PlayCore 当前正在运行的协程集合（WaitFinished 前置栅栏与收尾统一等待）。 */
+  private readonly runningTasks = new BackgroundSnippetTasks()
+  private lastLaunchedTask: Promise<void> = Promise.resolve()
 
   constructor(app: App) {
     this.app = app
     this.snippets = {
       ChangeBackgroundImage: ChangeBackgroundImageSnippet,
       ChangeBgm: ChangeBgmSnippet,
+      BgmVolume: BgmVolumeSnippet,
       ChangeLayoutMode: ChangeLayoutModeSnippet,
       LayoutAppear: LayoutAppearSnippet,
       LayoutClear: LayoutClearSnippet,
+      LayoutDepth: LayoutDepthSnippet,
+      CharacterShake: CharacterShakeSnippet,
+      CostumeChange: CostumeChangeSnippet,
       Talk: TalkSnippet,
       HideTalk: HideTalkSnippet,
       Move: MoveSnippet,
       Motion: MotionSnippet,
       Telop: TelopSnippet,
+      PlaceInfo: PlaceInfoSnippet,
+      FullScreenText: FullScreenTextSnippet,
+      SimpleSelectable: SimpleSelectableSnippet,
       BlackOut: BlackOutSnippet,
       BlackIn: BlackInSnippet,
       DoParam: DoParamSnippet,
       PlaySe: PlaySeSnippet,
       StopSe: StopSeSnippet,
       ShakeScreen: ShakeScreenSnippet,
+      StopShakeScreen: StopShakeScreenSnippet,
+      ShakeWindow: ShakeWindowSnippet,
+      StopShakeWindow: StopShakeWindowSnippet,
       FlashbackIn: FlashbackInSnippet,
       FlashbackOut: FlashbackOutSnippet,
+      SepiaIn: SepiaInSnippet,
+      SepiaOut: SepiaOutSnippet,
+      SekaiIn: SekaiInSnippet,
+      SekaiOut: SekaiOutSnippet,
       Wipe: WipeSnippet,
       CameraMove: CameraMoveSnippet,
       CameraZoom: CameraZoomSnippet,
+      DollyZoom: DollyZoomSnippet,
       AmbientColor: AmbientColorSnippet,
       SideFade: SideFadeSnippet,
+      AttachCharacterShader: AttachCharacterShaderSnippet,
+      PlayScenarioEffect: PlayScenarioEffectSnippet,
+      StopScenarioEffect: StopScenarioEffectSnippet,
+      BlurIn: BlurInSnippet,
+      BlurOut: BlurOutSnippet,
       BackgroundBlur: BackgroundBlurSnippet,
-      StopShake: StopShakeSnippet
+      StopShake: StopShakeSnippet,
+      Movie: MovieSnippet
     }
   }
 
-  async handleSnippet(data: SnippetData): Promise<void> {
-    const snippetConstructor = this.snippets[data.type]
-    if (snippetConstructor) {
-      const snippet = new snippetConstructor(this.app, data)
-
-      if (data.wait) {
-        await snippet.runSnippet()
-      } else {
-        snippet.runSnippet().catch(this.logger.error)
-      }
-    } else {
-      throw new TypeError(`Not implemented ${data.type}`)
+  /** 官方 PlayCore 前置栅栏：WaitFinished（或 Talk）在 delay 开始前等所有在跑任务结束。 */
+  async waitForPreFence(data: SnippetData): Promise<void> {
+    if (snippetHasPreFence(data)) {
+      await this.runningTasks.settle()
     }
   }
 
-  async handleSnippetForExport(data: SnippetData, snippetIndex = -1): Promise<void> {
+  getLastLaunchedTask(): Promise<void> {
+    return this.lastLaunchedTask
+  }
+
+  private async dispatchSnippet(
+    data: SnippetData,
+    snippetIndex: number,
+    forExport: boolean
+  ): Promise<void> {
     const snippetConstructor = this.snippets[data.type]
     if (!snippetConstructor) {
       throw new TypeError(`Not implemented ${data.type}`)
     }
 
+    await this.waitForPreFence(data)
+
     const snippet = new snippetConstructor(this.app, data)
     snippet.snippetIndex = snippetIndex
-    if (snippetBlocksTimeline(data)) {
-      await snippet.runSnippet()
-    } else {
-      // 官方 ProgressBehavior=0：启动协程后立刻继续下一条。delay/动画都在后台跑。
-      this.backgroundSnippets.track(snippet.runSnippet())
+
+    if (forExport && this.app.lastSnippetActualDurationMs === 0) {
+      this.app.lastSnippetActualDurationMs = estimateSnippetDuration(data)
     }
 
-    if (this.app.lastSnippetActualDurationMs === 0) {
-      this.app.lastSnippetActualDurationMs = snippetBlocksTimeline(data)
-        ? Math.max((data.delay || 0) * 1000, estimateSnippetDuration(data))
-        : 0
+    const task = snippet.runSnippet()
+    this.lastLaunchedTask = task
+    this.runningTasks.track(task)
+    if (!forExport) {
+      void task.catch((error) => this.logger.error(error))
     }
   }
 
-  /** 导出收尾：官方 WaitAllFinished 等所有后台协程结束。 */
+  async handleSnippet(data: SnippetData, snippetIndex = -1): Promise<void> {
+    await this.dispatchSnippet(data, snippetIndex, false)
+  }
+
+  async handleSnippetForExport(data: SnippetData, snippetIndex = -1): Promise<void> {
+    await this.dispatchSnippet(data, snippetIndex, true)
+  }
+
+  /** 官方 WaitAllFinished：等所有仍在运行的协程结束。 */
   async settleBackgroundSnippets(): Promise<void> {
-    await this.backgroundSnippets.settle()
+    await this.runningTasks.settle()
   }
 
-  /** 新一次导出开始前清掉上一次的引用；旧任务应由 abort/自然结束收尾。 */
+  /** 新一次导出/播放开始前清掉上一次的引用与阶段计时状态。 */
   resetBackgroundSnippets(): void {
-    this.backgroundSnippets.reset()
+    this.runningTasks.reset()
+    this.lastLaunchedTask = Promise.resolve()
+    resetStageTiming(this.app)
   }
 }

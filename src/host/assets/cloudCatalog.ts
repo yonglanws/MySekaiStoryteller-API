@@ -17,7 +17,7 @@ import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
 import type { AssetsSettings } from '../config'
 import { atomicWrite, type RequestOptions } from './http'
-import { listMedia } from './media'
+import { listMedia, listScenarioSeFiles } from './media'
 import {
   libraryRootFor,
   loadMoesekaiIndex,
@@ -81,6 +81,21 @@ export interface CloudBgmEntry {
   file: string
   name: string
   description: string
+  /** 若提取到 HCA/WAV 循环区间，则记录毫秒边界 */
+  loopStartMs?: number
+  loopEndMs?: number
+}
+
+export interface CloudSeEntry {
+  /** 稳定 cue id：se00053_b / se_walk_women_001_1 */
+  id: string
+  /** 相对 resources/audio/se/ 的路径：cloud/se00053_b.mp3 */
+  file: string
+  name: string
+  bundle: string
+  category: string
+  description: string
+  tags: string[]
 }
 
 export interface CloudCatalogData {
@@ -96,6 +111,7 @@ export interface CloudCatalogData {
   models: CloudModelEntry[]
   backgrounds: CloudBackgroundEntry[]
   bgm: CloudBgmEntry[]
+  se?: CloudSeEntry[]
 }
 
 export interface BuildCloudCatalogOptions {
@@ -282,8 +298,8 @@ export async function buildCloudCatalog(
     .sort((a, b) => a.id.localeCompare(b.id))
   progress(`云端背景：${backgrounds.length} 个`)
 
-  progress('读取云端 BGM 列表 …')
-  const [bgmMedia, soundtracks] = await Promise.all([
+  progress('读取云端 BGM / SE 列表 …')
+  const [bgmMedia, soundtracks, scenarioSe] = await Promise.all([
     listMedia({
       region: settings.region,
       kinds: ['bgm'],
@@ -300,6 +316,15 @@ export async function buildCloudCatalog(
     }).catch((error) => {
       progress(`BGM 曲名索引不可用：${String(error)}`)
       return null
+    }),
+    listScenarioSeFiles({
+      region: settings.region,
+      assetBase: settings.assetBase || undefined,
+      timeoutMs: Math.min(requestOptions.timeoutMs, 25_000),
+      retries: Math.min(requestOptions.retries, 1)
+    }).catch((error) => {
+      progress(`云端 SE 索引不可用：${String(error)}`)
+      return []
     })
   ])
   const bgm: CloudBgmEntry[] = bgmMedia.bundles
@@ -313,7 +338,16 @@ export async function buildCloudCatalog(
       }
     })
     .sort((a, b) => a.id.localeCompare(b.id))
-  progress(`云端 BGM：${bgm.length} 首`)
+  const se: CloudSeEntry[] = scenarioSe.map((entry) => ({
+    id: entry.id,
+    file: `cloud/${entry.file}`,
+    name: entry.id,
+    bundle: entry.bundle,
+    category: entry.category,
+    description: entry.description,
+    tags: entry.tags
+  }))
+  progress(`云端 BGM：${bgm.length} 首，SE：${se.length} 个`)
 
   return {
     format: CLOUD_CATALOG_FORMAT,
@@ -327,7 +361,8 @@ export async function buildCloudCatalog(
     },
     models,
     backgrounds,
-    bgm
+    bgm,
+    se
   }
 }
 
@@ -342,6 +377,9 @@ function readCachedCatalog(file: string): CloudCatalogData | null {
       !Array.isArray(parsed.bgm)
     ) {
       return null
+    }
+    if (!Array.isArray(parsed.se)) {
+      parsed.se = []
     }
     return parsed
   } catch {

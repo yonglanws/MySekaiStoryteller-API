@@ -1,9 +1,14 @@
+import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { promisify } from 'node:util'
 import type { AssetsSettings } from '../config'
+import { ffmpegPath } from '../../shared/ffmpeg'
 import { assertHttpUrl, atomicWrite, fetchJson, request, type RequestOptions } from './http'
 import { appendNamedManifest, type NamedManifestEntry } from './manifest'
 import { soundtrackKey, soundtrackLabel, type SoundtrackIndex } from './soundtracks'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * 从 Moesekai 资源站拉取背景与 BGM。
@@ -382,6 +387,7 @@ export interface DownloadedMediaFile {
   file: string
   bytes: number
   skipped: boolean
+  loop?: AudioLoopMetadata
 }
 
 /**
@@ -411,21 +417,374 @@ export async function downloadMediaFile(
 
   const target = path.join(dir, path.basename(picked.name))
   if (fs.existsSync(target) && !options.force) {
+    const existingLoop = options.kind === 'bgm' ? extractAudioLoopMetadata(target) : null
     return {
       file: relativeTo(options.outDir, target),
       bytes: fs.statSync(target).size,
-      skipped: true
+      skipped: true,
+      ...(existingLoop ? { loop: existingLoop } : {})
     }
   }
   const response = await request(new URL(picked.url, origin).href, requestOpts)
   const buffer = Buffer.from(await response.arrayBuffer())
   atomicWrite(target, buffer)
-  return { file: relativeTo(options.outDir, target), bytes: buffer.byteLength, skipped: false }
+  let loop = options.kind === 'bgm' ? extractAudioLoopMetadata(buffer) : null
+  if (!loop && options.kind === 'bgm') {
+    const metaCompanion = files.find((f) => /\.(hca|wav)$/i.test(f.name) && f.name !== picked.name)
+    if (metaCompanion) {
+      try {
+        const metaResp = await request(new URL(metaCompanion.url, origin).href, requestOpts)
+        const metaBuf = Buffer.from(await metaResp.arrayBuffer())
+        loop = extractAudioLoopMetadata(metaBuf)
+      } catch {
+        // best-effort companion loop extraction
+      }
+    }
+  }
+  if (loop) writeAudioLoopSidecar(target, loop)
+  return {
+    file: relativeTo(options.outDir, target),
+    bytes: buffer.byteLength,
+    skipped: false,
+    ...(loop ? { loop } : {})
+  }
+}
+
+export interface AudioLoopMetadata {
+  loopStartMs: number
+  loopEndMs: number
+  loopStartSample: number
+  loopEndSample: number
+  sampleRate: number
+  durationMs?: number
+  source: 'hca' | 'wav-smpl' | 'sidecar'
+}
+
+export interface ScenarioSeEntry {
+  id: string
+  file: string
+  bundle: string
+  path: string
+  url: string
+  size: number
+  category: string
+  description: string
+  tags: string[]
+}
+
+export const SCENARIO_SE_BUNDLES = [
+  'sound/scenario/se/se',
+  'sound/scenario/se/se_pack00001',
+  'sound/scenario/se/se_pack00001_b'
+] as const
+
+const SE_EXTS = ['.mp3', '.wav', '.ogg', '.flac', '.hca']
+
+/** 从 RIFF WAV `smpl` chunk 解析 CRI/vgmstream 写入的无缝循环样本点 `[start, end)`。 */
+export function parseWavSmplLoop(buffer: Buffer): AudioLoopMetadata | null {
+  if (
+    buffer.byteLength < 44 ||
+    buffer.toString('ascii', 0, 4) !== 'RIFF' ||
+    buffer.toString('ascii', 8, 12) !== 'WAVE'
+  ) {
+    return null
+  }
+  let sampleRate = 0
+  let channels = 0
+  let bitsPerSample = 0
+  let dataBytes = 0
+  let loopStartSample = -1
+  let loopEndSample = -1
+
+  let offset = 12
+  while (offset + 8 <= buffer.byteLength) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4)
+    const chunkSize = buffer.readUInt32LE(offset + 4)
+    const bodyStart = offset + 8
+    const bodyEnd = Math.min(buffer.byteLength, bodyStart + chunkSize)
+
+    if (chunkId === 'fmt ' && bodyStart + 16 <= bodyEnd) {
+      channels = buffer.readUInt16LE(bodyStart + 2)
+      sampleRate = buffer.readUInt32LE(bodyStart + 4)
+      bitsPerSample = buffer.readUInt16LE(bodyStart + 14)
+    } else if (chunkId === 'data') {
+      dataBytes = bodyEnd - bodyStart
+    } else if (chunkId === 'smpl' && bodyStart + 36 <= bodyEnd) {
+      const loopCount = buffer.readUInt32LE(bodyStart + 28)
+      if (loopCount > 0 && bodyStart + 60 <= bodyEnd) {
+        loopStartSample = buffer.readUInt32LE(bodyStart + 44)
+        loopEndSample = buffer.readUInt32LE(bodyStart + 48)
+      }
+    }
+
+    offset = bodyStart + chunkSize + (chunkSize & 1)
+  }
+
+  if (sampleRate <= 0 || loopStartSample < 0 || loopEndSample <= loopStartSample) return null
+  const frameBytes = Math.max(1, channels * (bitsPerSample / 8))
+  const totalSamples = dataBytes > 0 && channels > 0 && bitsPerSample > 0 ? Math.floor(dataBytes / frameBytes) : 0
+  const clampedEnd = totalSamples > 0 ? Math.min(loopEndSample, totalSamples) : loopEndSample
+  if (clampedEnd <= loopStartSample) return null
+
+  return {
+    loopStartMs: Math.round((loopStartSample * 1000000) / sampleRate) / 1000,
+    loopEndMs: Math.round((clampedEnd * 1000000) / sampleRate) / 1000,
+    loopStartSample,
+    loopEndSample: clampedEnd,
+    sampleRate,
+    ...(totalSamples > 0 ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 } : {}),
+    source: 'wav-smpl'
+  }
+}
+
+/** 从 CriWare `.hca` 头部 `fmt` + `loop` 块提取无缝循环区间（支持 bit-7 加密掩码）。 */
+export function parseHcaLoop(buffer: Buffer): AudioLoopMetadata | null {
+  if (buffer.byteLength < 16) return null
+  const magic =
+    String.fromCharCode(buffer[0] & 0x7f, buffer[1] & 0x7f, buffer[2] & 0x7f) +
+    String.fromCharCode(buffer[3] & 0x7f)
+  if (magic !== 'HCA\0') return null
+
+  const headerSize = Math.min(buffer.byteLength, buffer.readUInt16BE(6))
+  let sampleRate = 0
+  let blockCount = 0
+  let encoderDelay = 0
+  let encoderPadding = 0
+  let loopStartBlock = -1
+  let loopEndBlock = -1
+  let loopPreSkip = 0
+  let loopEndMargin = 0
+
+  let pos = 8
+  while (pos + 4 <= headerSize) {
+    const tag = String.fromCharCode(
+      buffer[pos] & 0x7f,
+      buffer[pos + 1] & 0x7f,
+      buffer[pos + 2] & 0x7f,
+      buffer[pos + 3] & 0x7f
+    )
+    if (tag === 'fmt\0' && pos + 16 <= headerSize) {
+      sampleRate = ((buffer[pos + 5] & 0xff) << 16) | ((buffer[pos + 6] & 0xff) << 8) | (buffer[pos + 7] & 0xff)
+      blockCount = buffer.readUInt32BE(pos + 8)
+      encoderDelay = buffer.readUInt16BE(pos + 12)
+      encoderPadding = buffer.readUInt16BE(pos + 14)
+      pos += 16
+    } else if (tag === 'comp' && pos + 16 <= headerSize) {
+      pos += 16
+    } else if (tag === 'dec\0' && pos + 12 <= headerSize) {
+      pos += 12
+    } else if (tag === 'loop' && pos + 14 <= headerSize) {
+      loopStartBlock = buffer.readUInt32BE(pos + 4)
+      loopEndBlock = buffer.readUInt32BE(pos + 8)
+      if (pos + 16 <= headerSize) {
+        loopPreSkip = buffer.readUInt16BE(pos + 12)
+        loopEndMargin = buffer.readUInt16BE(pos + 14)
+      }
+      pos += pos + 16 <= headerSize ? 16 : 14
+    } else if (tag === 'ciph' && pos + 6 <= headerSize) {
+      const cipherType = buffer.readUInt16BE(pos + 4)
+      pos += cipherType === 56 && pos + 16 <= headerSize ? 16 : 6
+    } else if (tag === 'rva\0' && pos + 8 <= headerSize) {
+      pos += 8
+    } else if (tag === 'comm' && pos + 5 <= headerSize) {
+      const len = buffer[pos + 4]
+      pos += 5 + len
+    } else if (tag === 'pad\0') {
+      break
+    } else {
+      break
+    }
+  }
+
+  if (sampleRate <= 0 || loopStartBlock < 0 || loopEndBlock < loopStartBlock) return null
+  const samplesPerBlock = 1024
+  const totalSamples = Math.max(0, blockCount * samplesPerBlock - encoderDelay - encoderPadding)
+  const loopStartSample = Math.max(0, loopStartBlock * samplesPerBlock - encoderDelay + loopPreSkip)
+  const rawEnd = (loopEndBlock + 1) * samplesPerBlock - encoderDelay - loopEndMargin
+  const loopEndSample = totalSamples > 0 ? Math.min(totalSamples, rawEnd) : rawEnd
+  if (loopEndSample <= loopStartSample) return null
+
+  return {
+    loopStartMs: Math.round((loopStartSample * 1000000) / sampleRate) / 1000,
+    loopEndMs: Math.round((loopEndSample * 1000000) / sampleRate) / 1000,
+    loopStartSample,
+    loopEndSample,
+    sampleRate,
+    ...(totalSamples > 0 ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 } : {}),
+    source: 'hca'
+  }
+}
+
+export function readAudioLoopSidecar(audioFilePath: string): AudioLoopMetadata | null {
+  const sidecarPath = `${audioFilePath}.loop.json`
+  if (!fs.existsSync(sidecarPath)) return null
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8')) as Partial<AudioLoopMetadata>
+    if (
+      typeof parsed.loopStartMs === 'number' &&
+      typeof parsed.loopEndMs === 'number' &&
+      parsed.loopEndMs > parsed.loopStartMs
+    ) {
+      return {
+        loopStartMs: parsed.loopStartMs,
+        loopEndMs: parsed.loopEndMs,
+        loopStartSample: Number(parsed.loopStartSample) || 0,
+        loopEndSample: Number(parsed.loopEndSample) || 0,
+        sampleRate: Number(parsed.sampleRate) || 48000,
+        ...(typeof parsed.durationMs === 'number' ? { durationMs: parsed.durationMs } : {}),
+        source: parsed.source ?? 'sidecar'
+      }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+export function writeAudioLoopSidecar(audioFilePath: string, metadata: AudioLoopMetadata): void {
+  atomicWrite(`${audioFilePath}.loop.json`, `${JSON.stringify(metadata, null, 2)}\n`)
+}
+
+/** 从 Buffer 或磁盘音频文件（含同 stem .hca / .wav / .loop.json 伴生文件）提取循环点。 */
+export function extractAudioLoopMetadata(filePathOrBuffer: string | Buffer): AudioLoopMetadata | null {
+  if (Buffer.isBuffer(filePathOrBuffer)) {
+    return parseHcaLoop(filePathOrBuffer) ?? parseWavSmplLoop(filePathOrBuffer)
+  }
+  const sidecar = readAudioLoopSidecar(filePathOrBuffer)
+  if (sidecar) return sidecar
+
+  const candidates = [filePathOrBuffer]
+  const parsed = path.parse(filePathOrBuffer)
+  for (const ext of ['.hca', '.wav']) {
+    const companion = path.join(parsed.dir, `${parsed.name}${ext}`)
+    if (companion !== filePathOrBuffer) candidates.push(companion)
+  }
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) continue
+    try {
+      const buf = fs.readFileSync(candidate)
+      const meta = parseHcaLoop(buf) ?? parseWavSmplLoop(buf)
+      if (meta) return meta
+    } catch {
+      // ignore unreadable candidate
+    }
+  }
+  return null
+}
+
+export async function transcodeAudioFile(
+  inputPath: string,
+  outputPath: string,
+  sampleRate = 48000
+): Promise<void> {
+  const args = ['-y', '-i', inputPath, '-ar', String(sampleRate), '-ac', '2', outputPath]
+  await execFileAsync(ffmpegPath(), args)
+}
+
+export function inferSeSemanticInfo(
+  cueId: string,
+  bundlePath: string
+): { category: string; description: string; tags: string[] } {
+  const lower = cueId.toLowerCase()
+  const bundleName = path.posix.basename(bundlePath)
+  if (lower.startsWith('se_walk_')) {
+    const who = lower.includes('men_') && !lower.includes('women_') ? '男性' : lower.includes('women_') ? '女性' : ''
+    return {
+      category: 'footsteps',
+      description: `${who}行走脚步声（${cueId}）`,
+      tags: ['footsteps', 'walk', ...(who ? [who] : [])]
+    }
+  }
+  if (lower.startsWith('se_run_')) {
+    const who = lower.includes('men_') && !lower.includes('women_') ? '男性' : lower.includes('women_') ? '女性' : ''
+    return {
+      category: 'running',
+      description: `${who}奔跑脚步声（${cueId}）`,
+      tags: ['footsteps', 'run', ...(who ? [who] : [])]
+    }
+  }
+  if (lower.startsWith('se_event_')) {
+    const slug = cueId.replace(/^se_event_/i, '').replace(/_\d{4}_\d+$/, '')
+    return {
+      category: 'event',
+      description: `活动剧情音效：${slug || cueId}`,
+      tags: ['event', ...(slug ? [slug] : [])]
+    }
+  }
+  if (lower.includes('door')) {
+    return { category: 'door', description: `门开关音效（${cueId}）`, tags: ['door'] }
+  }
+  if (lower.includes('phone') || lower.includes('ring') || lower.includes('call')) {
+    return { category: 'phone', description: `手机/来电音效（${cueId}）`, tags: ['phone'] }
+  }
+  if (lower.includes('transition') || lower.includes('sekai')) {
+    return { category: 'transition', description: `世界观转场音效（${cueId}）`, tags: ['transition', 'sekai'] }
+  }
+  return {
+    category: 'scenario',
+    description: `官方剧情音效 ${cueId}（资源包 ${bundleName}）`,
+    tags: ['scenario', bundleName]
+  }
+}
+
+/** 列出官方 `sound/scenario/se/*` 资源包中的 SE 文件并生成语义索引。 */
+export async function listScenarioSeFiles(options: {
+  region: AssetRegion
+  assetBase?: string
+  bundleNames?: string[]
+  timeoutMs?: number
+  retries?: number
+}): Promise<ScenarioSeEntry[]> {
+  const assetBase = normalizeAssetBase(options.assetBase)
+  const origin = apiOrigin(assetBase)
+  const requestOpts = requestOptions(options)
+
+  let bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts).catch(() => [])
+  if (bundles.length === 0) {
+    const fallbackNames = options.bundleNames ?? [...SCENARIO_SE_BUNDLES]
+    bundles = fallbackNames.map((bundlePath) => ({
+      kind: 'bgm' as MediaKind,
+      name: path.posix.basename(bundlePath),
+      path: bundlePath,
+      bytes: 0,
+      files: 0,
+      prefix: 'sound/scenario/se/'
+    }))
+  }
+
+  const perBundle = await mapPool(bundles, 3, async (bundle) => {
+    const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+    return files
+      .filter((file) => SE_EXTS.includes(path.posix.extname(file.name).toLowerCase()))
+      .map((file): ScenarioSeEntry => {
+        const id = path.posix.basename(file.name, path.posix.extname(file.name))
+        const semantic = inferSeSemanticInfo(id, bundle.path)
+        return {
+          id,
+          file: path.posix.basename(file.name),
+          bundle: bundle.path,
+          path: file.path,
+          url: file.url,
+          size: file.size,
+          ...semantic
+        }
+      })
+  })
+
+  const deduped = new Map<string, ScenarioSeEntry>()
+  for (const list of perBundle) {
+    for (const entry of list) {
+      if (!deduped.has(entry.file)) {
+        deduped.set(entry.file, entry)
+      }
+    }
+  }
+  return [...deduped.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 /**
- * 按需下载剧情 SE：cue 名（se_door）在 sound/scenario/se/ 的若干包里，
- * 逐个包查文件列表；找到后写到 audio/se/cloud/。
+ * 按需下载剧情 SE：cue 名（se_door / se00053_b）在 sound/scenario/se/ 的若干包里，
+ * 逐个包查文件列表；找到后写到 audio/se/cloud/，必要时自动转码为目标格式。
  */
 export async function downloadSeFile(options: {
   name: string
@@ -435,11 +794,15 @@ export async function downloadSeFile(options: {
   force?: boolean
   timeoutMs?: number
   retries?: number
+  transcodeTo?: 'mp3' | 'wav'
 }): Promise<DownloadedMediaFile | null> {
   const desired = options.name.trim()
   if (!desired) return null
-  const fileName = /\.(mp3|wav|ogg|flac)$/i.test(desired) ? desired : `${desired}.mp3`
-  const target = path.join(options.outDir, 'audio', 'se', 'cloud', fileName)
+  const extMatch = path.posix.extname(desired).toLowerCase()
+  const desiredStem = extMatch ? desired.slice(0, -extMatch.length) : desired
+  const fileName = extMatch ? desired : `${desired}.mp3`
+  const seDir = path.join(options.outDir, 'audio', 'se', 'cloud')
+  const target = path.join(seDir, options.transcodeTo ? `${desiredStem}.${options.transcodeTo}` : fileName)
   if (fs.existsSync(target) && !options.force) {
     return {
       file: relativeTo(options.outDir, target),
@@ -451,15 +814,43 @@ export async function downloadSeFile(options: {
   const assetBase = normalizeAssetBase(options.assetBase)
   const origin = apiOrigin(assetBase)
   const requestOpts = requestOptions(options)
-  const bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts)
+  let bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts).catch(() => [])
+  if (bundles.length === 0) {
+    bundles = SCENARIO_SE_BUNDLES.map((bundlePath) => ({
+      kind: 'bgm' as MediaKind,
+      name: path.posix.basename(bundlePath),
+      path: bundlePath,
+      bytes: 0,
+      files: 0,
+      prefix: 'sound/scenario/se/'
+    }))
+  }
+
   for (const bundle of bundles) {
-    const files = await bundleFiles(origin, options.region, bundle, requestOpts)
-    const hit = files.find((file) => file.name.toLowerCase() === fileName.toLowerCase())
+    const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+    const hit =
+      files.find((file) => file.name.toLowerCase() === fileName.toLowerCase()) ??
+      files.find((file) => {
+        const ext = path.posix.extname(file.name).toLowerCase()
+        if (!SE_EXTS.includes(ext)) return false
+        return path.posix.basename(file.name, ext).toLowerCase() === desiredStem.toLowerCase()
+      })
     if (!hit) continue
+
     const response = await request(new URL(hit.url, origin).href, requestOpts)
     const buffer = Buffer.from(await response.arrayBuffer())
-    atomicWrite(target, buffer)
-    return { file: relativeTo(options.outDir, target), bytes: buffer.byteLength, skipped: false }
+    const hitTarget = path.join(seDir, path.posix.basename(hit.name))
+    atomicWrite(hitTarget, buffer)
+
+    const loopMeta = extractAudioLoopMetadata(buffer)
+    if (loopMeta) writeAudioLoopSidecar(hitTarget, loopMeta)
+
+    if (options.transcodeTo && path.extname(hitTarget).toLowerCase() !== `.${options.transcodeTo}`) {
+      await transcodeAudioFile(hitTarget, target)
+      if (loopMeta) writeAudioLoopSidecar(target, loopMeta)
+      return { file: relativeTo(options.outDir, target), bytes: fs.statSync(target).size, skipped: false }
+    }
+    return { file: relativeTo(options.outDir, hitTarget), bytes: buffer.byteLength, skipped: false }
   }
   return null
 }

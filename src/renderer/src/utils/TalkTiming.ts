@@ -26,10 +26,15 @@ export interface TalkDurationOptions {
   /** 剧本有 voice 文件但没有可用的音频时长时，按文本估算语音长度。 */
   hasVoice?: boolean
   /**
-   * Talk 内所有身体动作 cue 的最晚结束时间（相对 Talk 开始）。
-   * 官方自动模式在语音结束后还要等动作收尾，再停留 0.5s。
+   * Talk 内所有身体动作 cue（或仍未收尾的舞台动作）的最晚结束时间（相对 Talk 开始）。
+   * 官方自动模式在语音结束后还要等动作收尾，再停留。
    */
   motionSettleMs?: number
+  /**
+   * 仍在后台滑动/退场的 Layout 任务的剩余结束时间（相对 Talk 开始）。
+   * 官方 Talk Gate：`while (layoutRunning || !motionsSettled) wait`。
+   */
+  layoutRunningMs?: number
   /**
    * 对话框从关闭到打开的时间（通常 0.2s）。官方 TalkWindow.Play 会先打开窗口，
    * `OnCompleteOpen` 才开始打字；语音和动作仍在 Talk 开始帧启动。
@@ -46,8 +51,9 @@ export function talkTypingDurationMs(content: string): number {
  * Talk 片段 body 的时长（不含 BaseSnippet 的 delay）。
  *
  * 官方 `TalkWindow` 自动模式：
- * - 有语音：`max(窗口打开 + 打字结束, 语音结束 + 0.05s, 动作收尾)` 之后再等 0.5s；
- * - 无语音：打字结束后等 2.0s，不检查动作。
+ * - 有语音：`max(窗口打开 + 打字结束, 语音结束 + 0.05s, 布局结束, 动作收尾)` 之后停留：
+ *   若语音在打字结束前就已经播完，按 `2.0s`（`AUTO_NEXT_PAGE_DELAY`）停留，否则 `0.5s`；
+ * - 无语音：打字结束后等 `2.0s`，不检查动作/布局。
  *
  * 窗口打开只推迟打字，不推迟语音；语音足够长时不会额外增加时长。
  */
@@ -72,12 +78,18 @@ export function calculateTalkDurationMs(
   }
 
   const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
+  const layoutFrames =
+    Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
+      ? framesForSeconds((options.layoutRunningMs as number) / 1000)
+      : 0
   const settleFrames =
     Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
       ? framesForSeconds((options.motionSettleMs as number) / 1000)
       : 0
-  const doneFrames = Math.max(typingFrames, voiceFrames, settleFrames)
-  return framesToMs(doneFrames + AUTO_WAIT_AFTER_VOICE_FRAMES)
+  const gateFrames = Math.max(typingFrames, voiceFrames, layoutFrames, settleFrames)
+  const tailFrames =
+    voiceFrames < typingFrames ? AUTO_NEXT_PAGE_DELAY_FRAMES : AUTO_WAIT_AFTER_VOICE_FRAMES
+  return framesToMs(gateFrames + tailFrames)
 }
 
 /** 诊断/测试用：把 Talk 拆成官方自动模式的四个阶段（毫秒，已帧量化）。 */
@@ -111,16 +123,22 @@ export function describeTalkTiming(
     }
   }
   const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
+  const layoutFrames =
+    Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
+      ? framesForSeconds((options.layoutRunningMs as number) / 1000)
+      : 0
   const settleFrames =
     Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
       ? framesForSeconds((options.motionSettleMs as number) / 1000)
       : 0
-  const gateFrames = Math.max(typingFrames, voiceFrames, settleFrames)
+  const gateFrames = Math.max(typingFrames, voiceFrames, layoutFrames, settleFrames)
+  const tailFrames =
+    voiceFrames < typingFrames ? AUTO_NEXT_PAGE_DELAY_FRAMES : AUTO_WAIT_AFTER_VOICE_FRAMES
   return {
     typingMs,
     voiceEndMs: framesToMs(voiceFrames),
     gateEndMs: framesToMs(gateFrames),
-    totalMs: framesToMs(gateFrames + AUTO_WAIT_AFTER_VOICE_FRAMES)
+    totalMs: framesToMs(gateFrames + tailFrames)
   }
 }
 

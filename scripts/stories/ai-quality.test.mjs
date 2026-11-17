@@ -65,23 +65,25 @@ test(
     inRange(aggregate.emotion.changesPer40, 1.5, 12, 'emotionChangesPer40')
     inRange(aggregate.emotion.runMean, 3, 16, 'emotionRunMean')
 
-    // 双人戏现在整场同场（Left/Right），不再按发言段反复 Clear/Appear；
-    // 单人戏仍允许 Center。旧报告（逐段上下场）也落在这个宽区间里。
-    inRange(aggregate.stage.stageMean, 1.05, 2.1, 'stageMean')
+    // 双人戏保持全幕同场（Left/Right，不按发言段切人）；
+    // 3~5 人群像解锁官方 ThreeMode（Left/Center/Right），stageMean 可达 3.0。
+    inRange(aggregate.stage.stageMean, 1.05, 3.05, 'stageMean')
     inRange(aggregate.stage.soloShare, 0, 0.95, 'soloShare')
     inRange(aggregate.stage.appearsPer40, 1, 30, 'appearsPer40')
     inRange(aggregate.stage.clearsPer40, 1, 30, 'clearsPer40')
     inRange(aggregate.stage.bgChangesPer40, 0.5, 2.2, 'bgChangesPer40')
 
-    // 如果这次评测的每个场景都是双人同场，入场/退场必须各只有开场/结尾一次
-    // （40 句折算 ≤4 次），防止 presence 又退回逐段切人。
+    // 若本次评测全部为双人戏，即便含 2~3 幕转场，每 40 句入/退场也应控制在 ≤6 次，
+    // 防止退回逐句/逐段 spotlight popping。
     const allDuo = report.results.every(
       (result) =>
-        result.summary?.stage?.stageMean >= 1.9 && result.summary?.stage?.soloShare <= 0.05
+        result.summary?.stage?.stageMean >= 1.9 &&
+        result.summary?.stage?.stageMean <= 2.05 &&
+        result.summary?.stage?.soloShare <= 0.05
     )
     if (allDuo) {
-      inRange(aggregate.stage.appearsPer40, 1, 4, 'duo appearsPer40')
-      inRange(aggregate.stage.clearsPer40, 1, 4, 'duo clearsPer40')
+      inRange(aggregate.stage.appearsPer40, 1, 6, 'duo appearsPer40')
+      inRange(aggregate.stage.clearsPer40, 1, 6, 'duo clearsPer40')
     }
     // 官方约 1.5 次/40 句；低于 1.0 说明第二首 BGM 没有生效（只剩开场一条）。
     inRange(aggregate.stage.bgmChangesPer40, 1.0, 2.4, 'bgmChangesPer40')

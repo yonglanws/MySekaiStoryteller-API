@@ -144,16 +144,17 @@ function makeStory(overrides = {}) {
   }
 }
 
-test('normalizes paths, speaker, names and offscreen enter/exit', () => {
+test('normalizes paths, speaker, names and defaults ±100 enter/exit to in-place fade while keeping motion', () => {
   const { story } = validateAndFixStory(makeStory(), makeView())
   const appears = story.snippets.filter((snippet) => snippet.type === 'LayoutAppear')
-  assert.deepEqual(appears[0].data.from, { side: 'Left', offset: -100 })
-  assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 100 })
+  assert.deepEqual(appears[0].data.from, { side: 'Left', offset: 0 })
+  assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 0 })
   assert.equal(appears[0].data.to.offset, 0)
+  assert.equal(appears[0].data.motion, 'w-normal-nod01')
 
   const clears = story.snippets.filter((snippet) => snippet.type === 'LayoutClear')
-  assert.deepEqual(clears[0].data.to, { side: 'Left', offset: -100 })
-  assert.deepEqual(clears[1].data.to, { side: 'Right', offset: 100 })
+  assert.deepEqual(clears[0].data.to, { side: 'Left', offset: 0 })
+  assert.deepEqual(clears[1].data.to, { side: 'Right', offset: 0 })
   // 退场动作不能是 default 站姿
   assert.ok(!clears[0].data.motion.includes('default'))
 
@@ -274,16 +275,18 @@ test('drops actions that exceed the per-line quota', () => {
   }
 })
 
-test('sanitizeDisplayText folds blank lines and wraps at 26 CJK cells', () => {
+test('sanitizeDisplayText folds blank lines and wraps at 30 CJK cells', () => {
   assert.equal(sanitizeDisplayText('  你好  \n\n\n世界  '), '你好\n世界')
-  const long = '一'.repeat(30)
+  const exact = '一'.repeat(30)
+  assert.equal(sanitizeDisplayText(exact), exact)
+  const long = '一'.repeat(35)
   const wrapped = sanitizeDisplayText(long)
-  assert.equal(wrapped, `${'一'.repeat(26)}\n${'一'.repeat(4)}`)
+  assert.equal(wrapped, `${'一'.repeat(30)}\n${'一'.repeat(5)}`)
 
   // 有标点时优先在标点后折行，不把词拦腰截断
-  const sentence = '今天也一起练习吧，然后我们再对一下明天要用的曲子，顺便把时间也定下来。'
+  const sentence = '今天也一起练习吧，然后我们再对一下明天要用的曲子，顺便把时间也定下来吧，好不好？'
   const natural = sanitizeDisplayText(sentence)
-  assert.ok(natural.split('\n').every((line) => line.length <= 26))
+  assert.ok(natural.split('\n').every((line) => line.length <= 30))
   assert.ok(natural.split('\n')[0].endsWith('，'))
   assert.equal(natural.replace(/\n/g, ''), sentence)
 })
@@ -410,4 +413,129 @@ test('keeps configured emotion labels and clears unknown ones', () => {
   })
   const clearedTalk = cleared.story.snippets.find((snippet) => snippet.type === 'Talk')
   assert.equal(clearedTalk.data.emotion, '')
+})
+
+test('preserves explicit LeftOver/RightOver walk-ins and under=true raises', () => {
+  const story = makeStory()
+  story.snippets[1].data.from = { side: 'LeftOver', offset: 0 }
+  story.snippets[2].data.from = { side: 'Right', offset: 0, under: true }
+  story.snippets[6].data.to = { side: 'RightOver', offset: 0 }
+  const { story: fixed } = validateAndFixStory(story, makeView())
+  const appears = fixed.snippets.filter((snippet) => snippet.type === 'LayoutAppear')
+  const clears = fixed.snippets.filter((snippet) => snippet.type === 'LayoutClear')
+  assert.deepEqual(appears[0].data.from, { side: 'LeftOver', offset: 0 })
+  assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 0, under: true })
+  assert.deepEqual(clears[0].data.to, { side: 'RightOver', offset: 0 })
+})
+
+test('supports ThreeMode with three simultaneous characters and rejects four on stage', () => {
+  const base = makeView()
+  const threeView = new CatalogView({
+    ...base.data,
+    models: [
+      ...base.models,
+      {
+        id: 3,
+        name: '宵崎奏',
+        shortName: '奏',
+        path: '17kanade_normal/17kanade_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01'],
+        facials: ['face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 4,
+        name: '朝比奈真冬',
+        shortName: '真冬',
+        path: '18mafuyu_normal/18mafuyu_normal.model3.json',
+        motions: ['w-normal-default01'],
+        facials: ['face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      }
+    ]
+  })
+  const threeStory = {
+    models: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json' },
+      { id: 2, model: '19ena_normal/19ena_normal.model3.json' },
+      { id: 3, model: '17kanade_normal/17kanade_normal.model3.json' }
+    ],
+    images: [{ id: 1, image: 'bg_classroom.jpg' }],
+    snippets: [
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Three' } },
+      { type: 'LayoutAppear', wait: false, delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
+      { type: 'LayoutAppear', wait: false, delay: 0, data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-tilt01', facial: 'face_smile_01' } },
+      { type: 'LayoutAppear', wait: true, delay: 0, data: { modelId: 3, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
+      { type: 'Talk', wait: true, delay: 0, data: { speaker: '奏', content: '大家都在呢。', ttsText: '', modelId: 3, motion: '', facial: '', closeWindowOnFinish: true } },
+      { type: 'LayoutClear', wait: false, delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutClear', wait: false, delay: 0, data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } } },
+      { type: 'LayoutClear', wait: true, delay: 0, data: { modelId: 3, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } }
+    ]
+  }
+  const { story: validThree } = validateAndFixStory(threeStory, threeView)
+  assert.equal(validThree.snippets.filter((s) => s.type === 'LayoutAppear').length, 3)
+
+  const fourStory = structuredClone(threeStory)
+  fourStory.models.push({ id: 4, model: '18mafuyu_normal/18mafuyu_normal.model3.json' })
+  fourStory.snippets.splice(5, 0, {
+    type: 'LayoutAppear',
+    wait: true,
+    delay: 0,
+    data: { modelId: 4, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } }
+  })
+  assert.throws(() => validateAndFixStory(fourStory, threeView), /最多三人|重叠/)
+})
+
+test('accepts all expanded official snippet types and auto-closes open effects', () => {
+  const story = makeStory()
+  story.snippets.splice(
+    3,
+    0,
+    { type: 'PlaceInfo', wait: false, delay: 0, data: { place: '宫益坂女子学园 屋顶', duration: 2200 } },
+    { type: 'SideFade', wait: true, delay: 0, data: { mode: 'Out', direction: 'LeftOut', duration: 400 } },
+    { type: 'SideFade', wait: true, delay: 0, data: { mode: 'In', direction: 'RightIn', duration: 400 } },
+    { type: 'SekaiIn', wait: true, delay: 0, data: { duration: 700 } },
+    { type: 'SekaiOut', wait: true, delay: 0, data: { duration: 700 } },
+    { type: 'AttachCharacterShader', wait: false, delay: 0, data: { modelId: 1, shader: 'hologram', level: 1 } },
+    { type: 'CharacterShake', wait: false, delay: 0, data: { modelId: 2, axis: 'x', duration: 300, amplitude: 0.02 } },
+    { type: 'LayoutDepth', wait: false, delay: 0, data: { modelId: 1, depth: 'Front' } },
+    { type: 'CostumeChange', wait: false, delay: 0, data: { modelId: 2, costume: 'casual_01' } },
+    { type: 'PlayScenarioEffect', wait: false, delay: 0, data: { effect: 'sakura', intensity: 0.6 } },
+    { type: 'StopScenarioEffect', wait: false, delay: 0, data: { effect: 'sakura' } },
+    { type: 'FullScreenText', wait: true, delay: 0, data: { text: '两天后——', duration: 2000 } },
+    { type: 'SimpleSelectable', wait: true, delay: 0, data: { choices: ['继续练习', '先休息一会儿'], pickedIndex: 0 } },
+    { type: 'SepiaIn', wait: true, delay: 0, data: { duration: 300 } },
+    { type: 'SepiaOut', wait: true, delay: 0, data: { duration: 300 } },
+    { type: 'BlurIn', wait: false, delay: 0, data: { duration: 300 } },
+    { type: 'BlurOut', wait: false, delay: 0, data: { duration: 300 } },
+    { type: 'BackgroundBlur', wait: false, delay: 0, data: { intensity: 0.4, duration: 300 } },
+    { type: 'DollyZoom', wait: false, delay: 0, data: { scale: 1.12, duration: 600 } },
+    { type: 'ShakeWindow', wait: false, delay: 0, data: { duration: 350, intensity: 12 } },
+    { type: 'StopShakeWindow', wait: false, delay: 0, data: {} },
+    { type: 'BgmVolume', wait: false, delay: 0, data: { volume: 0.5, fadeMs: 400 } },
+    { type: 'Movie', wait: true, delay: 0, data: { file: 'intro.mp4', duration: 1500 } },
+    // Intentionally leave FlashbackIn & sustained ShakeScreen unclosed so officialLinter closes them
+    { type: 'FlashbackIn', wait: false, delay: 0, data: {} },
+    { type: 'ShakeScreen', wait: false, delay: 0, data: { duration: 15000, amplitude: 0.01 } }
+  )
+  const { story: fixed } = validateAndFixStory(story, makeView())
+  const types = new Set(fixed.snippets.map((s) => s.type))
+  assert.ok(types.has('PlaceInfo'))
+  assert.ok(types.has('SideFade'))
+  assert.ok(types.has('SekaiIn'))
+  assert.ok(types.has('SekaiOut'))
+  assert.ok(types.has('AttachCharacterShader'))
+  assert.ok(types.has('CharacterShake'))
+  assert.ok(types.has('LayoutDepth'))
+  assert.ok(types.has('CostumeChange'))
+  assert.ok(types.has('PlayScenarioEffect'))
+  assert.ok(types.has('SimpleSelectable'))
+  assert.ok(types.has('DollyZoom'))
+  assert.ok(types.has('BgmVolume'))
+  assert.ok(types.has('Movie'))
+  assert.ok(types.has('FlashbackOut'), 'unclosed FlashbackIn should auto-close with FlashbackOut')
+  assert.ok(types.has('StopShakeScreen'), 'unclosed ShakeScreen should auto-close with StopShakeScreen')
 })

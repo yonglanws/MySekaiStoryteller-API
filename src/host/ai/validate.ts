@@ -1,35 +1,64 @@
 import { ILogObj, Logger } from 'tslog'
 import { DEFAULT_BGM_FADE_MS, MAX_BGM_FADE_MS } from '../../common/audio/bgm'
 import { StorySchema, type StoryData } from '../../common/types/Story'
+import { enforceOfficialStoryInvariants, type OfficialLintReport } from './officialLinter'
+import { normalizePjskTerminology } from './personas'
 import type { CatalogView } from './prompt'
+import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
 
-const TALK_LINE_WIDTH_UNITS = 26
+const TALK_LINE_WIDTH_UNITS = 30
 const TALK_MAX_LINES = 3
-const VALID_SIDES = new Set(['Center', 'Left', 'Right'])
+const VALID_SIDES = new Set(['Center', 'Left', 'Right', 'LeftOver', 'RightOver', 'Under'])
+const ON_STAGE_SIDES = new Set(['Center', 'Left', 'Right'])
+const OFFSCREEN_SIDES = new Set(['LeftOver', 'RightOver', 'Under'])
 const VALID_MOVE_SPEEDS = new Set(['Slow', 'Normal', 'Fast', 'Immediate'])
 const VALID_SNIPPET_TYPES = new Set([
   'ChangeLayoutMode',
   'ChangeBackgroundImage',
   'ChangeBgm',
+  'BgmVolume',
+  'PlaySe',
+  'StopSe',
   'LayoutAppear',
   'LayoutClear',
+  'LayoutDepth',
+  'CharacterShake',
+  'CostumeChange',
   'Talk',
   'HideTalk',
   'Move',
   'Motion',
   'Telop',
+  'PlaceInfo',
+  'FullScreenText',
+  'SimpleSelectable',
   'BlackOut',
   'BlackIn',
-  'DoParam',
-  'AmbientColor',
-  'PlaySe',
-  'StopSe',
-  'Wipe',
+  'ShakeScreen',
+  'StopShakeScreen',
+  'ShakeWindow',
+  'StopShakeWindow',
   'FlashbackIn',
   'FlashbackOut',
+  'SepiaIn',
+  'SepiaOut',
+  'SekaiIn',
+  'SekaiOut',
+  'Wipe',
+  'SideFade',
+  'AttachCharacterShader',
+  'PlayScenarioEffect',
+  'StopScenarioEffect',
+  'BlurIn',
+  'BlurOut',
   'CameraMove',
   'CameraZoom',
-  'ShakeScreen'
+  'DollyZoom',
+  'AmbientColor',
+  'BackgroundBlur',
+  'StopShake',
+  'Movie',
+  'DoParam'
 ])
 
 type JsonRecord = Record<string, unknown>
@@ -74,7 +103,7 @@ export function charWidthUnits(char: string): number {
 }
 
 /**
- * 清洗台词/字幕：统一换行、折叠连续空白、按 26 字宽硬折行。
+ * 清洗台词/字幕：统一换行、折叠连续空白、按 30 字宽硬折行。
  * 只排版不删台词；超行由 splitOverflowTalks 拆条。
  */
 export function sanitizeDisplayText(text: unknown, wrap = true): string {
@@ -236,12 +265,19 @@ export function splitOverflowTalks(story: JsonRecord): JsonRecord {
         partData.motion = ''
         partData.facial = ''
       }
-      result.push({
+      if (groupIndex < groups.length - 1) {
+        delete partData.closeWindowOnFinish
+      }
+      const nextSnippet: JsonRecord = {
         type: 'Talk',
         wait: Boolean(snippet.wait),
-        delay: groupIndex === 0 ? toNumber(snippet.delay) : 0.15,
+        delay: groupIndex === 0 ? toNumber(snippet.delay) : 0,
         data: partData
-      })
+      }
+      if (snippet.progressBehavior === 'Now' || snippet.progressBehavior === 'WaitFinished') {
+        nextSnippet.progressBehavior = snippet.progressBehavior
+      }
+      result.push(nextSnippet)
       start = end
     }
   }
@@ -249,10 +285,19 @@ export function splitOverflowTalks(story: JsonRecord): JsonRecord {
   return story
 }
 
-function offscreenPosition(side: string): JsonRecord {
-  return side === 'Center'
-    ? { side: 'Right', offset: 100 }
-    : { side, offset: side === 'Left' ? -100 : 100 }
+function parsePosition(raw: unknown, fallbackSide: string): JsonRecord {
+  const pos = isRecord(raw) ? raw : {}
+  const side = VALID_SIDES.has(toStr(pos.side)) ? toStr(pos.side) : fallbackSide
+  const under = toBool(pos.under, false)
+  return {
+    side,
+    offset: toNumber(pos.offset, 0),
+    ...(under ? { under: true } : {})
+  }
+}
+
+function isOffscreenPosition(pos: JsonRecord): boolean {
+  return OFFSCREEN_SIDES.has(toStr(pos.side)) || pos.under === true
 }
 
 const isStandingMotion = (name: string): boolean => {
@@ -341,11 +386,30 @@ function validateActions(
 }
 
 /**
- * 严格舞台校验：不在场说话、重复入场、双人同侧、第三人入场都会抛错，
- * 由上层把错误信息交给模型重写（不在这里删角色或台词）。
+ * 严格舞台校验：支持 Normal（<=2人，Left/Right 或单人 Center）与 Three（<=3人，Left/Center/Right）；
+ * 不在场说话、重复入场、槽位冲突、4人以上同台都会抛错，由上层重写（不删角色或台词）。
  */
 function normalizeScene(story: JsonRecord): void {
   const visible = new Map<number, JsonRecord>()
+  let layoutMode: 'Normal' | 'Three' = 'Normal'
+
+  const checkSlotAvailable = (
+    targetSide: string,
+    ignoreModelId: number | undefined,
+    label: string
+  ): void => {
+    for (const [other, current] of visible) {
+      if (other === ignoreModelId) continue
+      const currentSide = toStr(current.side)
+      if (currentSide === targetSide) {
+        throw new Error(`${label} 槽位 ${targetSide} 已被占用`)
+      }
+      if (layoutMode === 'Normal' && (currentSide === 'Center' || targetSide === 'Center')) {
+        throw new Error(`${label} Normal 模式双人必须占用 Left/Right 槽位，不可与 Center 混用`)
+      }
+    }
+  }
+
   for (const [index, snippet] of (story.snippets as JsonRecord[]).entries()) {
     const kind = snippet.type as string
     const data = isRecord(snippet.data) ? snippet.data : {}
@@ -353,27 +417,38 @@ function normalizeScene(story: JsonRecord): void {
     const label = `snippets[${index}] ${kind}`
 
     if (kind === 'ChangeLayoutMode') {
-      data.mode = 'Normal'
+      const mode = toStr(data.mode) === 'Three' ? 'Three' : 'Normal'
+      if (mode === 'Normal' && visible.size >= 3) {
+        throw new Error(`${label} 场上已有 3 名角色，需先 LayoutClear 退场后再切回 Normal`)
+      }
+      layoutMode = mode
+      data.mode = mode
       continue
     }
     if (kind === 'LayoutAppear') {
       if (typeof modelId !== 'number') throw new Error(`${label} 缺少 modelId`)
       if (visible.has(modelId)) throw new Error(`${label} 角色已在场，不能重复入场`)
-      if (visible.size >= 2) {
-        throw new Error(`${label} 同时最多两人在场；先 LayoutClear(wait:true) 完全滑出旧角色再入场`)
+      const maxOnStage = layoutMode === 'Three' ? 3 : 2
+      if (visible.size >= maxOnStage) {
+        throw new Error(
+          layoutMode === 'Three'
+            ? `${label} Three 模式同时最多三人在场；先 LayoutClear 退场旧角色再入场`
+            : `${label} Normal 模式同时最多两人在场；3人同台请先 ChangeLayoutMode('Three') 或先 LayoutClear 退场`
+        )
       }
-      const fadeIn = toBool(data.fadeIn, false)
-      const to = isRecord(data.to) ? data.to : {}
-      const side = VALID_SIDES.has(toStr(to.side)) ? toStr(to.side) : 'Left'
-      const position = { side, offset: toNumber(to.offset, 0) }
-      for (const current of visible.values()) {
-        if (current.side === side || current.side === 'Center' || side === 'Center') {
-          throw new Error(`${label} 双人必须占用不同的 Left/Right 槽位`)
-        }
+      const toRaw = parsePosition(data.to, 'Left')
+      const side = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : 'Left'
+      const position: JsonRecord = {
+        side,
+        offset: toNumber(toRaw.offset, 0),
+        ...(toRaw.under ? { under: true } : {})
       }
+      checkSlotAvailable(side, undefined, label)
       data.to = position
-      // fadeIn：原地淡入，不滑入（官方逐段上下场的常见做法）。
-      data.from = fadeIn ? { ...position } : offscreenPosition(side)
+
+      const fromRaw = parsePosition(data.from, side)
+      // 默认原地淡入（from == to, offset: 0）；仅保留明确的 LeftOver/RightOver/Under 物理入场
+      data.from = isOffscreenPosition(fromRaw) ? fromRaw : { ...position }
       visible.set(modelId, position)
       continue
     }
@@ -383,26 +458,28 @@ function normalizeScene(story: JsonRecord): void {
       }
       const current = visible.get(modelId)!
       data.from = { ...current }
-      snippet.wait = true
       if (kind === 'LayoutClear') {
-        data.to = toBool(data.fadeOut, false)
-          ? { ...current }
-          : offscreenPosition(toStr(current.side))
+        const toRaw = parsePosition(data.to, toStr(current.side))
+        // 默认原地淡出（from == to）；仅保留明确的 LeftOver/RightOver/Under 物理离场
+        data.to = isOffscreenPosition(toRaw) ? toRaw : { ...current }
         visible.delete(modelId)
       } else {
-        const to = isRecord(data.to) ? data.to : {}
-        const side = VALID_SIDES.has(toStr(to.side)) ? toStr(to.side) : 'Left'
-        for (const [other, currentPosition] of visible) {
-          if (other === modelId) continue
-          if (
-            currentPosition.side === side ||
-            currentPosition.side === 'Center' ||
-            side === 'Center'
-          ) {
-            throw new Error(`${label} 不能移入已占用的槽位`)
-          }
+        const toRaw = parsePosition(data.to, toStr(current.side))
+        const side = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : toStr(current.side)
+        checkSlotAvailable(side, modelId, label)
+        const nextPos: JsonRecord = {
+          side,
+          offset: toNumber(toRaw.offset, 0),
+          ...(toRaw.under ? { under: true } : {})
         }
-        visible.set(modelId, { side, offset: 0 })
+        data.to = nextPos
+        visible.set(modelId, nextPos)
+      }
+      continue
+    }
+    if (kind === 'LayoutDepth' || kind === 'CharacterShake') {
+      if (typeof modelId !== 'number' || !visible.has(modelId)) {
+        throw new Error(`${label} 角色不在场`)
       }
       continue
     }
@@ -424,7 +501,9 @@ function normalizeScene(story: JsonRecord): void {
           }
         }
       }
-      if (kind === 'Motion' && 'actions' in data) snippet.wait = true
+      if (kind === 'Motion' && 'actions' in data && snippet.progressBehavior === undefined) {
+        snippet.wait = true
+      }
     }
   }
 }
@@ -432,6 +511,7 @@ function normalizeScene(story: JsonRecord): void {
 export interface ValidationResult {
   story: StoryData
   warnings: string[]
+  lint?: OfficialLintReport
 }
 
 /**
@@ -679,19 +759,36 @@ export function validateAndFixStory(
     }
     const snippet = raw
     const kind = snippet.type as string
-    snippet.wait = toBool(snippet.wait, false)
+    if (snippet.progressBehavior === 'Now' || snippet.progressBehavior === 'WaitFinished') {
+      snippet.wait = snippet.progressBehavior === 'WaitFinished'
+    } else {
+      snippet.wait = toBool(snippet.wait, false)
+    }
     snippet.delay = toNumber(snippet.delay, 0)
     if (!Number.isFinite(snippet.delay) || (snippet.delay as number) < 0) {
       throw new Error(`snippets[${index}].delay 必须是非负有限秒数`)
     }
 
-    const needsData = kind !== 'HideTalk'
+    const needsData = kind !== 'HideTalk' && kind !== 'StopShake'
     if (needsData) {
       if (!isRecord(snippet.data)) snippet.data = {}
     }
     const data = isRecord(snippet.data) ? snippet.data : {}
 
-    if (['Talk', 'Motion', 'LayoutAppear', 'LayoutClear', 'Move', 'DoParam'].includes(kind)) {
+    if (
+      [
+        'Talk',
+        'Motion',
+        'LayoutAppear',
+        'LayoutClear',
+        'Move',
+        'DoParam',
+        'LayoutDepth',
+        'CharacterShake',
+        'CostumeChange',
+        'AttachCharacterShader'
+      ].includes(kind)
+    ) {
       if (!('modelId' in data)) data.modelId = defaultModel.id
       data.modelId = remapId(data.modelId)
       const modelId = data.modelId
@@ -726,7 +823,7 @@ export function validateAndFixStory(
       } else {
         data.speaker = speakerRaw || (model ? view.shortName(model) : '')
       }
-      const content = toStr(data.content, '...').replace(/\\n/g, '\n')
+      const content = normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
       data.content = sanitizeDisplayText(content) || '...'
       data.voice = toStr(data.voice, '')
       data.ttsText = typeof data.ttsText === 'string' && data.ttsText.trim() ? data.ttsText : ''
@@ -734,6 +831,20 @@ export function validateAndFixStory(
       const labels = options.emotionLabels ?? []
       data.emotion =
         labels.length > 0 ? (labels.includes(rawEmotion) ? rawEmotion : '') : rawEmotion
+
+      if ('closeWindowOnFinish' in data) {
+        if (typeof data.closeWindowOnFinish === 'boolean') {
+          if (!data.closeWindowOnFinish) delete data.closeWindowOnFinish
+        } else {
+          if (toBool(data.closeWindowOnFinish, false)) data.closeWindowOnFinish = true
+          else delete data.closeWindowOnFinish
+        }
+      }
+      if ('effect' in data) {
+        const eff = toStr(data.effect).trim()
+        if (eff === 'Normal' || eff === 'Internal' || eff === 'Overlap') data.effect = eff
+        else delete data.effect
+      }
 
       if (modelId === -1) {
         // 旁白没有模型，不能携带动作/表情
@@ -772,13 +883,16 @@ export function validateAndFixStory(
       )
       const requested = cleanPath(data.file)
 
-      if (stop) {
-        if (requested) {
+      if (stop || requested.toLowerCase().replace(/\.mp3$/i, '') === 'bgm00000') {
+        if (requested && !stop) {
+          warn(`snippets[${index}] ChangeBgm bgm00000 按停止 BGM 处理`)
+        } else if (requested && stop) {
           warn(`snippets[${index}] ChangeBgm 同时给了 file 和 stop，按停止处理`)
         }
         data.file = ''
         data.stop = true
         data.fadeMs = fadeMs
+        if ('volume' in data) data.volume = Math.min(2, Math.max(0, toNumber(data.volume, 1)))
         snippet.data = data
         continue
       }
@@ -795,56 +909,129 @@ export function validateAndFixStory(
       data.file = file
       data.stop = false
       data.fadeMs = fadeMs
+      if ('volume' in data) data.volume = Math.min(2, Math.max(0, toNumber(data.volume, 1)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'BgmVolume') {
+      data.volume = Math.min(2, Math.max(0, toNumber(data.volume, 1)))
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'PlaySe') {
+      const rawFile = cleanPath(data.file)
+      const canonical =
+        view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
+      if (!canonical) {
+        droppedSnippets.add(index)
+        continue
+      }
+      data.file = canonical
+      data.volume = Math.min(4, Math.max(0, toNumber(data.volume, 1)))
+      data.loop = toBool(data.loop, false)
+      data.fadeMs = Math.min(10000, Math.max(0, toNumber(data.fadeMs, 0)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'StopSe') {
+      const rawFile = cleanPath(data.file)
+      const canonical =
+        view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
+      if (!canonical) {
+        droppedSnippets.add(index)
+        continue
+      }
+      data.file = canonical
+      data.fadeMs = Math.min(10000, Math.max(0, toNumber(data.fadeMs, 0)))
       snippet.data = data
       continue
     }
 
     if (kind === 'LayoutAppear') {
       const modelId = data.modelId as number
-      const fadeIn = toBool(data.fadeIn, false)
       for (const field of ['motion', 'facial'] as const) {
-        const fixed = fixAnimation(view, modelId, field, data[field])
-        if (fixed) data[field] = fixed
-        else data[field] = field === 'facial' ? view.defaultFacial(modelId) : ''
+        const rawAnim = cleanPath(data[field])
+        if (!rawAnim) {
+          data[field] = field === 'facial' ? view.defaultFacial(modelId) : ''
+          continue
+        }
+        const fixed = fixAnimation(view, modelId, field, rawAnim)
+        data[field] = fixed ?? (field === 'facial' ? view.defaultFacial(modelId) : '')
       }
-      if (!fadeIn && (!data.motion || isStandingMotion(toStr(data.motion)))) {
-        data.motion = pickStageMotion(view, modelId)
+      if (isStandingMotion(toStr(data.motion))) {
+        data.motion = ''
       }
-      if (fadeIn) data.motion = typeof data.motion === 'string' ? data.motion : ''
       data.facialFirst = toBool(data.facialFirst, true)
       data.moveSpeed = VALID_MOVE_SPEEDS.has(toStr(data.moveSpeed))
         ? toStr(data.moveSpeed)
         : 'Normal'
       data.hologram = toBool(data.hologram, false)
-      const to = isRecord(data.to) ? data.to : {}
-      const side = VALID_SIDES.has(toStr(to.side)) ? toStr(to.side) : 'Left'
-      const offset = toNumber(to.offset, 0)
-      data.to = { side, offset }
-      // fadeIn：原地淡入（官方逐段上下场的常见做法），不滑入也不播入场动作。
-      data.from = fadeIn ? { side, offset } : offscreenPosition(side)
+      const toRaw = parsePosition(data.to, 'Left')
+      const toSide = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : 'Left'
+      const toPos: JsonRecord = {
+        side: toSide,
+        offset: toNumber(toRaw.offset, 0),
+        ...(toRaw.under ? { under: true } : {})
+      }
+      data.to = toPos
+      const fromRaw = parsePosition(data.from, toSide)
+      // 默认原地淡入（from == to, offset: 0），保留 motion；LeftOver/RightOver/Under 保留物理走入
+      data.from = isOffscreenPosition(fromRaw) ? fromRaw : { ...toPos }
+      delete data.fadeIn
       snippet.data = data
       continue
     }
 
     if (kind === 'LayoutClear') {
       const modelId = data.modelId as number
-      const fadeOut = toBool(data.fadeOut, false)
       data.moveSpeed = VALID_MOVE_SPEEDS.has(toStr(data.moveSpeed))
         ? toStr(data.moveSpeed)
         : 'Normal'
-      const from = isRecord(data.from) ? data.from : {}
-      const side = VALID_SIDES.has(toStr(from.side)) ? toStr(from.side) : 'Center'
-      const offset = toNumber(from.offset, 0)
-      data.from = { side, offset }
-      data.to = fadeOut ? { side, offset } : offscreenPosition(side)
-      let motion = fixAnimation(view, modelId, 'motion', data.motion)
-      if (fadeOut) motion = ''
-      else if (!motion || isStandingMotion(motion)) motion = pickStageMotion(view, modelId)
+      const fromPos = parsePosition(data.from, 'Center')
+      data.from = fromPos
+      const toRaw = parsePosition(data.to, toStr(fromPos.side))
+      // 默认原地淡出（from == to）；LeftOver/RightOver/Under 保留物理走出
+      data.to = isOffscreenPosition(toRaw) ? toRaw : { ...fromPos }
+      let motion = fixAnimation(view, modelId, 'motion', data.motion) ?? ''
+      if (isStandingMotion(motion)) motion = ''
       data.motion = motion
-      let facial = fixAnimation(view, modelId, 'facial', data.facial)
-      if (fadeOut) facial = ''
-      else if (!facial) facial = view.defaultFacial(modelId)
+      const facial = fixAnimation(view, modelId, 'facial', data.facial) ?? ''
       data.facial = facial
+      delete data.fadeOut
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'LayoutDepth') {
+      const d = toStr(data.depth)
+      data.depth = d === 'Front' || d === 'Back' || d === 'Reset' ? d : 'Front'
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'CharacterShake') {
+      data.axis = toStr(data.axis).toUpperCase() === 'Y' ? 'Y' : 'X'
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'CostumeChange') {
+      data.costume = toStr(data.costume).trim()
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'AttachCharacterShader') {
+      const s = toStr(data.shader).trim().toLowerCase()
+      data.shader =
+        s === 'hologram' || s === 'monitor' || s === 'blur' || s === 'none' ? s : 'hologram'
+      if ('level' in data) {
+        data.level = Math.min(10, Math.max(0, toNumber(data.level, 1)))
+      }
       snippet.data = data
       continue
     }
@@ -869,43 +1056,211 @@ export function validateAndFixStory(
     }
 
     if (kind === 'Move') {
+      const modelId = data.modelId as number
       data.moveSpeed = VALID_MOVE_SPEEDS.has(toStr(data.moveSpeed))
         ? toStr(data.moveSpeed)
         : 'Normal'
-      const from = isRecord(data.from) ? data.from : {}
-      const to = isRecord(data.to) ? data.to : {}
-      data.from = {
-        side: VALID_SIDES.has(toStr(from.side)) ? toStr(from.side) : 'Center',
-        offset: toNumber(from.offset, 0)
-      }
-      data.to = {
-        side: VALID_SIDES.has(toStr(to.side)) ? toStr(to.side) : 'Left',
-        offset: toNumber(to.offset, 0)
-      }
+      data.from = parsePosition(data.from, 'Center')
+      data.to = parsePosition(data.to, 'Left')
+      data.motion = fixAnimation(view, modelId, 'motion', data.motion) ?? ''
+      data.facial = fixAnimation(view, modelId, 'facial', data.facial) ?? ''
+      data.facialFirst = toBool(data.facialFirst, true)
       snippet.data = data
       continue
     }
 
     if (kind === 'BlackOut' || kind === 'BlackIn') {
       data.duration = toNumber(data.duration, kind === 'BlackOut' ? 800 : 1000)
+      data.color = toStr(data.color).toLowerCase() === 'white' ? 'white' : 'black'
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'FlashbackIn') {
+      data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 100)))
+      data.alpha = Math.min(1, Math.max(0, toNumber(data.alpha, 0.3)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'FlashbackOut') {
+      data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 100)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'SepiaIn' || kind === 'SepiaOut') {
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'SekaiIn' || kind === 'SekaiOut') {
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
+      if ('variant' in data) {
+        data.variant = toStr(data.variant) === 'v2' ? 'v2' : 'v1'
+      }
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'SideFade') {
+      const rawDir = toStr(data.direction ?? data.edge, 'Left').trim().toLowerCase()
+      const dir =
+        rawDir === 'right'
+          ? 'Right'
+          : rawDir === 'top'
+            ? 'Top'
+            : rawDir === 'bottom'
+              ? 'Bottom'
+              : 'Left'
+      const rawMode = toStr(data.mode, 'Out').trim().toLowerCase()
+      const mode = rawMode === 'in' ? 'In' : 'Out'
+      data.direction = dir
+      data.edge = dir.toLowerCase()
+      data.mode = mode
+      data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 450)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'Wipe') {
+      data.direction = toStr(data.direction).toLowerCase() === 'left' ? 'left' : 'right'
+      data.mode = toStr(data.mode).toLowerCase() === 'out' ? 'out' : 'in'
+      data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 450)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'BackgroundBlur') {
+      if (data.mode !== undefined) {
+        const mode = toStr(data.mode).toLowerCase() === 'out' ? 'Out' : 'In'
+        data.mode = mode
+        data.enabled = mode === 'In'
+      } else {
+        const enabled = toBool(data.enabled, true)
+        data.enabled = enabled
+        data.mode = enabled ? 'In' : 'Out'
+      }
+      if ('level' in data) data.level = Math.min(64, Math.max(0, toNumber(data.level, 8)))
+      if ('duration' in data) data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 300)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'BlurIn' || kind === 'BlurOut') {
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'PlayScenarioEffect' || kind === 'StopScenarioEffect') {
+      data.effectName = normalizeScenarioEffectName(data.effectName) || toStr(data.effectName).trim()
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
 
     if (kind === 'ChangeBackgroundImage') {
       data.imageId = toNumber(data.imageId, 1)
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
 
     if (kind === 'ChangeLayoutMode') {
-      data.mode = 'Normal'
+      data.mode = toStr(data.mode) === 'Three' ? 'Three' : 'Normal'
       snippet.data = data
       continue
     }
 
     if (kind === 'Telop') {
-      data.content = sanitizeDisplayText(toStr(data.content), false)
+      data.content = sanitizeDisplayText(normalizePjskTerminology(toStr(data.content)), false)
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'PlaceInfo') {
+      data.text = sanitizeDisplayText(normalizePjskTerminology(toStr(data.text)), false) || '...'
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'FullScreenText') {
+      data.text = normalizePjskTerminology(toStr(data.text).trim())
+      if ('duration' in data) data.duration = Math.min(120000, Math.max(0, toNumber(data.duration, 2500)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'SimpleSelectable') {
+      const choices = Array.isArray(data.choices)
+        ? data.choices.map((c) => toStr(c).trim()).filter(Boolean)
+        : ['……']
+      data.choices = choices.length > 0 ? choices : ['……']
+      if ('pickedIndex' in data) {
+        data.pickedIndex = Math.max(
+          0,
+          Math.min((data.choices as string[]).length - 1, Math.floor(toNumber(data.pickedIndex, 0)))
+        )
+      }
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'ShakeScreen') {
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      data.amplitude = Math.min(0.2, Math.max(0, toNumber(data.amplitude, 0.01)))
+      if ('intensity' in data) data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'ShakeWindow') {
+      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      if ('intensity' in data) data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'StopShakeScreen' || kind === 'StopShakeWindow') {
+      snippet.data = {}
+      continue
+    }
+
+    if (kind === 'CameraMove') {
+      data.x = toNumber(data.x, 0)
+      data.y = toNumber(data.y, 0)
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'CameraZoom') {
+      data.scale = Math.min(5, Math.max(0.1, toNumber(data.scale, 1)))
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'DollyZoom') {
+      data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 600)))
+      data.zoom = Math.min(10, Math.max(0.1, toNumber(data.zoom, 1.2)))
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'AmbientColor') {
+      const m = toStr(data.mode).toLowerCase()
+      data.mode = m === 'evening' ? 'evening' : m === 'night' ? 'night' : 'normal'
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'Movie') {
+      data.file = cleanPath(data.file)
+      if ('duration' in data) data.duration = Math.min(600000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
@@ -926,7 +1281,10 @@ export function validateAndFixStory(
   compileStoryBgm(story, view, warn)
   normalizeScene(story)
   splitOverflowTalks(story)
+  const lint = enforceOfficialStoryInvariants(story, view, warn)
 
   const parsed = StorySchema.parse(story)
-  return { story: parsed, warnings }
+  return { story: parsed, warnings, lint }
 }
+
+export const validateAndNormalizeStory = validateAndFixStory

@@ -2,8 +2,144 @@ import { ExportLogger } from './ExportLogger'
 import { mixBgmCueSamples, type BgmCue, type BgmSampleCue } from '../../../../common/audio/bgm'
 import { mixSeCueSamples, type SeBufferCue } from '../../../../common/audio/se'
 
-export type BgmAudioCue = BgmCue<AudioBuffer>
-export type SeAudioCue = SeBufferCue
+export const ACF_GAIN_BGM = 0.75
+export const ACF_GAIN_SE = 0.8
+export const ACF_GAIN_VOICE = 0.9
+export const MONO_PAN_GAIN = Math.SQRT1_2
+
+export const VOICE_DUCK_LEVEL = 0.65
+export const VOICE_DUCK_RELEASE_SEC = 0.5
+export const VOICE_DUCK_CURVE_STRENGTH = 0.5
+
+export const SE_DUCK_LEVEL = 0.8
+export const SE_DUCK_RELEASE_SEC = 0.5
+
+export interface DuckSpan {
+  startSample: number
+  endSample: number | null
+  kind: 'voice' | 'se'
+}
+
+export interface BgmVolumeTweenPoint {
+  timeMs: number
+  volume: number
+  durationMs: number
+}
+
+export type BgmAudioCue = BgmCue<AudioBuffer> & {
+  loopStartMs?: number
+  loopEndMs?: number
+  loopStartSample?: number
+  loopEndSample?: number
+  sourceSampleRate?: number
+}
+export type SeAudioCue = SeBufferCue & { numberOfChannels?: number; snippetIndex?: number }
+
+/** CRI `SquareReverse(s)`: `1 - (1 - x)^(1 + s)` (`sse-mix/src/lib.rs:122`). */
+export function evaluateDuckReleaseCurve(kind: 'voice' | 'se', x: number): number {
+  const clamped = Math.max(0, Math.min(1, x))
+  if (kind === 'voice') {
+    return 1 - Math.pow(1 - clamped, 1 + VOICE_DUCK_CURVE_STRENGTH)
+  }
+  return clamped
+}
+
+/**
+ * 1:1 对齐 `ProjectSekai.acf` REACT 自动闪避曲线：
+ * - Voice 期间压低 BGM 至 `0.65x`，结束后 `0.5s` 内按 `SquareReverse(0.5)` 恢复；
+ * - SE 期间压低 BGM 至 `0.80x`，结束后 `0.5s` 内按线性恢复；
+ * - 多段重叠取更深的最小值（`min`）。
+ */
+export function computeBgmDuckGainBuffer(
+  totalSamples: number,
+  sampleRate: number,
+  spans: ReadonlyArray<DuckSpan>
+): Float32Array {
+  const gains = new Float32Array(totalSamples)
+  gains.fill(1)
+  if (totalSamples <= 0 || spans.length === 0) return gains
+
+  for (const span of spans) {
+    const level = span.kind === 'voice' ? VOICE_DUCK_LEVEL : SE_DUCK_LEVEL
+    const releaseSec = span.kind === 'voice' ? VOICE_DUCK_RELEASE_SEC : SE_DUCK_RELEASE_SEC
+    const start = Math.max(0, Math.min(totalSamples, Math.round(span.startSample)))
+    const end =
+      span.endSample === null
+        ? totalSamples
+        : Math.max(start, Math.min(totalSamples, Math.round(span.endSample)))
+
+    for (let i = start; i < end; i++) {
+      if (level < gains[i]) gains[i] = level
+    }
+
+    if (span.endSample !== null) {
+      const releaseStart = Math.max(0, Math.round(span.endSample))
+      const releaseSamples = Math.max(1, Math.round(releaseSec * sampleRate))
+      const releaseEnd = Math.min(totalSamples, releaseStart + releaseSamples)
+      for (let i = releaseStart; i < releaseEnd; i++) {
+        const x = (i - releaseStart) / releaseSamples
+        const v = level + (1 - level) * evaluateDuckReleaseCurve(span.kind, x)
+        if (v < gains[i]) gains[i] = v
+      }
+    }
+  }
+  return gains
+}
+
+/** 计算 `BgmVolume` (`PlayMode 4`) 线性渐变包络。 */
+export function computeBgmVolumeTweenBuffer(
+  totalSamples: number,
+  sampleRate: number,
+  tweens: ReadonlyArray<BgmVolumeTweenPoint>,
+  initialVolume = 1
+): Float32Array {
+  const gains = new Float32Array(totalSamples)
+  gains.fill(initialVolume)
+  if (totalSamples <= 0 || tweens.length === 0) return gains
+
+  const sorted = [...tweens].sort((a, b) => a.timeMs - b.timeMs)
+  let currentVol = initialVolume
+  let cursor = 0
+
+  for (const tw of sorted) {
+    const start = Math.max(cursor, Math.min(totalSamples, Math.round((tw.timeMs / 1000) * sampleRate)))
+    for (let i = cursor; i < start; i++) gains[i] = currentVol
+
+    const durSamples = Math.max(0, Math.round((tw.durationMs / 1000) * sampleRate))
+    const target = Math.max(0, tw.volume)
+    const end = Math.min(totalSamples, start + durSamples)
+    if (end > start && durSamples > 0) {
+      for (let i = start; i < end; i++) {
+        const p = (i - start) / durSamples
+        gains[i] = currentVol + (target - currentVol) * p
+      }
+    }
+    currentVol = target
+    cursor = end
+  }
+  for (let i = cursor; i < totalSamples; i++) gains[i] = currentVol
+  return gains
+}
+
+export function resolveLoopSampleIndex(
+  playedSamples: number,
+  totalLength: number,
+  loopStart?: number,
+  loopEnd?: number
+): number {
+  if (totalLength <= 0) return 0
+  if (
+    loopStart !== undefined &&
+    loopEnd !== undefined &&
+    loopEnd > loopStart &&
+    loopStart >= 0 &&
+    loopEnd <= totalLength
+  ) {
+    if (playedSamples < loopEnd) return playedSamples
+    return loopStart + ((playedSamples - loopStart) % (loopEnd - loopStart))
+  }
+  return playedSamples % totalLength
+}
 
 export interface AudioTrackData {
   audioBuffer: ArrayBuffer
@@ -31,6 +167,7 @@ export class AudioMuxer {
   private audioTracks: AudioTrackData[] = []
   private bgmConfig: BGMConfig | null = null
   private bgmCues: BgmAudioCue[] = []
+  private bgmVolumeTweens: BgmVolumeTweenPoint[] = []
   private seCues: SeAudioCue[] = []
   private readonly logger: ExportLogger = new ExportLogger('AudioMuxer')
   private decodedBufferCache: Map<string, AudioBuffer> = new Map()
@@ -73,13 +210,21 @@ export class AudioMuxer {
   }
 
   /** 故事级 BGM 时间点；非空时优先于全局 bgmBuffer。 */
-  setBgmCues(cues: BgmAudioCue[]): void {
+  setBgmCues(cues: BgmAudioCue[] & { volumeTweens?: BgmVolumeTweenPoint[] }): void {
     this.bgmCues = cues
+    if (Array.isArray(cues.volumeTweens)) {
+      this.bgmVolumeTweens = cues.volumeTweens
+    }
     this.logger.info('BGM cues set', {
       cues: cues.length,
       files: cues.filter((cue) => !cue.stop).length,
-      stops: cues.filter((cue) => cue.stop).length
+      stops: cues.filter((cue) => cue.stop).length,
+      volumeTweens: this.bgmVolumeTweens.length
     })
+  }
+
+  setBgmVolumeTweens(tweens: BgmVolumeTweenPoint[]): void {
+    this.bgmVolumeTweens = tweens
   }
 
   hasBgmCues(): boolean {
@@ -109,6 +254,7 @@ export class AudioMuxer {
 
   clearTracks(): void {
     this.audioTracks = []
+    this.bgmVolumeTweens = []
     this.decodedBufferCache.clear()
   }
 
@@ -166,39 +312,59 @@ export class AudioMuxer {
     return decoded
   }
 
-  async mixAudioTracks(outputDuration: number, bgmBuffer?: AudioBuffer): Promise<AudioBuffer> {
+  private async ensureAudioContextReady(): Promise<void> {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       await this.initialize()
     }
-
     if (this.audioContext!.state === 'suspended') {
       this.logger.info('AudioContext suspended before mixing, resuming...')
       await this.audioContext!.resume()
       await new Promise((r) => setTimeout(r, 100))
     }
+  }
 
-    this.logger.info(
-      `Mixing audio: outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}, contextState=${this.audioContext!.state}`
-    )
+  /**
+   * 统一混音核心：按 `ProjectSekai.acf` 类别增益（BGM 0.75 / SE 0.80 / Voice 0.90 + 单声道 -3.01dB）、
+   * HCA 循环点、`BgmVolume` 渐变、以及 Voice(0.65x, 0.5s SquareReverse) / SE(0.80x, 0.5s Linear) 自动闪避
+   * 合成 48kHz 立体声缓冲区。
+   */
+  private async mixIntoStereoBuffers(
+    outputDuration: number,
+    bgmBuffer?: AudioBuffer
+  ): Promise<{ leftBuffer: Float32Array; rightBuffer: Float32Array; totalSamples: number; sampleRate: number }> {
+    await this.ensureAudioContextReady()
 
     const sampleRate = 48000
     const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
-    const numChannels = 2
-
     const leftBuffer = new Float32Array(totalSamples)
     const rightBuffer = new Float32Array(totalSamples)
 
+    const voiceSpans = await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
+    const seSpans = this.mixStorySe(leftBuffer, rightBuffer, totalSamples, sampleRate)
+
     if (this.bgmConfig?.enabled) {
+      const duckGains = computeBgmDuckGainBuffer(totalSamples, sampleRate, [...voiceSpans, ...seSpans])
+      const tweenGains = computeBgmVolumeTweenBuffer(totalSamples, sampleRate, this.bgmVolumeTweens, 1)
+
       if (this.bgmCues.length > 0) {
-        this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate)
+        this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate, duckGains, tweenGains)
       } else if (bgmBuffer) {
-        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
+        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples, duckGains, tweenGains)
       }
     }
 
-    await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
-    this.mixStorySe(leftBuffer, rightBuffer, sampleRate)
+    return { leftBuffer, rightBuffer, totalSamples, sampleRate }
+  }
 
+  async mixAudioTracks(outputDuration: number, bgmBuffer?: AudioBuffer): Promise<AudioBuffer> {
+    this.logger.info(
+      `Mixing audio: outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}`
+    )
+    const { leftBuffer, rightBuffer, totalSamples, sampleRate } = await this.mixIntoStereoBuffers(
+      outputDuration,
+      bgmBuffer
+    )
+    const numChannels = 2
     const outputBuffer = this.audioContext!.createBuffer(numChannels, totalSamples, sampleRate)
     outputBuffer.getChannelData(0).set(leftBuffer)
     outputBuffer.getChannelData(1).set(rightBuffer)
@@ -206,7 +372,6 @@ export class AudioMuxer {
     this.logger.info(
       `Audio mix output: duration=${outputBuffer.duration.toFixed(3)}s, samples=${totalSamples}, channels=${numChannels}`
     )
-
     return outputBuffer
   }
 
@@ -214,97 +379,204 @@ export class AudioMuxer {
     leftBuffer: Float32Array,
     rightBuffer: Float32Array,
     bgmBuffer: AudioBuffer,
-    totalSamples: number
+    totalSamples: number,
+    duckGains: Float32Array,
+    tweenGains: Float32Array
   ): void {
     const bgmChannels = bgmBuffer.numberOfChannels
     const bgmTotalSamples = bgmBuffer.getChannelData(0).length
-    const bgmVolume = this.bgmConfig!.volume ?? 0.1
-
-    // 减少日志:只在开始时记录一次
-    this.logger.info(
-      `Mixing BGM: volume=${bgmVolume}, channels=${bgmChannels}, bgmSamples=${bgmTotalSamples}, outputSamples=${totalSamples}`
-    )
+    if (bgmTotalSamples <= 0) return
+    const volume = (this.bgmConfig?.volume ?? 1.0) * ACF_GAIN_BGM * (bgmChannels === 1 ? MONO_PAN_GAIN : 1)
 
     const bgmLeftData = bgmBuffer.getChannelData(0)
-    const bgmRightData = bgmChannels > 1 ? bgmBuffer.getChannelData(1) : null
+    const bgmRightData = bgmChannels > 1 ? bgmBuffer.getChannelData(1) : bgmLeftData
 
-    // 使用局部变量缓存,提高循环性能
-    const leftBuf = leftBuffer
-    const rightBuf = rightBuffer
-    const volume = bgmVolume
-    const bgmLen = bgmTotalSamples
-
-    if (bgmChannels === 1) {
-      // 单声道BGM:复制到左右声道
-      for (let i = 0; i < totalSamples; i++) {
-        const sample = bgmLeftData[i % bgmLen] * volume
-        leftBuf[i] += sample
-        rightBuf[i] += sample
-      }
-    } else {
-      // 双声道BGM:分别混合
-      const rightData = bgmRightData!
-      for (let i = 0; i < totalSamples; i++) {
-        const idx = i % bgmLen
-        leftBuf[i] += bgmLeftData[idx] * volume
-        rightBuf[i] += rightData[idx] * volume
-      }
+    for (let i = 0; i < totalSamples; i++) {
+      const idx = i % bgmTotalSamples
+      const g = volume * duckGains[i] * tweenGains[i]
+      leftBuffer[i] += bgmLeftData[idx] * g
+      rightBuffer[i] += bgmRightData[idx] * g
     }
 
     const loopCount = Math.ceil(totalSamples / bgmTotalSamples)
-    this.logger.info(`BGM mixing complete: volume=${bgmVolume}, loops=${loopCount}`)
+    this.logger.info(`BGM mixing complete: effectiveGain=${volume.toFixed(3)}, loops=${loopCount}`)
   }
 
-  /** 故事级 BGM：按 ChangeBgm 时间点循环、切歌、淡入淡出。 */
+  private resolveCueLoopSamples(
+    cue: BgmAudioCue,
+    sampleRate: number,
+    sourceLength: number
+  ): { loopStart?: number; loopEnd?: number } {
+    if (
+      typeof cue.loopStartSample === 'number' &&
+      typeof cue.loopEndSample === 'number' &&
+      cue.loopEndSample > cue.loopStartSample
+    ) {
+      const ratio = cue.sourceSampleRate && cue.sourceSampleRate > 0 ? sampleRate / cue.sourceSampleRate : 1
+      const s = Math.max(0, Math.round(cue.loopStartSample * ratio))
+      const e = Math.min(sourceLength, Math.round(cue.loopEndSample * ratio))
+      if (e > s) return { loopStart: s, loopEnd: e }
+    }
+    if (
+      typeof cue.loopStartMs === 'number' &&
+      typeof cue.loopEndMs === 'number' &&
+      cue.loopEndMs > cue.loopStartMs
+    ) {
+      const s = Math.max(0, Math.round((cue.loopStartMs / 1000) * sampleRate))
+      const e = Math.min(sourceLength, Math.round((cue.loopEndMs / 1000) * sampleRate))
+      if (e > s) return { loopStart: s, loopEnd: e }
+    }
+    return {}
+  }
+
+  /** 故事级 BGM：按 ChangeBgm 时间点 + HCA 循环区 + 交叉淡化 + ACF 增益 + 闪避包络混音。 */
   private mixStoryBGM(
     leftBuffer: Float32Array,
     rightBuffer: Float32Array,
     totalSamples: number,
-    sampleRate: number
+    sampleRate: number,
+    duckGains: Float32Array,
+    tweenGains: Float32Array
   ): void {
-    const volume = this.bgmConfig?.volume ?? 0.1
-    const sampleCues: BgmSampleCue[] = this.bgmCues.map((cue) => {
-      if (!cue.buffer) {
+    const hasLoopRegions = this.bgmCues.some(
+      (c) => (typeof c.loopEndSample === 'number' || typeof c.loopEndMs === 'number') && !c.stop
+    )
+    const masterGain = (this.bgmConfig?.volume ?? 1.0) * ACF_GAIN_BGM
+    const bgmL = new Float32Array(totalSamples)
+    const bgmR = new Float32Array(totalSamples)
+
+    if (!hasLoopRegions) {
+      const sampleCues: BgmSampleCue[] = this.bgmCues.map((cue) => {
+        if (!cue.buffer) {
+          return {
+            timeMs: cue.timeMs,
+            fadeMs: cue.fadeMs,
+            stop: cue.stop,
+            channel0: null,
+            channel1: null,
+            volume: cue.volume
+          }
+        }
+        const channel0 = cue.buffer.getChannelData(0)
+        const isMono = cue.buffer.numberOfChannels === 1
+        const channel1 = isMono ? channel0 : cue.buffer.getChannelData(1)
+        const pan = isMono ? MONO_PAN_GAIN : 1
         return {
           timeMs: cue.timeMs,
           fadeMs: cue.fadeMs,
           stop: cue.stop,
-          channel0: null,
-          channel1: null,
-          volume: cue.volume
+          channel0,
+          channel1,
+          volume: (cue.volume ?? 1) * pan
         }
+      })
+      const stats = mixBgmCueSamples(sampleCues, bgmL, bgmR, sampleRate, masterGain)
+      for (let i = 0; i < totalSamples; i++) {
+        const mod = duckGains[i] * tweenGains[i]
+        leftBuffer[i] += bgmL[i] * mod
+        rightBuffer[i] += bgmR[i] * mod
       }
-      const channel0 = cue.buffer.getChannelData(0)
-      const channel1 = cue.buffer.numberOfChannels > 1 ? cue.buffer.getChannelData(1) : channel0
-      return {
-        timeMs: cue.timeMs,
-        fadeMs: cue.fadeMs,
-        stop: cue.stop,
-        channel0,
-        channel1,
-        volume: cue.volume
-      }
-    })
+      this.logger.info(
+        `Story BGM mixed: cues=${stats.cueCount}, segments=${stats.segments}, masterGain=${masterGain.toFixed(3)}`
+      )
+      return
+    }
 
-    const stats = mixBgmCueSamples(sampleCues, leftBuffer, rightBuffer, sampleRate, volume)
-    this.logger.info(
-      `Story BGM mixed: cues=${stats.cueCount}, segments=${stats.segments}, skipped=${stats.skipped}, volume=${volume}, outputSamples=${totalSamples}`
-    )
+    const sorted = [...this.bgmCues].sort((a, b) => a.timeMs - b.timeMs)
+    const starts = sorted.map((c) => Math.max(0, Math.min(totalSamples, Math.round((c.timeMs / 1000) * sampleRate))))
+    let segments = 0
+    for (let idx = 0; idx < sorted.length; idx++) {
+      const cue = sorted[idx]
+      if (cue.stop || !cue.buffer) continue
+      const source0 = cue.buffer.getChannelData(0)
+      if (source0.length === 0) continue
+      const isMono = cue.buffer.numberOfChannels === 1
+      const source1 = isMono ? source0 : cue.buffer.getChannelData(1)
+      const pan = isMono ? MONO_PAN_GAIN : 1
+      const start = starts[idx]
+      const next = sorted[idx + 1]
+      const rawFadeOut = next ? Math.min(totalSamples - start, Math.round((Math.max(0, next.fadeMs) / 1000) * sampleRate)) : 0
+      const end = Math.min(totalSamples, (next ? starts[idx + 1] : totalSamples) + rawFadeOut)
+      if (end <= start) continue
+
+      const duration = end - start
+      const fadeIn = cue.fadeMs > 0 ? Math.min(duration, Math.round((cue.fadeMs / 1000) * sampleRate)) : 0
+      const fadeOut = Math.min(rawFadeOut, duration)
+      const cueVol = (cue.volume ?? 1) * pan * masterGain
+      const { loopStart, loopEnd } = this.resolveCueLoopSamples(cue, sampleRate, source0.length)
+
+      let played = 0
+      for (let sample = start; sample < end; sample++) {
+        let fadeGain = 1
+        const local = sample - start
+        if (fadeIn > 0 && local < fadeIn) fadeGain = local / fadeIn
+        if (fadeOut > 0) {
+          const remaining = end - sample
+          if (remaining <= fadeOut) fadeGain = Math.min(fadeGain, remaining / fadeOut)
+        }
+        const sIdx = resolveLoopSampleIndex(played, source0.length, loopStart, loopEnd)
+        const mod = cueVol * fadeGain * duckGains[sample] * tweenGains[sample]
+        leftBuffer[sample] += source0[sIdx] * mod
+        rightBuffer[sample] += source1[sIdx] * mod
+        played++
+      }
+      segments++
+    }
+    this.logger.info(`Story BGM mixed (HCA loop): cues=${sorted.length}, segments=${segments}`)
   }
 
-  /** 故事级 SE：一次性音效、循环脚步、StopSe 淡出。 */
+  /** 故事级 SE：按 `ACF_GAIN_SE = 0.80` 混音并返回用于压低 BGM 的区间表。 */
   private mixStorySe(
     leftBuffer: Float32Array,
     rightBuffer: Float32Array,
+    totalSamples: number,
     sampleRate: number
-  ): void {
-    if (this.seCues.length === 0) return
-    // 与 TTS 的 0.5 缩放相比，SE 保持更接近游戏原声；最终输出仍会 clamp。
-    const volume = 0.6
-    const stats = mixSeCueSamples(this.seCues, leftBuffer, rightBuffer, sampleRate, volume)
+  ): DuckSpan[] {
+    const spans: DuckSpan[] = []
+    if (this.seCues.length === 0) return spans
+
+    const activeLoopStartByKey = new Map<string, number>()
+    const panCues = this.seCues.map((cue) => {
+      const startSample = Math.max(0, Math.round((cue.timeMs / 1000) * sampleRate))
+      const key = cue.file || String(cue.snippetIndex ?? 'loop')
+      if (!cue.stop && cue.channel0) {
+        if (!cue.loop) {
+          spans.push({
+            startSample,
+            endSample: Math.min(totalSamples, startSample + cue.channel0.length),
+            kind: 'se'
+          })
+        } else {
+          activeLoopStartByKey.set(key, startSample)
+        }
+      } else if (cue.stop) {
+        const stopFade = Math.round((Math.max(0, cue.fadeMs) / 1000) * sampleRate)
+        for (const [k, sStart] of activeLoopStartByKey.entries()) {
+          if (!cue.file || k === key) {
+            spans.push({
+              startSample: sStart,
+              endSample: Math.min(totalSamples, startSample + stopFade),
+              kind: 'se'
+            })
+            activeLoopStartByKey.delete(k)
+          }
+        }
+      }
+
+      const isMono = cue.numberOfChannels === 1
+      if (!isMono || cue.stop) return cue
+      return { ...cue, volume: cue.volume * MONO_PAN_GAIN }
+    })
+
+    for (const sStart of activeLoopStartByKey.values()) {
+      spans.push({ startSample: sStart, endSample: null, kind: 'se' })
+    }
+
+    const stats = mixSeCueSamples(panCues, leftBuffer, rightBuffer, sampleRate, ACF_GAIN_SE)
     this.logger.info(
-      `Story SE mixed: events=${stats.events}, oneShots=${stats.oneShots}, loops=${stats.loops}, skipped=${stats.skipped}, volume=${volume}`
+      `Story SE mixed: events=${stats.events}, oneShots=${stats.oneShots}, loops=${stats.loops}, gain=${ACF_GAIN_SE}`
     )
+    return spans
   }
 
   private async mixTTSTracks(
@@ -312,13 +584,15 @@ export class AudioMuxer {
     rightBuffer: Float32Array,
     totalSamples: number,
     sampleRate: number
-  ): Promise<void> {
-    if (this.audioTracks.length === 0) return
+  ): Promise<DuckSpan[]> {
+    const voiceSpans: DuckSpan[] = []
+    if (this.audioTracks.length === 0) return voiceSpans
 
     interface ValidTrack {
       track: AudioTrackData
       sourceCh0: Float32Array
       sourceCh1: Float32Array
+      isMono: boolean
     }
 
     const validTracks: ValidTrack[] = []
@@ -339,14 +613,11 @@ export class AudioMuxer {
       }
 
       if (track.pcmData && track.pcmData.channel0.length > 0) {
-        // 减少日志:只在调试时记录
-        // this.logger.info(
-        //   `Using pre-extracted PCM data for "${track.characterName}" (samples=${track.pcmData.channel0.length}, sampleRate=${track.pcmData.sampleRate})`
-        // )
         validTracks.push({
           track,
           sourceCh0: track.pcmData.channel0,
-          sourceCh1: track.pcmData.channel1
+          sourceCh1: track.pcmData.channel1,
+          isMono: track.pcmData.channel0 === track.pcmData.channel1
         })
       } else {
         const decodePromise = this.decodeAudioTrackCached(track).then((decoded) => {
@@ -355,8 +626,9 @@ export class AudioMuxer {
             return
           }
           const ch0 = decoded.getChannelData(0)
-          const ch1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : ch0
-          validTracks.push({ track, sourceCh0: ch0, sourceCh1: ch1 })
+          const isMono = decoded.numberOfChannels <= 1
+          const ch1 = isMono ? ch0 : decoded.getChannelData(1)
+          validTracks.push({ track, sourceCh0: ch0, sourceCh1: ch1, isMono })
         })
         decodePromises.push(decodePromise)
       }
@@ -368,8 +640,7 @@ export class AudioMuxer {
     let skippedTrackCount = 0
     let totalSampleCount = 0
 
-    // 批量处理音频轨道,减少函数调用开销
-    for (const { track, sourceCh0, sourceCh1 } of validTracks) {
+    for (const { track, sourceCh0, sourceCh1, isMono } of validTracks) {
       try {
         if (!sourceCh0 || sourceCh0.length === 0) {
           this.logger.warn(`Empty channel data for "${track.characterName}", skipping`)
@@ -379,32 +650,27 @@ export class AudioMuxer {
 
         const startSample = Math.floor((track.startTime / 1000) * sampleRate)
         const endSample = Math.min(startSample + sourceCh0.length, totalSamples)
-
         if (startSample >= totalSamples) {
           skippedTrackCount++
           continue
         }
 
-        // 使用局部变量缓存,提高性能
-        const volumeScale = 0.5
+        voiceSpans.push({ startSample, endSample, kind: 'voice' })
+
+        const volumeScale = ACF_GAIN_VOICE * (isMono ? MONO_PAN_GAIN : 1)
         const ch0 = sourceCh0
         const ch1 = sourceCh1
         const leftBuf = leftBuffer
         const rightBuf = rightBuffer
-        const start = startSample
-        const end = endSample
 
-        // 优化后的混合循环:减少属性访问和重复计算
-        for (let i = start; i < end; i++) {
-          const sourceIndex = i - start
-          const leftSample = ch0[sourceIndex] * volumeScale
-          const rightSample = ch1[sourceIndex] * volumeScale
-          leftBuf[i] += leftSample
-          rightBuf[i] += rightSample
+        for (let i = startSample; i < endSample; i++) {
+          const sourceIndex = i - startSample
+          leftBuf[i] += ch0[sourceIndex] * volumeScale
+          rightBuf[i] += ch1[sourceIndex] * volumeScale
         }
 
         mixedTrackCount++
-        totalSampleCount += end - start
+        totalSampleCount += endSample - startSample
       } catch (error) {
         this.logger.error(
           `Failed to mix audio track for character "${track.characterName}": ${error instanceof Error ? error.message : String(error)}`,
@@ -417,6 +683,7 @@ export class AudioMuxer {
     this.logger.info(
       `Track mixing complete: mixed=${mixedTrackCount}, skipped=${skippedTrackCount}, totalSamples=${totalSampleCount}`
     )
+    return voiceSpans
   }
 
   async loadBGMBuffer(bgmPath: string): Promise<AudioBuffer | null> {
@@ -458,36 +725,13 @@ export class AudioMuxer {
     outputDuration: number,
     bgmBuffer?: AudioBuffer
   ): Promise<Int16Array> {
-    if (!this.audioContext || this.audioContext.state === 'closed') {
-      await this.initialize()
-    }
-
-    if (this.audioContext!.state === 'suspended') {
-      this.logger.info('AudioContext suspended before mixing, resuming...')
-      await this.audioContext!.resume()
-      await new Promise((r) => setTimeout(r, 100))
-    }
-
     this.logger.info(
       `Mixing audio (int16 direct): outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}`
     )
-
-    const sampleRate = 48000
-    const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
-
-    const leftBuffer = new Float32Array(totalSamples)
-    const rightBuffer = new Float32Array(totalSamples)
-
-    if (this.bgmConfig?.enabled) {
-      if (this.bgmCues.length > 0) {
-        this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate)
-      } else if (bgmBuffer) {
-        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples)
-      }
-    }
-
-    await this.mixTTSTracks(leftBuffer, rightBuffer, totalSamples, sampleRate)
-    this.mixStorySe(leftBuffer, rightBuffer, sampleRate)
+    const { leftBuffer, rightBuffer, totalSamples } = await this.mixIntoStereoBuffers(
+      outputDuration,
+      bgmBuffer
+    )
 
     const pcm = new Int16Array(totalSamples * 2)
     for (let i = 0; i < totalSamples; i++) {

@@ -219,8 +219,8 @@ const timingCases = [
     twentyChars,
     1000,
     'い'.repeat(100),
-    1833.333,
-    2033.333
+    3333.333,
+    3533.333
   ],
   ['UTF-16 length matches UIText', '😀'.repeat(10), 0, '', 3333.333, 3533.333],
   ['NaN falls back to estimation', twentyChars, NaN, '', 3333.333, 3533.333],

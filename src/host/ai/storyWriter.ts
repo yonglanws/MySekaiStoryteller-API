@@ -16,16 +16,19 @@ import {
   buildEmotionPrompt,
   buildEmotionRepairPrompt,
   buildQuickCastPrompt,
+  buildStagingPrompt,
   composeStory,
   condenseDialogue,
   countDialogueChars,
   countEmotionRuns,
   fallbackCastPlan,
   fallbackDirection,
+  fallbackStaging,
   normalizeCastPlan,
   normalizeDialogue,
   normalizeDirection,
   normalizeEmotionPlan,
+  normalizeStaging,
   softenPunctuation,
   stabilizeEmotions,
   type LlmPipeline,
@@ -33,7 +36,8 @@ import {
   type StagedDialogue,
   type StagedDirection,
   type StagedMessages,
-  type StagedPromptOptions
+  type StagedPromptOptions,
+  type StagedStaging
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { ensureJapaneseTtsText, type TtsBatchTranslator } from './ttsText'
@@ -105,7 +109,7 @@ export class StoryGenerationError extends Error {
 const REPAIR_HINT = `上一次输出无法使用：{error}
 
 请只输出修复后的完整 JSON（仅含 models、images、snippets），保留原有剧情、台词与表演，不要解释，不要 markdown。
-注意：角色必须在 LayoutAppear 之后才能说话/表演；双人必须占用不同的 Left/Right 槽位；任意时刻最多两人在场。`
+注意：角色必须在 LayoutAppear 之后才能说话/表演；Normal 模式同屏最多 2 人（Left/Right），Three 模式同屏最多 3 人（Left/Center/Right），同槽位不能重叠两人。`
 
 function filterByCast(view: CatalogView, cast: string[] | undefined): CatalogView {
   if (!cast || cast.length === 0) return view
@@ -183,7 +187,7 @@ export class StoryWriter {
   }
 
   /**
-   * single/chat 的前置快速选角：把 26 人缩到 1~2 人。
+   * single/chat 的前置快速选角：从全角色池缩到与场景相关的子集（chat 最多 2 人，story 最多 4 人）。
    *
    * 顺序：场景点名 → 沿用上一轮角色 → 一次很短的选角调用；失败保留全目录。
    * 这样主提示词只带入选角色的紧凑人设，而不是 26 份完整人设。
@@ -194,6 +198,7 @@ export class StoryWriter {
     options: GenerateStoryOptions
   ): Promise<CatalogView> {
     if (view.models.length <= 2) return view
+    const maxFastCast = (options.mode ?? 'story') === 'chat' ? 2 : 4
 
     const mentioned = view.models.filter((model) => {
       const fullName = model.name
@@ -206,11 +211,11 @@ export class StoryWriter {
     if (mentioned.length > 0) {
       this.logger.info(
         `[AI] 场景点名角色：${mentioned
-          .slice(0, 2)
+          .slice(0, maxFastCast)
           .map((model) => view.shortName(model))
           .join('、')}`
       )
-      return view.withModels(mentioned.slice(0, 2))
+      return view.withModels(mentioned.slice(0, maxFastCast))
     }
 
     const history = options.history ?? []
@@ -258,8 +263,8 @@ export class StoryWriter {
         if (model && !cast.includes(model)) cast.push(model)
       }
       if (cast.length > 0) {
-        this.logger.info(`[AI] 快速选角：${cast.map((model) => view.shortName(model)).join('、')}`)
-        return view.withModels(cast.slice(0, 2))
+        this.logger.info(`[AI] 快速选角：${cast.slice(0, maxFastCast).map((model) => view.shortName(model)).join('、')}`)
+        return view.withModels(cast.slice(0, maxFastCast))
       }
     } catch (error) {
       if (options.signal?.aborted) throw error
@@ -494,7 +499,7 @@ export class StoryWriter {
       dialogue = normalizeDialogue(
         extractJson(result.content),
         plan,
-        Math.round(targetMinutes * 16),
+        Math.max(12, Math.round(targetMinutes * 18)),
         this.emotionLabels
       )
       if (!dialogue) {
@@ -516,7 +521,7 @@ export class StoryWriter {
         dialogue = normalizeDialogue(
           extractJson(repair.content),
           plan,
-          Math.round(targetMinutes * 16),
+          Math.max(12, Math.round(targetMinutes * 18)),
           this.emotionLabels
         )
         if (!dialogue) markStageFailed('重写后仍没有至少 2 条可用台词')
@@ -567,7 +572,7 @@ export class StoryWriter {
         const expandedDialogue = normalizeDialogue(
           extractJson(expanded.content),
           plan,
-          Math.round(targetMinutes * 16),
+          Math.max(12, Math.round(targetMinutes * 18)),
           this.emotionLabels
         )
         if (
@@ -692,27 +697,44 @@ export class StoryWriter {
       }
       return emotionPlan
     })()
-    // 表演段报错/取消时可能不再等待情绪任务；挂一个空 catch，避免未处理的 Promise 拒绝。
+    // 舞台调度/摄影策划与情绪标注、日文翻译同时启动；等待情绪回填后，再交给精细演技导演（directActing）。
+    const stagingTask: Promise<StagedStaging> = (async () => {
+      try {
+        const result = await runStage(
+          'staging',
+          buildStagingPrompt(view, plan, finalDialogue, promptOptions)
+        )
+        return normalizeStaging(extractJson(result.content), view, plan, finalDialogue)
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        const message = errorMessage(error)
+        details.push(`舞台调度：${message}`)
+        warnings.push(`舞台调度不可用，已使用默认转场与站位：${message}`)
+        return fallbackStaging(view, plan, finalDialogue)
+      }
+    })()
+    // 任一前置并行任务取消/报错时避免未捕获拒绝。
     void emotionTask.catch(() => undefined)
+    void stagingTask.catch(() => undefined)
 
-    // ---- 3. 表演设计（与情绪标注并行） ---------------------------------------------------------------------
-    // 情绪标签尚未回填，direction 直接按台词文本判断语气；提示词会切换成对应写法。
-    const directionDialogue: StagedDialogue =
-      this.emotionLabels.length > 0
-        ? {
-            ...finalDialogue,
-            lines: finalDialogue.lines.map((line) => ({ ...line, emotion: '' }))
-          }
-        : finalDialogue
+    // ---- 3. 等待情绪分段与舞台调度完成，并回填情绪 -------------------------------------------------------
+    const [emotionPlan, staging] = await Promise.all([emotionTask, stagingTask])
+    dialogue = applyEmotionPlan(
+      finalDialogue,
+      emotionPlan ? stabilizeEmotions(dialogue, emotionPlan, this.emotionLabels) : null,
+      this.emotionLabels
+    )
+
+    // ---- 4. 精细演技导演（带完整情绪段与舞台/分镜上下文） -------------------------------------------------
     let direction: StagedDirection = fallbackDirection(view, plan)
     let directionRaw = ''
     try {
       const result = await runStage(
         'direction',
-        buildDirectionPrompt(view, plan, directionDialogue, promptOptions)
+        buildDirectionPrompt(view, plan, dialogue, promptOptions, staging)
       )
       directionRaw = result.content
-      direction = normalizeDirection(extractJson(result.content), view, plan, directionDialogue)
+      direction = normalizeDirection(extractJson(result.content), view, plan, dialogue)
       if (direction.lines.length === 0) {
         markStageFailed('没有返回可用的表演设计')
         warnings.push('表演设计为空，已请求重写一次')
@@ -727,9 +749,9 @@ export class StoryWriter {
       try {
         const repair = await runStage(
           'direction-repair',
-          buildDirectionRepairPrompt(view, plan, directionDialogue, promptOptions, directionRaw)
+          buildDirectionRepairPrompt(view, plan, dialogue, promptOptions, directionRaw, staging)
         )
-        direction = normalizeDirection(extractJson(repair.content), view, plan, directionDialogue)
+        direction = normalizeDirection(extractJson(repair.content), view, plan, dialogue)
       } catch (error) {
         if (options.signal?.aborted) throw error
         details.push(`表演设计重写：${errorMessage(error)}`)
@@ -740,16 +762,8 @@ export class StoryWriter {
       direction = fallbackDirection(view, plan)
     }
 
-    // ---- 3.4 回填情绪 ---------------------------------------------------------------------------------------
-    const emotionPlan = await emotionTask
-    dialogue = applyEmotionPlan(
-      finalDialogue,
-      emotionPlan ? stabilizeEmotions(dialogue, emotionPlan, this.emotionLabels) : null,
-      this.emotionLabels
-    )
-
-    // ---- 3.5 收取并行翻译结果 ------------------------------------------------------------------------------
-    // 背景翻译在情绪段之前已经启动，通常在表演设计期间就已完成；这里只做等待与写入。
+    // ---- 4.5 收取并行翻译结果 ------------------------------------------------------------------------------
+    // 背景翻译在情绪与舞台调度之前已经启动，通常在此前就已完成；这里只做等待与写入。
     let ttsTranslated = 0
     if (dialogueTts) {
       const translated = await dialogueTts
@@ -764,11 +778,11 @@ export class StoryWriter {
       }
     }
 
-    // ---- 4. 合成与校验 -------------------------------------------------------------------------------------
+    // ---- 5. 合成与校验 -------------------------------------------------------------------------------------
     let validated: ValidationResult
     try {
       validated = validateAndFixStory(
-        composeStory(view, plan, dialogue, direction),
+        composeStory(view, plan, dialogue, direction, staging),
         view,
         this.logger,
         { emotionLabels: this.emotionLabels }
@@ -779,7 +793,7 @@ export class StoryWriter {
       details.push(`合成：${message}`)
       try {
         validated = validateAndFixStory(
-          composeStory(view, plan, dialogue, fallbackDirection(view, plan)),
+          composeStory(view, plan, dialogue, fallbackDirection(view, plan), staging),
           view,
           this.logger,
           { emotionLabels: this.emotionLabels }
@@ -802,7 +816,7 @@ export class StoryWriter {
     const activeIds = new Set(validated.story.models.map((entry) => entry.id))
     const cast = view.models.filter((entry) => activeIds.has(entry.id)).map((entry) => entry.name)
 
-    // 情绪与表演并行后完成顺序不固定；按流水线顺序输出，便于日志与客户端展示。
+    // 并行阶段完成顺序不固定；按 5 阶段流水线顺序输出，便于日志与客户端展示。
     const stageOrder = [
       'cast',
       'dialogue',
@@ -811,6 +825,7 @@ export class StoryWriter {
       'dialogue-expand-2',
       'emotion',
       'emotion-repair',
+      'staging',
       'direction',
       'direction-repair'
     ]

@@ -91,6 +91,20 @@ const directionReply = {
   ]
 }
 
+const stagingReply = {
+  scenes: [
+    {
+      id: 's1',
+      fromLineId: 'l1',
+      background: 'bg_room.jpg',
+      ambient: 'none',
+      activeCast: ['瑞希', '绘名'],
+      bgm: 'bgm00003.mp3'
+    }
+  ],
+  events: []
+}
+
 async function startMockLlm(handler) {
   const requests = []
   const server = http.createServer(async (req, res) => {
@@ -179,7 +193,8 @@ function stageOf(system) {
   if (system.includes('第一轮')) return 'cast'
   if (system.includes('第二轮')) return 'dialogue'
   if (system.includes('情绪标注员')) return 'emotion'
-  if (system.includes('第三轮')) return 'direction'
+  if (system.includes('舞台监督') || system.includes('directStaging')) return 'staging'
+  if (system.includes('精细演技导演') || system.includes('directActing') || system.includes('第三轮')) return 'direction'
   if (system.includes('中日翻译')) return 'translate'
   return 'unknown'
 }
@@ -191,6 +206,8 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
         return castReply
       case 'dialogue':
         return dialogueReply
+      case 'staging':
+        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':
@@ -206,11 +223,11 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
   const result = await writer.generate({ prompt: '放学后瑞希和绘名聊下次练习', targetMinutes: 0.3 })
 
   assert.equal(result.meta.pipeline, 'staged')
-  assert.equal(result.meta.rounds, 3)
-  assert.equal(result.meta.stages.length, 3)
+  assert.equal(result.meta.rounds, 4)
+  assert.equal(result.meta.stages.length, 4)
   assert.deepEqual(
     result.meta.stages.map((stage) => stage.stage),
-    ['cast', 'dialogue', 'direction']
+    ['cast', 'dialogue', 'staging', 'direction']
   )
   assert.ok(result.meta.stages.every((stage) => stage.ok))
   assert.equal(result.meta.title, '放学后')
@@ -238,14 +255,17 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
     talks.map((talk) => talk.data.speaker),
     ['瑞希', '绘名', '瑞希']
   )
-  // 双人戏整场两人同场：第一句的听者反应也保留，所以第一句有说话者+听者两个动作。
+  // 双人戏整场两人同场：l1 紧跟在 LayoutAppear 后（<0.4s），入场动作已由 LayoutAppear 承担，
+  // 因此 l1 自动去重说话者起手 body motion，但保留表情与听者反应，避免开场 0.2s 连续抽搐两次。
   assert.equal(talks[0].data.actions.length, 2)
   assert.equal(talks[0].data.actions[0].modelId, 1)
-  assert.equal(talks[0].data.actions[0].motion, 'w-normal-nod01')
+  assert.equal(talks[0].data.actions[0].motion, undefined)
+  assert.equal(talks[0].data.actions[0].facial, 'face_smile_01')
   assert.equal(talks[0].data.actions[1].modelId, 2)
-  // 第二句只有说话者动作（direction 没给听者反应）
+  // 第二句超过入场冷却期，保留说话者动作
   assert.equal(talks[1].data.actions.length, 1)
   assert.equal(talks[1].data.actions[0].modelId, 2)
+  assert.equal(talks[1].data.actions[0].motion, 'e-normal-sigh01')
   // 第三句只有表情
   assert.equal(talks[2].data.actions.length, 1)
   assert.equal(talks[2].data.actions[0].facial, 'face_smile_01')
@@ -266,20 +286,24 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
   assert.equal(result.meta.ttsTranslated, 3)
   assert.ok(talks.every((talk) => talk.data.ttsText.length > 0))
 
-  // 台词段只带入选角色的完整人设；表演段带动作清单与逐字台词
+  // 台词段只带入选角色的完整人设；舞台调度带可用 BGM；表演段带动作清单与逐字台词
   const dialogueRequest = mock.requests.find(
     (request) => stageOf(request.messages[0].content) === 'dialogue'
   )
   assert.ok(dialogueRequest.messages[1].content.includes('瑞希是 Nightcord 的成员'))
   assert.ok(dialogueRequest.messages[1].content.includes('绘名嘴硬心软'))
   assert.ok(!dialogueRequest.messages[1].content.includes('w-normal-nod01'))
+  const stagingRequest = mock.requests.find(
+    (request) => stageOf(request.messages[0].content) === 'staging'
+  )
+  assert.ok(stagingRequest.messages[1].content.includes('可用 BGM'))
+  assert.ok(stagingRequest.messages[1].content.includes('bgm00003.mp3'))
   const directionRequest = mock.requests.find(
     (request) => stageOf(request.messages[0].content) === 'direction'
   )
   assert.ok(directionRequest.messages[1].content.includes('w-normal-nod01'))
   assert.ok(directionRequest.messages[1].content.includes('今天也一起练吧。'))
-  assert.ok(directionRequest.messages[1].content.includes('可用 BGM'))
-  assert.ok(directionRequest.messages[1].content.includes('bgm00003.mp3'))
+  assert.ok(directionRequest.messages[1].content.includes('[s1]'))
 })
 
 test('staged pipeline translates dialogue while the direction stage is running', async () => {
@@ -302,6 +326,7 @@ test('staged pipeline translates dialogue while the direction stage is running',
       events.push(`start:${stage}`)
       if (stage === 'cast') return chatResult(castReply)
       if (stage === 'dialogue') return chatResult(dialogueReply)
+      if (stage === 'staging') return chatResult(stagingReply)
       if (stage === 'direction') {
         events.push('end:direction')
         releaseTranslation()
@@ -351,12 +376,34 @@ test('staged pipeline translates dialogue while the direction stage is running',
   )
 })
 
-test('staged pipeline labels emotions while the direction stage is running', async () => {
+test('staged pipeline runs emotion and staging concurrently before passing full emotions to direction', async () => {
   const events = []
-  let releaseEmotion
-  const emotionGate = new Promise((resolve) => {
-    releaseEmotion = resolve
+  let releaseStaging
+  const stagingGate = new Promise((resolve) => {
+    releaseStaging = resolve
   })
+  let directionUserPrompt = ''
+  const nineDialogue = {
+    title: '放学后',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '今天也一起练吧。' },
+      { id: 'l2', speaker: '绘名', content: '嗯，先从哪首开始？' },
+      { id: 'l3', speaker: '瑞希', content: '我想先试前奏。' },
+      { id: 'l4', speaker: '绘名', content: '这一段我很期待呢！' },
+      { id: 'l5', speaker: '瑞希', content: '对吧，听起来很轻快。' },
+      { id: 'l6', speaker: '绘名', content: '那就先试一遍副歌！' },
+      { id: 'l7', speaker: '瑞希', content: '……好，稍微休息一下。' },
+      { id: 'l8', speaker: '绘名', content: '呼吸调整好了吗？' },
+      { id: 'l9', speaker: '瑞希', content: '嗯，继续吧。' }
+    ]
+  }
+  const nineDirection = {
+    ...directionReply,
+    lines: nineDialogue.lines.map((line, i) => ({
+      id: line.id,
+      facial: i % 2 === 0 ? 'face_smile_01' : 'face_normal_01'
+    }))
+  }
   const chatResult = (content) => ({
     content: JSON.stringify(content),
     model: 'fake-model',
@@ -370,18 +417,27 @@ test('staged pipeline labels emotions while the direction stage is running', asy
       const stage = stageOf(messages[0].content)
       events.push(`start:${stage}`)
       if (stage === 'cast') return chatResult(castReply)
-      if (stage === 'dialogue') return chatResult(dialogueReply)
+      if (stage === 'dialogue') return chatResult(nineDialogue)
+      if (stage === 'staging') {
+        await stagingGate
+        events.push('end:staging')
+        return chatResult(stagingReply)
+      }
       if (stage === 'emotion') {
-        await emotionGate
+        releaseStaging()
         events.push('end:emotion')
-        return chatResult({ segments: [{ from: 'l1', to: 'l3', emotion: '开心' }] })
+        return chatResult({
+          segments: [
+            { from: 'l1', to: 'l4', emotion: '平静' },
+            { from: 'l5', to: 'l7', emotion: '开心' },
+            { from: 'l8', to: 'l9', emotion: '伤心' }
+          ]
+        })
       }
       if (stage === 'direction') {
-        // 表演段应看到没有情绪标签的台词稿
-        assert.ok(!messages[1].content.includes('〔'))
+        directionUserPrompt = messages[1].content
         events.push('end:direction')
-        releaseEmotion()
-        return chatResult(directionReply)
+        return chatResult(nineDirection)
       }
       throw new Error(`unexpected stage: ${stage}`)
     },
@@ -395,7 +451,7 @@ test('staged pipeline labels emotions while the direction stage is running', asy
     makeSettings('http://127.0.0.1:1/v1'),
     catalog,
     new Logger({ type: 'hidden' }),
-    ['平静', '开心']
+    ['平静', '开心', '伤心']
   )
   const result = await writer.generate({
     prompt: '两个人聊天',
@@ -404,15 +460,17 @@ test('staged pipeline labels emotions while the direction stage is running', asy
   })
 
   assert.ok(events.indexOf('start:emotion') < events.indexOf('start:direction'))
-  assert.ok(events.indexOf('end:emotion') > events.indexOf('start:direction'))
-  assert.ok(events.indexOf('end:emotion') > events.indexOf('end:direction'))
+  assert.ok(events.indexOf('start:staging') < events.indexOf('start:direction'))
+  assert.ok(events.indexOf('end:emotion') < events.indexOf('start:direction'))
+  assert.ok(events.indexOf('end:staging') < events.indexOf('start:direction'))
+  assert.ok(directionUserPrompt.includes('〔开心〕'), 'direction 必须看到已回填的情绪标签')
+  assert.ok(directionUserPrompt.includes('[s1'), 'direction 必须看到分幕上下文标签')
   const stageNames = result.meta.stages.map((stage) => stage.stage)
-  assert.deepEqual(stageNames.slice(0, 3), ['cast', 'dialogue', 'emotion'])
-  assert.equal(stageNames[stageNames.length - 1], 'direction')
+  assert.deepEqual(stageNames, ['cast', 'dialogue', 'emotion', 'staging', 'direction'])
   const talks = result.story.snippets.filter((snippet) => snippet.type === 'Talk')
   assert.deepEqual(
     talks.map((talk) => talk.data.emotion),
-    ['开心', '开心', '开心']
+    ['平静', '平静', '平静', '平静', '开心', '开心', '开心', '开心', '开心']
   )
 })
 
@@ -423,6 +481,8 @@ test('staged pipeline falls back to catalog order when casting fails', async (t)
         return { cast: [{ modelId: 999, name: '不存在' }] }
       case 'dialogue':
         return dialogueReply
+      case 'staging':
+        return {}
       case 'direction':
         return { background: 'bg_room.jpg', lines: [] }
       case 'translate':
@@ -465,6 +525,10 @@ test('staged pipeline repairs an empty dialogue pass once', async (t) => {
       case 'dialogue':
         dialogueCalls += 1
         return dialogueCalls === 1 ? { lines: [] } : dialogueReply
+      case 'staging':
+        return stagingReply
+      case 'staging':
+        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':
@@ -485,7 +549,7 @@ test('staged pipeline repairs an empty dialogue pass once', async (t) => {
 
   assert.deepEqual(
     result.meta.stages.map((stage) => stage.stage),
-    ['cast', 'dialogue', 'dialogue-repair', 'direction']
+    ['cast', 'dialogue', 'dialogue-repair', 'staging', 'direction']
   )
   assert.equal(result.meta.stages[1].ok, false)
   assert.equal(result.story.snippets.filter((snippet) => snippet.type === 'Talk').length, 3)
@@ -503,6 +567,8 @@ test('staged pipeline labels emotions in a separate stable pass', async (t) => {
             { speaker: '绘名', lines: ['……知道了。'] }
           ]
         }
+      case 'staging':
+        return stagingReply
       case 'emotion':
         return {
           segments: [
@@ -510,6 +576,8 @@ test('staged pipeline labels emotions in a separate stable pass', async (t) => {
             { from: 'l3', to: 'l3', emotion: '开心' }
           ]
         }
+      case 'staging':
+        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':
@@ -735,16 +803,20 @@ test('planPresence keeps both characters on stage for the whole duo scene', () =
       { id: 'l8' }
     ]
   }
-  assert.deepEqual(planPresence(plan, dialogue, direction), [{ from: 0, to: 7, mode: 'duo' }])
+  assert.deepEqual(planPresence(plan, dialogue, direction), [
+    { from: 0, to: 7, mode: 'duo', castIds: [1, 2] }
+  ])
 
   // 听者反应不影响 presence：双人戏始终同场
   const noListener = { ...direction, lines: dialogue.lines.map((line) => ({ id: line.id })) }
-  assert.deepEqual(planPresence(plan, dialogue, noListener), [{ from: 0, to: 7, mode: 'duo' }])
+  assert.deepEqual(planPresence(plan, dialogue, noListener), [
+    { from: 0, to: 7, mode: 'duo', castIds: [1, 2] }
+  ])
 
   // 单人戏保持 Center，不强行加第二个人
   const soloPlan = { ...plan, cast: [plan.cast[0]] }
   assert.deepEqual(planPresence(soloPlan, dialogue, direction), [
-    { from: 0, to: 7, mode: 'solo', speaker: 'A' }
+    { from: 0, to: 7, mode: 'solo', speaker: 'A', castIds: [1] }
   ])
 })
 
@@ -839,18 +911,22 @@ test('composed staging keeps ambient and second background through validation', 
     )
   )
   const appears = validated.story.snippets.filter((snippet) => snippet.type === 'LayoutAppear')
-  assert.equal(appears.length, 2, '双人戏只允许开场入场一次')
+  assert.equal(appears.length, 4, '两场戏每场双人同时入场一次（含切夜转场重新入场）')
   assert.ok(
     appears.every((snippet) => snippet.data.motion),
     '两个角色都带入场动作'
   )
   assert.ok(
-    appears.every((snippet) => !snippet.data.fadeIn),
-    '双人戏不需要原地淡入切人'
+    appears.every(
+      (snippet) =>
+        snippet.data.from.side === snippet.data.to.side &&
+        snippet.data.from.offset === snippet.data.to.offset
+    ),
+    '默认原地淡入'
   )
-  assert.deepEqual(appears.map((snippet) => snippet.data.to.side).sort(), ['Left', 'Right'])
+  assert.deepEqual(appears.slice(0, 2).map((snippet) => snippet.data.to.side).sort(), ['Left', 'Right'])
   const clears = validated.story.snippets.filter((snippet) => snippet.type === 'LayoutClear')
-  assert.equal(clears.length, 2, '双人戏只在结尾退场一次')
+  assert.equal(clears.length, 4, '两场戏转场与片尾各同时退场一次')
   assert.ok(
     clears.every(
       (snippet) =>
@@ -886,6 +962,8 @@ test('staged pipeline expands a too-short dialogue once', async (t) => {
             ]
           }))
         }
+      case 'staging':
+        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':

@@ -128,10 +128,10 @@ test('story plan bakes the official frame timeline', () => {
     [
       [0, 0, 7],
       [1, 7, 212],
-      [2, 212, 322],
-      [3, 322, 323],
-      [4, 323, 535],
-      [5, 535, 550]
+      [2, 212, 412],
+      [3, 412, 413],
+      [4, 413, 625],
+      [5, 625, 640]
     ]
   )
   assert.deepEqual(
@@ -155,14 +155,14 @@ test('story plan bakes the official frame timeline', () => {
   )
   assert.equal(plan.entries[4].talk.windowOpenFrames, 12, 'HideTalk 后重新打开窗口')
   assert.equal(plan.entries[4].talk.voiceEndFrame, null)
-  assert.equal(plan.entries[4].talk.gateEndFrame, 415)
+  assert.equal(plan.entries[4].talk.gateEndFrame, 505)
   assert.equal(plan.entries[0].layout.fadeStartFrame, 1)
   assert.equal(plan.entries[0].layout.fadeEndFrame, 7)
-  assert.equal(plan.entries[5].layout.fadeStartFrame, 544)
-  assert.equal(plan.entries[5].layout.fadeEndFrame, 550)
+  assert.equal(plan.entries[5].layout.fadeStartFrame, 634)
+  assert.equal(plan.entries[5].layout.fadeEndFrame, 640)
   assert.equal(plan.entries[0].actions[0].frame, 0)
   assert.equal(plan.entries[1].actions[0].frame, 7)
-  assert.equal(plan.totalFrames, 550)
+  assert.equal(plan.totalFrames, 640)
 })
 
 test('diagnostics carries the baked plan and approximation list', () => {
@@ -203,11 +203,11 @@ test('diagnostics carries the baked plan and approximation list', () => {
   assert.ok(report.approximations.some((item) => /PixiJS/.test(item)))
 })
 
-test('non-blocking clear still bakes its 15-frame fade; following appear is new', () => {
+test('pre-start fence lets Now overlap at frame 0 while WaitFinished drains prior tasks', () => {
   const { load } = fixture()
   const calculator = load('utils/TimelineCalculator.ts')
   const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
-  const layout = (type, wait) => ({
+  const layout = (type, wait, extra = {}) => ({
     type,
     wait,
     delay: 0,
@@ -216,7 +216,8 @@ test('non-blocking clear still bakes its 15-frame fade; following appear is new'
       from: { side: 'Center', offset: 0 },
       to: { side: 'Center', offset: 0 },
       moveSpeed: 'Normal',
-      ...(type === 'LayoutAppear' ? { motion: '', facial: '', hologram: false } : {})
+      ...(type === 'LayoutAppear' ? { motion: '', facial: '', hologram: false } : {}),
+      ...extra
     }
   })
   const snippets = [
@@ -228,21 +229,58 @@ test('non-blocking clear still bakes its 15-frame fade; following appear is new'
   const timeline = calculator.calculateTimeline(snippets, new Map())
   const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
 
-  // 非阻塞 Clear 不推进 cursor，但后台淡出仍是 0.15s + 0.1s。
-  assert.equal(plan.entries[1].durationFrames, 0)
-  assert.equal(plan.entries[1].layout.fadeStartFrame, 7 + 9)
-  assert.equal(plan.entries[1].layout.fadeEndFrame, 7 + 15)
-  assert.ok(
-    plan.entries[1].layout.fadeStartFrame <= plan.entries[1].layout.fadeEndFrame,
-    'fadeStart must not exceed fadeEnd'
+  // 前置栅栏：snippet 0 与 Now 的 snippet 1 同在 0 帧开跑；snippet 2 (WaitFinished) 等 0 和 1 全部跑完（15 帧）再启动。
+  assert.deepEqual(
+    Array.from(plan.entries, (entry) => [entry.startFrame, entry.endFrame, entry.durationFrames]),
+    [
+      [0, 7, 7],
+      [0, 15, 15],
+      [15, 22, 7],
+      [22, 37, 15]
+    ]
   )
+  assert.equal(plan.entries[1].layout.fadeStartFrame, 9)
+  assert.equal(plan.entries[1].layout.fadeEndFrame, 15)
+  assert.equal(plan.entries[2].layout.fadeStartFrame, 16)
+  assert.equal(plan.entries[2].layout.fadeEndFrame, 22)
+  assert.equal(plan.entries[3].layout.fadeStartFrame, 31)
+  assert.equal(plan.entries[3].layout.fadeEndFrame, 37)
+})
 
-  // Clear 在开始时就把角色标记为不在场，因此同一帧的 Appear 是新入场（7 帧淡入）。
-  assert.equal(plan.entries[2].layout.fadeStartFrame, 8)
-  assert.equal(plan.entries[2].layout.fadeEndFrame, 14)
+test('Talk closeWindowOnFinish and async LayoutAppear slide end gate in storyPlan', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    {
+      type: 'LayoutAppear',
+      wait: true,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {
+        modelId: 1,
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Right', offset: 0 },
+        motion: '',
+        facial: '',
+        moveSpeed: 'Normal',
+        hologram: false
+      }
+    },
+    talk({ content: 'あ', closeWindowOnFinish: true }),
+    talk({ content: 'あ' })
+  ]
+  const tts = new Map([[1, { snippetIndex: 1, durationMs: 300 }]])
+  const timeline = calculator.calculateTimeline(snippets, tts)
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
 
-  // 后面的 Clear 重新看到“在场”，按原地 15 帧退场。
-  assert.equal(plan.entries[3].durationFrames, 15)
-  assert.equal(plan.entries[3].layout.fadeStartFrame, 14 + 9)
-  assert.equal(plan.entries[3].layout.fadeEndFrame, 14 + 15)
+  // Appear 7f 完成后启动有声 Talk (frame 7)，后台滑行仍跑到 frame 30 > max(typing=23, voice=28) -> gateEnd=30
+  assert.equal(plan.entries[0].startFrame, 0)
+  assert.equal(plan.entries[0].endFrame, 7)
+  assert.equal(plan.entries[1].startFrame, 7)
+  assert.equal(plan.entries[1].talk.gateEndFrame, 30)
+  assert.equal(plan.entries[1].talk.computedEndFrame, 60)
+  assert.equal(plan.entries[1].durationFrames, 53)
+  // closeWindowOnFinish 后下一句 Talk 重新打开 12f 对话框
+  assert.equal(plan.entries[2].talk.windowOpenFrames, 12)
 })

@@ -2,17 +2,35 @@ import BaseSnippet from './BaseSnippet'
 import { Cubism2InternalModel, Cubism4InternalModel } from 'pixi-live2d-display-advanced'
 import AdvancedModel from '../model/AdvancedModel'
 import type { CharacterAction } from '../../../common/types/Story'
+import AnimationManager from '../managers/AnimationManager'
 import { scheduleCharacterActions } from '../utils/CharacterActionScheduler'
-import { sampleLipSync, textLipSequence } from '../utils/LipSyncEnvelope'
+import { sampleLipSync, textLipSequence, type LipSyncEnvelope } from '../utils/LipSyncEnvelope'
+import {
+  AUTO_NEXT_PAGE_DELAY_MS,
+  AUTO_WAIT_AFTER_VOICE_MS,
+  FRAME_MS,
+  TALK_WINDOW_OPEN_CLOSE_MS,
+  VOICE_END_LATENCY_MS
+} from '../../../common/official/timing'
 import {
   calculateTalkDurationMs,
   TALK_DISPLAY_MS_PER_CHAR,
   visibleTextLength
 } from '../utils/TalkTiming'
+import {
+  areTrackedMotionsSettled,
+  getLayoutRunningEndMs,
+  getMotionSettledEndMs,
+  nowMs,
+  recordMotionSettledAt,
+  type ExtendedModelLayer,
+  type ExtendedUILayer
+} from './stageTiming'
 
 interface TalkData {
   type: 'Talk'
-  wait: boolean
+  wait?: boolean
+  progressBehavior?: 'Now' | 'WaitFinished'
   delay: number
   data: {
     speaker: string
@@ -23,11 +41,23 @@ interface TalkData {
     motion?: string
     facial?: string
     actions?: CharacterAction[]
+    closeWindowOnFinish?: boolean
+    effect?: 'Normal' | 'Internal' | 'Overlap'
   }
 }
 
 export default class TalkSnippet extends BaseSnippet {
   private mouthCleanup: (() => void) | null = null
+  private capturedPlannedDurationMs = 0
+  private capturedLipSync: LipSyncEnvelope | null = null
+
+  override async runSnippet(): Promise<void> {
+    // 在前置栅栏后、delay 前同步捕获本句的规划时长和口型包络，
+    // 防止紧随其后的 ProgressBehavior=Now 片段覆盖 App 上的状态。
+    this.capturedPlannedDurationMs = this.app.lastSnippetActualDurationMs
+    this.capturedLipSync = this.app.currentTalkLipSync
+    await super.runSnippet()
+  }
 
   private setMouthParam(model: AdvancedModel, value: number): void {
     const internal = model.internalModel
@@ -44,10 +74,13 @@ export default class TalkSnippet extends BaseSnippet {
     }
   }
 
-  private startMouthAnimation(model: AdvancedModel, contentLength: number): void {
+  private startMouthAnimation(
+    model: AdvancedModel,
+    contentLength: number,
+    envelope: LipSyncEnvelope | null
+  ): void {
     this.stopMouthAnimation()
     if (model.destroyed || model.actionSignal?.aborted) return
-    const envelope = this.app.currentTalkLipSync
     const hasVoice =
       Boolean(envelope?.values.length) &&
       Number.isFinite(envelope?.durationMs) &&
@@ -57,7 +90,7 @@ export default class TalkSnippet extends BaseSnippet {
     const startTime = this.app.currentTalkStartedAtMs
     const update = (): void => {
       if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
-      const elapsed = performance.now() - startTime
+      const elapsed = nowMs() - startTime
       if (hasVoice) {
         this.setMouthParam(model, sampleLipSync(envelope!, elapsed))
         return
@@ -92,11 +125,22 @@ export default class TalkSnippet extends BaseSnippet {
     this.mouthCleanup = null
   }
 
-  private resolveExportTalkDurationMs(): number {
-    const timelineMs = this.app.lastSnippetActualDurationMs
-    if (Number.isFinite(timelineMs) && timelineMs > 0) return timelineMs
-    const talkData = this.data as unknown as TalkData
-    return calculateTalkDurationMs(talkData.data.content, 0, talkData.data.ttsText)
+  private resolveTalkDurationMs(
+    talkData: TalkData,
+    snippetStartTime: number,
+    windowOpenMs: number
+  ): number {
+    if (Number.isFinite(this.capturedPlannedDurationMs) && this.capturedPlannedDurationMs > 0) {
+      return this.capturedPlannedDurationMs
+    }
+    const layoutRunningMs = Math.max(0, getLayoutRunningEndMs(this.app) - snippetStartTime)
+    const existingSettleMs = Math.max(0, getMotionSettledEndMs(this.app) - snippetStartTime)
+    return calculateTalkDurationMs(talkData.data.content, 0, talkData.data.ttsText, {
+      hasVoice: Boolean(talkData.data.voice),
+      windowOpenMs,
+      layoutRunningMs,
+      motionSettleMs: existingSettleMs
+    })
   }
 
   protected async handleSnippet(): Promise<void> {
@@ -105,10 +149,19 @@ export default class TalkSnippet extends BaseSnippet {
     const isExporting = this.app.isExporting
     const signal = this.app.videoExportManager?.signal
     if (signal?.aborted) return
-    const snippetStartTime = performance.now()
+
+    const snippetStartTime = nowMs()
     this.app.currentTalkStartedAtMs = snippetStartTime
-    const targetDurationMs = this.resolveExportTalkDurationMs()
+    const ui = this.app.layerUI as unknown as ExtendedUILayer
+    const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
     const hasModel = talkData.data.modelId !== -1
+    if (hasModel) {
+      modelLayer.setLayoutDepth?.(talkData.data.modelId, 'Front')
+    }
+
+    const windowOpenMs = !ui.UITalkShowed ? TALK_WINDOW_OPEN_CLOSE_MS : 0
+    const targetDurationMs = this.resolveTalkDurationMs(talkData, snippetStartTime, windowOpenMs)
+
     const actions: CharacterAction[] = []
     if (hasModel && (talkData.data.motion || talkData.data.facial)) {
       actions.push({
@@ -119,53 +172,115 @@ export default class TalkSnippet extends BaseSnippet {
       })
     }
     actions.push(...(talkData.data.actions ?? []))
+
+    // 语音与 at=0 动作在 act 帧立即启动（不等 0.2s 窗口打开动画结束）。
     const sequence = scheduleCharacterActions(
       actions,
       targetDurationMs,
       {
         isVisible: (id) => this.app.layerModel.isModelVisible(id),
-        apply: (action, actionSignal) =>
-          this.app
-            .getModelById(action.modelId)
-            .applyCharacterAction(
-              action,
-              actionSignal,
-              () => this.app.layerModel.isModelVisible(action.modelId),
-              this.snippetIndex
-            ),
+        apply: async (action, actionSignal) => {
+          const model = this.app.getModelById(action.modelId)
+          await model.applyCharacterAction(
+            action,
+            actionSignal,
+            () => this.app.layerModel.isModelVisible(action.modelId),
+            this.snippetIndex
+          )
+          if (action.motion && !model.isMotionLooping?.(action.motion)) {
+            const clipMs = model.getMotionDurationMs?.(action.motion) ?? 0
+            if (clipMs > 0) {
+              recordMotionSettledAt(this.app, action.modelId, nowMs() + clipMs)
+            }
+          }
+        },
         onError: (error) => this.logger.warn('Talk character action failed', error)
       },
       signal
     )
+
+    let voiceEndedAtMs: number | null = null
+    let voicePromise: Promise<void> | null = null
+    if (
+      hasModel &&
+      talkData.data.voice &&
+      !isExporting &&
+      !this.app.ttsManager?.isTTSEnabled()
+    ) {
+      const model = this.app.getModelById(talkData.data.modelId)
+      voicePromise = new Promise<void>((resolve) => {
+        model.speak(this.app.getVoiceByName(talkData.data.voice), {
+          volume: 0.5,
+          onFinish: () => {
+            voiceEndedAtMs = nowMs()
+            resolve()
+          }
+        })
+      })
+    }
+
     const stopMouth = (): void => this.stopMouthAnimation()
     signal?.addEventListener('abort', stopMouth, { once: true })
 
     try {
-      this.app.layerUI.resetTalkData()
-      this.app.layerUI.setTalkData(talkData.data.speaker, talkData.data.content)
+      ui.resetTalkData?.()
+      ui.setTalkData?.(talkData.data.speaker, talkData.data.content)
       if (hasModel) {
         this.startMouthAnimation(
           this.app.getModelById(talkData.data.modelId),
-          visibleTextLength(talkData.data.content)
+          visibleTextLength(talkData.data.content),
+          this.capturedLipSync
         )
       }
-      if (!this.app.layerUI.UITalkShowed) await this.app.layerUI.showTextBackground()
-      const waits: Promise<unknown>[] = [this.app.layerUI.startDisplayContent()]
-      if (hasModel && talkData.data.voice && !isExporting && !this.app.ttsManager?.isTTSEnabled()) {
-        const model = this.app.getModelById(talkData.data.modelId)
-        waits.push(
-          new Promise<void>((resolve) => {
-            model.speak(this.app.getVoiceByName(talkData.data.voice), {
-              volume: 0.5,
-              onFinish: resolve
-            })
-          })
-        )
+      if (!ui.UITalkShowed) await ui.showTextBackground?.()
+      await ui.startDisplayContent?.()
+      const typingEndedAtMs = nowMs()
+
+      if (voicePromise) {
+        await voicePromise
+        const voiceDoneMs = (voiceEndedAtMs ?? nowMs()) + VOICE_END_LATENCY_MS
+        const remainingLatencyMs = Math.max(0, voiceDoneMs - nowMs())
+        if (remainingLatencyMs > 0 && !signal?.aborted) {
+          await AnimationManager.delay(remainingLatencyMs)
+        }
+        // 官方 AUTO Gate：等仍在执行的布局与身体动作收尾后再进入停留倒计时。
+        while (
+          !signal?.aborted &&
+          (!areTrackedMotionsSettled(this.app, nowMs()) ||
+            nowMs() < getLayoutRunningEndMs(this.app) - 0.5)
+        ) {
+          await AnimationManager.delay(FRAME_MS)
+        }
+        if (!signal?.aborted) {
+          const tailMs =
+            voiceDoneMs < typingEndedAtMs ? AUTO_NEXT_PAGE_DELAY_MS : AUTO_WAIT_AFTER_VOICE_MS
+          await AnimationManager.delay(tailMs)
+        }
+      } else {
+        // 导出模式（已把语音与门控合并进 targetDurationMs）或无语音交互播放：
+        // 必须等到目标时长（含 2.0s / 0.5s 停留与门控），不能打字结束就立刻返回。
+        if (!isExporting && Boolean(talkData.data.voice)) {
+          while (
+            !signal?.aborted &&
+            (!areTrackedMotionsSettled(this.app, nowMs()) ||
+              nowMs() < getLayoutRunningEndMs(this.app) - 0.5)
+          ) {
+            await AnimationManager.delay(FRAME_MS)
+          }
+        }
+        const elapsedMs = nowMs() - snippetStartTime
+        const remainingTargetMs = Math.max(0, targetDurationMs - elapsedMs)
+        if (remainingTargetMs > 0 && !signal?.aborted) {
+          await AnimationManager.delay(remainingTargetMs)
+        }
+        await sequence.finished
       }
-      await Promise.all(waits)
-      // 官方 AUTO 模式：打字结束、语音结束、动作收尾之后才进入下一句。
-      // sequence 的时长已经由 lastSnippetActualDurationMs 按同一套官方时序给出。
-      await sequence.finished
+
+      ui.closePlaceInfo?.()
+      if (talkData.data.closeWindowOnFinish) {
+        // 官方 WhenFinishCloseWindow：Talk 完成帧异步发起 0.2s 窗口关闭。
+        void ui.hideTextBackground?.(TALK_WINDOW_OPEN_CLOSE_MS)
+      }
     } finally {
       sequence.cancel()
       signal?.removeEventListener('abort', stopMouth)

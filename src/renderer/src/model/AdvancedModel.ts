@@ -8,7 +8,7 @@ import AnimationManager from '../managers/AnimationManager'
 import PositionRel from '../types/PositionRel'
 import { CharacterAction, ModelData } from '../../../common/types/Story'
 import { VisualEffectManager } from '../managers/VisualEffectManager'
-import { AlphaFilter } from 'pixi.js'
+import { AlphaFilter, Filter } from 'pixi.js'
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../utils/Logger'
 import { motionTrace } from '../managers/video-export/MotionTraceCollector'
@@ -23,7 +23,13 @@ import {
   wakeBlink,
   type BlinkState
 } from './NaturalMotion'
-import { BODY_MOTION_FADE_SECONDS, FACIAL_FADE_SECONDS } from '../../../common/official/timing'
+import {
+  BODY_MOTION_FADE_SECONDS,
+  FACIAL_FADE_SECONDS,
+  LIP_LOUD_TARGET_VALUE_SCALE,
+  LIP_TARGET_VALUE_SCALE
+} from '../../../common/official/timing'
+import { evaluateEase } from '../effects/Ease'
 
 /**
  * 素材库里混有两种 Cubism 参数 ID 命名：Cubism2 风格全大写下划线（PARAM_ARM_R_1）
@@ -942,7 +948,73 @@ export default class AdvancedModel extends Live2DModel {
     await this.waitForMotionsFinished()
   }
 
+  private alphaFilter: AlphaFilter | null = null
+  private characterShaderFilter: Filter | null = null
+  private ambientColorFilter: Filter | null = null
+  private basePositionBeforeShake: { x: number; y: number } | null = null
+  private shakeGeneration = 0
+  private activeCostumeName = ''
+
+  /** 官方 `LIPSYNC_LOUD_CHARACTERS = [1, 4, 8, 12, 17, 18]`：返回 1.25 或 1.0 唇形增益。 */
+  public inferCharacterId(): number | null {
+    const modelPath = this._metadata?.model ?? ''
+    const match = /(?:^|[/\\])(?:v\d+_)?0?([1-9]\d?)[a-z_-]/i.exec(modelPath)
+    if (!match) return null
+    const parsed = Number.parseInt(match[1], 10)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  public getLipSyncScale(): number {
+    const charId = this.inferCharacterId()
+    return charId !== null && [1, 4, 8, 12, 17, 18].includes(charId)
+      ? LIP_LOUD_TARGET_VALUE_SCALE
+      : LIP_TARGET_VALUE_SCALE
+  }
+
+  public get currentCostume(): string {
+    return this.activeCostumeName
+  }
+
+  public set currentCostume(name: string) {
+    this.activeCostumeName = name
+  }
+
+  private resolveAlphaFilter(): AlphaFilter | null {
+    if (!this.alphaFilter) {
+      const existing = this.filters?.find((f): f is AlphaFilter => f instanceof AlphaFilter)
+      if (existing) this.alphaFilter = existing
+    }
+    return this.alphaFilter
+  }
+
+  private syncModelFilters(): void {
+    const alpha = this.resolveAlphaFilter()
+    const list: Filter[] = alpha ? [alpha] : []
+    if (this.characterShaderFilter) list.push(this.characterShaderFilter)
+    if (this.ambientColorFilter) list.push(this.ambientColorFilter)
+    this.filters = list.length > 0 ? list : null
+  }
+
+  public setCharacterShaderFilter(filter: Filter | null): void {
+    if (this.characterShaderFilter && this.characterShaderFilter !== filter) {
+      this.characterShaderFilter.destroy()
+    }
+    this.characterShaderFilter = filter
+    this.syncModelFilters()
+  }
+
+  public getCharacterShaderFilter(): Filter | null {
+    return this.characterShaderFilter
+  }
+
+  public setAmbientColorFilter(filter: Filter | null): void {
+    this.ambientColorFilter = filter
+    this.syncModelFilters()
+  }
+
   public setPositionRel(stage_size: [number, number], position: PositionRel): void {
+    this.shakeGeneration++
+    this.basePositionBeforeShake = null
     this.position.set(stage_size[0] * position.x, stage_size[1] * (position.y + 0.3))
   }
 
@@ -953,6 +1025,8 @@ export default class AdvancedModel extends Live2DModel {
     time_ms: number
   ): Promise<void> {
     if (from.x === to.x && from.y === to.y) return
+    this.shakeGeneration++
+    this.basePositionBeforeShake = null
 
     const abs_from: [number, number] = [stage_size[0] * from.x, stage_size[1] * (from.y + 0.3)]
     const abs_to: [number, number] = [stage_size[0] * to.x, stage_size[1] * (to.y + 0.3)]
@@ -961,6 +1035,39 @@ export default class AdvancedModel extends Live2DModel {
       this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
       this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
     }, time_ms)
+  }
+
+  /** 官方 `CharacterLayout Type 4/5` (`ShakeX / ShakeY`)：0.3s、振幅 15px (1920参考)、20 段 OutQuad 衰减。 */
+  public async shake(axis: 'X' | 'Y', stageWidth = 1920): Promise<void> {
+    if (this.destroyed) return
+    const generation = ++this.shakeGeneration
+    if (!this.basePositionBeforeShake) {
+      this.basePositionBeforeShake = { x: this.position.x, y: this.position.y }
+    }
+    const base = { ...this.basePositionBeforeShake }
+    const strength = 15 * (stageWidth / 1920)
+    const durationMs = 300
+    const vibrato = 20
+
+    await AnimationManager.linear((progress) => {
+      if (this.destroyed || generation !== this.shakeGeneration) return
+      const decay = 1 - evaluateEase('OutQuad', progress)
+      const seg = Math.min(vibrato - 1, Math.floor(progress * vibrato))
+      const segT = progress * vibrato - seg
+      const sign = seg % 2 === 0 ? 1 : -1
+      const env = Math.sin(segT * Math.PI)
+      const delta = sign * env * strength * decay
+      if (axis === 'X') {
+        this.position.x = base.x + delta
+      } else {
+        this.position.y = base.y + delta
+      }
+    }, durationMs)
+
+    if (!this.destroyed && generation === this.shakeGeneration) {
+      this.position.set(base.x, base.y)
+      this.basePositionBeforeShake = null
+    }
   }
 
   public async playMotionLastFrame(motion?: string, facial?: string): Promise<void> {
@@ -1051,6 +1158,11 @@ export default class AdvancedModel extends Live2DModel {
     this.restoreBodyUpdate?.()
     this.restoreBodyUpdate = null
     this.visualEffectManager.disableAll()
+    if (this.characterShaderFilter) {
+      this.characterShaderFilter.destroy()
+      this.characterShaderFilter = null
+    }
+    this.ambientColorFilter = null
     super.destroy(options)
   }
 }

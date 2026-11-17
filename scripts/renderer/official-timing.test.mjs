@@ -92,9 +92,14 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
   const twenty = 'あ'.repeat(20)
   assert.equal(round(talk.calculateTalkDurationMs(twenty, 0)), 3333.333)
   assert.equal(round(talk.calculateTalkDurationMs(twenty, 2860)), 3416.667)
-  assert.equal(round(talk.calculateTalkDurationMs(twenty, 1000)), 1833.333)
+  // 语音比打字更早结束（1000+50ms=63f < 80f）时，按打字后 2.0s 停留（80+120=200f=3333.333ms）
+  assert.equal(round(talk.calculateTalkDurationMs(twenty, 1000)), 3333.333)
   assert.equal(
     round(talk.calculateTalkDurationMs(twenty, 2860, '', { motionSettleMs: 4000 })),
+    4500
+  )
+  assert.equal(
+    round(talk.calculateTalkDurationMs(twenty, 2860, '', { layoutRunningMs: 4000 })),
     4500
   )
   assert.equal(
@@ -110,26 +115,33 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
   assert.equal(round(described.totalMs), 3416.667)
 })
 
-test('timeline opens the talk window once, reopens it after HideTalk, and quantizes to frames', () => {
+test('timeline opens the talk window once, reopens after HideTalk or closeWindowOnFinish, and includes delay', () => {
   const { load } = fixture()
   const calculator = load('utils/TimelineCalculator.ts')
-  const talk = (delay = 0) => ({
+  const timing = load(path.join(root, 'src/common/official/timing.ts'))
+  const talk = (delay = 0, extra = {}) => ({
     type: 'Talk',
     wait: true,
     delay,
-    data: { speaker: 'a', content: 'あ'.repeat(20), ttsText: '', voice: '', modelId: 1 }
+    data: { speaker: 'a', content: 'あ'.repeat(20), ttsText: '', voice: '', modelId: 1, ...extra }
   })
-  const durations = Array.from(
-    calculator
-      .calculateTimeline([
-        talk(),
-        talk(),
-        { type: 'HideTalk', wait: true, delay: 0, data: {} },
-        talk()
-      ])
-      .entries.map((entry) => entry.durationMs)
-  )
-  assert.deepEqual(durations, [3533.333, 3333.333, 1, 3533.333])
+  const result = calculator.calculateTimeline([
+    talk(),
+    talk(0, { closeWindowOnFinish: true }),
+    talk(0.5),
+    { type: 'HideTalk', wait: true, delay: 0, data: {} },
+    talk()
+  ])
+  const durations = Array.from(result.entries, (entry) => entry.durationMs)
+  assert.deepEqual(durations, [3533.333, 3333.333, 3533.333, 1, 3533.333])
+  assert.equal(round(result.entries[2].delayStartTimeMs), round(3533.333 + 3333.333))
+  assert.equal(round(result.entries[2].startTimeMs), round(3533.333 + 3333.333 + 500))
+  assert.equal(round(result.entries[2].endTimeMs), round(result.entries[2].startTimeMs + 3533.333))
+  assert.equal(timing.OPENING_COVER_FADE_MS, 500)
+  assert.equal(timing.PLAYED_WAIT_TIME_MS, 250)
+  assert.equal(timing.SCENARIO_EXIT_BGM_FADE_MS, 250)
+  assert.deepEqual(Array.from(timing.MODEL_COLOR_EVENING), [0.99, 0.9, 0.8])
+  assert.deepEqual(Array.from(timing.MODEL_COLOR_NIGHT), [0.83, 0.86, 0.91])
 })
 
 test('layout and staging match the official transition map', () => {

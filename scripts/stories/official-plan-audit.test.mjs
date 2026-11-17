@@ -43,6 +43,7 @@ test(
     assert.ok(report.totals.layoutModes > 300, `layoutModes=${report.totals.layoutModes}`)
     assert.ok(report.totals.actions > 23_000, `actions=${report.totals.actions}`)
     assert.ok(report.totals.nonWait > 27_000, `nonWait=${report.totals.nonWait}`)
+    assert.deepEqual(report.totals.skippedEffects, {})
 
     // 每集都必须真的产出 plan；空 plan 的集数不能混过去。
     assert.equal(report.episodeSummaries.filter((episode) => episode.snippets === 0).length, 0)

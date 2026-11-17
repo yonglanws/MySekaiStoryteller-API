@@ -63,7 +63,7 @@ export interface StoryPlanEntry {
   startFrame: number
   endFrame: number
   durationFrames: number
-  /** 官方 ProgressBehavior=1；false 时该片段在后台运行，不推进下一条的起点。 */
+  /** 官方 ProgressBehavior=1（或 Talk）：在启动与 delay 前触发前置栅栏。 */
   blocking: boolean
   talk?: StoryPlanTalk
   layout?: StoryPlanLayout
@@ -79,7 +79,7 @@ export interface StoryPlan {
 }
 
 export interface StoryPlanOptions {
-  /** 首句/HideTalk 后第一句打开窗口的额外毫秒；不传则按剧本顺序推导。 */
+  /** 首句/关闭后第一句打开窗口的额外毫秒；不传则按剧本顺序推导。 */
   windowOpenMs?: ReadonlyMap<number, number>
   /** Talk 内身体动作的最晚结束时间（相对 Talk 开始），用于官方 gate。 */
   motionSettleMs?: ReadonlyMap<number, number>
@@ -92,13 +92,14 @@ interface TalkLike {
   modelId?: number
   motion?: string
   facial?: string
+  closeWindowOnFinish?: boolean
   actions?: Array<{ at?: number; modelId?: number; motion?: string; facial?: string }>
 }
 
 interface LayoutLike {
   modelId?: number
-  from?: { side?: string; offset?: number }
-  to?: { side?: string; offset?: number }
+  from?: { side?: string; offset?: number; under?: boolean }
+  to?: { side?: string; offset?: number; under?: boolean }
   moveSpeed?: string
 }
 
@@ -114,6 +115,10 @@ function deriveWindowOpen(snippets: SnippetData[]): Map<number, number> {
       if (!open) {
         map.set(i, TALK_WINDOW_OPEN_CLOSE_MS)
         open = true
+      }
+      const data = snippetData(snippets[i])
+      if (data.closeWindowOnFinish === true) {
+        open = false
       }
     } else if (snippets[i].type === 'HideTalk') {
       open = false
@@ -134,7 +139,8 @@ function layoutMoved(data: LayoutLike): boolean {
   if (!from || !to) return false
   return (
     (from.side ?? 'Center') !== (to.side ?? 'Center') ||
-    (Number(from.offset) || 0) !== (Number(to.offset) || 0)
+    (Number(from.offset) || 0) !== (Number(to.offset) || 0) ||
+    Boolean(from.under) !== Boolean(to.under)
   )
 }
 
@@ -148,17 +154,26 @@ export function bakeStoryPlan(
   const entries: StoryPlanEntry[] = []
   const visibleModels = new Set<number>()
   let cursorFrame = 0
+  let runningEndFrame = 0
+  let activeLayoutEndFrame = 0
   let lastEndFrame = 0
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
     const data = snippetData(snippet)
     const timing = timelineByIndex.get(i)
+    const blocking = snippetBlocksTimeline(snippet)
+
+    // PlayCore 前置栅栏：WaitFinished 在 delay 开始前先等所有在跑任务完成。
+    if (blocking) {
+      cursorFrame = Math.max(cursorFrame, runningEndFrame)
+    }
+
+    const delayStartFrame = cursorFrame
     const delayFrames = framesForSeconds(snippet.delay)
-    const startFrame = cursorFrame + delayFrames
+    const startFrame = delayStartFrame + delayFrames
     const durationFrames = framesForSeconds((timing?.durationMs ?? 0) / 1000)
     const endFrame = startFrame + durationFrames
-    const blocking = snippetBlocksTimeline(snippet)
     const actions: StoryPlanActionCue[] = []
 
     if (typeof data.motion === 'string' || typeof data.facial === 'string') {
@@ -192,8 +207,18 @@ export function bakeStoryPlan(
       const voiceEndFrame =
         ttsMs > 0 ? startFrame + framesForSeconds(ttsMs / 1000 + VOICE_END_LATENCY_SECONDS) : null
       const settleFrames = framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000)
-      const doneFrame = Math.max(typingEndFrame, voiceEndFrame ?? 0, startFrame + settleFrames)
-      const tailFrames = voiceEndFrame !== null ? framesForSeconds(0.5) : framesForSeconds(2)
+      const layoutGateFrame = activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0
+      const doneFrame =
+        voiceEndFrame !== null
+          ? Math.max(typingEndFrame, voiceEndFrame, layoutGateFrame, startFrame + settleFrames)
+          : typingEndFrame
+      const voiceFinishedBeforeTyping = voiceEndFrame !== null && voiceEndFrame < typingEndFrame
+      const tailFrames =
+        voiceEndFrame !== null
+          ? voiceFinishedBeforeTyping
+            ? framesForSeconds(2)
+            : framesForSeconds(0.5)
+          : framesForSeconds(2)
       const computedEndFrame = doneFrame + tailFrames
       talk = {
         windowOpenFrames: windowFrames,
@@ -213,16 +238,22 @@ export function bakeStoryPlan(
     ) {
       const layoutData = data as LayoutLike
       const moveFrames = moveFramesFor(layoutData)
+      const moved = layoutMoved(layoutData)
       const modelId = Number(layoutData.modelId) || -1
       if (snippet.type === 'LayoutAppear') {
         const shown = visibleModels.has(modelId)
+        const moveEndFrame = startFrame + (shown ? APPEAR_SHOWN_MOVE_FRAMES : moveFrames)
         layout = {
           kind: 'appear',
           fadeStartFrame: shown ? null : startFrame + 1,
           fadeEndFrame: shown ? null : startFrame + APPEAR_FADE_TOTAL_FRAMES,
           // 已在场 Appear 是 CharacterMoveTo(side, 0.2)，与 moveSpeed 无关。
-          moveEndFrame: startFrame + (shown ? APPEAR_SHOWN_MOVE_FRAMES : moveFrames)
+          moveEndFrame
         }
+        const activeSlideEnd = shown
+          ? moveEndFrame
+          : Math.max(startFrame + APPEAR_FADE_TOTAL_FRAMES, moved ? moveEndFrame : 0)
+        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
         const shown = visibleModels.has(modelId)
@@ -233,7 +264,7 @@ export function bakeStoryPlan(
             fadeEndFrame: null,
             moveEndFrame: startFrame
           }
-        } else if (layoutMoved(layoutData)) {
+        } else if (moved) {
           const fadeFrames = framesForSeconds(CHARACTER_FADE_MS / 1000)
           layout = {
             kind: 'clear',
@@ -241,10 +272,8 @@ export function bakeStoryPlan(
             fadeEndFrame: startFrame + Math.max(fadeFrames, moveFrames),
             moveEndFrame: startFrame + moveFrames
           }
+          activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)
         } else {
-          // 非阻塞 Clear 的 timeline durationFrames 是 0（不推进 cursor），
-          // 但后台淡出协程仍走 0.15s 延迟 + 0.1s 淡出；计划不能把 fadeEnd
-          // 算到 startFrame 上，否则会出现 fadeStart > fadeEnd。
           const fadeFrames = framesForSeconds(CHARACTER_FADE_MS / 1000)
           const hideDelayFrames = framesForSeconds(HIDE_DELAY_IN_PLACE_MS / 1000)
           layout = {
@@ -253,6 +282,7 @@ export function bakeStoryPlan(
             fadeEndFrame: startFrame + hideDelayFrames + Math.max(1, fadeFrames),
             moveEndFrame: startFrame
           }
+          activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)
         }
         visibleModels.delete(modelId)
       } else {
@@ -262,13 +292,14 @@ export function bakeStoryPlan(
           fadeEndFrame: null,
           moveEndFrame: startFrame + moveFrames
         }
+        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.moveEndFrame)
       }
     }
 
     entries.push({
       index: i,
       type: snippet.type,
-      delayStartFrame: cursorFrame,
+      delayStartFrame,
       startFrame,
       endFrame,
       durationFrames,
@@ -277,9 +308,8 @@ export function bakeStoryPlan(
       ...(layout ? { layout } : {}),
       actions
     })
-    // ProgressBehavior=0：协程在后台跑，调度器不推进 cursor；它的 delay/动画仍
-    // 计入 totalFrames（官方收尾 WaitAllFinished 会等所有后台协程）。
-    if (blocking) cursorFrame = endFrame
+
+    runningEndFrame = Math.max(runningEndFrame, endFrame)
     lastEndFrame = Math.max(lastEndFrame, endFrame)
   }
 

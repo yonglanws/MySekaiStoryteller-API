@@ -9,6 +9,11 @@ import {
   FRAME_MS,
   framesForSeconds
 } from '../../../common/official/timing'
+import {
+  nowMs,
+  recordLayoutRunningEnd,
+  recordMotionSettledAt
+} from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutAppearSnippet extends BaseSnippet {
@@ -35,19 +40,19 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
       this.app.layerModel.layoutMode,
-      this.data.data.from.offset
+      this.data.data.from.offset,
+      this.data.data.from.under
     )
     const to: PositionRel = StageUtils.side_to_position(
       this.data.data.to.side,
       this.app.layerModel.layoutMode,
-      this.data.data.to.offset
+      this.data.data.to.offset,
+      this.data.data.to.under
     )
 
     const is_moved = from.x !== to.x || from.y !== to.y
 
     // 先把动作真正启动（此时模型 alpha=0，观众看不到），再开始淡入/滑入。
-    // 旧顺序先 show 再 await startMotions：动作文件冷加载期间角色已经淡入但仍是站姿，
-    // 这就是“入场一瞬间站桩”的直接来源。
     const entryMotion =
       this.data.data.motion && model.hasMotion(this.data.data.motion) ? this.data.data.motion : ''
     if (entryMotion || this.data.data.facial) {
@@ -55,16 +60,21 @@ export default class LayoutAppearSnippet extends BaseSnippet {
         facialForce: true,
         traceSnippetIndex: this.snippetIndex
       })
+      if (entryMotion && !model.isMotionLooping?.(entryMotion)) {
+        const clipMs = model.getMotionDurationMs?.(entryMotion) ?? 0
+        if (clipMs > 0) {
+          recordMotionSettledAt(this.app, this.data.data.modelId, nowMs() + clipMs)
+        }
+      }
     }
     if (!entryMotion) {
-      // 外部直接导出的剧本可能没写、或写了别的模型的动作；兜底也要边动边出现。
-      // 剧本已给合法表情时保留它，不要被默认表情覆盖。
       await model.startEntryMotion(!this.data.data.facial, this.snippetIndex)
     }
 
     if (wasShown) {
       // 官方 AppearCharacter 对已在场的 view 走 CharacterMoveToCoroutine(side, 0.2)：
       // 不淡入，片段等这 0.2s 的滑动完成。
+      recordLayoutRunningEnd(this.app, nowMs() + APPEAR_SHOWN_MOVE_MS)
       model.setOpacity?.(1)
       model.setPositionRel(this.app.stage_size, from)
       if (is_moved) {
@@ -79,14 +89,13 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     // 新 view：AppearCharacter(SideFrom) 先落到 from，CharacterMoveTo(SideTo) 与淡入并发。
     model.setPositionRel(this.app.stage_size, is_moved ? from : to)
 
-    const moveTask = is_moved
-      ? model.move(
-          this.app.stage_size,
-          from,
-          to,
-          StageUtils.move_speed_to_num(this.data.data.moveSpeed)
-        )
-      : null
+    const moveMs = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
+    recordLayoutRunningEnd(
+      this.app,
+      nowMs() + Math.max(APPEAR_FADE_TOTAL_FRAMES * FRAME_MS, moveMs)
+    )
+
+    const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null
     if (moveTask) {
       // 官方 Appear 片段只等淡入（7 帧），滑入继续在后台播放；不能 await 完整 move。
       void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))

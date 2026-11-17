@@ -38,7 +38,7 @@ function parsePersonaFile(file: string): PersonaEntry | null {
     }
   }
 
-  const prompt = body.trim()
+  const prompt = normalizePjskTerminology(body.trim())
   if (!prompt) return null
   return { name, prompt, aliases, group, source: file }
 }
@@ -67,7 +67,7 @@ export function loadPersonas(settings: LlmSettings): PersonaEntry[] {
     if (!persona.name || !persona.prompt.trim()) continue
     entries.push({
       name: persona.name,
-      prompt: persona.prompt.trim(),
+      prompt: normalizePjskTerminology(persona.prompt.trim()),
       aliases: persona.aliases ?? [],
       group: persona.group ?? '',
       source: 'config'
@@ -151,6 +151,14 @@ function sectionRanges(lines: string[], wanted: string[]): SectionRange[] {
   return merged
 }
 
+/** 站内统一术语规范：保留 Wonderhoy / 宁宁号，覆盖国服官译 Wonderhoi / 宁宁机器人。 */
+export function normalizePjskTerminology(text: string): string {
+  if (!text) return text
+  return text
+    .replace(/Wonderho([～~ー-]*)i/gi, (_m, wave: string) => `Wonderho${wave}y`)
+    .replace(/宁宁机器人/g, '宁宁号')
+}
+
 function truncateAtLine(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   const cut = text.slice(0, maxChars)
@@ -170,7 +178,7 @@ export function dialoguePersonaPrompt(
   maxChars = DIALOGUE_PERSONA_MAX_CHARS
 ): string {
   if (!persona) return ''
-  const text = persona.prompt.trim()
+  const text = normalizePjskTerminology(persona.prompt.trim())
   if (!text || text.length <= maxChars) return text
 
   const lines = text.split('\n')

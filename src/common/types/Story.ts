@@ -8,8 +8,13 @@ export enum LayoutModes {
 export enum Sides {
   Center = 'Center',
   Left = 'Left',
-  Right = 'Right'
+  Right = 'Right',
+  LeftOver = 'LeftOver',
+  RightOver = 'RightOver',
+  Under = 'Under'
 }
+
+export type LayoutSide = `${Sides}`
 
 export enum MoveSpeed {
   Slow = 'Slow',
@@ -24,12 +29,16 @@ export enum Curves {
   Cosine = 'Cosine'
 }
 
+export const ProgressBehaviorEnum = z.enum(['Now', 'WaitFinished'])
+export type ProgressBehavior = z.infer<typeof ProgressBehaviorEnum>
+
 const ModelSchema = z.object({
   id: z.number(),
   model: z.string(),
   normal_scale: z.number().default(2.1),
   small_scale: z.number().default(1.8),
-  anchor: z.number().default(0.5)
+  anchor: z.number().default(0.5),
+  costumes: z.record(z.string(), z.string()).optional()
 })
 
 const ImageSchema = z.object({
@@ -41,6 +50,18 @@ const LayoutModeEnum = z.enum(LayoutModes)
 const SideEnum = z.enum(Sides)
 const MoveSpeedEnum = z.enum(MoveSpeed)
 const CurvesEnum = z.enum(Curves)
+
+const LayoutPositionSchema = z.object({
+  side: SideEnum,
+  offset: z.number().default(0),
+  under: z.boolean().optional()
+})
+
+const baseSnippetFields = {
+  wait: z.boolean().optional(),
+  progressBehavior: ProgressBehaviorEnum.optional(),
+  delay: z.number().default(0)
+}
 
 /** Timed character cues. `at` is a fraction of the containing snippet's duration. */
 export const CharacterActionSchema = z
@@ -57,27 +78,25 @@ export const CharacterActionSchema = z
 const CharacterActionsSchema = z.array(CharacterActionSchema).max(24).optional()
 export type CharacterAction = z.infer<typeof CharacterActionSchema>
 
-const SnippetSchema = z.discriminatedUnion('type', [
+export const SnippetSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ChangeLayoutMode'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       mode: LayoutModeEnum
     })
   }),
   z.object({
     type: z.literal('ChangeBackgroundImage'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
-      imageId: z.number()
+      imageId: z.number(),
+      duration: z.number().finite().min(0).max(30000).optional()
     })
   }),
   z.object({
     type: z.literal('ChangeBgm'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       /** 相对 resources/audio/bgm/ 的文件名；stop=true 时为空 */
       file: z.string().default(''),
@@ -90,9 +109,16 @@ const SnippetSchema = z.discriminatedUnion('type', [
     })
   }),
   z.object({
+    type: z.literal('BgmVolume'),
+    ...baseSnippetFields,
+    data: z.object({
+      volume: z.number().finite().min(0).max(2),
+      duration: z.number().finite().min(0).max(30000)
+    })
+  }),
+  z.object({
     type: z.literal('PlaySe'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 相对 resources/audio/se/ 的文件名 */
       file: z.string().trim().min(1),
@@ -104,8 +130,7 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('StopSe'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       file: z.string().trim().min(1),
       /** 淡出时长（毫秒）；0 = 立即停止 */
@@ -114,18 +139,11 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('LayoutAppear'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       modelId: z.number(),
-      from: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
-      to: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
+      from: LayoutPositionSchema,
+      to: LayoutPositionSchema,
       motion: z.string(),
       facial: z.string(),
       facialFirst: z.boolean().default(true),
@@ -135,18 +153,11 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('LayoutClear'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       modelId: z.number(),
-      from: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
-      to: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
+      from: LayoutPositionSchema,
+      to: LayoutPositionSchema,
       moveSpeed: MoveSpeedEnum,
       /** 退场时的并发身体动作（与滑出同时进行，模型离场后自然中断） */
       motion: z.string().default(''),
@@ -155,9 +166,32 @@ const SnippetSchema = z.discriminatedUnion('type', [
     })
   }),
   z.object({
+    type: z.literal('LayoutDepth'),
+    ...baseSnippetFields,
+    data: z.object({
+      modelId: z.number(),
+      depth: z.enum(['Front', 'Back', 'Reset'])
+    })
+  }),
+  z.object({
+    type: z.literal('CharacterShake'),
+    ...baseSnippetFields,
+    data: z.object({
+      modelId: z.number(),
+      axis: z.enum(['X', 'Y'])
+    })
+  }),
+  z.object({
+    type: z.literal('CostumeChange'),
+    ...baseSnippetFields,
+    data: z.object({
+      modelId: z.number(),
+      costume: z.string()
+    })
+  }),
+  z.object({
     type: z.literal('Talk'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       speaker: z.string(),
       content: z.string(),
@@ -173,28 +207,24 @@ const SnippetSchema = z.discriminatedUnion('type', [
       motion: z.string().default(''),
       /** 说话时的并发表情切换（可选，缺省保持当前表情） */
       facial: z.string().default(''),
-      actions: CharacterActionsSchema
+      actions: CharacterActionsSchema,
+      /** 官方 TalkData.WhenFinishCloseWindow */
+      closeWindowOnFinish: z.boolean().optional(),
+      /** 官方 TalkData.RequirePlayEffect */
+      effect: z.enum(['Normal', 'Internal', 'Overlap']).optional()
     })
   }),
   z.object({
     type: z.literal('HideTalk'),
-    wait: z.boolean(),
-    delay: z.number()
+    ...baseSnippetFields
   }),
   z.object({
     type: z.literal('Move'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       modelId: z.number(),
-      from: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
-      to: z.object({
-        side: SideEnum,
-        offset: z.number().default(0)
-      }),
+      from: LayoutPositionSchema,
+      to: LayoutPositionSchema,
       moveSpeed: MoveSpeedEnum,
       /** 与位移并发的身体动作（PJSK CharacterLayout/Motion） */
       motion: z.string().default(''),
@@ -205,8 +235,7 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('Motion'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       modelId: z.number(),
       motion: z.string().default(''),
@@ -219,16 +248,40 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('Telop'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       content: z.string()
     })
   }),
   z.object({
+    type: z.literal('PlaceInfo'),
+    ...baseSnippetFields,
+    data: z.object({
+      text: z.string(),
+      duration: z.number().finite().min(0).max(30000).optional()
+    })
+  }),
+  z.object({
+    type: z.literal('FullScreenText'),
+    ...baseSnippetFields,
+    data: z.object({
+      text: z.string(),
+      voice: z.string().optional(),
+      duration: z.number().finite().min(0).max(120000).optional(),
+      keepBars: z.boolean().optional()
+    })
+  }),
+  z.object({
+    type: z.literal('SimpleSelectable'),
+    ...baseSnippetFields,
+    data: z.object({
+      choices: z.array(z.string()),
+      pickedIndex: z.number().int().min(0).optional()
+    })
+  }),
+  z.object({
     type: z.literal('BlackOut'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       duration: z.number(),
       /** 画面淡出到黑/白（PJSK 的 BlackOut / WhiteOut），旧故事缺省为黑 */
@@ -237,8 +290,7 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('BlackIn'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       duration: z.number(),
       /** 从黑/白淡入画面（PJSK 的 BlackIn / WhiteIn） */
@@ -247,19 +299,38 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('ShakeScreen'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
-      /** 抖动时长（毫秒） */
-      duration: z.number().finite().positive().max(30000),
+      /** 抖动时长（毫秒，或 <=10 兼容秒） */
+      duration: z.number().finite().min(0).max(30000),
       /** 振幅，相对画面高度的比例；PJSK 为 1% */
-      amplitude: z.number().finite().min(0).max(0.2).default(0.01)
+      amplitude: z.number().finite().min(0).max(0.2).default(0.01),
+      intensity: z.number().finite().min(0).max(100).optional()
     })
   }),
   z.object({
+    type: z.literal('StopShakeScreen'),
+    ...baseSnippetFields,
+    data: z.object({}).optional()
+  }),
+  z.object({
+    type: z.literal('ShakeWindow'),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        duration: z.number().finite().min(0).max(30000).optional(),
+        intensity: z.number().finite().min(0).max(100).optional()
+      })
+      .default({})
+  }),
+  z.object({
+    type: z.literal('StopShakeWindow'),
+    ...baseSnippetFields,
+    data: z.object({}).optional()
+  }),
+  z.object({
     type: z.literal('FlashbackIn'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 淡入时长（毫秒）；PJSK 固定 100 */
       duration: z.number().finite().min(0).max(10000).default(100),
@@ -269,16 +340,52 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('FlashbackOut'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       duration: z.number().finite().min(0).max(10000).default(100)
     })
   }),
   z.object({
+    type: z.literal('SepiaIn'),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        duration: z.number().finite().min(0).max(30000).optional()
+      })
+      .default({})
+  }),
+  z.object({
+    type: z.literal('SepiaOut'),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        duration: z.number().finite().min(0).max(30000).optional()
+      })
+      .default({})
+  }),
+  z.object({
+    type: z.literal('SekaiIn'),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        duration: z.number().finite().min(0).max(30000).optional(),
+        variant: z.enum(['v1', 'v2']).optional()
+      })
+      .default({})
+  }),
+  z.object({
+    type: z.literal('SekaiOut'),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        duration: z.number().finite().min(0).max(30000).optional(),
+        variant: z.enum(['v1', 'v2']).optional()
+      })
+      .default({})
+  }),
+  z.object({
     type: z.literal('Wipe'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 黑色幕布扫过的方向 */
       direction: z.enum(['left', 'right']).default('right'),
@@ -289,41 +396,92 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('SideFade'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
+    data: z
+      .object({
+        /** 新官方契约字段 */
+        direction: z.enum(['Left', 'Right', 'Top', 'Bottom']).optional(),
+        /** 旧字段兼容（EffectType 29~36） */
+        edge: z.enum(['left', 'right', 'top', 'bottom']).optional(),
+        mode: z.enum(['In', 'Out', 'in', 'out']),
+        duration: z.number().finite().min(0).max(10000)
+      })
+      .refine((d) => Boolean(d.direction || d.edge), {
+        message: 'SideFade must specify direction or edge'
+      })
+  }),
+  z.object({
+    type: z.literal('AttachCharacterShader'),
+    ...baseSnippetFields,
     data: z.object({
-      /** 黑幕从哪一侧覆盖/退出（官方 EffectType 29~36） */
-      edge: z.enum(['left', 'right', 'top', 'bottom']),
-      /** out = 从该侧滑入覆盖；in = 从覆盖状态向该侧滑出、露出画面 */
-      mode: z.enum(['in', 'out']),
-      duration: z.number().finite().min(0).max(10000)
+      modelId: z.number(),
+      shader: z.enum(['hologram', 'monitor', 'blur', 'none']),
+      level: z.number().finite().min(0).max(10).optional()
+    })
+  }),
+  z.object({
+    type: z.literal('PlayScenarioEffect'),
+    ...baseSnippetFields,
+    data: z.object({
+      effectName: z.string(),
+      duration: z.number().finite().min(0).max(30000).optional()
+    })
+  }),
+  z.object({
+    type: z.literal('StopScenarioEffect'),
+    ...baseSnippetFields,
+    data: z.object({
+      effectName: z.string(),
+      duration: z.number().finite().min(0).max(30000).optional()
+    })
+  }),
+  z.object({
+    type: z.literal('BlurIn'),
+    ...baseSnippetFields,
+    data: z.object({
+      duration: z.number().finite().min(0).max(30000)
+    })
+  }),
+  z.object({
+    type: z.literal('BlurOut'),
+    ...baseSnippetFields,
+    data: z.object({
+      duration: z.number().finite().min(0).max(30000)
     })
   }),
   z.object({
     type: z.literal('CameraMove'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 相对游戏 1920×1080 舞台的偏移（像素） */
       x: z.number().finite().default(0),
       y: z.number().finite().default(0),
-      duration: z.number().finite().min(0).max(30000).default(0)
+      duration: z.number().finite().min(0).max(30000).default(0),
+      ease: z.string().optional()
     })
   }),
   z.object({
     type: z.literal('CameraZoom'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 相对初始视角的缩放倍率；1 = 不缩放 */
       scale: z.number().finite().positive().max(5),
-      duration: z.number().finite().min(0).max(30000).default(0)
+      duration: z.number().finite().min(0).max(30000).default(0),
+      ease: z.string().optional()
+    })
+  }),
+  z.object({
+    type: z.literal('DollyZoom'),
+    ...baseSnippetFields,
+    data: z.object({
+      duration: z.number().finite().min(0).max(30000),
+      zoom: z.number().finite().positive().max(10),
+      ease: z.string().optional()
     })
   }),
   z.object({
     type: z.literal('AmbientColor'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
+    ...baseSnippetFields,
     data: z.object({
       /** 人物层的环境色滤镜（PJSK 的 AmbientColor*） */
       mode: z.enum(['normal', 'evening', 'night']).default('normal')
@@ -331,22 +489,35 @@ const SnippetSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('BackgroundBlur'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0),
-    data: z.object({
-      /** 官方 EffectType 44：背景模糊开关 */
-      enabled: z.boolean()
-    })
+    ...baseSnippetFields,
+    data: z
+      .object({
+        /** 新官方契约字段 */
+        mode: z.enum(['In', 'Out']).optional(),
+        level: z.number().finite().min(0).max(64).optional(),
+        duration: z.number().finite().min(0).max(10000).optional(),
+        /** 旧字段兼容 */
+        enabled: z.boolean().optional()
+      })
+      .refine((d) => d.mode !== undefined || d.enabled !== undefined, {
+        message: 'BackgroundBlur must specify mode or enabled'
+      })
   }),
   z.object({
     type: z.literal('StopShake'),
-    wait: z.boolean().default(false),
-    delay: z.number().default(0)
+    ...baseSnippetFields
+  }),
+  z.object({
+    type: z.literal('Movie'),
+    ...baseSnippetFields,
+    data: z.object({
+      file: z.string(),
+      duration: z.number().finite().min(0).max(600000).optional()
+    })
   }),
   z.object({
     type: z.literal('DoParam'),
-    wait: z.boolean(),
-    delay: z.number(),
+    ...baseSnippetFields,
     data: z.object({
       modelId: z.number(),
       params: z.array(

@@ -10,9 +10,12 @@ import AdvancedModel from '../model/AdvancedModel'
 import SnippetStrategyManager from '../managers/SnippetStrategyManager'
 import UILayer from '../layers/UILayer'
 import FontFaceObserver from 'fontfaceobserver'
-import { Application, Texture, Ticker } from 'pixi.js'
+import { Application, Container, Texture, Ticker, type Filter } from 'pixi.js'
 import SpecialEffectLayer from '../layers/SpecialEffectLayer'
 import EnvironmentLayer from '../layers/EnvironmentLayer'
+import { evaluateEase, runEasedTween } from '../effects/Ease'
+import { preloadCommonInappTextures, resetInappTextureCache } from '../effects/InappTextures'
+import { createMulberry32, DollyZoomFilter } from '../effects/OfficialFilters'
 import { configureCubism4 } from 'pixi-live2d-display-advanced'
 import VideoExportManager, {
   VideoExportOptions,
@@ -100,14 +103,21 @@ export class App {
   public layerEnvironment!: EnvironmentLayer
   public ttsManager: TTSManager = new TTSManager()
 
-  /** 相机状态（PJSK ChangeCameraPosition / ChangeCameraZoomLevel） */
+  /** 相机状态（PJSK ChangeCameraPosition / ChangeCameraZoomLevel / DollyZoom） */
   private cameraScale = 1
   private cameraOffsetX = 0
   private cameraOffsetY = 0
+  private cameraMoveGen = 0
+  private cameraZoomGen = 0
+  private dollyZoomGen = 0
   /** 震屏附加偏移，不改变相机基准值 */
   private shakeOffsetX = 0
   private shakeOffsetY = 0
   private shakeGeneration = 0
+  private scenarioContainer!: Container
+  private readonly dollyZoomFilter = new DollyZoomFilter(0, 0)
+  private envFilters: Filter[] = []
+  private cameraBlurFilter: Filter | null = null
 
   private models: Live2DModelMap[] = []
   private textures: TextureMap[] = []
@@ -165,7 +175,13 @@ export class App {
     if (this.pixiApplication) {
       try {
         Ticker.shared.stop()
-        this.pixiApplication.destroy(true, { children: true, texture: true })
+        resetInappTextureCache()
+        // Do NOT destroy shared base/global textures (Texture.WHITE / imported SVGs) across worker reuse
+        this.pixiApplication.destroy(true, {
+          children: true,
+          texture: false,
+          baseTexture: false
+        })
       } catch (e) {
         this.logger.warn('Failed to destroy previous pixiApplication', e)
       }
@@ -241,16 +257,69 @@ export class App {
 
     await new FontFaceObserver('MiSans Medium', {}).load()
     this.logger.info(`Loaded fonts.`)
+    preloadCommonInappTextures()
 
     this.logger.info('Preloaded story assets')
   }
 
+  private syncScenarioFilters(): void {
+    if (!this.scenarioContainer) return
+    const list: Filter[] = [...this.envFilters]
+    if (this.cameraBlurFilter) list.push(this.cameraBlurFilter)
+    if (
+      Math.abs(this.dollyZoomFilter.distortion) > 0.0001 ||
+      this.dollyZoomFilter.samplingDistance > 0.001
+    ) {
+      list.push(this.dollyZoomFilter)
+    }
+    this.scenarioContainer.filters = list.length > 0 ? list : null
+  }
+
+  private resetSceneState(): void {
+    this.cameraMoveGen++
+    this.cameraZoomGen++
+    this.dollyZoomGen++
+    this.shakeGeneration++
+    this.cameraScale = 1
+    this.cameraOffsetX = 0
+    this.cameraOffsetY = 0
+    this.shakeOffsetX = 0
+    this.shakeOffsetY = 0
+    this.envFilters = []
+    this.cameraBlurFilter = null
+    this.dollyZoomFilter.distortion = 0
+    this.dollyZoomFilter.samplingDistance = 0
+    this.syncScenarioFilters()
+  }
+
   public initializeLayers(): void {
+    this.resetSceneState()
+    this.scenarioContainer = new Container()
+    this.scenarioContainer.zIndex = 0
+    this.scenarioContainer.sortableChildren = true
+    this.scenarioContainer.filterArea = this.pixiApplication.screen
+    this.pixiApplication.stage.addChild(this.scenarioContainer)
+
     this.layerBackground = new BackgroundLayer(this.pixiApplication)
     this.layerModel = new ModelLayer(this.pixiApplication)
     this.layerEnvironment = new EnvironmentLayer(this.pixiApplication)
     this.layerUI = new UILayer(this.pixiApplication)
     this.layerSpecialEffect = new SpecialEffectLayer(this.pixiApplication)
+
+    this.scenarioContainer.addChild(this.layerBackground.getContainer(), this.layerModel.getContainer())
+
+    this.layerEnvironment.setFilterSyncCallback((filters) => {
+      this.envFilters = filters
+      this.syncScenarioFilters()
+    })
+    this.layerSpecialEffect.setCameraBlurCallback((filter) => {
+      this.cameraBlurFilter = filter
+      this.syncScenarioFilters()
+    })
+    this.layerModel.setOnModelReplaced((modelId, model) => {
+      const entry = this.models.find((m) => m.id === modelId)
+      if (entry) entry.model = model
+    })
   }
 
   private applyViewTransform(): void {
@@ -263,43 +332,117 @@ export class App {
     this.layerModel.setViewTransform(this.cameraScale, offsetX, offsetY)
   }
 
-  /** 相机平移：x/y 使用游戏 1920×1080 舞台像素。 */
-  public async cameraMove(x: number, y: number, durationMs: number): Promise<void> {
+  /** 相机平移：x/y 使用游戏 1920×1080 舞台像素，默认 DOTween OutQuad 缓动。 */
+  public async cameraMove(
+    x: number,
+    y: number,
+    durationMs: number,
+    ease = 'OutQuad'
+  ): Promise<void> {
+    const gen = ++this.cameraMoveGen
     const toX = x / 1920
     const toY = y / 1080
     const fromX = this.cameraOffsetX
     const fromY = this.cameraOffsetY
-    await AnimationManager.linear((progress) => {
-      this.cameraOffsetX = fromX + (toX - fromX) * progress
-      this.cameraOffsetY = fromY + (toY - fromY) * progress
-      this.applyViewTransform()
-    }, durationMs)
+    await runEasedTween(
+      durationMs,
+      ease,
+      (p) => {
+        if (gen !== this.cameraMoveGen) return
+        this.cameraOffsetX = fromX + (toX - fromX) * p
+        this.cameraOffsetY = fromY + (toY - fromY) * p
+        this.applyViewTransform()
+      },
+      () => gen !== this.cameraMoveGen
+    )
   }
 
-  /** 相机缩放：scale 为绝对倍率，1 = 初始视角。 */
-  public async cameraZoom(scale: number, durationMs: number): Promise<void> {
+  /** 相机缩放：scale 为绝对倍率，1 = 初始视角，默认 DOTween OutQuad 缓动。 */
+  public async cameraZoom(scale: number, durationMs: number, ease = 'OutQuad'): Promise<void> {
+    const gen = ++this.cameraZoomGen
     const from = this.cameraScale
     const to = Math.max(0.1, scale)
-    await AnimationManager.linear((progress) => {
-      this.cameraScale = from + (to - from) * progress
-      this.applyViewTransform()
-    }, durationMs)
+    await runEasedTween(
+      durationMs,
+      ease,
+      (p) => {
+        if (gen !== this.cameraZoomGen) return
+        this.cameraScale = from + (to - from) * p
+        this.applyViewTransform()
+      },
+      () => gen !== this.cameraZoomGen
+    )
   }
 
-  /** 震屏：背景与人物一起抖动，UI 不动（PJSK ShakeScreen）。 */
-  public async shakeScreen(durationMs: number, amplitude: number): Promise<void> {
+  /** 官方 `EffectType 45 DollyZoom`: 同步缩放场景 + 桶形畸变与边缘径向模糊。 */
+  public async dollyZoom(zoom: number, durationMs: number, ease = 'OutQuad'): Promise<void> {
+    const gen = ++this.dollyZoomGen
+    const fromScale = this.cameraScale
+    const toScale = Math.max(0.1, zoom)
+    const fromDist = this.dollyZoomFilter.samplingDistance
+    const targetDelta = toScale - 1
+    const scaleFactor = this.stage_size[0] / 1920
+    const toDistortion = -targetDelta * 0.42
+    const toSampling = Math.min(2.8, Math.abs(targetDelta) * 2.2) * scaleFactor
+    const fromDistortion = this.dollyZoomFilter.distortion
+
+    await runEasedTween(
+      durationMs,
+      ease,
+      (p) => {
+        if (gen !== this.dollyZoomGen) return
+        this.cameraScale = fromScale + (toScale - fromScale) * p
+        this.dollyZoomFilter.distortion = fromDistortion + (toDistortion - fromDistortion) * p
+        this.dollyZoomFilter.samplingDistance = fromDist + (toSampling - fromDist) * p
+        this.applyViewTransform()
+        this.syncScenarioFilters()
+      },
+      () => gen !== this.dollyZoomGen
+    )
+    if (gen !== this.dollyZoomGen) return
+    if (Math.abs(toScale - 1) < 1e-4) {
+      this.dollyZoomFilter.distortion = 0
+      this.dollyZoomFilter.samplingDistance = 0
+      this.syncScenarioFilters()
+    }
+  }
+
+  /**
+   * 震屏：背景与人物一起抖动，UI 不动（PJSK ShakeScreen）。
+   * 对齐 DOTween `DOShakePosition(dur, strength=10, vibrato=16, fadeOut=(dur<3600))` + `SHAKE_BASE_Y = -8`。
+   * @param durationSec 秒（>=3600 视为无限持续直至 StopShakeScreen）
+   * @param intensity 振幅（参考 1080 像素默认 10；若 <1 按屏高比例兼容旧调用）
+   */
+  public async shakeScreen(durationSec: number, intensity = 10): Promise<void> {
     const height = this.stage_size[1]
-    const amp = Math.max(0, amplitude) * height
-    const duration = Math.max(1, durationMs)
+    const scaleY = height / 1080
+    const amp = intensity > 0 && intensity < 1 ? intensity * height : Math.max(0, intensity) * scaleY
+    const baseY = -8 * scaleY
+    const clampedSec = Math.min(3600, Math.max(0, durationSec))
+    const durationMs = clampedSec * 1000
+    const fadeOut = clampedSec < 3600
+    const vibrato = Math.max(8, Math.round(16 * Math.max(0.5, Math.min(60, clampedSec))))
     const generation = ++this.shakeGeneration
+    const rng = createMulberry32((generation * 2654435761) >>> 0)
+    const dirs = Array.from({ length: vibrato + 1 }, () => {
+      const a = rng() * Math.PI * 2
+      return [Math.cos(a), Math.sin(a)] as const
+    })
+
     await AnimationManager.linear((progress) => {
       if (generation !== this.shakeGeneration) return
-      const elapsed = (progress * duration) / 1000
-      this.shakeOffsetX = (Math.sin(elapsed * 97.3) + Math.sin(elapsed * 41.7) * 0.6) * amp * 0.5
-      this.shakeOffsetY = (Math.sin(elapsed * 83.1) + Math.sin(elapsed * 53.9) * 0.6) * amp * 0.5
+      const decay = fadeOut ? 1 - evaluateEase('OutQuad', progress) : 1
+      const segFloat = progress * vibrato
+      const seg = Math.min(vibrato - 1, Math.floor(segFloat))
+      const segT = segFloat - seg
+      const env = Math.sin(segT * Math.PI)
+      const [dx, dy] = dirs[seg]
+      this.shakeOffsetX = dx * amp * env * decay
+      this.shakeOffsetY = baseY * (fadeOut ? 1 - progress * 0.25 : 1) + dy * amp * env * decay
       this.applyViewTransform()
-    }, duration)
-    // 被 StopShake 抢先归零时不要覆盖它的结果。
+    }, Math.max(1, durationMs))
+
+    // 被 StopShakeScreen 抢先归零时不要覆盖它的结果。
     if (generation === this.shakeGeneration) {
       this.shakeOffsetX = 0
       this.shakeOffsetY = 0
@@ -307,12 +450,26 @@ export class App {
     }
   }
 
-  /** 官方 EffectType 25/26：StopShakeScreen / StopShakeWindow。 */
-  public stopShake(): void {
+  /** 官方 EffectType 25：StopShakeScreen。 */
+  public stopShakeScreen(): void {
     this.shakeGeneration++
     this.shakeOffsetX = 0
     this.shakeOffsetY = 0
     this.applyViewTransform()
+  }
+
+  /** 兼容旧调用：同时停止全屏震动与对话框文本震动。 */
+  public stopShake(): void {
+    this.stopShakeScreen()
+    this.layerUI?.stopShakeWindow()
+  }
+
+  public async setOpeningCover(durationMs = 500): Promise<void> {
+    await this.layerSpecialEffect.setOpeningCover(durationMs)
+  }
+
+  public async setEndingEnvelope(holdMs = 250, fadeMs = 250): Promise<void> {
+    await this.layerSpecialEffect.setEndingEnvelope(holdMs, fadeMs)
   }
 
   public getTextureById(id: number): Texture {
@@ -564,6 +721,10 @@ export class App {
       this.currentTalkLipSync = null
       this.currentTalkStartedAtMs = 0
       this.ttsManager?.clearAudioTracks()
+      this.layerModel?.clearAllShaders()
+      this.layerSpecialEffect?.reset()
+      this.layerUI?.closePlaceInfo()
+      this.resetSceneState()
       Ticker.shared.stop()
       this.logger.info('Ticker stopped after API export completed to reduce GPU idle usage')
     }

@@ -1,126 +1,75 @@
-import { Graphics, Matrix, Texture } from 'pixi.js'
-import { AdjustmentFilter, CRTFilter, BloomFilter } from 'pixi-filters'
-import { VisualEffect } from './VisualEffect'
+import { Graphics } from 'pixi.js'
 import AdvancedModel from '../model/AdvancedModel'
-import vfx_hologram from '../../assets/ui/vfx_hologram.svg'
-import AnimationManager from '../managers/AnimationManager'
+import { loadInappTexture } from './InappTextures'
+import { Live2DHologramShaderFilter } from './OfficialFilters'
+import { VisualEffect } from './VisualEffect'
 
-// Thanks lezzthanthree/SEKAI-Stories to provide a solution
+/**
+ * 全息投影模型特效：通过虚拟时钟步进 `Live2DHologramShaderFilter` 扫描线与闪烁，
+ * 不使用任何独立 `requestAnimationFrame`，以保证 fast 导出的严格帧确定性。
+ */
 export class HologramEffect extends VisualEffect {
-  private elapsed = 0
-  private animating = false
-  private graphic_l: Graphics
-  private graphic_s: Graphics
-  private readonly crtFilter: CRTFilter
-  private readonly adjustFilter: AdjustmentFilter
-  private rafId: number | null = null
+  private readonly shaderFilter: Live2DHologramShaderFilter
+  private readonly pedestal: Graphics
+  private elapsedSec = 0
 
-  private readonly scaleLarge = 0.9
-  private readonly scaleSmall = 0.8
-  private readonly maxAlpha = 0.5
-
-  constructor(model: AdvancedModel, width: number, height: number) {
+  constructor(model: AdvancedModel, width: number, height: number, monitor = false) {
     super(model)
 
-    this.graphic_l = new Graphics()
-    this.graphic_s = new Graphics()
-    this.addChild(this.graphic_l, this.graphic_s)
+    this.shaderFilter = new Live2DHologramShaderFilter({ monitor })
+    this.pedestal = new Graphics()
+    this.drawPedestal(width, height, 0)
+    this.addChild(this.pedestal)
 
-    const texture = Texture.from(vfx_hologram)
-    const init = (): void => this.createPattern(texture, width, height)
-    texture.valid ? init() : texture.baseTexture.once('loaded', init)
-
-    this.crtFilter = new CRTFilter({ time: 0, lineWidth: 8, lineContrast: 0.03, vignetting: 0 })
-    this.adjustFilter = new AdjustmentFilter({ alpha: 0.85, brightness: 1, red: 0.75 })
-
-    this._parentFilters = [
-      this.crtFilter,
-      new AdjustmentFilter({ alpha: 0.85, brightness: 1.25, red: 0.75 })
-    ]
-    this.filters = [this.crtFilter, this.adjustFilter, new BloomFilter(15)]
-
-    const animateCRT = (): void => {
-      this.crtFilter.time += 0.03
-      this.crtFilter.seed = Math.random()
-      this.rafId = requestAnimationFrame(animateCRT)
+    const currentFilters = Array.isArray(this.model.filters) ? [...this.model.filters] : []
+    if (!currentFilters.includes(this.shaderFilter)) {
+      currentFilters.push(this.shaderFilter)
+      this.model.filters = currentFilters
     }
-    this.rafId = requestAnimationFrame(animateCRT)
+
+    void loadInappTexture('player/loose/Texture2D/holo.png').then((tex) => {
+      if (!this.destroyed && tex && tex.valid && tex.baseTexture?.valid) {
+        this.shaderFilter.setHoloTexture(tex)
+      }
+    })
+  }
+
+  private drawPedestal(width: number, height: number, phase: number): void {
+    const g = this.pedestal
+    g.clear()
+    const radiusX = Math.max(120, Math.min(360, width * 0.14))
+    const radiusY = radiusX * 0.22
+    const y = Math.min(height * 0.18, 120)
+    const pulse = 0.28 + 0.1 * Math.sin(phase * 3.1)
+
+    g.beginFill(0x66f0ff, pulse * 0.35)
+    g.drawEllipse(0, y, radiusX, radiusY)
+    g.endFill()
+
+    g.lineStyle(2.5, 0x9cf7ff, pulse * 0.85)
+    g.drawEllipse(0, y, radiusX * 0.92, radiusY * 0.92)
+    g.lineStyle(1.5, 0xffffff, pulse * 0.6)
+    g.drawEllipse(0, y, radiusX * 0.62, radiusY * 0.62)
   }
 
   update(delta: number): void {
-    if (!this.enabled) return
-    this.elapsed += delta
-
-    const amp = 0.25
-    const offset = 1.2
-    this.adjustFilter.brightness = offset + amp * Math.sin(this.elapsed * 0.05)
-    this.crtFilter.time += delta * 0.01
-
-    const small = this.graphic_s
-    const large = this.graphic_l
-
-    if (!this.animating) {
-      this.animating = true
-
-      const startScale = small.scale.x
-      const targetScale = this.scaleLarge
-
-      AnimationManager.linear((progress) => {
-        const eased = 0.5 - 0.5 * Math.cos(Math.PI * progress)
-
-        small.scale.set(startScale + (targetScale - startScale) * eased)
-
-        const fadeIn = eased * this.maxAlpha
-        const fadeOut = (1 - eased) * this.maxAlpha
-        const totalAlpha = fadeIn + fadeOut
-        const normalize = totalAlpha > 1.5 ? 1.5 / totalAlpha : 1
-
-        small.alpha = fadeIn * normalize
-        large.alpha = fadeOut * normalize
-      }, 5000)
-        .then(() => {
-          const temp = this.graphic_l
-          this.graphic_l = this.graphic_s
-          this.graphic_s = temp
-
-          this.graphic_s.scale.set(this.scaleSmall)
-          this.graphic_s.alpha = 0
-          this.graphic_l.alpha = this.maxAlpha
-
-          this.animating = false
-        })
-        .catch(() => {
-          this.animating = false
-        })
-    }
-  }
-
-  private createPattern(texture: Texture, width: number, height: number): void {
-    const draw = (g: Graphics, scale: number): void => {
-      const matrix = new Matrix().scale(width / texture.width, height / texture.height)
-      g.clear()
-      g.beginTextureFill({ texture, matrix })
-      g.drawPolygon([width / 3, height, 0, 0, width, 0, (2 * width) / 3, height])
-      g.endFill()
-      g.pivot.set(width / 2, height / 1.7)
-      const offsetY = (0.5 - this.model.anchor.y) * this.model.height
-      g.position.set(this.model.width / 2, this.model.height / 2 - offsetY)
-      g.scale.set(scale)
-    }
-
-    draw(this.graphic_l, this.scaleLarge)
-    draw(this.graphic_s, this.scaleSmall)
-    this.graphic_l.alpha = this.maxAlpha
-    this.graphic_s.alpha = 0
+    if (this.destroyed) return
+    const dtSec = Math.max(0, delta) / 60
+    this.elapsedSec += dtSec
+    this.shaderFilter.step(dtSec)
+    this.drawPedestal(3000, 4500, this.elapsedSec)
   }
 
   destroyEffect(): void {
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId)
-      this.rafId = null
+    this.destroy()
+  }
+
+  destroy(): void {
+    if (this.model && !this.model.destroyed && Array.isArray(this.model.filters)) {
+      const remaining = this.model.filters.filter((f) => f !== this.shaderFilter)
+      this.model.filters = remaining.length > 0 ? remaining : null
     }
-    this.filters = []
-    this.removeChildren()
-    this.destroy({ children: true })
+    this.shaderFilter.destroy()
+    super.destroy({ children: true })
   }
 }

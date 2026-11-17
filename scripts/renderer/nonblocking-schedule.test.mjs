@@ -47,7 +47,7 @@ const talk = (content, wait = true) => ({
   data: { speaker: 'A', content, ttsText: '', voice: '', modelId: 1 }
 })
 
-test('non-blocking snippets take 0ms and do not advance the next snippet', () => {
+test('Now snippets overlap at caller cursor while WaitFinished fences prior tasks before delay', () => {
   const snippets = [
     talk('あ'.repeat(10)),
     {
@@ -68,21 +68,41 @@ test('non-blocking snippets take 0ms and do not advance the next snippet', () =>
   const result = timeline.calculateTimeline(snippets, new Map())
   const baked = plan.bakeStoryPlan(snippets, result.entries)
 
+  // PlayCore 前置栅栏：snippet 0 (WaitFinished) 启动后立即推进到 snippet 1 (Now)，
+  // snippet 1 自身仍有 7f (116.667ms) 淡入；snippet 2 (WaitFinished) 前置等待前两条都完成。
   assert.equal(result.entries[1].blocking, false)
-  assert.equal(result.entries[1].durationMs, 0)
+  assert.equal(result.entries[1].durationMs, 116.667)
   assert.equal(result.validationSummary.crossValidationPassed, true)
   assert.equal(result.validationSummary.anomaliesDetected.length, 0)
 
-  const talk1Frames = result.entries[0].durationMs / timing.FRAME_MS
-  assert.equal(baked.entries[1].delayStartFrame, Math.round(talk1Frames))
-  assert.equal(baked.entries[1].startFrame, Math.round(talk1Frames) + timing.framesForSeconds(0.5))
-  assert.equal(baked.entries[1].endFrame, baked.entries[1].startFrame)
+  const talk1Frames = Math.round(result.entries[0].durationMs / timing.FRAME_MS)
+  assert.equal(baked.entries[1].delayStartFrame, 0)
+  assert.equal(baked.entries[1].startFrame, timing.framesForSeconds(0.5))
+  assert.equal(baked.entries[1].endFrame, timing.framesForSeconds(0.5) + 7)
   assert.equal(baked.entries[1].blocking, false)
   assert.equal(
     baked.entries[2].startFrame,
-    Math.round(talk1Frames),
-    '下一条从非阻塞片段启动前的 cursor 开始，而不是 delay 之后'
+    talk1Frames,
+    '下一个 WaitFinished 片段等前面所有在跑任务完成后才启动'
   )
+
+  // 当 Now 片段自身耗时更长（如 1.0s SideFade）时，后续 WaitFinished 必须等到它完成。
+  const fenced = timeline.calculateTimeline(
+    [
+      {
+        type: 'SideFade',
+        progressBehavior: 'Now',
+        delay: 0.2,
+        data: { direction: 'Left', mode: 'In', duration: 1 }
+      },
+      talk('う'.repeat(2))
+    ],
+    new Map()
+  )
+  assert.equal(fenced.entries[0].delayStartTimeMs, 0)
+  assert.equal(fenced.entries[0].startTimeMs, 200)
+  assert.equal(fenced.entries[0].endTimeMs, 1200)
+  assert.equal(fenced.entries[1].startTimeMs, 1200)
 })
 
 test('Talk stays blocking even if the scenario says ProgressBehavior=0', () => {

@@ -80,6 +80,32 @@ function effectDurationMs(effect) {
   return Math.round((Number(effect.Duration) || 0) * 1000)
 }
 
+function depthOf(value) {
+  switch (Number(value)) {
+    case 1:
+      return 'Front'
+    case 2:
+      return 'Back'
+    case 3:
+      return 'Reset'
+    default:
+      return null
+  }
+}
+
+function parseDollyZoom(raw) {
+  let zoom = null
+  for (const part of String(raw || '').replace(/：/g, ':').split(',')) {
+    const idx = part.indexOf(':')
+    if (idx < 0) continue
+    if (part.slice(0, idx).trim().toLowerCase() === 'zoom') {
+      const value = Number.parseFloat(part.slice(idx + 1).trim())
+      if (Number.isFinite(value)) zoom = value
+    }
+  }
+  return Number.isFinite(zoom) && zoom > 0 ? Math.min(zoom, 10) : 1
+}
+
 /**
  * 把一集官方 scenario 映射成 StoryData.snippets。只做时间线相关的映射；
  * 资源路径、翻译、TTS 都不参与，保证审计可以完全离线跑完 328 集。
@@ -124,12 +150,14 @@ export function mapOfficialEpisode(scenario) {
   push({
     type: 'ChangeLayoutMode',
     wait: false,
+    progressBehavior: 'Now',
     delay: 0,
     data: { mode: layoutModeOf(scenario.FirstCharacterLayoutMode) }
   })
   push({
     type: 'ChangeBackgroundImage',
     wait: false,
+    progressBehavior: 'Now',
     delay: 0,
     data: { imageId: 1 }
   })
@@ -137,13 +165,15 @@ export function mapOfficialEpisode(scenario) {
     push({
       type: 'ChangeBgm',
       wait: false,
+      progressBehavior: 'Now',
       delay: 0,
       data: { file: `${scenario.FirstBgm}.mp3`, fadeMs: 600 }
     })
   }
 
   for (const snippet of scenario.Snippets ?? []) {
-    const wait = Number(snippet.ProgressBehavior) === 1
+    const progressBehavior = Number(snippet.ProgressBehavior) === 1 ? 'WaitFinished' : 'Now'
+    const wait = progressBehavior === 'WaitFinished'
     const delay = Number(snippet.Delay) || 0
     switch (Number(snippet.Action)) {
       case 1: {
@@ -151,10 +181,17 @@ export function mapOfficialEpisode(scenario) {
         if (!talk) break
         const modelId = modelIdOf(talk.TalkCharacters?.[0]?.Character2dId)
         const actions = addActions(talk.Motions ?? [])
+        const talkEffect =
+          Number(talk.RequirePlayEffect) === 1
+            ? 'Internal'
+            : Number(talk.RequirePlayEffect) === 2
+              ? 'Overlap'
+              : undefined
         stats.talks++
         push({
           type: 'Talk',
           wait,
+          progressBehavior,
           delay,
           data: {
             speaker: talk.WindowDisplayName ?? '',
@@ -162,6 +199,8 @@ export function mapOfficialEpisode(scenario) {
             ttsText: '',
             voice: '',
             modelId,
+            ...(talk.WhenFinishCloseWindow ? { closeWindowOnFinish: true } : {}),
+            ...(talkEffect ? { effect: talkEffect } : {}),
             ...(actions.length > 0 ? { actions } : {})
           }
         })
@@ -172,13 +211,15 @@ export function mapOfficialEpisode(scenario) {
         const layout = scenario.LayoutData?.[snippet.ReferenceIndex]
         if (!layout) break
         const modelId = modelIdOf(layout.Character2dId)
-        if (Number(snippet.Action) === 4 || Number(layout.Type) === 0) {
+        const layoutType = Number(layout.Type)
+        if (Number(snippet.Action) === 4 || layoutType === 0) {
           if (!layout.MotionName && !layout.FacialName) break
           // 官方 ChangeMotion 不等剪辑；0.1s actions 序列只发 cue。
           stats.motions++
           push({
             type: 'Motion',
             wait,
+            progressBehavior,
             delay,
             data: {
               modelId,
@@ -201,11 +242,12 @@ export function mapOfficialEpisode(scenario) {
           to: sideOf(layout.SideTo, layout.SideToOffsetX),
           moveSpeed: speedOf(layout.MoveSpeedType)
         }
-        if (Number(layout.Type) === 2) {
+        if (layoutType === 2) {
           stats.appears++
           push({
             type: 'LayoutAppear',
             wait,
+            progressBehavior,
             delay,
             data: {
               ...base,
@@ -213,11 +255,22 @@ export function mapOfficialEpisode(scenario) {
               facial: layout.FacialName || ''
             }
           })
-        } else if (Number(layout.Type) === 3) {
+          const appearDepth = depthOf(layout.DepthType)
+          if (appearDepth === 'Front' || appearDepth === 'Back') {
+            push({
+              type: 'LayoutDepth',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: { modelId, depth: appearDepth }
+            })
+          }
+        } else if (layoutType === 3) {
           stats.clears++
           push({
             type: 'LayoutClear',
             wait,
+            progressBehavior,
             delay,
             data: {
               ...base,
@@ -225,17 +278,76 @@ export function mapOfficialEpisode(scenario) {
               facial: layout.FacialName || ''
             }
           })
-        } else if (Number(layout.Type) === 1) {
+        } else if (layoutType === 1) {
           stats.moves++
           push({
             type: 'Move',
             wait,
+            progressBehavior,
             delay,
             data: {
               ...base,
               motion: layout.MotionName || '',
               facial: layout.FacialName || ''
             }
+          })
+        } else if (layoutType === 4 || layoutType === 5) {
+          if (layout.MotionName || layout.FacialName) {
+            stats.motions++
+            push({
+              type: 'Motion',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: {
+                modelId,
+                duration: 0.1,
+                actions: [
+                  {
+                    at: 0,
+                    modelId,
+                    ...(layout.MotionName ? { motion: layout.MotionName } : {}),
+                    ...(layout.FacialName ? { facial: layout.FacialName } : {})
+                  }
+                ]
+              }
+            })
+          }
+          push({
+            type: 'CharacterShake',
+            wait,
+            progressBehavior,
+            delay,
+            data: { modelId, axis: layoutType === 4 ? 'X' : 'Y' }
+          })
+        } else if (layoutType === 6) {
+          if (layout.MotionName || layout.FacialName) {
+            stats.motions++
+            push({
+              type: 'Motion',
+              wait: false,
+              progressBehavior: 'Now',
+              delay,
+              data: {
+                modelId,
+                duration: 0.1,
+                actions: [
+                  {
+                    at: 0,
+                    modelId,
+                    ...(layout.MotionName ? { motion: layout.MotionName } : {}),
+                    ...(layout.FacialName ? { facial: layout.FacialName } : {})
+                  }
+                ]
+              }
+            })
+          }
+          push({
+            type: 'LayoutDepth',
+            wait,
+            progressBehavior,
+            delay,
+            data: { modelId, depth: depthOf(layout.DepthType) || 'Reset' }
           })
         }
         break
@@ -247,60 +359,99 @@ export function mapOfficialEpisode(scenario) {
         const type = Number(effect.EffectType)
         stats.effects++
         switch (type) {
+          case 0:
+          case 11:
+          case 17:
+          case 37:
+            // 官方 Noop / 等候占位 / 不支持的 3D MV
+            break
           case 1:
-            push({ type: 'BlackIn', wait, delay, data: { duration: durationMs, color: 'black' } })
+            push({ type: 'BlackIn', wait, progressBehavior, delay, data: { duration: durationMs, color: 'black' } })
             break
           case 2:
-            push({ type: 'HideTalk', wait: true, delay: 0, data: {} })
+            push({ type: 'HideTalk', wait: true, progressBehavior: 'WaitFinished', delay: 0 })
             push({
               type: 'BlackOut',
               wait,
+              progressBehavior,
               delay,
               data: { duration: durationMs, color: 'black' }
             })
             break
           case 3:
-            push({ type: 'BlackIn', wait, delay, data: { duration: durationMs, color: 'white' } })
+            push({ type: 'BlackIn', wait, progressBehavior, delay, data: { duration: durationMs, color: 'white' } })
             break
           case 4:
-            push({ type: 'HideTalk', wait: true, delay: 0, data: {} })
+            push({ type: 'HideTalk', wait: true, progressBehavior: 'WaitFinished', delay: 0 })
             push({
               type: 'BlackOut',
               wait,
+              progressBehavior,
               delay,
               data: { duration: durationMs, color: 'white' }
             })
             break
           case 5:
-          case 6:
             push({
               type: 'ShakeScreen',
               wait,
+              progressBehavior,
               delay,
-              data: { duration: Math.max(1, durationMs) }
+              data: { duration: Math.min(durationMs, 30000) }
+            })
+            break
+          case 6:
+            push({
+              type: 'ShakeWindow',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
             })
             break
           case 7:
-            push({ type: 'ChangeBackgroundImage', wait, delay, data: { imageId: 2 } })
+            push({
+              type: 'ChangeBackgroundImage',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                imageId: 2,
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
             break
           case 8:
+            push({ type: 'Telop', wait, progressBehavior, delay, data: { content: effect.StringVal || '' } })
+            break
           case 18:
-            push({ type: 'Telop', wait, delay, data: { content: effect.StringVal || '' } })
+            push({
+              type: 'PlaceInfo',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                text: effect.StringVal || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
             break
           case 9:
             push({
               type: 'FlashbackIn',
               wait,
+              progressBehavior,
               delay,
-              data: { duration: Math.max(100, durationMs), alpha: 0.3 }
+              data: { duration: Math.min(Math.max(100, durationMs), 10000), alpha: 0.3 }
             })
             break
           case 10:
             push({
               type: 'FlashbackOut',
               wait,
+              progressBehavior,
               delay,
-              data: { duration: Math.max(100, durationMs) }
+              data: { duration: Math.min(Math.max(100, durationMs), 10000) }
             })
             break
           case 12:
@@ -309,9 +460,46 @@ export function mapOfficialEpisode(scenario) {
             push({
               type: 'AmbientColor',
               wait,
+              progressBehavior,
               delay,
               data: {
                 mode: type === 12 ? 'normal' : type === 13 ? 'evening' : 'night'
+              }
+            })
+            break
+          case 15:
+            push({
+              type: 'PlayScenarioEffect',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                effectName: effect.StringVal || effect.StringValSub || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
+            break
+          case 16:
+            push({
+              type: 'StopScenarioEffect',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                effectName: effect.StringVal || effect.StringValSub || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {})
+              }
+            })
+            break
+          case 19:
+            push({
+              type: 'Movie',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                file: effect.StringVal || '',
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 600000) } : {})
               }
             })
             break
@@ -320,19 +508,82 @@ export function mapOfficialEpisode(scenario) {
           case 40:
           case 41:
             push({
-              type: 'Wipe',
+              type: type % 2 === 0 ? 'SekaiIn' : 'SekaiOut',
               wait,
+              progressBehavior,
               delay,
               data: {
-                mode: type % 2 === 0 ? 'in' : 'out',
-                direction: 'right',
-                duration: durationMs
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}),
+                variant: type >= 40 ? 'v2' : 'v1'
+              }
+            })
+            break
+          case 22: {
+            const rawShader = String(effect.StringVal || '').trim().toLowerCase()
+            const shader = ['hologram', 'monitor', 'blur', 'none'].includes(rawShader)
+              ? rawShader
+              : 'none'
+            const shaderLevel = Number.parseFloat(effect.StringValSub)
+            push({
+              type: 'AttachCharacterShader',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                modelId: modelIdOf(effect.IntVal),
+                shader,
+                ...(shader === 'blur' && Number.isFinite(shaderLevel)
+                  ? { level: Math.min(3, Math.max(1, shaderLevel)) }
+                  : {})
+              }
+            })
+            break
+          }
+          case 23:
+            push({
+              type: 'SimpleSelectable',
+              wait,
+              progressBehavior,
+              delay,
+              data: { choices: String(effect.StringVal || '').split('/') }
+            })
+            break
+          case 24:
+            push({
+              type: 'FullScreenText',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                text: effect.StringVal || '',
+                ...(effect.StringValSub ? { voice: effect.StringValSub } : {}),
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 120000) } : {})
               }
             })
             break
           case 25:
+            push({ type: 'StopShakeScreen', wait, progressBehavior, delay, data: {} })
+            break
           case 26:
-            push({ type: 'StopShake', wait, delay, data: {} })
+            push({ type: 'StopShakeWindow', wait, progressBehavior, delay, data: {} })
+            break
+          case 27:
+            push({
+              type: 'SepiaIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}
+            })
+            break
+          case 28:
+            push({
+              type: 'SepiaOut',
+              wait,
+              progressBehavior,
+              delay,
+              data: durationMs > 0 ? { duration: Math.min(durationMs, 30000) } : {}
+            })
             break
           case 29:
           case 30:
@@ -346,43 +597,84 @@ export function mapOfficialEpisode(scenario) {
             push({
               type: 'SideFade',
               wait,
+              progressBehavior,
               delay,
-              data: { ...fade, duration: durationMs }
+              data: {
+                edge: fade.edge,
+                direction: `${fade.edge[0].toUpperCase()}${fade.edge.slice(1)}`,
+                mode: fade.mode === 'in' ? 'In' : 'Out',
+                duration: Math.min(durationMs, 10000)
+              }
             })
             break
           }
           case 38:
+            push({
+              type: 'BlurIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: Math.min(durationMs, 30000) }
+            })
+            break
           case 39:
             push({
-              type: 'BackgroundBlur',
+              type: 'BlurOut',
               wait,
+              progressBehavior,
               delay,
-              data: { enabled: type === 38 }
+              data: { duration: Math.min(durationMs, 30000) }
             })
             break
-          case 44:
+          case 44: {
+            const enabled = /^(1|true|on)$/i.test(String(effect.StringVal || ''))
             push({
               type: 'BackgroundBlur',
               wait,
+              progressBehavior,
               delay,
-              data: { enabled: /^(1|true|on)$/i.test(String(effect.StringVal || '')) }
+              data: {
+                mode: enabled ? 'In' : 'Out',
+                enabled,
+                ...(durationMs > 0 ? { duration: Math.min(durationMs, 10000) } : {})
+              }
             })
             break
+          }
           case 42: {
             const [x, y] = String(effect.StringVal || '0, 0')
               .split(',')
               .map((value) => Number.parseFloat(value) || 0)
-            push({ type: 'CameraMove', wait, delay, data: { x, y, duration: durationMs } })
+            push({
+              type: 'CameraMove',
+              wait,
+              progressBehavior,
+              delay,
+              data: { x, y, duration: Math.min(durationMs, 30000) }
+            })
             break
           }
           case 43:
             push({
               type: 'CameraZoom',
               wait,
+              progressBehavior,
               delay,
               data: {
                 scale: Number.parseFloat(effect.StringVal) || 1,
-                duration: durationMs
+                duration: Math.min(durationMs, 30000)
+              }
+            })
+            break
+          case 45:
+            push({
+              type: 'DollyZoom',
+              wait,
+              progressBehavior,
+              delay,
+              data: {
+                duration: Math.min(durationMs, 30000),
+                zoom: parseDollyZoom(effect.StringVal)
               }
             })
             break
@@ -395,28 +687,49 @@ export function mapOfficialEpisode(scenario) {
         const sound = scenario.SoundData?.[snippet.ReferenceIndex]
         if (!sound) break
         const fadeMs = effectDurationMs(sound)
+        const volume = Number.isFinite(Number(sound.Volume)) ? Number(sound.Volume) : 1
         stats.sounds++
-        if (Number(sound.PlayMode) === 4) break
+        if (Number(sound.PlayMode) === 4) {
+          push({
+            type: 'BgmVolume',
+            wait,
+            progressBehavior,
+            delay,
+            data: {
+              volume: Math.min(2, Math.max(0, volume)),
+              duration: Math.min(Math.max(0, fadeMs), 30000)
+            }
+          })
+          break
+        }
         if (sound.Bgm === 'bgm00000') {
-          push({ type: 'ChangeBgm', wait, delay, data: { stop: true, fadeMs } })
+          push({ type: 'ChangeBgm', wait, progressBehavior, delay, data: { stop: true, fadeMs } })
         } else if (sound.Bgm) {
           push({
             type: 'ChangeBgm',
             wait,
+            progressBehavior,
             delay,
-            data: { file: `${sound.Bgm}.mp3`, fadeMs, volume: Number(sound.Volume) || 1 }
+            data: { file: `${sound.Bgm}.mp3`, fadeMs, volume }
           })
         } else if (sound.Se) {
           if (Number(sound.PlayMode) === 3) {
-            push({ type: 'StopSe', wait, delay, data: { file: `${sound.Se}.mp3`, fadeMs } })
+            push({
+              type: 'StopSe',
+              wait,
+              progressBehavior,
+              delay,
+              data: { file: `${sound.Se}.mp3`, fadeMs }
+            })
           } else {
             push({
               type: 'PlaySe',
               wait,
+              progressBehavior,
               delay,
               data: {
                 file: `${sound.Se}.mp3`,
-                volume: Number(sound.Volume) || 1,
+                volume,
                 loop: Number(sound.PlayMode) === 2,
                 fadeMs
               }
@@ -430,7 +743,13 @@ export function mapOfficialEpisode(scenario) {
           scenario.ScenarioSnippetCharacterLayoutModes?.[snippet.ReferenceIndex]
             ?.CharacterLayoutMode
         stats.layoutModes++
-        push({ type: 'ChangeLayoutMode', wait, delay, data: { mode: layoutModeOf(mode) } })
+        push({
+          type: 'ChangeLayoutMode',
+          wait,
+          progressBehavior,
+          delay,
+          data: { mode: layoutModeOf(mode) }
+        })
         break
       }
       case 0:
@@ -490,6 +809,8 @@ export function auditEpisode(scenario, episodeId, runtime) {
   let actions = 0
   let windowOpen = false
   let cursorFrame = 0
+  let runningEndFrame = 0
+  let activeLayoutEndFrame = 0
   let lastEndFrame = 0
   const visibleModels = new Set()
   for (let i = 0; i < story.snippets.length; i++) {
@@ -497,9 +818,17 @@ export function auditEpisode(scenario, episodeId, runtime) {
     const entry = baked.entries[i]
     const timelineEntry = result.entries[i]
     const delayFrames = timing.framesForSeconds(Number(snippet.delay) || 0)
-    const blocking = snippet.wait !== false || snippet.type === 'Talk'
+    const blocking =
+      (snippet.progressBehavior ? snippet.progressBehavior === 'WaitFinished' : snippet.wait !== false) ||
+      snippet.type === 'Talk'
     if (entry.blocking !== blocking) {
       frameFails(fails, episodeId, i, `blocking ${entry.blocking} != ${blocking}`)
+    }
+    if (blocking) {
+      cursorFrame = Math.max(cursorFrame, runningEndFrame)
+    }
+    if (entry.delayStartFrame !== cursorFrame) {
+      frameFails(fails, episodeId, i, `delayStart ${entry.delayStartFrame} != cursor ${cursorFrame}`)
     }
     if (entry.startFrame !== cursorFrame + delayFrames) {
       frameFails(
@@ -527,13 +856,13 @@ export function auditEpisode(scenario, episodeId, runtime) {
         `end ${entry.endFrame} != start ${entry.startFrame} + duration ${entry.durationFrames}`
       )
     }
-    if (blocking) cursorFrame = entry.endFrame
+    runningEndFrame = Math.max(runningEndFrame, entry.endFrame)
     lastEndFrame = Math.max(lastEndFrame, entry.endFrame)
 
     if (snippet.type === 'Talk') {
       talks++
       const expectedWindow = windowOpen ? 0 : timing.msToFrames(timing.TALK_WINDOW_OPEN_CLOSE_MS)
-      windowOpen = true
+      windowOpen = !snippet.data?.closeWindowOnFinish
       const talk = entry.talk
       if (!talk) {
         frameFails(fails, episodeId, i, 'Talk missing plan')
@@ -609,7 +938,8 @@ export function auditEpisode(scenario, episodeId, runtime) {
       )
       const moved =
         snippet.data.from.side !== snippet.data.to.side ||
-        (Number(snippet.data.from.offset) || 0) !== (Number(snippet.data.to.offset) || 0)
+        (Number(snippet.data.from.offset) || 0) !== (Number(snippet.data.to.offset) || 0) ||
+        Boolean(snippet.data.from.under) !== Boolean(snippet.data.to.under)
       const modelId = snippet.data.modelId
       const wasVisible = visibleModels.has(modelId)
       if (snippet.type === 'LayoutAppear') {
@@ -632,9 +962,13 @@ export function auditEpisode(scenario, episodeId, runtime) {
         const expectedDuration = wasVisible
           ? timing.APPEAR_SHOWN_MOVE_FRAMES
           : timing.APPEAR_FADE_TOTAL_FRAMES
-        if (entry.durationFrames !== (blocking ? expectedDuration : 0)) {
+        if (entry.durationFrames !== expectedDuration) {
           frameFails(fails, episodeId, i, `appear duration ${entry.durationFrames}`)
         }
+        const activeSlideEnd = wasVisible
+          ? layout.moveEndFrame
+          : Math.max(entry.startFrame + timing.APPEAR_FADE_TOTAL_FRAMES, moved ? layout.moveEndFrame : 0)
+        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
         if (!wasVisible) {
@@ -661,7 +995,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
           if (layout.fadeEndFrame !== entry.startFrame + Math.max(fadeFrames, moveFrames)) {
             frameFails(fails, episodeId, i, `clear fadeEnd ${layout.fadeEndFrame}`)
           }
-          if (entry.durationFrames !== (blocking ? Math.max(fadeFrames, moveFrames) : 0)) {
+          if (entry.durationFrames !== Math.max(fadeFrames, moveFrames)) {
             frameFails(fails, episodeId, i, `clear duration ${entry.durationFrames}`)
           }
         } else {
@@ -671,18 +1005,20 @@ export function auditEpisode(scenario, episodeId, runtime) {
           ) {
             frameFails(fails, episodeId, i, `clear in-place fadeStart ${layout.fadeStartFrame}`)
           }
-          if (entry.durationFrames !== (blocking ? timing.HIDE_IN_PLACE_TOTAL_FRAMES : 0)) {
+          if (entry.durationFrames !== timing.HIDE_IN_PLACE_TOTAL_FRAMES) {
             frameFails(fails, episodeId, i, `clear in-place duration ${entry.durationFrames}`)
           }
         }
+        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? entry.startFrame)
         visibleModels.delete(modelId)
       } else {
         if (layout.moveEndFrame !== entry.startFrame + moveFrames) {
           frameFails(fails, episodeId, i, `move end ${layout.moveEndFrame}`)
         }
-        if (entry.durationFrames !== (blocking ? moveFrames : 0)) {
+        if (entry.durationFrames !== moveFrames) {
           frameFails(fails, episodeId, i, `move duration ${entry.durationFrames}`)
         }
+        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.moveEndFrame)
       }
     }
   }

@@ -30,10 +30,22 @@ import { applyTalkPatch } from './video-export/talkPatch'
 import type { VideoExportOptions } from './video-export'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
+import { snippetHasPreFence } from '../../../common/export/snippetSemantics'
 import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
-import { TALK_WINDOW_OPEN_CLOSE_MS } from '../../../common/official/timing'
+import {
+  OPENING_COVER_FADE_MS,
+  PLAYED_WAIT_TIME_MS,
+  SCENARIO_EXIT_BGM_FADE_MS,
+  TALK_WINDOW_OPEN_CLOSE_MS
+} from '../../../common/official/timing'
+import {
+  getLayoutRunningEndMs,
+  getMotionSettledEndMs,
+  resetStageTiming,
+  type ExtendedApp
+} from '../snippets/stageTiming'
 import { webGLValidator } from '../utils/WebGLContextValidator'
 import { frameValidator } from '../utils/FrameContentValidator'
 import { resolveBgmUrl } from '../utils/ResourceUrl'
@@ -59,16 +71,37 @@ const FRAME_VALIDATION_EXEMPT_SNIPPETS = new Set<string>([
   'ChangeLayoutMode',
   'ChangeBackgroundImage',
   'ChangeBgm',
+  'BgmVolume',
   'PlaySe',
   'StopSe',
   'HideTalk',
   'BlackIn',
   'BlackOut',
+  'SekaiIn',
+  'SekaiOut',
   'Wipe',
+  'SideFade',
   'FlashbackIn',
   'FlashbackOut',
+  'SepiaIn',
+  'SepiaOut',
+  'BlurIn',
+  'BlurOut',
+  'BackgroundBlur',
+  'FullScreenText',
+  'Movie',
   'CameraMove',
   'CameraZoom',
+  'DollyZoom',
+  'ShakeWindow',
+  'StopShakeWindow',
+  'StopShakeScreen',
+  'StopShake',
+  'LayoutDepth',
+  'CostumeChange',
+  'AttachCharacterShader',
+  'PlayScenarioEffect',
+  'StopScenarioEffect',
   'LayoutClear'
 ])
 
@@ -139,10 +172,14 @@ export default class VideoExportManager {
     talk: TalkSnippetLike,
     ttsDurationMs: number,
     windowOpenMs = 0,
-    snippetIndex = -1
+    snippetIndex = -1,
+    layoutRunningMs = 0,
+    existingMotionSettleMs = 0
   ): number {
     const base = calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
-      windowOpenMs
+      windowOpenMs,
+      layoutRunningMs,
+      motionSettleMs: existingMotionSettleMs
     })
     if (!(ttsDurationMs > 0)) return base
     const cues: Array<{ at: number; modelId: number; motion?: string }> = []
@@ -150,35 +187,45 @@ export default class VideoExportManager {
     for (const action of talk.actions ?? []) {
       if (action.motion) cues.push(action)
     }
-    let settleMs = 0
+    let settleMs = existingMotionSettleMs
     for (const cue of cues) {
-      if (!cue.motion || !this.app.layerModel.isModelVisible(cue.modelId)) continue
+      const visible =
+        this.app.layerModel.isModelVisible(cue.modelId) ||
+        Boolean(this.app.layerModel.isModelShown?.(cue.modelId))
+      if (!cue.motion || !visible) continue
       try {
-        const clipMs = this.app.getModelById(cue.modelId).getMotionDurationMs(cue.motion)
+        const model = this.app.getModelById(cue.modelId)
+        if (model.isMotionLooping?.(cue.motion)) continue
+        const clipMs = model.getMotionDurationMs(cue.motion)
         if (clipMs > 0) settleMs = Math.max(settleMs, cue.at * base + clipMs)
       } catch {
         /* model not loaded; the gate cannot be planned */
       }
     }
     if (settleMs > 0 && snippetIndex >= 0) this.talkSettleMsByIndex.set(snippetIndex, settleMs)
-    return settleMs > 0
+    return settleMs > 0 || layoutRunningMs > 0
       ? calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
           motionSettleMs: settleMs,
+          layoutRunningMs,
           windowOpenMs
         })
       : base
   }
 
-  /** 首个 Talk（或 HideTalk 后第一句）需要 0.2s 打开对话框；连续 Talk 不再加。 */
+  /** 首个 Talk（或关闭后第一句）需要 0.2s 打开对话框；连续 Talk 不再加。 */
   private talkWindowOpenMs(snippets: SnippetData[], index: number): number {
     let open = false
     for (let i = 0; i <= index; i++) {
-      if (snippets[i].type === 'Talk') {
+      const snippet = snippets[i]
+      if (snippet.type === 'Talk') {
         if (!open) {
           if (i === index) return TALK_WINDOW_OPEN_CLOSE_MS
           open = true
         }
-      } else if (snippets[i].type === 'HideTalk') {
+        if (snippet.data.closeWindowOnFinish) {
+          open = false
+        }
+      } else if (snippet.type === 'HideTalk') {
         open = false
       }
     }
@@ -195,6 +242,7 @@ export default class VideoExportManager {
     motionTrace.reset()
     exportTraceContext.reset()
     this.talkSettleMsByIndex.clear()
+    resetStageTiming(this.app)
     this.app.snippetStrategyManager?.resetBackgroundSnippets()
   }
 
@@ -639,7 +687,7 @@ export default class VideoExportManager {
       this.app.ttsManager.setTimeline(timeline)
     }
 
-    totalDurationMs = timeline.length > 0 ? timeline[timeline.length - 1].endTimeMs : 0
+    totalDurationMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
 
     const totalSnippets = snippets.length
     let contextLost = false
@@ -682,6 +730,18 @@ export default class VideoExportManager {
       }
       concurrentPipeline.markRenderStart()
       timestampRecorder.markRenderStart()
+
+      const extendedApp = this.app as unknown as ExtendedApp
+      const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+      void openingCoverTask?.catch(() => undefined)
+
+      const pendingTimestampTasks: Promise<void>[] = []
+      const flushPendingTimestamps = async (): Promise<void> => {
+        if (pendingTimestampTasks.length === 0) return
+        const batch = [...pendingTimestampTasks]
+        pendingTimestampTasks.length = 0
+        await Promise.allSettled(batch)
+      }
 
       this.logger.info('Concurrent mode: Video rendering started', {
         fps: options.fps,
@@ -736,9 +796,20 @@ export default class VideoExportManager {
         }
 
         const snippet = snippets[i]
+        // PlayCore 前置栅栏：WaitFinished（或 Talk）先等所有在跑任务结束，再解析 TTS/delay。
+        if (snippetHasPreFence(snippet)) {
+          await this.app.snippetStrategyManager?.waitForPreFence?.(snippet)
+          await flushPendingTimestamps()
+        }
+
         exportTraceContext.setSnippet(i, snippet.type)
         const isTalk = snippet.type === 'Talk'
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
+        const nowMs = performance.now()
+        const layoutRunningMs = isTalk ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs) : 0
+        const existingMotionSettleMs = isTalk
+          ? Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
+          : 0
 
         let resolvedTalkDurationMs: number | undefined
         if (ttsEnabled && talkData) {
@@ -755,7 +826,9 @@ export default class VideoExportManager {
               talkData as unknown as TalkSnippetLike,
               ttsDurationMs,
               this.talkWindowOpenMs(snippets, i),
-              i
+              i,
+              layoutRunningMs,
+              existingMotionSettleMs
             )
           )
           if (ttsDurationMs > 0) {
@@ -799,20 +872,28 @@ export default class VideoExportManager {
                 snippet.data as unknown as TalkSnippetLike,
                 0,
                 this.talkWindowOpenMs(snippets, i),
-                i
+                i,
+                layoutRunningMs,
+                existingMotionSettleMs
               )
-            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
+            : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
-        await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
-        this.app.currentTalkStartedAtMs = 0
-        timestampRecorder.markSnippetStart(i, snippet.type, {
-          speaker: talkData?.speaker,
-          content: talkData?.content
-        })
+        if (isTalk) {
+          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
+          this.app.currentTalkStartedAtMs = 0
+          timestampRecorder.markSnippetStart(i, snippet.type, {
+            speaker: talkData?.speaker,
+            content: talkData?.content
+          })
+        }
 
-        // 渲染片段 - 片段间的延迟由 snippet.delay 控制，不由帧率控制器控制
         const snippetStartedAtMs = performance.now()
         await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
+        const hasAsyncTaskTracker =
+          typeof this.app.snippetStrategyManager?.getLastLaunchedTask === 'function'
+        const launchedTask = hasAsyncTaskTracker
+          ? this.app.snippetStrategyManager.getLastLaunchedTask()
+          : null
 
         // 剧本本来就可能是黑场（EffectType 1~4）、纯黑背景，或者处于没有
         // 画面内容的准备片段；这些片段不能拿来判定“模型没渲染”。
@@ -842,12 +923,32 @@ export default class VideoExportManager {
         }
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
-        timestampRecorder.markSnippetEnd(
-          ttsDur,
-          this.app.currentTalkStartedAtMs > 0
-            ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
-            : 0
-        )
+        if (isTalk) {
+          const recordEnd = (): void => {
+            timestampRecorder.markSnippetEnd(
+              ttsDur,
+              this.app.currentTalkStartedAtMs > 0
+                ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
+                : 0
+            )
+          }
+          if (launchedTask) {
+            pendingTimestampTasks.push(launchedTask.then(recordEnd, () => {}))
+          } else {
+            recordEnd()
+          }
+        } else if (launchedTask) {
+          pendingTimestampTasks.push(
+            launchedTask.then(
+              () => {
+                timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+              },
+              () => {}
+            )
+          )
+        } else {
+          timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+        }
 
         if (i % 50 === 0) {
           this.logger.info(
@@ -861,8 +962,12 @@ export default class VideoExportManager {
         }
       }
 
-      // 官方 WaitAllFinished：等 ProgressBehavior=0 的后台片段播完再停录。
+      // 官方 WaitAllFinished + 开场黑幕收尾 + 0.25s 停留 + 0.25s 淡出。
       await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
+      await flushPendingTimestamps()
+      if (openingCoverTask) await openingCoverTask
+      await extendedApp.setEndingEnvelope?.(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
+
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
 
@@ -893,7 +998,13 @@ export default class VideoExportManager {
       this.logger.info('Phase 3: Audio mixing and final assembly')
 
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      totalDurationMs = Math.max(actualVideoDurationMs, recordedDurationMs)
+      totalDurationMs = Math.max(
+        actualVideoDurationMs +
+          (typeof extendedApp.setEndingEnvelope === 'function'
+            ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS
+            : 0),
+        recordedDurationMs
+      )
 
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
       this.logger.info(
@@ -1418,14 +1529,36 @@ export default class VideoExportManager {
 
     try {
       const totalSnippets = snippets.length
+      const extendedApp = this.app as unknown as ExtendedApp
+      const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+      void openingCoverTask?.catch(() => undefined)
+
+      const pendingTimestampTasks: Promise<void>[] = []
+      const flushPendingTimestamps = async (): Promise<void> => {
+        if (pendingTimestampTasks.length === 0) return
+        const batch = [...pendingTimestampTasks]
+        pendingTimestampTasks.length = 0
+        await Promise.allSettled(batch)
+      }
 
       for (let i = 0; i < totalSnippets; i++) {
         this.checkAborted()
         if (pumpError) throw pumpError
 
         const snippet = snippets[i]
+        if (snippetHasPreFence(snippet)) {
+          await this.app.snippetStrategyManager?.waitForPreFence?.(snippet)
+          await flushPendingTimestamps()
+        }
+
         exportTraceContext.setSnippet(i, snippet.type)
+        const isTalk = snippet.type === 'Talk'
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
+        const nowMs = performance.now()
+        const layoutRunningMs = isTalk ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs) : 0
+        const existingMotionSettleMs = isTalk
+          ? Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
+          : 0
 
         let resolvedTalkDurationMs: number | undefined
         if (ttsEnabled && talkData) {
@@ -1448,7 +1581,9 @@ export default class VideoExportManager {
               talkData as unknown as TalkSnippetLike,
               ttsDurationMs,
               this.talkWindowOpenMs(snippets, i),
-              i
+              i,
+              layoutRunningMs,
+              existingMotionSettleMs
             )
           )
           if (ttsDurationMs > 0) {
@@ -1485,40 +1620,76 @@ export default class VideoExportManager {
                 snippet.data as unknown as TalkSnippetLike,
                 0,
                 this.talkWindowOpenMs(snippets, i),
-                i
+                i,
+                layoutRunningMs,
+                existingMotionSettleMs
               )
-            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
+            : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
-        pumpPaused = true
-        await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
-        pumpPaused = false
-        this.app.currentTalkStartedAtMs = 0
-        timestampRecorder.markSnippetStart(i, snippet.type, {
-          speaker: talkData?.speaker,
-          content: talkData?.content
-        })
+        if (isTalk) {
+          pumpPaused = true
+          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
+          pumpPaused = false
+          this.app.currentTalkStartedAtMs = 0
+          timestampRecorder.markSnippetStart(i, snippet.type, {
+            speaker: talkData?.speaker,
+            content: talkData?.content
+          })
+        }
 
         const snippetStartedAtMs = performance.now()
         await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
+        const hasAsyncTaskTracker =
+          typeof this.app.snippetStrategyManager?.getLastLaunchedTask === 'function'
+        const launchedTask = hasAsyncTaskTracker
+          ? this.app.snippetStrategyManager.getLastLaunchedTask()
+          : null
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
-        timestampRecorder.markSnippetEnd(
-          ttsDur,
-          this.app.currentTalkStartedAtMs > 0
-            ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
-            : 0
-        )
+        if (isTalk) {
+          const recordEnd = (): void => {
+            timestampRecorder.markSnippetEnd(
+              ttsDur,
+              this.app.currentTalkStartedAtMs > 0
+                ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
+                : 0
+            )
+          }
+          if (launchedTask) {
+            pendingTimestampTasks.push(launchedTask.then(recordEnd, () => {}))
+          } else {
+            recordEnd()
+          }
+        } else if (launchedTask) {
+          pendingTimestampTasks.push(
+            launchedTask.then(
+              () => {
+                timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+              },
+              () => {}
+            )
+          )
+        } else {
+          timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+        }
       }
 
-      // 官方 WaitAllFinished：后台片段（ProgressBehavior=0）播完才算收尾。
+      // 官方 WaitAllFinished + 开场黑幕收尾 + 0.25s 停留 + 0.25s BGM/黑幕淡出。
       await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
+      await flushPendingTimestamps()
+      if (openingCoverTask) await openingCoverTask
 
-      // 尾部追帧：让帧泵渲染到「最后一个片段的虚拟结束时间」，
-      // 保证 TTS 尾垫与出场动画的最后一帧都在视频里
-      const lastTimelineEntry = timeline[timeline.length - 1]
+      const hasEndingEnvelope = typeof extendedApp.setEndingEnvelope === 'function'
+      if (hasEndingEnvelope) {
+        await extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
+      }
+
+      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」，
+      // 保证 TTS 尾垫、出场动画与片尾淡出的最后一帧都在视频里
+      const maxTimelineEndMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
       pumpTargetVirtualMs = Math.max(
         virtualClock.now(),
-        lastTimelineEntry ? lastTimelineEntry.endTimeMs : virtualClock.now()
+        maxTimelineEndMs + (hasEndingEnvelope ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS : 0)
       )
       pumpDone = true
       await framePump
@@ -2015,11 +2186,18 @@ export default class VideoExportManager {
       }
     }
 
+    const extendedApp = this.app as unknown as ExtendedApp
+    const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+    void openingCoverTask?.catch(() => undefined)
+
     try {
       for (let i = startSnippetIndex; i < snippets.length; i++) {
         this.checkAborted()
 
         const snippet = snippets[i]
+        if (snippetHasPreFence(snippet)) {
+          await this.app.snippetStrategyManager?.waitForPreFence?.(snippet)
+        }
         exportTraceContext.setSnippet(i, snippet.type)
         const timelineEntry = timeline[i]
         const safeTotal = totalSnippets || 1
@@ -2036,6 +2214,7 @@ export default class VideoExportManager {
           percentage: pct
         })
 
+        const nowMs = performance.now()
         this.app.lastSnippetActualDurationMs =
           timelineEntry?.durationMs ??
           (snippet.type === 'Talk'
@@ -2043,9 +2222,11 @@ export default class VideoExportManager {
                 snippet.data as unknown as TalkSnippetLike,
                 0,
                 this.talkWindowOpenMs(snippets, i),
-                i
+                i,
+                Math.max(0, getLayoutRunningEndMs(this.app) - nowMs),
+                Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
               )
-            : Math.max(Math.round(snippet.delay * 1000), estimateSnippetDuration(snippet)))
+            : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
 
@@ -2090,6 +2271,8 @@ export default class VideoExportManager {
 
       // 后台片段播完后再 flush，否则尾帧会被截掉。
       await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
+      if (openingCoverTask) await openingCoverTask
+      await extendedApp.setEndingEnvelope?.(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
     } catch (error) {
       this.logger.error('Frame capture loop failed, cleaning up resources', error)
       try {

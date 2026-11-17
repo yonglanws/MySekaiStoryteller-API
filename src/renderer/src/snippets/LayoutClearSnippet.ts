@@ -2,7 +2,16 @@ import PositionRel from '../types/PositionRel'
 import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
-import { CHARACTER_FADE_MS, HIDE_DELAY_IN_PLACE_MS } from '../../../common/official/timing'
+import {
+  CHARACTER_FADE_MS,
+  HIDE_DELAY_IN_PLACE_MS,
+  HIDE_IN_PLACE_TOTAL_MS
+} from '../../../common/official/timing'
+import {
+  nowMs,
+  recordLayoutRunningEnd,
+  recordMotionSettledAt
+} from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutClearSnippet extends BaseSnippet {
@@ -25,16 +34,22 @@ export default class LayoutClearSnippet extends BaseSnippet {
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
       this.app.layerModel.layoutMode,
-      this.data.data.from.offset
+      this.data.data.from.offset,
+      this.data.data.from.under
     )
     const to: PositionRel = StageUtils.side_to_position(
       this.data.data.to.side,
       this.app.layerModel.layoutMode,
-      this.data.data.to.offset
+      this.data.data.to.offset,
+      this.data.data.to.under
     )
 
     const is_moved = from.x !== to.x || from.y !== to.y
     const move_duration_ms = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
+    const totalClearMs = is_moved
+      ? Math.max(CHARACTER_FADE_MS, move_duration_ms)
+      : HIDE_IN_PLACE_TOTAL_MS
+    recordLayoutRunningEnd(this.app, nowMs() + totalClearMs)
 
     // 退场动作先加载并启动；淡出只在最后 0.1s 发生，角色边演边走边隐。
     const exit_motion = this.data.data.motion
@@ -44,6 +59,12 @@ export default class LayoutClearSnippet extends BaseSnippet {
         facialForce: true,
         traceSnippetIndex: this.snippetIndex
       })
+      if (exit_motion && !model.isMotionLooping?.(exit_motion)) {
+        const clipMs = model.getMotionDurationMs?.(exit_motion) ?? 0
+        if (clipMs > 0) {
+          recordMotionSettledAt(this.app, this.data.data.modelId, nowMs() + clipMs)
+        }
+      }
     }
 
     // SetTransformData(SideFrom) 先把角色放回起点，再 CharacterMoveTo(SideTo)。
@@ -53,7 +74,7 @@ export default class LayoutClearSnippet extends BaseSnippet {
 
     // HideCharacter(id, delay)：
     // - 原地：delay 0.15s，然后 0.1s 淡出，共 0.25s；
-    // - 滑动：delay = move_duration - 0.1s，淡出结束时正好滑到位。
+    // - 滑动：delay = max(0, move_duration - 0.1s)，淡出结束时正好滑到位。
     const delay_ms = is_moved
       ? Math.max(0, move_duration_ms - CHARACTER_FADE_MS)
       : HIDE_DELAY_IN_PLACE_MS

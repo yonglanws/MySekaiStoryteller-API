@@ -5,27 +5,81 @@ import {
   type BgmChangeSpec,
   type BgmCue
 } from '../../../../common/audio/bgm'
-import type { AudioMuxer } from './AudioMuxer'
+import type { AudioMuxer, BgmAudioCue, BgmVolumeTweenPoint } from './AudioMuxer'
 import { ExportLogger } from './ExportLogger'
 import { resolveBgmUrl } from '../../utils/ResourceUrl'
 
+export interface BgmLoopMetadata {
+  loopStartMs: number
+  loopEndMs: number
+  loopStartSample?: number
+  loopEndSample?: number
+  sampleRate?: number
+}
+
+export interface BgmVolumeSpec {
+  snippetIndex: number
+  volume: number
+  durationMs: number
+  delayMs: number
+}
+
+export function collectBgmVolumeSpecs(snippets: SnippetData[]): BgmVolumeSpec[] {
+  const specs: BgmVolumeSpec[] = []
+  snippets.forEach((snippet, snippetIndex) => {
+    if (snippet.type !== 'BgmVolume') return
+    specs.push({
+      snippetIndex,
+      volume: Math.max(0, Math.min(2, Number(snippet.data.volume) || 0)),
+      durationMs: Math.max(0, Number(snippet.data.duration) || 0),
+      delayMs: Math.max(0, (Number(snippet.delay) || 0) * 1000)
+    })
+  })
+  return specs
+}
+
+export function buildBgmVolumeTweens(
+  specs: ReadonlyArray<BgmVolumeSpec>,
+  startTimesMs: ReadonlyArray<number>,
+  startTimesIncludeDelay = false
+): BgmVolumeTweenPoint[] {
+  return specs
+    .map((spec) => {
+      const baseMs = startTimesMs[spec.snippetIndex] ?? 0
+      const timeMs = baseMs + (startTimesIncludeDelay ? 0 : spec.delayMs)
+      return {
+        timeMs: Math.max(0, timeMs),
+        volume: spec.volume,
+        durationMs: spec.durationMs
+      }
+    })
+    .sort((a, b) => a.timeMs - b.timeMs)
+}
+
+export type BuiltBgmCueList = BgmAudioCue[] & {
+  volumeTweens?: BgmVolumeTweenPoint[]
+}
+
 /**
  * 一次导出的 BGM 计划：
- * - 只加载故事里 ChangeBgm 引用到的文件；
- * - 没有 ChangeBgm 引用文件时，保留旧的全局 bgm.yaml 行为；
- * - cue 的播放位置在时间线确定后由 build() 计算（Talk 的 TTS 时长会改变后续时间点）。
+ * - 加载故事里 ChangeBgm 引用到的文件，同时顺带读取可选 `.loop.json` 循环点元数据；
+ * - 提取 `BgmVolume` (`PlayMode 4`) 渐变点并挂到 `build()` 返回的队列上供 `AudioMuxer` 消费。
  */
 export class BgmPlan {
   private readonly changes: BgmChangeSpec[]
+  private readonly volumeSpecs: BgmVolumeSpec[]
   private readonly buffers = new Map<string, AudioBuffer>()
+  private readonly loops = new Map<string, BgmLoopMetadata>()
+  private readonly loopByBuffer = new WeakMap<AudioBuffer, BgmLoopMetadata>()
   private readonly logger: ExportLogger = new ExportLogger('BgmPlan')
 
   constructor(snippets: SnippetData[]) {
     this.changes = collectBgmChanges(snippets)
+    this.volumeSpecs = collectBgmVolumeSpecs(snippets)
   }
 
   get hasChanges(): boolean {
-    return this.changes.length > 0
+    return this.changes.length > 0 || this.volumeSpecs.length > 0
   }
 
   /** 故事里是否有换曲（而不是只有 stop）；有换曲时不再混全局默认 BGM。 */
@@ -46,20 +100,81 @@ export class BgmPlan {
     for (const file of files) {
       const url = resolveBgmUrl(`audio/bgm/${file}`)
       this.logger.info(`Loading story BGM: ${file} (${url})`)
-      const buffer = await audioMuxer.loadBGMBuffer(url)
+      const [buffer, loopMeta] = await Promise.all([
+        audioMuxer.loadBGMBuffer(url),
+        this.loadLoopSidecar(url)
+      ])
       if (buffer) {
         this.buffers.set(file, buffer)
-        this.logger.info(`Story BGM loaded: ${file}, duration=${buffer.duration.toFixed(2)}s`)
+        if (loopMeta) {
+          this.loops.set(file, loopMeta)
+          this.loopByBuffer.set(buffer, loopMeta)
+        }
       } else {
-        this.logger.warn(`Story BGM failed to load, skipped: ${file}`)
+        this.logger.warn(`Story BGM missing or decode failed, cue skipped: ${file}`)
       }
     }
   }
 
+  private async loadLoopSidecar(bgmUrl: string): Promise<BgmLoopMetadata | null> {
+    if (typeof fetch === 'undefined') return null
+    try {
+      const resp = await fetch(`${bgmUrl}.loop.json`)
+      if (!resp.ok) return null
+      const parsed = (await resp.json()) as Partial<BgmLoopMetadata>
+      if (
+        typeof parsed.loopStartMs === 'number' &&
+        typeof parsed.loopEndMs === 'number' &&
+        parsed.loopEndMs > parsed.loopStartMs
+      ) {
+        return {
+          loopStartMs: parsed.loopStartMs,
+          loopEndMs: parsed.loopEndMs,
+          ...(typeof parsed.loopStartSample === 'number' ? { loopStartSample: parsed.loopStartSample } : {}),
+          ...(typeof parsed.loopEndSample === 'number' ? { loopEndSample: parsed.loopEndSample } : {}),
+          ...(typeof parsed.sampleRate === 'number' ? { sampleRate: parsed.sampleRate } : {})
+        }
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  buildVolumeTweens(
+    startTimesMs: ReadonlyArray<number>,
+    startTimesIncludeDelay = false
+  ): BgmVolumeTweenPoint[] {
+    return buildBgmVolumeTweens(this.volumeSpecs, startTimesMs, startTimesIncludeDelay)
+  }
+
+  /**
+   * @param startTimesMs 每个片段的起始时间；record 模式传入实际时间（含 delay）
+   * @param globalBuffer 若剧本未禁用背景音乐且配置了全局 BGM，则作为兜底音轨
+   * @param startTimesIncludeDelay 起始时间是否已经包含片段 delay
+   */
   build(
     startTimesMs: ReadonlyArray<number>,
-    globalBuffer: AudioBuffer | null
-  ): BgmCue<AudioBuffer>[] {
-    return buildBgmCues(this.changes, startTimesMs, this.buffers, globalBuffer)
+    globalBuffer: AudioBuffer | null = null,
+    startTimesIncludeDelay = false
+  ): BuiltBgmCueList {
+    const baseCues = buildBgmCues(this.changes, startTimesMs, this.buffers, globalBuffer)
+    const enriched: BuiltBgmCueList = baseCues.map((cue: BgmCue<AudioBuffer>) => {
+      const loop = cue.buffer ? this.loopByBuffer.get(cue.buffer) : undefined
+      return {
+        ...cue,
+        ...(loop
+          ? {
+              loopStartMs: loop.loopStartMs,
+              loopEndMs: loop.loopEndMs,
+              loopStartSample: loop.loopStartSample,
+              loopEndSample: loop.loopEndSample,
+              sourceSampleRate: loop.sampleRate
+            }
+          : {})
+      }
+    })
+    enriched.volumeTweens = this.buildVolumeTweens(startTimesMs, startTimesIncludeDelay)
+    return enriched
   }
 }

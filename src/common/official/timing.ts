@@ -199,3 +199,63 @@ export function lipTargetFromRms(
 export const OPENING_COVER_FADE_SECONDS = 0.5
 export const PLAYED_WAIT_TIME_SECONDS = 0.25
 export const SCENARIO_EXIT_BGM_FADE_SECONDS = 0.25
+export const OPENING_COVER_FADE_MS = framesToMs(framesForSeconds(OPENING_COVER_FADE_SECONDS))
+export const PLAYED_WAIT_TIME_MS = framesToMs(framesForSeconds(PLAYED_WAIT_TIME_SECONDS))
+export const SCENARIO_EXIT_BGM_FADE_MS = framesToMs(
+  framesForSeconds(SCENARIO_EXIT_BGM_FADE_SECONDS)
+)
+
+// ---- official special effects & UI ---------------------------------------------------
+
+export const PLACE_INFO_TRANSITION_SECONDS = 0.2
+export const PLACE_INFO_TRANSITION_MS = framesToMs(framesForSeconds(PLACE_INFO_TRANSITION_SECONDS))
+
+export const CHARACTER_SHAKE_SECONDS = 0.3
+export const CHARACTER_SHAKE_MS = framesToMs(framesForSeconds(CHARACTER_SHAKE_SECONDS))
+
+export const SEKAI_IN_PRE_DELAY_SECONDS = 0.25
+export const SEKAI_OUT_PRE_DELAY_SECONDS = 0.5
+export const SEKAI_IN_PRE_DELAY_MS = framesToMs(framesForSeconds(SEKAI_IN_PRE_DELAY_SECONDS))
+export const SEKAI_OUT_PRE_DELAY_MS = framesToMs(framesForSeconds(SEKAI_OUT_PRE_DELAY_SECONDS))
+export const SEKAI_IN_FADE_DELAY_MS = SEKAI_IN_PRE_DELAY_MS
+export const SEKAI_OUT_FADE_DELAY_MS = SEKAI_OUT_PRE_DELAY_MS
+
+/** 官方 Character AmbientColor RGB 线性倍乘。 */
+export const MODEL_COLOR_EVENING = [0.99, 0.9, 0.8] as const
+export const MODEL_COLOR_NIGHT = [0.83, 0.86, 0.91] as const
+
+export const FULLSCREEN_BARS_SECONDS = 1.0
+export const FULLSCREEN_TEXT_PRE_DELAY_SECONDS = 0.5
+export const FULLSCREEN_TEXT_HOLD_SECONDS = 1.0
+export const FULLSCREEN_CHAR_FADE_SECONDS = 0.125
+export const FULLSCREEN_BARS_MS = framesToMs(framesForSeconds(FULLSCREEN_BARS_SECONDS))
+export const FULLSCREEN_TEXT_PRE_DELAY_MS = framesToMs(
+  framesForSeconds(FULLSCREEN_TEXT_PRE_DELAY_SECONDS)
+)
+export const FULLSCREEN_TEXT_HOLD_MS = framesToMs(framesForSeconds(FULLSCREEN_TEXT_HOLD_SECONDS))
+export const FULLSCREEN_CHAR_FADE_MS = framesToMs(framesForSeconds(FULLSCREEN_CHAR_FADE_SECONDS))
+
+export const SIMPLE_SELECTABLE_OPEN_SECONDS = 0.125
+export const SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS = 1.5
+export const SIMPLE_SELECTABLE_CLOSE_SECONDS = 0.5
+export const SIMPLE_SELECTABLE_TOTAL_MS = framesToMs(
+  framesForSeconds(SIMPLE_SELECTABLE_OPEN_SECONDS) +
+    framesForSeconds(SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS) +
+    framesForSeconds(SIMPLE_SELECTABLE_CLOSE_SECONDS)
+)
+
+export const FLASHBACK_DEFAULT_MS = 100
+export const SEPIA_DEFAULT_MS = 100
+
+export const SIDE_OVER_OFFSET_X = 819.2
+export const SIDE_OVER_X = LAYOUT_REFERENCE_WIDTH / 2 + SIDE_OVER_OFFSET_X
+export const SIDE_UNDER_Y = -1123.2
+
+/**
+ * 统一官方秒与项目毫秒：<= 10 视为秒（乘以 1000），> 10 视为毫秒。
+ */
+export function normalizeEffectDurationMs(duration: number | undefined, fallbackMs = 0): number {
+  if (duration === undefined || !Number.isFinite(duration)) return fallbackMs
+  if (duration <= 0) return 0
+  return duration > 10 ? duration : duration * 1000
+}

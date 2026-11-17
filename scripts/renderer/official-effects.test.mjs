@@ -112,21 +112,30 @@ function effectScenario(types) {
 test('official effect types map to the Story snippets', () => {
   const types = [6, 8, 18, 20, 21, 25, 26, 29, 30, 31, 32, 33, 34, 35, 36, 38, 39, 44]
   const { story, stats } = mapOfficialEpisode(effectScenario(types))
-  const effects = story.snippets.filter((snippet) =>
-    ['Telop', 'Wipe', 'StopShake', 'SideFade', 'BackgroundBlur', 'ShakeScreen'].includes(
-      snippet.type
-    )
-  )
+  const mappedTypes = new Set([
+    'Telop',
+    'PlaceInfo',
+    'SekaiIn',
+    'SekaiOut',
+    'StopShakeScreen',
+    'StopShakeWindow',
+    'SideFade',
+    'BlurIn',
+    'BlurOut',
+    'BackgroundBlur',
+    'ShakeWindow'
+  ])
+  const effects = story.snippets.filter((snippet) => mappedTypes.has(snippet.type))
   assert.deepEqual(
     effects.map((snippet) => snippet.type),
     [
-      'ShakeScreen',
+      'ShakeWindow',
       'Telop',
-      'Telop',
-      'Wipe',
-      'Wipe',
-      'StopShake',
-      'StopShake',
+      'PlaceInfo',
+      'SekaiIn',
+      'SekaiOut',
+      'StopShakeScreen',
+      'StopShakeWindow',
       'SideFade',
       'SideFade',
       'SideFade',
@@ -135,8 +144,8 @@ test('official effect types map to the Story snippets', () => {
       'SideFade',
       'SideFade',
       'SideFade',
-      'BackgroundBlur',
-      'BackgroundBlur',
+      'BlurIn',
+      'BlurOut',
       'BackgroundBlur'
     ]
   )
@@ -144,20 +153,21 @@ test('official effect types map to the Story snippets', () => {
 
   const fades = effects.filter((snippet) => snippet.type === 'SideFade')
   assert.deepEqual(
-    fades.map((snippet) => [snippet.data.edge, snippet.data.mode]),
+    fades.map((snippet) => [snippet.data.direction, snippet.data.mode]),
     [
-      ['left', 'in'],
-      ['left', 'out'],
-      ['right', 'in'],
-      ['right', 'out'],
-      ['top', 'in'],
-      ['top', 'out'],
-      ['bottom', 'in'],
-      ['bottom', 'out']
+      ['Left', 'In'],
+      ['Left', 'Out'],
+      ['Right', 'In'],
+      ['Right', 'Out'],
+      ['Top', 'In'],
+      ['Top', 'Out'],
+      ['Bottom', 'In'],
+      ['Bottom', 'Out']
     ]
   )
   assert.equal(effects.at(-1).data.enabled, true)
-  assert.equal(effects.at(-2).data.enabled, false)
+  assert.equal(effects.at(-1).data.mode, 'In')
+  assert.equal(effects.at(-2).type, 'BlurOut')
 })
 
 test('SideFade mapping follows SSE 29~36 exactly', () => {
