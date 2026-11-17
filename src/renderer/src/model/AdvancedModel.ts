@@ -577,14 +577,11 @@ export default class AdvancedModel extends Live2DModel {
       return
     }
     const manager = internal.parallelMotionManager[channel]
-    // 同一个表情已经在播时，官方 ChangeModelFacial 不会产生可见变化；
-    // 重新 startMotion 还会和 MotionState 的 reservation 打架。直接视为已应用。
-    if (
-      channel === 1 &&
-      name === this.currentFacialName &&
-      manager.playing &&
-      !manager.isFinished()
-    ) {
+    // 同一个表情或身体动作已经在播时，官方 PlayableAnimator 不会产生可见变化；
+    // 重新 startMotion 还会触发误报 interrupted 或与 MotionState 的 reservation 打架。直接视为已应用。
+    const isSameActiveCue =
+      channel === 1 ? name === this.currentFacialName : name === this.currentBodyMotion
+    if (isSameActiveCue && manager.playing && !manager.isFinished()) {
       motionTrace.record({
         at: requestedAt,
         modelId: this.metadata.id,
@@ -592,7 +589,7 @@ export default class AdvancedModel extends Live2DModel {
         channel,
         name,
         event: 'skipped',
-        reason: 'same facial already active'
+        reason: channel === 1 ? 'same facial already active' : 'same body motion already active'
       })
       return
     }
@@ -637,7 +634,12 @@ export default class AdvancedModel extends Live2DModel {
     })
     if (channel === 0) {
       this.bodyIgnoredParamIds = ignoredParamIds
-      if (this.currentBodyMotion && manager.playing && !manager.isFinished()) {
+      if (
+        this.currentBodyMotion &&
+        this.currentBodyMotion !== name &&
+        manager.playing &&
+        !manager.isFinished()
+      ) {
         motionTrace.record({
           at: loadedAt,
           modelId: this.metadata.id,
@@ -684,13 +686,15 @@ export default class AdvancedModel extends Live2DModel {
         loadMs: startedAt - requestedAt,
         clipDurationMs,
         fadeMs: Math.round(fadeSeconds * 1000),
-        // 同一个表情已经播完但仍是 current group/index 时，manager 也会拒绝
+        // 同一个表情或动作已经播完但仍是 current group/index 时，manager 也会拒绝
         // 重新 startMotion；视觉上没有变化，不应算成“拒绝”。
         reason: started
           ? undefined
           : channel === 1 && name === this.currentFacialName
             ? 'same facial already active'
-            : 'motion manager refused the cue'
+            : channel === 0 && name === this.currentBodyMotion
+              ? 'same body motion already active'
+              : 'motion manager refused the cue'
       })
       if (started && channel === 0) {
         this.currentBodyMotion = name

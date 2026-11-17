@@ -420,7 +420,7 @@ function normalizeScene(story: JsonRecord): void {
         throw new Error(
           layoutMode === 'Three'
             ? `${label} Three 模式同时最多三人在场；先 LayoutClear 退场旧角色再入场`
-            : `${label} Normal 模式同时最多两人在场；3人同台请先 ChangeLayoutMode('Three') 或先 LayoutClear 退场`
+            : `${label} Normal 模式同时最多两人在场；请先 LayoutClear 退场旧角色再入场`
         )
       }
       const toRaw = parsePosition(data.to, 'Left')

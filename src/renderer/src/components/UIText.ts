@@ -2,40 +2,32 @@ import { AlphaFilter, Text, TextStyle } from 'pixi.js'
 import AnimationManager from '../managers/AnimationManager'
 import { TALK_DISPLAY_MS_PER_CHAR, sliceVisibleText, visibleTextLength } from '../utils/TalkTiming'
 
-/**
- * 官方 `TalkWindow/Words`（`[250, 858, 1368.3, 154]` @ 1920×1080）：
- * - 行宽 1368.3 * k（对应约 30 个全角汉字/行）；
- * - 去除旧版厚重 `#4A4968D9` 描边，保持清晰锐利的 `#FFFFFF` 字形与轻微投影。
- */
 export default class UIText extends Text {
   public data: string = ''
   private animGen = 0
 
   constructor(screen_width: number, screen_height: number) {
-    const k = Math.min(screen_width / 1920, screen_height / 1080)
+    const x = screen_width / 8
+
     const style = new TextStyle({
       align: 'left',
-      fill: '#FFFFFF',
+      fill: '#FFFFFFF5',
       fontFamily: "'MiSans Medium', sans-serif",
-      fontSize: 42 * k,
-      lineHeight: 48 * k,
-      strokeThickness: 0,
-      dropShadow: true,
-      dropShadowColor: 'rgba(10, 12, 34, 0.55)',
-      dropShadowBlur: 2 * k,
-      dropShadowDistance: 1.5 * k,
+      fontSize: screen_height / 26,
+      lineHeight: screen_height / 19,
+      stroke: '#4A4968D9',
+      strokeThickness: screen_height / 120,
       wordWrap: true,
-      wordWrapWidth: 1368.3 * k,
-      breakWords: true
+      wordWrapWidth: screen_width - x * 2
     })
     super('', style)
 
-    this.x = 250 * k
-    this.y = 858 * k
+    this.x = x
+    this.y = screen_height / 1.27
 
-    const alphaFilter = new AlphaFilter(0)
-    alphaFilter.resolution = 2
-    this.filters = [alphaFilter]
+    const alpha_filter = new AlphaFilter(0)
+    alpha_filter.resolution = 2
+    this.filters = [alpha_filter]
   }
 
   public async show(time: number): Promise<void> {
@@ -73,6 +65,7 @@ export default class UIText extends Text {
 
   public async startDisplayContent(): Promise<void> {
     const gen = ++this.animGen
+    // 排版换行不计入官方 4 帧/字；长句被 sanitizeDisplayText 折行后仍保持原速。
     const contentLength = visibleTextLength(this.data)
     const timeMS = contentLength * TALK_DISPLAY_MS_PER_CHAR
 
@@ -81,7 +74,8 @@ export default class UIText extends Text {
       return
     }
 
-    // 官方 PlayWords(startFirst: true)：第一次迭代就显示 1 个 UTF-16 单元，之后每 4 帧（66.7ms）多显示一个。
+    // 官方 PlayWords(startFirst: true)：第一次迭代就显示 1 个 UTF-16 单元，
+    // 之后每 4 帧（66.7ms）多显示一个。
     this.text = sliceVisibleText(this.data, 1)
     await AnimationManager.linear((progress) => {
       if (gen !== this.animGen) return

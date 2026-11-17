@@ -22,7 +22,7 @@ import {
  * 2. writeDialogue (`dialogue`)：只带入选角色人设 + 官方团体 few-shot，逐字定稿对白与句间停顿；
  * 2.5 emotion + directStaging + translateDialogue（三路并行）：
  *     - emotion：5~10 句稳态 Irodori 配音情绪分段；
- *     - directStaging：幕次阻塞走位（双人全片同场 / 三人 ThreeMode / 分组淡入淡出）、Move、SE、镜头与转场；
+ *     - directStaging：幕次阻塞走位（双人全片同场 / 多人 Normal<=2 交叠淡出淡入轮换）、Move、SE、镜头与转场；
  *     - translateDialogue：日文 ttsText 批量翻译；
  * 3. directActing (`direction`)：带完整情绪标签与分幕上下文设计动作/表情/2拍 Talk.actions/静默反应；
  * 4. composeStory + validateAndFixStory + OfficialLinter：编译官方时间线并校验硬指标。
@@ -556,7 +556,7 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
         background: view.defaultImage() || '背景文件名',
         ambient: 'evening',
         transitionIn: 'sideFade',
-        activeCast: exampleCast.slice(0, 3).map((c) => c.name),
+        activeCast: exampleCast.slice(0, 2).map((c) => c.name),
         bgm: 'silence'
       }
     ],
@@ -567,8 +567,8 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
     view.models.length <= 2
       ? '从角色池选 1~2 名角色（默认 2 人；仅明确要求独白时选 1 人）。'
       : groupStyle
-        ? '本场偏向团体/活动场景：建议选 **3~5 名角色** 参演，用 scenes 安排每幕 1~3 人分组同台（3 人同台会启用官方 ThreeMode）。'
-        : '按场景需要选 **2~5 名角色**（双人对话选 2 人并保持两人全片同场；团体/活动场景选 3~5 人并按幕分组或用 ThreeMode 三人同台；仅明确独白选 1 人）。'
+        ? '本场偏向团体/活动场景：建议选 **3~5 名角色** 参演，用 scenes 安排每幕 1~2 人在场（官方 Normal 模式每次最多 2 人同台，通过 2 人交叠淡出淡入轮换上场）。'
+        : '按场景需要选 **2~5 名角色**（双人对话选 2 人并保持两人全片同场；团体/活动场景选 3~5 人并按幕或对话轮换保持每次最多 2 人在场；仅明确独白选 1 人）。'
 
   return {
     system: [
@@ -596,7 +596,7 @@ ${bgmList || '（可使用 keep 或 silence）'}
 - ${castRule}
 - 给每个角色标明本场功能（谁发起、谁回应、谁吐槽、谁压轴）。
 - 规划 **2~3 幕（scenes）**：
-  - 每幕写明 \`id\`（s1/s2/s3）、\`summary\`、\`background\`（必须来自可用背景清单）、\`ambient\`（normal/evening/night）、\`activeCast\`（1~3 名本幕在场角色名）。
+  - 每幕写明 \`id\`（s1/s2/s3）、\`summary\`、\`background\`（必须来自可用背景清单）、\`ambient\`（normal/evening/night）、\`activeCast\`（1~2 名本幕起手在场角色名，Normal 模式每次最多 2 人）。
   - 合理规划转场与标题条：首幕可用 \`telop\`（时间/气氛短标题，如「放学后」）或 \`placeInfo\`（左上角地点条）；后续幕次可用 \`transitionIn\`：\`sideFade\`（横向遮罩擦除）、\`flashback\`（白光闪入回忆：WhiteOut->FlashbackIn->WhiteIn）、\`sekaiIn\`/\`sekaiOut\`（出入 SEKAI）或 \`black\`。
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
   - 善用 BGM 弧光：在情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
@@ -720,9 +720,9 @@ export function normalizeCastPlan(
       cast,
       view,
       options.personas
-    )
+    ).slice(0, 2)
     const fallbackActive =
-      cast.length === 2 ? cast.map((c) => c.name) : cast.slice(0, Math.min(3, cast.length)).map((c) => c.name)
+      cast.length === 2 ? cast.map((c) => c.name) : cast.slice(0, Math.min(2, cast.length)).map((c) => c.name)
     const isFlashback = toBool(item.isFlashback ?? item.flashback)
     const isSekai = toBool(item.isSekai ?? item.sekai)
     let transitionIn = normalizeTransitionKind(item.transitionIn ?? item.transition)
@@ -765,7 +765,7 @@ export function normalizeCastPlan(
       activeCast:
         cast.length === 2
           ? cast.map((c) => c.name)
-          : cast.slice(0, Math.min(3, cast.length)).map((c) => c.name)
+          : cast.slice(0, Math.min(2, cast.length)).map((c) => c.name)
     })
   }
 
@@ -805,7 +805,7 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
         background: bg,
         ambient: 'normal',
         transitionIn: 'black',
-        activeCast: cast.slice(0, Math.min(3, cast.length)).map((c) => c.name)
+        activeCast: cast.slice(0, Math.min(2, cast.length)).map((c) => c.name)
       }
     ]
   }
@@ -1605,7 +1605,7 @@ export function buildStagingPrompt(
         telop: '放学后',
         placeInfo: '放学后的教室',
         transitionIn: 'black',
-        activeCast: plan.cast.slice(0, plan.cast.length === 2 ? 2 : 3).map((c) => c.name),
+        activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name),
         bgm: firstBgm || ''
       },
       ...(dialogue.lines.length >= 12
@@ -1613,10 +1613,10 @@ export function buildStagingPrompt(
             {
               id: 's2',
               fromLineId: midLine,
-              background: plan.background || view.defaultImage() || 'bg_room.jpg',
+              background: plan.background || view.defaultImage() || '背景文件名',
               ambient: 'evening',
               transitionIn: 'sideFade',
-              activeCast: plan.cast.slice(0, plan.cast.length === 2 ? 2 : 3).map((c) => c.name),
+              activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name),
               bgm: 'silence'
             }
           ]
@@ -1641,7 +1641,7 @@ export function buildStagingPrompt(
   const presenceRule =
     plan.cast.length === 2
       ? '- **双人全片同场铁律**：本场只有 2 人，每一幕 activeCast 都必须包含两人（Left / Right 全程同台，禁止把单人切出舞台）。'
-      : '- **多人动态分组与 ThreeMode**：本场 >=3 人，按对话节奏在幕次或 events.stageGroup 中切换 1~3 人在场（3 人同框自动启用官方 `Three` 模式 `Left/Center/Right`），不要让 4 人同时挤在台上。'
+      : '- **多人动态分组（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），按对话节奏在幕次或 events.stageGroup 中轮换 1~2 人在场，通过 `LayoutClear` + `LayoutAppear` 交叠淡出淡入切换，严禁 3 人以上同时挤在台上。'
 
   return {
     system: [
@@ -1723,7 +1723,7 @@ function resolveCastIds(
       ids.push(model.id)
     }
   }
-  return ids.slice(0, 3)
+  return ids.slice(0, 2)
 }
 
 function inferSceneStartsFromDialogue(
@@ -1760,7 +1760,7 @@ export function fallbackStaging(
       background: plan.background || view.defaultImage(),
       ambient: 'normal' as const,
       transitionIn: 'black' as const,
-      activeCast: plan.cast.slice(0, Math.min(3, plan.cast.length)).map((c) => c.name)
+      activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name)
     }
   ]
 
@@ -1773,7 +1773,7 @@ export function fallbackStaging(
         ? plan.cast.map((c) => c.modelId)
         : resolveCastIds(ps.activeCast, plan, view)
     if (activeCast.length === 0) {
-      activeCast = plan.cast.slice(0, Math.min(3, plan.cast.length)).map((c) => c.modelId)
+      activeCast = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
     }
     const bgDetail = view.canonicalImageEntry(ps.background)
     scenes.push({
@@ -1835,7 +1835,7 @@ function enrichStagingBaseline(
     }
   }
 
-  // 确保每一幕（尤其 >=3 人分幕时）覆盖该幕里开口的角色
+  // 确保每一幕起手阵容覆盖本幕开场前两名说话人（Normal 模式严格 <=2 人）
   if (plan.cast.length >= 3) {
     for (let sIdx = 0; sIdx < staging.scenes.length; sIdx++) {
       const scene = staging.scenes[sIdx]
@@ -1846,17 +1846,17 @@ function enrichStagingBaseline(
         const m = plan.cast.find((c) => c.name === lines[i].speaker)
         if (m && !speakersInScene.includes(m.modelId)) speakersInScene.push(m.modelId)
       }
-      if (speakersInScene.length <= 3) {
-        const merged = [...scene.activeCast]
-        for (const sid of speakersInScene) {
-          if (!merged.includes(sid) && merged.length < 3) merged.push(sid)
-        }
-        // 确保每名说话人都在 activeCast 中
-        for (const sid of speakersInScene) {
-          if (!merged.includes(sid)) merged[merged.length - 1] = sid
-        }
-        scene.activeCast = merged
+      const merged = scene.activeCast.slice(0, 2)
+      for (const sid of speakersInScene.slice(0, 2)) {
+        if (!merged.includes(sid) && merged.length < 2) merged.push(sid)
       }
+      const sceneSpeakers = new Set(speakersInScene.slice(0, 2))
+      for (const sid of speakersInScene.slice(0, 2)) {
+        if (merged.includes(sid)) continue
+        const replaceIdx = merged.findIndex((id) => !sceneSpeakers.has(id))
+        if (replaceIdx >= 0) merged[replaceIdx] = sid
+      }
+      scene.activeCast = merged.slice(0, 2)
     }
   }
 
@@ -1935,7 +1935,7 @@ export function normalizeStaging(
         ? plan.cast.map((c) => c.modelId)
         : resolveCastIds(item.activeCast ?? item.cast, plan, view)
     if (activeCast.length === 0) {
-      activeCast = plan.cast.slice(0, Math.min(3, plan.cast.length)).map((c) => c.modelId)
+      activeCast = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
     }
     const isFlashback = toBool(item.isFlashback ?? item.flashback)
     const isSekai = toBool(item.isSekai ?? item.sekai)
@@ -2653,7 +2653,7 @@ export interface StagedPresenceSegment {
  * 舞台在场计划：
  * - 双人戏严格遵守全片两人同场（Left/Right）；
  * - 单人戏保持 Center；
- * - 3~5 人戏按分幕/说话组动态切换（3人启用 ThreeMode）。
+ * - 3~5 人戏在 Normal 模式（<=2 人同框）下按分幕/说话组动态轮换。
  */
 export function planPresence(
   plan: StagedCastPlan,
@@ -2673,25 +2673,27 @@ export function planPresence(
   if (scenes.length > 0) {
     return scenes.map((scene, index) => {
       const to = index + 1 < scenes.length ? Math.max(scene.fromIndex, scenes[index + 1].fromIndex - 1) : last
-      const count = scene.activeCast.length
+      const castIds = scene.activeCast.slice(0, 2)
+      const count = castIds.length
       return {
         from: scene.fromIndex,
         to,
-        mode: count >= 3 ? 'trio' : count === 2 ? 'duo' : 'solo',
-        ...(count === 1 ? { speaker: plan.cast.find((c) => c.modelId === scene.activeCast[0])?.name } : {}),
-        castIds: scene.activeCast
+        mode: count === 2 ? 'duo' : 'solo',
+        ...(count === 1 ? { speaker: plan.cast.find((c) => c.modelId === castIds[0])?.name } : {}),
+        castIds
       }
     })
   }
-  const initialIds = plan.cast.slice(0, Math.min(3, plan.cast.length)).map((c) => c.modelId)
-  return [{ from: 0, to: last, mode: initialIds.length >= 3 ? 'trio' : 'duo', castIds: initialIds }]
+  const initialIds = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
+  return [{ from: 0, to: last, mode: initialIds.length === 2 ? 'duo' : 'solo', castIds: initialIds }]
 }
 
 /**
  * 把五阶段结果合成为官方 PJSK 规范的 StoryData。
  *
- * 保持双人全片同场、三人 ThreeMode、99% 原地淡入淡出、93% delay=0、
- * 入场防重叠去重、转场前 closeWindowOnFinish、Move/PlaySe/SideFade/Flashback/Sekai/Hologram 全部精确对齐。
+ * 保持全片 Normal 模式（<=2 人同场）、双人全片同场、多人 2 人交叠淡出淡入轮换、
+ * 99% 原地淡入淡出、93% delay=0、入场防重叠去重、转场前 closeWindowOnFinish、
+ * Move/PlaySe/SideFade/Flashback/Sekai/Hologram 全部精确对齐。
  */
 export function composeStory(
   view: CatalogView,
@@ -2769,13 +2771,15 @@ export function composeStory(
     speakingCountSinceAppear: number
   }
   const onStage = new Map<number, StageActorState>()
-  let layoutMode: 'Normal' | 'Three' | null = null
+  let layoutMode: 'Normal' | null = null
   let windowOpen = false
   let flashbackActive = false
   let currentEffect = ''
   let currentBgm = ''
   let cameraDirty = false
   let shakeScreenActive = false
+  let lastSpeakerId: number | null = null
+  const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
   const closeWindowBeforeBreak = (): void => {
     if (!windowOpen) return
@@ -2820,21 +2824,21 @@ export function composeStory(
     shakeScreenActive = false
   }
 
-  const switchLayoutMode = (target: 'Normal' | 'Three'): void => {
-    if (layoutMode === target) return
+  const ensureNormalLayoutMode = (): void => {
+    if (layoutMode === 'Normal') return
     snippets.push({
       type: 'ChangeLayoutMode',
       wait: false,
       progressBehavior: 'Now',
       delay: 0,
-      data: { mode: target }
+      data: { mode: 'Normal' }
     })
-    layoutMode = target
+    layoutMode = 'Normal'
   }
 
-  const clearActors = (ids: number[], walkOutSet = new Set<number>()): void => {
+  const clearActors = (ids: number[], walkOutSet = new Set<number>()): number => {
     const toClear = ids.filter((id) => onStage.has(id))
-    if (toClear.length === 0) return
+    if (toClear.length === 0) return 0
     for (const id of toClear) {
       const state = onStage.get(id)!
       if (state.hologram) {
@@ -2871,6 +2875,7 @@ export function composeStory(
       })
       onStage.delete(id)
     })
+    return toClear.length
   }
 
   const appearActors = (
@@ -2881,53 +2886,107 @@ export function composeStory(
       walkOutSet?: Set<number>
       hologramSet?: Set<number>
       forceReenter?: boolean
+      hadPrecedingClear?: boolean
     } = {}
   ): void => {
-    const validIds = targetIds.filter((id) => cast.some((c) => c.modelId === id)).slice(0, 3)
+    const validIds = targetIds.filter((id) => cast.some((c) => c.modelId === id)).slice(0, 2)
     if (validIds.length === 0) return
 
-    const desiredMode: 'Normal' | 'Three' = validIds.length >= 3 ? 'Three' : 'Normal'
     const walkInSet = options.walkInSet ?? new Set<number>()
     const walkOutSet = options.walkOutSet ?? new Set<number>()
     const hologramSet = options.hologramSet ?? new Set<number>()
 
     const sameGroup =
       !options.forceReenter &&
-      desiredMode === layoutMode &&
+      layoutMode === 'Normal' &&
       validIds.length === onStage.size &&
       validIds.every((id) => onStage.has(id))
     if (sameGroup) return
 
-    const targetSlots: SideSlot[] =
-      desiredMode === 'Three'
-        ? ['Left', 'Center', 'Right']
-        : validIds.length === 1
-          ? ['Center']
-          : ['Left', 'Right']
+    // Normal 模式槽位分配：<= 2 人时尽量保留在场角色现有的 Left/Right 槽位，避免无意义闪退重入
+    const desiredSlotFor = new Map<number, SideSlot>()
+    if (validIds.length === 1) {
+      desiredSlotFor.set(validIds[0], 'Center')
+    } else {
+      const freeSlots: SideSlot[] = ['Left', 'Right']
+      if (!options.forceReenter) {
+        for (const id of validIds) {
+          const existing = onStage.get(id)?.side
+          if (existing === 'Left' || existing === 'Right') {
+            desiredSlotFor.set(id, existing)
+            const idx = freeSlots.indexOf(existing)
+            if (idx >= 0) freeSlots.splice(idx, 1)
+          }
+        }
+      }
+      for (const id of validIds) {
+        if (!desiredSlotFor.has(id)) {
+          desiredSlotFor.set(id, freeSlots.shift() ?? 'Right')
+        }
+      }
+    }
 
-    // 避免局部改组槽位冲突：双人或换模式/多人重排时先原地清出不在目标或槽位需重排的成员
-    const outgoing = [...onStage.keys()].filter((id) => {
-      if (!validIds.includes(id)) return true
-      const slotIdx = validIds.indexOf(id)
-      return onStage.get(id)?.side !== targetSlots[slotIdx]
-    })
-    clearActors(outgoing, walkOutSet)
-    switchLayoutMode(desiredMode)
+    // 单人 Center -> 双人 Left/Right（或相反）时，保留角色直接 Move 到新槽位，避免淡出再淡入
+    const outgoing = [...onStage.keys()].filter((id) => !validIds.includes(id))
+    const clearedCount = clearActors(outgoing, walkOutSet)
+    ensureNormalLayoutMode()
 
+    let movedExisting = false
+    for (const id of validIds) {
+      const st = onStage.get(id)
+      const targetSide = desiredSlotFor.get(id)!
+      if (st && st.side !== targetSide) {
+        snippets.push({
+          type: 'Move',
+          wait: clearedCount === 0 && !movedExisting,
+          progressBehavior: clearedCount === 0 && !movedExisting ? 'WaitFinished' : 'Now',
+          delay: 0,
+          data: {
+            modelId: id,
+            from: { side: st.side, offset: st.offset },
+            to: { side: targetSide, offset: 0 },
+            moveSpeed: 'Fast',
+            motion: '',
+            facial: ''
+          }
+        })
+        st.side = targetSide
+        st.offset = 0
+        movedExisting = true
+      }
+    }
+
+    const overlapsPreceding = Boolean(options.hadPrecedingClear) || clearedCount > 0 || movedExisting
+    const lineAtEntry = dialogue.lines[lineIndex]
+    const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
     incoming.forEach((id, idx) => {
-      const slot = targetSlots[validIds.indexOf(id)]
+      const slot = desiredSlotFor.get(id)!
       const isWalk = walkInSet.has(id)
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
         : { side: slot, offset: 0 }
-      const entryMotion = view.exampleMotion(id) || view.defaultMotion(id)
-      const entryFacial = view.exampleFacial(id) || view.defaultFacial(id)
+      const memberName = cast.find((c) => c.modelId === id)?.name
+      const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
+      const directedMotion =
+        isEntrySpeaker && directedAtEntry
+          ? directedAtEntry.beats?.[0]?.motion ?? directedAtEntry.motion
+          : undefined
+      const directedFacial =
+        isEntrySpeaker && directedAtEntry
+          ? directedAtEntry.beats?.[0]?.facial ?? directedAtEntry.facial
+          : undefined
+      const entryMotion =
+        directedMotion && !isStandingMotion(directedMotion)
+          ? directedMotion
+          : view.exampleMotion(id) || view.defaultMotion(id)
+      const entryFacial = directedFacial || view.exampleFacial(id) || view.defaultFacial(id)
       const isHolo = hologramSet.has(id)
+      const waitFirst = !overlapsPreceding && idx === 0
       snippets.push({
         type: 'LayoutAppear',
-        wait: idx === 0,
-        progressBehavior: idx === 0 ? 'WaitFinished' : 'Now',
+        wait: waitFirst,
+        progressBehavior: waitFirst ? 'WaitFinished' : 'Now',
         delay: 0,
         data: {
           modelId: id,
@@ -2992,8 +3051,7 @@ export function composeStory(
   const scene0 = effectiveStaging.scenes[0]
   if (scene0) {
     applyBgmDirective(scene0.bgm || direction.bgm, 600)
-    const initialMode: 'Normal' | 'Three' = scene0.activeCast.length >= 3 ? 'Three' : 'Normal'
-    switchLayoutMode(initialMode)
+    ensureNormalLayoutMode()
     const bgId = registerImage(scene0.background)
     snippets.push({
       type: 'BlackOut',
@@ -3062,7 +3120,6 @@ export function composeStory(
   // ---- 逐句编译分幕转场、走位事件、音效与表演 ----------------------------------------------------------------
   const sceneByStart = new Map(effectiveStaging.scenes.slice(1).map((s) => [s.fromIndex, s]))
   const eventByIndex = new Map(effectiveStaging.events.map((e) => [e.lineIndex, e]))
-  const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
   for (let index = 0; index < dialogue.lines.length; index++) {
     const nextScene = sceneByStart.get(index)
@@ -3119,12 +3176,12 @@ export function composeStory(
             data: { file: 'se00053_b.mp3', volume: 0.9, loop: false, fadeMs: 0 }
           })
         }
-        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         if (enteringFlashback) {
           snippets.push({
             type: 'FlashbackIn',
-            wait: false,
-            progressBehavior: 'Now',
+            wait: clearedCount === 0,
+            progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
             delay: 0,
             data: { duration: 100, alpha: 0.3 }
           })
@@ -3134,8 +3191,8 @@ export function composeStory(
         }
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: clearedCount === 0 && !enteringFlashback,
+          progressBehavior: clearedCount === 0 && !enteringFlashback ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3149,7 +3206,8 @@ export function composeStory(
         appearActors(nextScene.activeCast, index, {
           walkInSet: new Set(nextScene.walkInCast ?? []),
           hologramSet: new Set(nextScene.hologramCast ?? []),
-          forceReenter: true
+          forceReenter: true,
+          hadPrecedingClear: true
         })
         snippets.push({
           type: 'BlackIn',
@@ -3166,12 +3224,12 @@ export function composeStory(
           delay: 0,
           data: { duration: 500, variant: 'v2' }
         })
-        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         closeFlashbackBehindCurtain()
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: clearedCount === 0,
+          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3185,7 +3243,8 @@ export function composeStory(
         appearActors(nextScene.activeCast, index, {
           walkInSet: new Set(nextScene.walkInCast ?? []),
           hologramSet: new Set(nextScene.hologramCast ?? []),
-          forceReenter: true
+          forceReenter: true,
+          hadPrecedingClear: true
         })
         snippets.push({
           type: 'SekaiIn',
@@ -3202,12 +3261,12 @@ export function composeStory(
           delay: 0,
           data: { direction: 'Left', edge: 'left', mode: 'Out', duration: 450 }
         })
-        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         closeFlashbackBehindCurtain()
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: clearedCount === 0,
+          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3221,7 +3280,8 @@ export function composeStory(
         appearActors(nextScene.activeCast, index, {
           walkInSet: new Set(nextScene.walkInCast ?? []),
           hologramSet: new Set(nextScene.hologramCast ?? []),
-          forceReenter: true
+          forceReenter: true,
+          hadPrecedingClear: true
         })
         snippets.push({
           type: 'SideFade',
@@ -3239,11 +3299,11 @@ export function composeStory(
           delay: 0,
           data: { duration: 400, color: fadeColor }
         })
-        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: clearedCount === 0,
+          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3257,7 +3317,8 @@ export function composeStory(
         appearActors(nextScene.activeCast, index, {
           walkInSet: new Set(nextScene.walkInCast ?? []),
           hologramSet: new Set(nextScene.hologramCast ?? []),
-          forceReenter: true
+          forceReenter: true,
+          hadPrecedingClear: true
         })
         snippets.push({
           type: 'BlackIn',
@@ -3308,11 +3369,11 @@ export function composeStory(
     if (!member) continue
     const ev = eventByIndex.get(index)
 
-    // 多人戏若本句说话人尚未在场，安全入场或分组切换
+    // 多人戏若本句说话人尚未在场，安全入场或以 Normal 模式（<=2 人）交叠淡出淡入轮换
     if (ev?.stageGroup && plan.cast.length >= 3) {
       const targetGroup = ev.stageGroup.activeCast.includes(member.modelId)
-        ? ev.stageGroup.activeCast
-        : [member.modelId, ...ev.stageGroup.activeCast.slice(0, 2)]
+        ? ev.stageGroup.activeCast.slice(0, 2)
+        : [member.modelId, ...ev.stageGroup.activeCast.slice(0, 1)]
       appearActors(targetGroup, index, {
         walkInSet: new Set(ev.stageGroup.walkIn ?? []),
         walkOutSet: new Set(ev.stageGroup.walkOut ?? [])
@@ -3320,8 +3381,12 @@ export function composeStory(
     } else if (!onStage.has(member.modelId)) {
       if (plan.cast.length >= 3) {
         const currentIds = [...onStage.keys()]
+        const keepId =
+          lastSpeakerId !== null && currentIds.includes(lastSpeakerId)
+            ? lastSpeakerId
+            : currentIds[currentIds.length - 1]
         const nextIds =
-          currentIds.length < 3 ? [...currentIds, member.modelId] : [...currentIds.slice(1), member.modelId]
+          currentIds.length < 2 ? [...currentIds, member.modelId] : [keepId, member.modelId]
         appearActors(nextIds, index)
       } else {
         appearActors(cast.map((c) => c.modelId), index)
@@ -3529,6 +3594,7 @@ export function composeStory(
       }
     })
     windowOpen = !closeAfter
+    lastSpeakerId = member.modelId
 
     if (ev?.se && ev.se.timing === 'during') {
       snippets.push({

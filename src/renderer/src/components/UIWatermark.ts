@@ -20,11 +20,9 @@ export default class UIWatermark extends Text {
     })
     super(`${WATERMARK_LINE_1}\n${WATERMARK_LINE_2}`, style)
 
-    const k = Math.min(screen_width / 1920, screen_height / 1080)
     this.anchor.set(1, 0)
-    // Reserve the right edge [1808, 16, 96, 96] for UILayer's circular MENU button.
-    this.x = screen_width - 136 * k
-    this.y = 20 * k
+    this.x = screen_width - screen_width / 48
+    this.y = screen_height / 36
   }
 
   /**

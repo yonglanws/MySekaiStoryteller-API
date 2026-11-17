@@ -1,31 +1,32 @@
 import { AlphaFilter, Text, TextStyle } from 'pixi.js'
 import AnimationManager from '../managers/AnimationManager'
 
-/**
- * 官方 `TalkWindow/Name`（`[230, 790, 593, 44]` @ 1920×1080，色值 `#EBECF2`，无厚重描边）。
- */
 export default class UISpeakerText extends Text {
   private animGen = 0
 
   constructor(screen_width: number, screen_height: number, y?: number) {
-    const k = Math.min(screen_width / 1920, screen_height / 1080)
+    const x = screen_width / 9
+
     const style = new TextStyle({
       align: 'left',
-      fill: '#EBECF2',
+      fill: '#FFFFFFF5',
       fontFamily: "'MiSans Medium', sans-serif",
-      fontSize: 40 * k,
+      fontSize: screen_height / 25,
       fontWeight: '600',
-      stroke: 'rgba(68, 68, 102, 0.55)',
-      strokeThickness: 1.5 * k
+      stroke: '#4A4968D9',
+      strokeThickness: screen_height / 120,
+      wordWrap: true,
+      wordWrapWidth: screen_width * 0.7,
+      breakWords: true
     })
     super('', style)
-    this.anchor.set(0, 1)
-    this.x = 230 * k
-    this.y = y !== undefined && y > 0 ? y : 820 * k
 
-    const alphaFilter = new AlphaFilter(0)
-    alphaFilter.resolution = 2
-    this.filters = [alphaFilter]
+    this.x = x
+    this.y = y ?? screen_height / 1.3 - screen_width / 37
+
+    const alpha_filter = new AlphaFilter(0)
+    alpha_filter.resolution = 2
+    this.filters = [alpha_filter]
   }
 
   public async show(time: number): Promise<void> {

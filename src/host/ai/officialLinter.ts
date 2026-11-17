@@ -8,12 +8,13 @@
  * 4. 转场（BlackOut / SideFade Out / SekaiOut / Telop）与静默动作前设 closeWindowOnFinish
  * 5. FlashbackIn/Out、SepiaIn/Out、SideFade Out/In、SekaiOut/In、ShakeScreen/Stop、Shader、Camera 闭合
  * 6. 动作与表情全部存在于实时 CatalogView 目录中
- * 7. Normal(<=2) / Three(<=3) 舞台人数与槽位无冲突
+ * 7. Normal(<=2) 舞台人数与槽位无冲突（禁止 ThreeMode）
  */
 
 import { snippetHasPreFence } from '../../common/export/snippetSemantics'
 import {
   APPEAR_FADE_TOTAL_MS,
+  AUTO_NEXT_PAGE_DELAY_MS,
   HIDE_IN_PLACE_TOTAL_MS,
   MOVE_SPEED_DURATION_MS,
   SEKAI_IN_PRE_DELAY_MS,
@@ -65,7 +66,7 @@ function estimateTalkDurationSec(data: JsonRecord, windowOpen: boolean): number 
   const chars = visibleChars(str(data.content))
   const openSec = windowOpen ? 0 : TALK_WINDOW_OPEN_CLOSE_MS / 1000
   const typingSec = chars * ((WORD_INTERVAL_FRAMES * FRAME_MS) / 1000)
-  return Math.max(1.8, openSec + typingSec + 2.0)
+  return openSec + typingSec + AUTO_NEXT_PAGE_DELAY_MS / 1000
 }
 
 function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): number {
@@ -172,7 +173,6 @@ export function lintOfficialStory(
   const invalidCatalogAnimations: string[] = []
 
   const visible = new Map<number, { side: string; offset: number }>()
-  let layoutMode: 'Normal' | 'Three' = 'Normal'
   let flashbackOpen = false
   let sepiaOpen = false
   let sideFadeCovered = false
@@ -218,7 +218,10 @@ export function lintOfficialStory(
     }
 
     if (kind === 'ChangeLayoutMode') {
-      layoutMode = data.mode === 'Three' ? 'Three' : 'Normal'
+      if (data.mode === 'Three') {
+        stageViolationCount += 1
+        issues.push(`snippets[${i}] 禁止使用 ThreeMode（官方剧集全为 Normal <=2 人模式）`)
+      }
     } else if (kind === 'LayoutAppear') {
       appearCount += 1
       const from = isRecord(data.from) ? data.from : {}
@@ -231,13 +234,12 @@ export function lintOfficialStory(
       }
       const modelId = num(data.modelId, -1)
       const side = str(to.side, 'Left')
-      const maxOnStage = layoutMode === 'Three' ? 3 : 2
-      if (visible.size >= maxOnStage && !visible.has(modelId)) {
+      if (visible.size >= 2 && !visible.has(modelId)) {
         stageViolationCount += 1
       }
       for (const [otherId, pos] of visible) {
         if (otherId === modelId) continue
-        if (pos.side === side || (layoutMode === 'Normal' && (pos.side === 'Center' || side === 'Center'))) {
+        if (pos.side === side || pos.side === 'Center' || side === 'Center') {
           stageViolationCount += 1
         }
       }
@@ -255,7 +257,7 @@ export function lintOfficialStory(
       const side = str(to.side, 'Left')
       for (const [otherId, pos] of visible) {
         if (otherId === modelId) continue
-        if (pos.side === side || (layoutMode === 'Normal' && (pos.side === 'Center' || side === 'Center'))) {
+        if (pos.side === side || pos.side === 'Center' || side === 'Center') {
           stageViolationCount += 1
         }
       }

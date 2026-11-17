@@ -760,7 +760,7 @@ const STORY_PROMPT = `# 视觉小说剧本生成
 
 {character_pool}
 
-> 根据场景从角色池选角：独白用 1 人，双人对话用 2 人，团体/活动场景可选 3~5 人。优先选场景点名的角色；Normal 模式最多 2 人同台（Left/Right 或单人 Center），Three 模式允许 3 人同台（Left/Center/Right）。
+> 根据场景从角色池选角：独白用 1 人，双人对话用 2 人，团体/活动场景可选 3~5 人。优先选场景点名的角色；全片保持 Normal 模式（最多 2 人同台：Left/Right 或单人 Center），3~5 人通过 LayoutClear + LayoutAppear 交叠淡出淡入轮换同框。
 
 ## modelId 对照表（不可混淆）
 {model_table}
@@ -769,11 +769,11 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 
 ## 布局与舞台规则
 
-- ChangeLayoutMode.data.mode：1~2 人用 "Normal"（Left / Right 或单人 Center），3 人同台前切为 "Three"（Left / Center / Right）；严禁 4 人以上同时在场或槽位冲突。
+- ChangeLayoutMode.data.mode：固定为 "Normal"（Left / Right 双人或单人 Center）；严禁 3 人及以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
-- **双人全片同场原则**：当整场只有 2 名角色时，保持两人在场（Left/Right），不要每句来回切人淡入淡出。当整场 >=3 名角色时，可按幕次分组切换（或用 ThreeMode 三人同框）。
+- **双人全片同场与多人轮换原则**：当整场只有 2 名角色时，保持两人在场（Left/Right），不要每句来回切人淡入淡出。当整场 >=3 名角色时，保持每次最多 2 人在场，按幕次或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
 - **入场/退场动画规则（99% 原地淡入淡出）**：
-  - 默认原地淡入淡出：LayoutAppear 的 from 与 to 写相同槽位且 offset=0（如 {"side":"Left","offset":0} -> {"side":"Left","offset":0}）；双人/三人同入时第一条 progressBehavior="WaitFinished" (wait:true)，其余 progressBehavior="Now" (wait:false)。
+  - 默认原地淡入淡出：LayoutAppear 的 from 与 to 写相同槽位且 offset=0（如 {"side":"Left","offset":0} -> {"side":"Left","offset":0}）；双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
   - 仅在明确“走入/走离”镜头时，才用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
   - LayoutAppear 若已带入场动作（禁止 default 站姿），紧接着 0.4s 内的该角色首句 Talk 不要再重复触发 body motion（可只改 facial）。
   - LayoutClear 默认原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
@@ -840,7 +840,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 
 ## 输出要求
 1. 只输出合法 JSON，无 markdown、无解释；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear/LayoutClear 默认原地淡入淡出（from == to, offset: 0），仅物理走入用 LeftOver/RightOver；Normal 最多 2 人，Three 最多 3 人
+2. 开场与退场序列完整；LayoutAppear/LayoutClear 默认原地淡入淡出（from == to, offset: 0），仅物理走入用 LeftOver/RightOver；全片 Normal 模式最多 2 人同时在场
 3. models 的 id 和路径必须与对照表一致，多角色绝不能写成同一个模型；数组顺序与登场顺序一致
 4. 所有 Talk/Motion/LayoutAppear/LayoutClear 的 modelId：{id_mapping}
 5. 每条 Talk 只写 content、不要写 ttsText；入场后 <0.4s 勿重复触发同角色 body motion；短反应保留 facial

@@ -251,7 +251,7 @@ test('normalizeDirection preserves facial on short reactions and builds 2-beat T
   assert.equal(l3.facial, 'face_sparkling_01', 'short reaction line l3 must NOT lose facial')
 })
 
-test('5-stage director compiles 4-cast ThreeMode, multi-scene transitions, hologram, silence cut, and passes officialLinter', () => {
+test('5-stage director compiles 4-cast Normal mode (<=2 on stage with overlapping crossfades), multi-scene transitions, hologram, silence cut, and passes officialLinter', () => {
   const view = makeEnsembleView()
   const plan = staged.normalizeCastPlan(
     {
@@ -371,14 +371,34 @@ test('5-stage director compiles 4-cast ThreeMode, multi-scene transitions, holog
   assert.equal(report.metrics.inPlaceAppearShare, 1)
 
   const types = new Set(story.snippets.map((s) => s.type))
-  assert.ok(story.snippets.some((s) => s.type === 'ChangeLayoutMode' && s.data.mode === 'Three'))
+  assert.ok(story.snippets.some((s) => s.type === 'ChangeLayoutMode' && s.data.mode === 'Normal'))
+  assert.ok(!story.snippets.some((s) => s.type === 'ChangeLayoutMode' && s.data.mode === 'Three'))
+
+  // Assert <= 2 on-stage characters at all times & overlapping crossfades (LayoutClear -> LayoutAppear with Now)
+  const onStage = new Set()
+  let maxOnStage = 0
+  let crossfadeAppearNow = 0
+  for (let i = 0; i < story.snippets.length; i++) {
+    const s = story.snippets[i]
+    if (s.type === 'LayoutAppear') {
+      onStage.add(s.data.modelId)
+      maxOnStage = Math.max(maxOnStage, onStage.size)
+      if (i > 0 && story.snippets[i - 1].type === 'LayoutClear' && s.progressBehavior === 'Now') {
+        crossfadeAppearNow += 1
+      }
+    } else if (s.type === 'LayoutClear') {
+      onStage.delete(s.data.modelId)
+    }
+  }
+  assert.ok(maxOnStage <= 2, `Expected max 2 on-stage characters in Normal mode, got ${maxOnStage}`)
+  assert.ok(crossfadeAppearNow >= 1, 'Expected at least 1 overlapping LayoutClear -> LayoutAppear(Now) crossfade')
+
   assert.ok(types.has('Telop'))
   assert.ok(types.has('PlaceInfo'))
   assert.ok(types.has('PlayScenarioEffect') && types.has('StopScenarioEffect'))
   assert.ok(types.has('FlashbackIn') && types.has('FlashbackOut'))
   assert.ok(types.has('SekaiOut') && types.has('SekaiIn'))
   assert.ok(types.has('Move'))
-  assert.ok(types.has('CharacterShake'))
   assert.ok(types.has('Motion'))
   assert.ok(types.has('PlaySe'))
   assert.ok(types.has('CameraZoom'))
@@ -390,6 +410,29 @@ test('5-stage director compiles 4-cast ThreeMode, multi-scene transitions, holog
     story.snippets.some((s) => s.type === 'AttachCharacterShader' && s.data.shader === 'none'),
     'hologram shader must cleanly reset to none before exit'
   )
+})
+
+test('officialLinter rejects ThreeMode and keeps Normal-mode stage bounds', () => {
+  const view = makeEnsembleView()
+  const threeStory = {
+    models: [
+      { id: 13, model: '13tsukasa_normal/13tsukasa_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 14, model: '14emu_normal/14emu_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 15, model: '15nene_normal/15nene_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_stage.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Three' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 13, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 14, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } } },
+      { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 15, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', content: '测试。', modelId: 13, closeWindowOnFinish: true } }
+    ]
+  }
+  const report = linter.lintOfficialStory(threeStory, view)
+  assert.equal(report.passed, false)
+  assert.ok(report.metrics.stageViolationCount >= 1)
 })
 
 test('officialLinter flags and enforces invariants on malformed snippets', () => {

@@ -35,9 +35,11 @@ import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import {
+  FRAME_MS,
   OPENING_COVER_FADE_MS,
   PLAYED_WAIT_TIME_MS,
   SCENARIO_EXIT_BGM_FADE_MS,
+  STORY_FPS,
   TALK_WINDOW_OPEN_CLOSE_MS
 } from '../../../common/official/timing'
 import {
@@ -124,6 +126,11 @@ export default class VideoExportManager {
   private abortController: AbortController | null = null
   /** Talk 索引 -> 动作收尾时间（ms，相对 Talk 开始），用于 diagnostics 的逐帧计划。 */
   private talkSettleMsByIndex = new Map<number, number>()
+  private lipSyncCache = new Map<number, ReturnType<typeof buildLipSyncEnvelope> | null>()
+  private pendingLipSync = new Map<
+    number,
+    Promise<ReturnType<typeof buildLipSyncEnvelope> | null>
+  >()
 
   private static readonly DEFAULT_BATCH_SIZE = 30
 
@@ -146,9 +153,9 @@ export default class VideoExportManager {
     this.logger.info('Export aborted by user')
   }
 
-  private async prepareTalkLipSync(audioBuffer?: ArrayBuffer): Promise<void> {
-    this.app.currentTalkLipSync = null
-    if (!audioBuffer) return
+  private async decodeLipSyncEnvelope(
+    audioBuffer: ArrayBuffer
+  ): Promise<ReturnType<typeof buildLipSyncEnvelope> | null> {
     try {
       // Offline decoding must not wait on timers while the fast frame pump is paused.
       const decoder = new OfflineAudioContext(1, 1, 48000)
@@ -157,10 +164,76 @@ export default class VideoExportManager {
       const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) =>
         decoded.getChannelData(index)
       )
-      this.app.currentTalkLipSync = buildLipSyncEnvelope(channels, decoded.sampleRate)
+      return buildLipSyncEnvelope(channels, decoded.sampleRate)
     } catch (error) {
       this.checkAborted()
       this.logger.warn('Speech envelope unavailable; skipping lip sync', error)
+      return null
+    }
+  }
+
+  private predecodeTalkLipSync(snippetIndex: number, audioBuffer?: ArrayBuffer): void {
+    if (
+      snippetIndex < 0 ||
+      !audioBuffer ||
+      this.lipSyncCache.has(snippetIndex) ||
+      this.pendingLipSync.has(snippetIndex)
+    ) {
+      return
+    }
+    const task = this.decodeLipSyncEnvelope(audioBuffer)
+      .then((envelope) => {
+        this.lipSyncCache.set(snippetIndex, envelope)
+        return envelope
+      })
+      .finally(() => {
+        this.pendingLipSync.delete(snippetIndex)
+      })
+    this.pendingLipSync.set(snippetIndex, task)
+  }
+
+  private async prepareTalkLipSync(audioBuffer?: ArrayBuffer, snippetIndex = -1): Promise<void> {
+    this.app.currentTalkLipSync = null
+    if (snippetIndex >= 0 && this.lipSyncCache.has(snippetIndex)) {
+      this.app.currentTalkLipSync = this.lipSyncCache.get(snippetIndex) ?? null
+      return
+    }
+    if (snippetIndex >= 0 && this.pendingLipSync.has(snippetIndex)) {
+      this.app.currentTalkLipSync = (await this.pendingLipSync.get(snippetIndex)) ?? null
+      return
+    }
+    if (!audioBuffer) return
+    const envelope = await this.decodeLipSyncEnvelope(audioBuffer)
+    if (snippetIndex >= 0) this.lipSyncCache.set(snippetIndex, envelope)
+    this.app.currentTalkLipSync = envelope
+  }
+
+  private hasOpeningCurtain(snippets: SnippetData[]): boolean {
+    for (const snippet of snippets) {
+      if (snippet.type === 'BlackOut' || snippet.type === 'BlackIn') return true
+      if (snippet.type === 'LayoutAppear' || snippet.type === 'Talk') return false
+    }
+    return false
+  }
+
+  private async prewarmReadyLipSync(
+    snippets: SnippetData[],
+    concurrentPipeline: ConcurrentExportPipeline,
+    fromIndex: number,
+    lookahead: number
+  ): Promise<void> {
+    if (!this.app.ttsManager) return
+    let queued = 0
+    for (let j = fromIndex; j < snippets.length && queued < lookahead; j++) {
+      if (snippets[j].type !== 'Talk') continue
+      queued++
+      if (this.lipSyncCache.has(j) || this.pendingLipSync.has(j)) continue
+      if (!concurrentPipeline.isTTSReady(j)) continue
+      const res = await concurrentPipeline.waitForTTSReady(j)
+      if (res?.success && res.duration > 0) {
+        const buf = this.app.ttsManager.getAudioBufferForSnippet(j)
+        if (buf) this.predecodeTalkLipSync(j, buf)
+      }
     }
   }
 
@@ -242,6 +315,8 @@ export default class VideoExportManager {
     motionTrace.reset()
     exportTraceContext.reset()
     this.talkSettleMsByIndex.clear()
+    this.lipSyncCache.clear()
+    this.pendingLipSync.clear()
     resetStageTiming(this.app)
     this.app.snippetStrategyManager?.resetBackgroundSnippets()
   }
@@ -680,6 +755,18 @@ export default class VideoExportManager {
         })
         await concurrentPipeline.waitForTTSPipeline()
         this.checkAborted()
+        for (let idx = 0; idx < snippets.length; idx++) {
+          if (snippets[idx].type !== 'Talk') continue
+          const res = await concurrentPipeline.waitForTTSReady(idx)
+          if (res?.success && res.duration > 0) {
+            const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
+            if (buf) this.predecodeTalkLipSync(idx, buf)
+          }
+        }
+        if (this.pendingLipSync.size > 0) {
+          await Promise.allSettled([...this.pendingLipSync.values()])
+          this.checkAborted()
+        }
         if (exportStatus) exportStatus.textContent = '语音合成完成，开始录制…'
       }
     } else {
@@ -732,7 +819,9 @@ export default class VideoExportManager {
       timestampRecorder.markRenderStart()
 
       const extendedApp = this.app as unknown as ExtendedApp
-      const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+      const openingCoverTask = this.hasOpeningCurtain(snippets)
+        ? undefined
+        : extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
       void openingCoverTask?.catch(() => undefined)
 
       const pendingTimestampTasks: Promise<void>[] = []
@@ -805,6 +894,36 @@ export default class VideoExportManager {
         exportTraceContext.setSnippet(i, snippet.type)
         const isTalk = snippet.type === 'Talk'
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
+
+        let ttsDurationMs = 0
+        if (ttsEnabled && talkData) {
+          const ttsResult = await concurrentPipeline.waitForTTSReady(i)
+          ttsDurationMs =
+            ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
+              ? ttsResult.duration
+              : 0
+          if (ttsDurationMs > 0) {
+            const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
+            if (rawAudioBuffer) {
+              ttsAudioResults.set(i, {
+                audioBuffer: rawAudioBuffer,
+                durationMs: ttsDurationMs,
+                characterName: talkData.speaker,
+                text: talkData.content,
+                preDecoded: false
+              })
+            }
+          }
+        }
+
+        // 先完成口型包络解码（serial 模式为 0ms 缓存命中），再采样 nowMs 与启动计时，避免解码/等 TTS 拉偏墙钟动画
+        if (isTalk) {
+          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer, i)
+          if (ttsEnabled && !serialTts) {
+            void this.prewarmReadyLipSync(snippets, concurrentPipeline, i + 1, 3)
+          }
+        }
+
         const nowMs = performance.now()
         const layoutRunningMs = isTalk ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs) : 0
         const existingMotionSettleMs = isTalk
@@ -813,11 +932,6 @@ export default class VideoExportManager {
 
         let resolvedTalkDurationMs: number | undefined
         if (ttsEnabled && talkData) {
-          const ttsResult = await concurrentPipeline.waitForTTSReady(i)
-          const ttsDurationMs =
-            ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
-              ? ttsResult.duration
-              : 0
           resolvedTalkDurationMs = applyTalkPatch(
             timeline,
             i,
@@ -831,18 +945,6 @@ export default class VideoExportManager {
               existingMotionSettleMs
             )
           )
-          if (ttsDurationMs > 0) {
-            const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
-            if (rawAudioBuffer) {
-              ttsAudioResults.set(i, {
-                audioBuffer: rawAudioBuffer,
-                durationMs: ttsDurationMs,
-                characterName: talkData.speaker,
-                text: talkData.content,
-                preDecoded: false
-              })
-            }
-          }
         }
 
         const timelineEntry = timeline[i]
@@ -879,7 +981,6 @@ export default class VideoExportManager {
             : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
         if (isTalk) {
-          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
           this.app.currentTalkStartedAtMs = 0
           timestampRecorder.markSnippetStart(i, snippet.type, {
             speaker: talkData?.speaker,
@@ -1367,6 +1468,18 @@ export default class VideoExportManager {
         })
         await concurrentPipeline.waitForTTSPipeline()
         this.checkAborted()
+        for (let idx = 0; idx < snippets.length; idx++) {
+          if (snippets[idx].type !== 'Talk') continue
+          const res = await concurrentPipeline.waitForTTSReady(idx)
+          if (res?.success && res.duration > 0) {
+            const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
+            if (buf) this.predecodeTalkLipSync(idx, buf)
+          }
+        }
+        if (this.pendingLipSync.size > 0) {
+          await Promise.allSettled([...this.pendingLipSync.values()])
+          this.checkAborted()
+        }
         if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
       }
     }
@@ -1436,7 +1549,13 @@ export default class VideoExportManager {
     this.app.pixiApplication.ticker.stop()
     this.logger.info('Fast export: app render ticker stopped, rendering once per frame')
 
+    // 虚拟时钟用 >=60Hz 步进动画/Live2D，即便编码帧率封顶在 30fps
+    const simFps = Math.max(STORY_FPS, fps)
+    AnimationManager.exportTargetFPS = simFps
+    Ticker.shared.maxFPS = simFps
+
     virtualClock.install()
+    const virtualRenderStartMs = virtualClock.now()
     timestampRecorder.markRenderStart()
     concurrentPipeline.markRenderStart()
 
@@ -1476,8 +1595,15 @@ export default class VideoExportManager {
           }
           const frameStart = virtualClock.realTimeMs()
 
+          const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
+          const deltaForFrame = Math.max(0, nextFrameVirtualMs - virtualClock.now())
+          const subTicks = Math.max(1, Math.ceil(deltaForFrame / FRAME_MS - 1e-6))
+          const subStepMs = deltaForFrame / subTicks
+
           const tickStart = virtualClock.realTimeMs()
-          await virtualClock.tick(frameMs)
+          for (let s = 0; s < subTicks; s++) {
+            await virtualClock.tick(subStepMs)
+          }
           tickMs += virtualClock.realTimeMs() - tickStart
 
           // 显式渲染一次（私有渲染 ticker 已停）；放在 tick 之后可保证
@@ -1530,7 +1656,9 @@ export default class VideoExportManager {
     try {
       const totalSnippets = snippets.length
       const extendedApp = this.app as unknown as ExtendedApp
-      const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+      const openingCoverTask = this.hasOpeningCurtain(snippets)
+        ? undefined
+        : extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
       void openingCoverTask?.catch(() => undefined)
 
       const pendingTimestampTasks: Promise<void>[] = []
@@ -1628,7 +1756,7 @@ export default class VideoExportManager {
 
         if (isTalk) {
           pumpPaused = true
-          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer)
+          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer, i)
           pumpPaused = false
           this.app.currentTalkStartedAtMs = 0
           timestampRecorder.markSnippetStart(i, snippet.type, {
@@ -1680,6 +1808,9 @@ export default class VideoExportManager {
       if (openingCoverTask) await openingCoverTask
 
       const hasEndingEnvelope = typeof extendedApp.setEndingEnvelope === 'function'
+      const endingEnvelopeMs = hasEndingEnvelope
+        ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS
+        : 0
       if (hasEndingEnvelope) {
         await extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
       }
@@ -1689,7 +1820,7 @@ export default class VideoExportManager {
       const maxTimelineEndMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
       pumpTargetVirtualMs = Math.max(
         virtualClock.now(),
-        maxTimelineEndMs + (hasEndingEnvelope ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS : 0)
+        virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
       )
       pumpDone = true
       await framePump
@@ -1710,7 +1841,11 @@ export default class VideoExportManager {
       virtualClock.uninstall()
 
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      const totalDurationMs = actualVideoDurationMs + 500
+      const capturedVideoDurationMs = Math.round((frameIndex / encodeFps) * 1000)
+      const totalDurationMs = Math.max(
+        actualVideoDurationMs + endingEnvelopeMs,
+        capturedVideoDurationMs
+      )
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
 
       const actualStartTimesMs = snippets.map((_, index) =>
@@ -1809,7 +1944,7 @@ export default class VideoExportManager {
       const result = {
         success: true,
         duration: (virtualClock.realTimeMs() - realStart) / 1000,
-        frameCount: Math.round((totalDurationMs / 1000) * encodeFps),
+        frameCount: frameIndex,
         outputSize: saveResult.fileSize,
         timings
       }
@@ -2187,7 +2322,9 @@ export default class VideoExportManager {
     }
 
     const extendedApp = this.app as unknown as ExtendedApp
-    const openingCoverTask = extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
+    const openingCoverTask = this.hasOpeningCurtain(snippets)
+      ? undefined
+      : extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
     void openingCoverTask?.catch(() => undefined)
 
     try {

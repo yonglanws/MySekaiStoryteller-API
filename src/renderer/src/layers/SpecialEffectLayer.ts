@@ -215,8 +215,13 @@ export default class SpecialEffectLayer extends BaseLayer {
       this.setSpriteAlpha(sprite, 1)
       return
     }
-    await sprite.show(duration)
+    this.setSpriteAlpha(sprite, 0)
+    await AnimationManager.linear((progress) => {
+      if (gen !== this.fadeGen) return
+      this.setSpriteAlpha(sprite, progress)
+    }, duration)
     if (gen !== this.fadeGen) return
+    this.setSpriteAlpha(sprite, 1)
   }
 
   public async fadeIn(duration: number, color: 'black' | 'white' = 'black'): Promise<void> {
@@ -228,8 +233,13 @@ export default class SpecialEffectLayer extends BaseLayer {
       sprite.visible = false
       return
     }
-    await sprite.hide(duration)
+    this.setSpriteAlpha(sprite, 1)
+    await AnimationManager.linear((progress) => {
+      if (gen !== this.fadeGen) return
+      this.setSpriteAlpha(sprite, 1 - progress)
+    }, duration)
     if (gen !== this.fadeGen) return
+    this.setSpriteAlpha(sprite, 0)
     sprite.visible = false
   }
 

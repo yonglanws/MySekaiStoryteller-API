@@ -632,7 +632,19 @@ test('talkPatch keeps concurrent non-blocking cues after Talk at the Talk start 
 // preparation, action scheduling and timestamp recording.
 function exportFixture(
   t,
-  { snippets, results = [], enabled = true, missingTimeline = false, decodeFails = false }
+  {
+    snippets,
+    results = [],
+    enabled = true,
+    missingTimeline = false,
+    decodeFails = false,
+    fps = 10,
+    fastFps,
+    bgmEnabled = false,
+    onClockTick,
+    onMixAudioTracks,
+    onDecodeAudioData
+  }
 ) {
   const f = fixture(t)
   const planned = []
@@ -652,8 +664,13 @@ function exportFixture(
   }
   class AudioMuxer {
     initialize = async () => {}
+    setBGMConfig = noop
+    loadBGMBuffer = async () => ({ duration: 10 })
     addAudioTrack = noop
-    mixAudioTracks = async () => ({})
+    mixAudioTracks = async (durationMs) => {
+      onMixAudioTracks?.(durationMs)
+      return {}
+    }
     audioBufferToWav = async () => new ArrayBuffer(0)
     dispose = noop
   }
@@ -672,7 +689,10 @@ function exportFixture(
     now = () => f.clock.now
     realTimeMs = () => f.clock.now
     realSleep = () => new Promise((resolve) => setImmediate(resolve))
-    tick = (ms) => f.clock.tickAsync(ms)
+    tick = (ms) => {
+      onClockTick?.(ms)
+      return f.clock.tickAsync(ms)
+    }
   }
   class JpegSink {
     initialize = async () => {}
@@ -708,9 +728,10 @@ function exportFixture(
   f.mocks.set('../utils/FrameContentValidator', {
     frameValidator: { reset: noop, validateFrame: () => ({ isValid: true, isBlackScreen: false }) }
   })
-  f.mocks.set('../utils/ResourceUrl', {})
+  f.mocks.set('../utils/ResourceUrl', { resolveBgmUrl: (p) => p })
   f.context.OfflineAudioContext = class {
     async decodeAudioData() {
+      onDecodeAudioData?.()
       if (decodeFails) throw new Error('fixture decode failed')
       return {
         numberOfChannels: 1,
@@ -730,7 +751,7 @@ function exportFixture(
   f.app.ttsManager = {
     isTTSEnabled: () => enabled,
     checkTTSAvailability: async () => true,
-    getBGMConfig: () => ({ enabled: false }),
+    getBGMConfig: () => (bgmEnabled ? { enabled: true, path: 'bgm.mp3' } : { enabled: false }),
     getConfig: () => ({ provider: 'gpt-sovits' }),
     buildTimelineWithoutTTS: (data) =>
       missingTimeline ? [] : calculator.calculateTimelineWithoutTTS(data).entries,
@@ -747,14 +768,21 @@ function exportFixture(
     }
   }
   const manager = new Manager(f.app)
-  manager.prepareStreamRecording = async () => ({ canvas, snippets, captureFps: 10 })
+  manager.prepareStreamRecording = async () => ({ canvas, snippets, captureFps: fps })
   manager.resolveFastUseWebCodecs = async () => false
   manager.saveApiVideoFromDisk = async () => ({
     frameCount: 1,
     durationMs: f.clock.now,
     fileSize: 123
   })
-  const options = { fps: 10, width: 1920, height: 1080, quality: 1, apiMode: true }
+  const options = {
+    fps,
+    ...(fastFps !== undefined ? { fastFps } : {}),
+    width: 1920,
+    height: 1080,
+    quality: 1,
+    apiMode: true
+  }
   return {
     ...f,
     manager,
@@ -831,3 +859,197 @@ for (const mode of ['record', 'fast']) {
     assert.ok(f.warnings.every(([message]) => !/text rhythm/i.test(message)))
   })
 }
+
+test('fast export steps VirtualClockController in <=16.67ms sub-ticks at 30fps and computes ending envelope accurately', async (t) => {
+  const tickDeltas = []
+  const mixedDurations = []
+  const f = exportFixture(t, {
+    snippets: [talk('あ'.repeat(4))],
+    enabled: false,
+    fps: 60,
+    fastFps: 30,
+    bgmEnabled: true,
+    onClockTick: (ms) => tickDeltas.push(ms),
+    onMixAudioTracks: (ms) => mixedDurations.push(ms)
+  })
+  const resNoEnvelope = await f.export('fast')
+  assert.equal(resNoEnvelope.success, true)
+  assert.ok(tickDeltas.length > 0)
+  assert.ok(
+    tickDeltas.every((ms) => ms <= 16.67),
+    `Expected every sub-tick <= 16.67ms at 30fps, got max=${Math.max(...tickDeltas)}`
+  )
+  // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
+  const snippetDur = Math.round(f.planned[0])
+  assert.ok(
+    mixedDurations[0] >= snippetDur && mixedDurations[0] < snippetDur + 100,
+    `Expected no hardcoded +500ms tail when setEndingEnvelope is absent, got mix=${mixedDurations[0]} vs snippet=${snippetDur}`
+  )
+
+  // Now with setEndingEnvelope present, tail equals PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS (500ms).
+  mixedDurations.length = 0
+  f.app.setEndingEnvelope = async (holdMs, fadeMs) => {
+    await new Promise((r) => setTimeout(r, holdMs + fadeMs))
+  }
+  const resWithEnvelope = await f.export('fast')
+  assert.equal(resWithEnvelope.success, true)
+  assert.ok(
+    mixedDurations[0] >= snippetDur + 500,
+    `Expected accurate 500ms ending envelope tail, got ${mixedDurations[0]}`
+  )
+})
+
+test('stream export pre-decodes lip-sync envelopes before snippet loop and skips opening cover on BlackOut stories', async (t) => {
+  let decodeCallsDuringSnippet = 0
+  let inSnippetLoop = false
+  let openingCoverCalled = 0
+  const snippets = [
+    { type: 'BlackOut', wait: true, delay: 0, data: { duration: 500 } },
+    talk('あ'.repeat(4))
+  ]
+  const f = exportFixture(t, {
+    snippets,
+    results: [undefined, { success: true, duration: 1200 }],
+    enabled: true,
+    fps: 30,
+    onDecodeAudioData: () => {
+      if (inSnippetLoop) decodeCallsDuringSnippet++
+    }
+  })
+  f.app.setOpeningCover = async () => {
+    openingCoverCalled++
+  }
+  const origHandle = f.app.snippetStrategyManager.handleSnippetForExport
+  f.app.snippetStrategyManager.handleSnippetForExport = async (snippet, idx) => {
+    inSnippetLoop = true
+    if (snippet.type === 'BlackOut') return
+    return origHandle(snippet, idx)
+  }
+  const res = await f.export('record')
+  assert.equal(res.success, true)
+  assert.equal(decodeCallsDuringSnippet, 0, 'Serial stream export must pre-decode before recording loop')
+  assert.equal(openingCoverCalled, 0, 'Must skip setOpeningCover when story starts with BlackOut')
+})
+
+test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade collision', async (t) => {
+  const f = fixture(t)
+  class Sprite {
+    constructor() {
+      this.anchor = { set: noop }
+      this.position = { set: noop }
+      this.filters = [{ alpha: 0 }]
+      this.visible = true
+      this.alpha = 1
+    }
+  }
+  class Container {
+    children = []
+    addChild(...items) {
+      this.children.push(...items)
+    }
+    removeChild() {}
+  }
+  f.mocks.set('pixi.js', {
+    Application: class {},
+    Container,
+    Sprite,
+    Texture: { from: () => ({ valid: true, baseTexture: { valid: true } }), WHITE: { valid: true, baseTexture: { valid: true } }, EMPTY: {} },
+    Ticker: { shared: { add: noop, elapsedMS: 16 } }
+  })
+  f.mocks.set('../../assets/ui/ui_se_black.svg', 'ui_se_black.svg')
+  f.mocks.set('../components/SEBlack', { default: Sprite })
+  f.mocks.set('../effects/Ease', { runEasedTween: async () => {} })
+  f.mocks.set('../effects/InappTextures', { inappUrl: (p) => p, loadInappTexture: async () => null })
+  f.mocks.set('../effects/OfficialFilters', { CameraBlurFilter: class { spread = 0 } })
+  f.mocks.set('../effects/TriangleParticleEffect', { ScenarioEffectOverlay: class {}, SekaiTransitionParticles: class {} })
+
+  const SpecialEffectLayer = f.load('layers/SpecialEffectLayer.ts').default
+  const layer = new SpecialEffectLayer({ stage: new Container(), screen: { width: 1920, height: 1080 } })
+  const coverPromise = layer.setOpeningCover(500)
+  const blackOutPromise = layer.fadeOut(500, 'black')
+  await f.clock.tickAsync(250)
+  const midAlpha = layer.seBlackSprite.filters[0].alpha
+  await f.clock.tickAsync(300)
+  await Promise.all([coverPromise, blackOutPromise])
+  assert.ok(midAlpha > 0.35 && midAlpha < 0.65, `Expected smooth fadeOut midpoint ~0.5 without cover fight, got ${midAlpha}`)
+  assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'BlackOut must end fully opaque without stale fadeIn reset')
+  assert.equal(layer.seBlackSprite.visible, true)
+})
+
+test('AdvancedModel channel 0 skips duplicate active body cues without false interrupted or motion-refused errors', async (t) => {
+  const f = fixture(t)
+  f.mocks.set('pixi.js', {
+    Text: class {},
+    AlphaFilter: class {},
+    Filter: class {},
+    TextStyle: class {},
+    Ticker: { shared: {} }
+  })
+  f.mocks.set('pixi-live2d-display-advanced', {
+    Cubism4InternalModel: class {},
+    Cubism2InternalModel: class {},
+    Live2DModel: class {},
+    MotionPriority: { FORCE: 3 }
+  })
+  f.mocks.set(path.join(renderer, 'managers/VisualEffectManager.ts'), {
+    VisualEffectManager: class {}
+  })
+  f.mocks.set(path.join(renderer, 'effects/Ease.ts'), {
+    evaluateEase: (_k, tVal) => tVal
+  })
+  const { motionTrace } = f.load('managers/video-export/MotionTraceCollector.ts')
+  const { default: AdvancedModel } = f.load('model/AdvancedModel.ts')
+  motionTrace.reset()
+
+  const body = {
+    playing: false,
+    finished: true,
+    state: { setReserved() {} },
+    stopAllMotions: noop,
+    async startMotion() {
+      body.playing = true
+      body.finished = false
+      return true
+    },
+    isFinished() {
+      return body.finished
+    }
+  }
+  const facial = { ...body, isFinished: () => true }
+  const model = Object.create(AdvancedModel.prototype)
+  model._metadata = { id: 1 }
+  model.destroyed = false
+  model.actionController = new AbortController()
+  model.channelGeneration = [0, 0]
+  model.bodyChainArmed = false
+  model.bodyChainGeneration = -1
+  model.bodyChainTimer = null
+  model.recentBodyMotions = []
+  model.bodyIgnoredParamIds = []
+  model.currentBodyMotion = null
+  model.currentBodyStartedAt = 0
+  model.currentBodyClipDurationMs = 0
+  model.bodyFinishReported = true
+  model.channelFadeSeconds = [0.5, 0.25]
+  model.facialForceNext = false
+  model.firstBodyCue = true
+  model.defaultMotionName = null
+  model.blinkState = { status: 'ready', doSleep: false, opening: 1 }
+  model.internalModel = {
+    parallelMotionManager: [body, facial],
+    motionManager: {
+      async loadMotion(name) {
+        return { getDuration: () => 2.0, name }
+      }
+    }
+  }
+  model.logger = new f.Logger()
+
+  await model.startCharacterChannel(0, 'w-normal-nod01', [], undefined, undefined, false, 1)
+  await model.startCharacterChannel(0, 'w-normal-nod01', [], undefined, undefined, true, 2)
+  const events = Array.from(motionTrace.snapshot())
+  assert.equal(events.filter((e) => e.event === 'interrupted').length, 0)
+  assert.equal(events.filter((e) => e.reason === 'motion manager refused the cue').length, 0)
+  const skipped = events.find((e) => e.event === 'skipped')
+  assert.ok(skipped && skipped.reason === 'same body motion already active')
+})

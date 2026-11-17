@@ -1,6 +1,7 @@
 /**
- * Official parity unit tests for SSE filters, DOTween easing, Telop drift fix & 21-sample curves,
- * PlaceInfo / FullScreenText / ChoiceDialog chrome, and StageUtils coordinates.
+ * Official parity unit tests for SSE filters, DOTween easing, Telop drift fix,
+ * restored 531004c~1 SVG/typography UI, zero MENU/AUTO HUD chrome, PlaceInfo /
+ * FullScreenText / ChoiceDialog hooks, HologramEffect lazy filter, and StageUtils.
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -327,39 +328,92 @@ test('Ease evaluates exact DOTween OutQuad and OutQuart curves', async () => {
   assert.deepEqual(fast, [1])
 })
 
-test('UITelop resets x cleanly across repeated shows and matches 21-sample official curves', async () => {
+test('UITelop restores ui_telop.svg visuals while keeping resetOrigin horizontal-drift fix', async () => {
   const anim = createImmediateAnimationManager()
   const { load, pixi } = createRendererLoader(new Map([['managers/AnimationManager.ts', anim]]))
-  const { default: UITelop, TELOP_SHOW_BASE_SCALE_X, TELOP_HIDE_ALPHA, sampleTelopCurve } = load(
-    'components/UITelop.ts'
-  )
+  const { default: UITelop } = load('components/UITelop.ts')
 
-  assert.equal(TELOP_SHOW_BASE_SCALE_X.length, 21)
-  assert.equal(TELOP_HIDE_ALPHA.length, 21)
-  assert.equal(sampleTelopCurve(TELOP_SHOW_BASE_SCALE_X, 0), 0)
-  assert.equal(sampleTelopCurve(TELOP_SHOW_BASE_SCALE_X, 1), 1)
-
-  const telop = new UITelop(pixi.Texture.EMPTY, 1920, 1080)
+  const telopTex = new pixi.Texture(960, 125)
+  const telop = new UITelop(telopTex, 1920, 1080)
   assert.equal(telop.x, 0)
-  await telop.show('First Telop')
-  assert.equal(telop.x, 0, 'first telop must not leave permanent x offset')
-  await telop.show('Second Telop')
-  assert.equal(telop.x, 0, 'repeated telop must not accumulate +10px drift')
-  await telop.show('Third Telop')
-  assert.equal(telop.x, 0, 'third telop must still end at x === 0')
+  assert.equal(telop.visible, false)
+  assert.equal(telop.children.length, 2)
+  assert.equal(telop.children[0].texture, telopTex)
+  assert.equal(telop.children[0].scale.x, 1)
+  assert.equal(telop.children[0].height, 1080 / 8)
+  assert.equal(telop.children[1].style.fill, '#FFFFFF')
+
+  telop.text = 'First Telop'
+  await telop.show(200)
+  assert.equal(telop.x, 0, 'first telop show must end at x === 0')
+  assert.equal(telop.visible, true)
+  await telop.hide(200)
+  assert.equal(telop.x, 0, 'first telop hide must reset origin to x === 0')
+  assert.equal(telop.visible, false)
+
+  telop.text = 'Second Telop'
+  await telop.show(200)
+  assert.equal(telop.x, 0, 'repeated telop show must not accumulate +10px drift')
+  await telop.hide(200)
+  assert.equal(telop.x, 0, 'repeated telop hide must reset origin to x === 0')
+
+  telop.text = 'Third Telop'
+  await telop.show(200)
+  assert.equal(telop.x, 0, 'third telop show must still end at x === 0')
+  await telop.hide(200)
+  assert.equal(telop.x, 0, 'third telop hide must still reset origin to x === 0')
 })
 
-test('UIText uses official 1368.3px width and #FFFFFF fill without thick dark stroke', () => {
+test('UIText, UISpeakerText, UITextBackground, and UITextUnderline restore 531004c~1 SVG & typography', () => {
   const anim = createImmediateAnimationManager()
-  const { load } = createRendererLoader(new Map([['managers/AnimationManager.ts', anim]]))
+  const { load, pixi } = createRendererLoader(new Map([['managers/AnimationManager.ts', anim]]))
   const { default: UIText } = load('components/UIText.ts')
+  const { default: UISpeakerText } = load('components/UISpeakerText.ts')
+  const { default: UITextBackground } = load('components/UITextBackground.ts')
+  const { default: UITextUnderline } = load('components/UITextUnderline.ts')
 
   const uiText = new UIText(1920, 1080)
-  assert.equal(uiText.style.fill, '#FFFFFF')
-  assert.equal(uiText.style.strokeThickness, 0)
-  assert.equal(uiText.style.wordWrapWidth, 1368.3)
-  assert.equal(uiText.x, 250)
-  assert.equal(uiText.y, 858)
+  assert.equal(uiText.style.fill, '#FFFFFFF5')
+  assert.equal(uiText.style.stroke, '#4A4968D9')
+  assert.equal(uiText.style.strokeThickness, 1080 / 120)
+  assert.equal(uiText.style.fontSize, 1080 / 26)
+  assert.equal(uiText.style.lineHeight, 1080 / 19)
+  assert.equal(uiText.style.wordWrapWidth, 1920 - (1920 / 8) * 2)
+  assert.equal(uiText.x, 1920 / 8)
+  assert.equal(uiText.y, 1080 / 1.27)
+
+  const expectedSpeakerY = 1080 / 1.3 - 1920 / 37
+  const speakerText = new UISpeakerText(1920, 1080, expectedSpeakerY)
+  assert.equal(speakerText.style.fill, '#FFFFFFF5')
+  assert.equal(speakerText.style.stroke, '#4A4968D9')
+  assert.equal(speakerText.style.strokeThickness, 1080 / 120)
+  assert.equal(speakerText.style.fontSize, 1080 / 25)
+  assert.equal(speakerText.style.fontWeight, '600')
+  assert.equal(speakerText.anchor.x, 0)
+  assert.equal(speakerText.anchor.y, 0)
+  assert.equal(speakerText.x, 1920 / 9)
+  assert.equal(speakerText.y, expectedSpeakerY)
+
+  const bgTex = new pixi.Texture(1920, 1080)
+  const textBg = new UITextBackground(bgTex, 1920, 1080)
+  assert.equal(textBg.texture, bgTex)
+  assert.equal(textBg.anchor.x, 0.5)
+  assert.equal(textBg.anchor.y, 0.5)
+  assert.equal(textBg.width, 1920)
+  assert.equal(textBg.height, 1080)
+  assert.equal(textBg.x, 960)
+  assert.equal(textBg.y, 540)
+
+  const ulTex = new pixi.Texture(1000, 11)
+  const textUl = new UITextUnderline(ulTex, 1920, 1080)
+  assert.equal(textUl.texture, ulTex)
+  assert.equal(textUl.width, 1920 / 2)
+  assert.equal(textUl.x, 1920 / 10)
+  assert.equal(textUl.y, 1080 / 1.3)
+
+  const bgSvg = fs.readFileSync(path.join(root, 'src/renderer/assets/ui/ui_text_background.svg'), 'utf8')
+  assert.match(bgSvg, /width="1920"/)
+  assert.match(bgSvg, /height="1080"/)
 })
 
 test('UIPlaceInfo, UIFullScreenText, and UIChoiceDialog manage official state transitions', async () => {
@@ -423,9 +477,27 @@ test('StageUtils resolves Normal, Three, LeftOver/RightOver and Under positions'
   assert.ok(leftUnder.y > 1.0, 'Under flag shifts vertical anchor below frame')
 })
 
-test('HologramEffect stays lazy until enabled and UIWatermark clears the MENU button', () => {
+test('HologramEffect stays lazy until enabled, UIWatermark restores corner position, and UILayer has zero HUD chrome', async () => {
+  const linearCalls = []
+  const anim = createImmediateAnimationManager()
+  const trackedAnim = {
+    __esModule: true,
+    default: {
+      ...anim.default,
+      linear(onUpdate, durationMs) {
+        linearCalls.push(durationMs)
+        return anim.default.linear(onUpdate, durationMs)
+      }
+    }
+  }
   const { load, pixi } = createRendererLoader(
-    new Map([['effects/InappTextures.ts', { loadInappTexture: async () => null }]])
+    new Map([
+      ['effects/InappTextures.ts', { loadInappTexture: async () => null }],
+      ['managers/AnimationManager.ts', trackedAnim],
+      ['assets/ui/ui_text_background.svg', 'ui_text_background.svg'],
+      ['assets/ui/ui_text_underline.svg', 'ui_text_underline.svg'],
+      ['assets/ui/ui_telop.svg', 'ui_telop.svg']
+    ])
   )
   const { HologramEffect } = load('effects/HologramEffect.ts')
   const alphaFilter = new pixi.AlphaFilter(1)
@@ -445,5 +517,38 @@ test('HologramEffect stays lazy until enabled and UIWatermark clears the MENU bu
   const { default: UIWatermark } = load('components/UIWatermark.ts')
   const watermark = new UIWatermark(1920, 1080)
   assert.equal(watermark.anchor.x, 1)
-  assert.ok(watermark.x <= 1808 - 20, `watermark right edge ${watermark.x} must stay left of [1808, 16, 96, 96] MENU button`)
+  assert.equal(watermark.anchor.y, 0)
+  assert.equal(watermark.x, 1920 - 1920 / 48)
+  assert.equal(watermark.y, 1080 / 36)
+
+  const uiLayerSource = fs.readFileSync(path.join(rendererSrc, 'layers/UILayer.ts'), 'utf8')
+  for (const forbidden of ['menuContainer', 'autoContainer', 'endSignContainer', 'loadInappTexture', 'Ticker.shared']) {
+    assert.equal(uiLayerSource.includes(forbidden), false, `UILayer.ts must not contain ${forbidden}`)
+  }
+
+  const stage = new pixi.Container()
+  const mockApp = { stage, screen: { width: 1920, height: 1080 } }
+  const { default: UILayer } = load('layers/UILayer.ts')
+  const layerUI = new UILayer(mockApp)
+
+  assert.equal(layerUI.UITalkShowed, false)
+  assert.equal(stage.children.length, 2, 'stage only contains UILayer container and watermarkSprite')
+  const watermarkOnStage = stage.children[1]
+  assert.equal(watermarkOnStage.zIndex, 4)
+  assert.equal(watermarkOnStage.visible, false)
+
+  await layerUI.showTextBackground()
+  assert.equal(layerUI.UITalkShowed, true)
+  linearCalls.length = 0
+  await layerUI.hideTextBackground()
+  assert.equal(layerUI.UITalkShowed, false)
+  assert.ok(linearCalls.length > 0 && linearCalls.every((ms) => ms === 0), 'default hideTextBackground() must use immediate 0ms timing')
+
+  assert.equal(typeof layerUI.shakeWindow, 'function')
+  assert.equal(typeof layerUI.stopShakeWindow, 'function')
+  assert.equal(typeof layerUI.showPlaceInfo, 'function')
+  assert.equal(typeof layerUI.closePlaceInfo, 'function')
+  assert.equal(typeof layerUI.showFullScreenText, 'function')
+  assert.equal(typeof layerUI.hideFullScreenText, 'function')
+  assert.equal(typeof layerUI.showChoiceDialog, 'function')
 })
