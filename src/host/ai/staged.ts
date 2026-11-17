@@ -7,7 +7,7 @@ import {
   personaFor,
   type PersonaEntry
 } from './personas'
-import type { CatalogView } from './prompt'
+import { isStandingMotion, type CatalogView } from './prompt'
 import {
   CURATED_SCENARIO_EFFECTS,
   isVirtualSingerModel,
@@ -261,19 +261,6 @@ const cleanText = (value: unknown): string => {
     merged += /[。！？!?…—、，,.\s”’」』）)]/.test(previous) ? `\n${parts[index]}` : parts[index]
   }
   return merged.trim()
-}
-
-const isStandingMotion = (name: string): boolean => {
-  const lower = name.toLowerCase()
-  return lower.includes('default') || lower.includes('stand')
-}
-
-function pickStageMotion(view: CatalogView, modelId: number): string {
-  const model = view.modelById(modelId)
-  for (const name of model?.motions ?? []) {
-    if (!isStandingMotion(name)) return name
-  }
-  return view.defaultMotion(modelId)
 }
 
 function pickFollowupMotion(view: CatalogView, modelId: number, currentMotion?: string): string {
@@ -2934,8 +2921,8 @@ export function composeStory(
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
         : { side: slot, offset: 0 }
-      const entryMotion = pickStageMotion(view, id)
-      const entryFacial = view.defaultFacial(id)
+      const entryMotion = view.exampleMotion(id) || view.defaultMotion(id)
+      const entryFacial = view.exampleFacial(id) || view.defaultFacial(id)
       const isHolo = hologramSet.has(id)
       snippets.push({
         type: 'LayoutAppear',

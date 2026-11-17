@@ -3,7 +3,7 @@ import { DEFAULT_BGM_FADE_MS, MAX_BGM_FADE_MS } from '../../common/audio/bgm'
 import { StorySchema, type StoryData } from '../../common/types/Story'
 import { enforceOfficialStoryInvariants, type OfficialLintReport } from './officialLinter'
 import { normalizePjskTerminology } from './personas'
-import type { CatalogView } from './prompt'
+import { isStandingMotion, type CatalogView } from './prompt'
 import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
 
 const TALK_LINE_WIDTH_UNITS = 30
@@ -298,19 +298,6 @@ function parsePosition(raw: unknown, fallbackSide: string): JsonRecord {
 
 function isOffscreenPosition(pos: JsonRecord): boolean {
   return OFFSCREEN_SIDES.has(toStr(pos.side)) || pos.under === true
-}
-
-const isStandingMotion = (name: string): boolean => {
-  const lower = name.toLowerCase()
-  return lower.includes('default') || lower.includes('stand')
-}
-
-function pickStageMotion(view: CatalogView, modelId: number): string {
-  const model = view.modelById(modelId)
-  for (const name of model?.motions ?? []) {
-    if (!isStandingMotion(name)) return name
-  }
-  return view.defaultMotion(modelId)
 }
 
 function fixAnimation(

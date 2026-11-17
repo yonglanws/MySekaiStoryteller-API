@@ -88,6 +88,10 @@ function createPixiMock() {
       this.draws.push({ op: 'drawRoundedRect', args })
       return this
     }
+    drawEllipse(...args) {
+      this.draws.push({ op: 'drawEllipse', args })
+      return this
+    }
     endFill() {
       return this
     }
@@ -417,4 +421,29 @@ test('StageUtils resolves Normal, Three, LeftOver/RightOver and Under positions'
   const leftUnder = StageUtils.side_to_position('Left', 'Normal', 20, true)
   assert.ok(Math.abs(leftUnder.x - (0.5 - 330 / 1920)) < 1e-6)
   assert.ok(leftUnder.y > 1.0, 'Under flag shifts vertical anchor below frame')
+})
+
+test('HologramEffect stays lazy until enabled and UIWatermark clears the MENU button', () => {
+  const { load, pixi } = createRendererLoader(
+    new Map([['effects/InappTextures.ts', { loadInappTexture: async () => null }]])
+  )
+  const { HologramEffect } = load('effects/HologramEffect.ts')
+  const alphaFilter = new pixi.AlphaFilter(1)
+  const model = { filters: [alphaFilter] }
+  const effect = new HologramEffect(model, 1920, 1080)
+
+  assert.equal(model.filters.length, 1, 'constructing HologramEffect must not apply hologram shader to non-hologram models')
+  assert.equal(model.filters[0], alphaFilter)
+  assert.equal(effect.parentFilters.length, 1, 'parentFilters exposes hologram shader only when applied by VisualEffectManager')
+  const beforeScroll = effect.parentFilters[0].uniforms.uScroll
+  effect.update(60)
+  assert.equal(effect.parentFilters[0].uniforms.uScroll, beforeScroll, 'disabled HologramEffect ignores ticker steps')
+  effect.enabled = true
+  effect.update(60)
+  assert.notEqual(effect.parentFilters[0].uniforms.uScroll, beforeScroll, 'enabled HologramEffect steps shader')
+
+  const { default: UIWatermark } = load('components/UIWatermark.ts')
+  const watermark = new UIWatermark(1920, 1080)
+  assert.equal(watermark.anchor.x, 1)
+  assert.ok(watermark.x <= 1808 - 20, `watermark right edge ${watermark.x} must stay left of [1808, 16, 96, 96] MENU button`)
 })

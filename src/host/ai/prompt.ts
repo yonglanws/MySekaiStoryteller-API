@@ -173,6 +173,12 @@ export interface CatalogSe {
   description: string
 }
 
+/** 判断动作名是否为默认站姿（入场/后续连招会优先避开这类静态名）。 */
+export function isStandingMotion(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.includes('default') || lower.includes('stand')
+}
+
 /**
  * 资源目录的提示词视图：把 ResourceCatalog 的原始数据整理成模型/动作/表情/背景/BGM/SE 文本，
  * 并提供校验所需的精确名称与模糊修复。

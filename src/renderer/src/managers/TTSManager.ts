@@ -20,11 +20,13 @@ import {
 export interface SnippetTimelineEntry {
   snippetIndex: number
   snippetType: string
+  delayStartTimeMs?: number
   startTimeMs: number
   durationMs: number
   endTimeMs: number
   ttsDurationMs: number
   hasTTS: boolean
+  blocking?: boolean
   /** 时间线时长来源（tts_audio/content_estimation/type_default…），导出诊断用 */
   durationSource?: string
 }
@@ -552,11 +554,13 @@ export class TTSManager {
     return {
       snippetIndex: e.snippetIndex,
       snippetType: e.snippetType,
+      delayStartTimeMs: e.delayStartTimeMs,
       startTimeMs: e.startTimeMs,
       durationMs: e.durationMs,
       endTimeMs: e.endTimeMs,
       ttsDurationMs: e.ttsDurationMs,
       hasTTS: e.hasTTS,
+      blocking: e.blocking,
       durationSource: e.durationSource
     }
   }

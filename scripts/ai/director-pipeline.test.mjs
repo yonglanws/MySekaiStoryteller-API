@@ -480,3 +480,83 @@ test('officialLinter flags and enforces invariants on malformed snippets', () =>
     'unclosed FlashbackIn auto-closed'
   )
 })
+
+test('stage LayoutAppear uses calm entrance motion instead of alphabetically-first blushed cue', () => {
+  const catalog = {
+    format: 'msst.cloud-catalog/1',
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    region: 'jp',
+    models: [
+      {
+        id: '20mizuki_normal',
+        characterId: 20,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-adult-blushed01', 'w-normal-default01', 'w-normal-nod01'],
+        facials: ['face_normal_01', 'face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: '19ena_normal',
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-adult-blushed01', 'w-normal-default01', 'w-normal-tilthead01'],
+        facials: ['face_normal_01', 'face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      }
+    ],
+    backgrounds: [{ id: 'bg1', name: '家庭餐厅', file: 'bg_restaurant.jpg' }],
+    bgm: [{ id: 'bgm00001', title: '日常', file: 'bgm00001.mp3' }],
+    se: [{ id: 'se00001_b', file: 'se00001_b.mp3', description: '轻响' }]
+  }
+  const view = new promptMod.CatalogView(catalog, {
+    background: 'bg_restaurant.jpg',
+    cast: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', characterId: 20, name: '晓山瑞希' },
+      { id: 2, model: '19ena_normal/19ena_normal.model3.json', characterId: 19, name: '东云绘名' }
+    ]
+  })
+  const plan = staged.normalizeCastPlan(
+    {
+      title: '入口测试',
+      background: 'bg_restaurant.jpg',
+      cast: [
+        { modelId: 1, name: '瑞希', role: 'A' },
+        { modelId: 2, name: '绘名', role: 'B' }
+      ],
+      scenes: [{ id: 's1', location: 'bg_restaurant.jpg', time: 'day', transition: 'black', summary: '开场' }]
+    },
+    view,
+    '两人开场'
+  )
+  const dialogue = staged.normalizeDialogue(
+    {
+      title: '入口测试',
+      lines: [
+        { id: 'l1', speaker: '瑞希', content: '这里先讨论一下。' },
+        { id: 'l2', speaker: '绘名', content: '好，那我们开始。' }
+      ]
+    },
+    plan
+  )
+  const staging = staged.normalizeStaging(
+    {
+      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_restaurant.jpg', ambient: 'normal', activeCast: [1, 2], placements: [{ modelId: 1, side: 'Left' }, { modelId: 2, side: 'Right' }] }]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const direction = staged.normalizeDirection({ actions: [{ id: 'l1' }, { id: 'l2' }] }, view, plan, dialogue)
+  const story = staged.composeStory(view, plan, dialogue, direction, staging)
+  const appears = story.snippets.filter((s) => s.type === 'LayoutAppear')
+  assert.equal(appears.length, 2)
+  assert.equal(appears[0].data.motion, 'w-normal-nod01')
+  assert.equal(appears[1].data.motion, 'w-normal-tilthead01')
+  assert.ok(appears.every((s) => !/blushed/.test(s.data.motion)))
+})

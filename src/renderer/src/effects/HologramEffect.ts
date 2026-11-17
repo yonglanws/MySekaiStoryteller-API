@@ -17,15 +17,10 @@ export class HologramEffect extends VisualEffect {
     super(model)
 
     this.shaderFilter = new Live2DHologramShaderFilter({ monitor })
+    this._parentFilters = [this.shaderFilter]
     this.pedestal = new Graphics()
     this.drawPedestal(width, height, 0)
     this.addChild(this.pedestal)
-
-    const currentFilters = Array.isArray(this.model.filters) ? [...this.model.filters] : []
-    if (!currentFilters.includes(this.shaderFilter)) {
-      currentFilters.push(this.shaderFilter)
-      this.model.filters = currentFilters
-    }
 
     void loadInappTexture('player/loose/Texture2D/holo.png').then((tex) => {
       if (!this.destroyed && tex && tex.valid && tex.baseTexture?.valid) {
@@ -53,7 +48,7 @@ export class HologramEffect extends VisualEffect {
   }
 
   update(delta: number): void {
-    if (this.destroyed) return
+    if (this.destroyed || !this.enabled) return
     const dtSec = Math.max(0, delta) / 60
     this.elapsedSec += dtSec
     this.shaderFilter.step(dtSec)

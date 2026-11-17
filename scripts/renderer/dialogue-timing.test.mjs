@@ -610,6 +610,22 @@ test('talkPatch updates metadata at zero delta, clears failed audio and tolerate
   assert.equal(applyTalkPatch([], 0, 2860, 3460), 3460)
 })
 
+test('talkPatch keeps concurrent non-blocking cues after Talk at the Talk start cursor', (t) => {
+  const f = fixture(t)
+  const { applyTalkPatch } = f.load('managers/video-export/talkPatch.ts')
+  const timeline = [
+    { snippetIndex: 0, delayStartTimeMs: 1000, startTimeMs: 1000, durationMs: 2000, endTimeMs: 3000, ttsDurationMs: 0, hasTTS: false, blocking: true },
+    { snippetIndex: 1, delayStartTimeMs: 1000, startTimeMs: 1000, durationMs: 0, endTimeMs: 1000, ttsDurationMs: 0, hasTTS: false, blocking: false },
+    { snippetIndex: 2, delayStartTimeMs: 3000, startTimeMs: 3000, durationMs: 1500, endTimeMs: 4500, ttsDurationMs: 0, hasTTS: false, blocking: true },
+  ]
+  applyTalkPatch(timeline, 0, 4000, 4500)
+  assert.equal(timeline[0].endTimeMs, 5500)
+  assert.equal(timeline[1].startTimeMs, 1000, 'PlaySe/Now right after Talk stays at Talk start')
+  assert.equal(timeline[1].delayStartTimeMs, 1000, 'concurrent cue delayStartTimeMs stays at Talk start')
+  assert.equal(timeline[2].startTimeMs, 5500, 'subsequent blocking Talk shifts to patched end')
+  assert.equal(timeline[2].delayStartTimeMs, 5500, 'subsequent blocking Talk delayStartTimeMs shifts too')
+})
+
 // Exercise both real export loops (not a regex/source inspection). Preparation,
 // GPU capture, TTS network results and final encoding/IPC are isolated boundaries.
 // Both loops still execute real snippets, timeline calculation, patching, envelope
