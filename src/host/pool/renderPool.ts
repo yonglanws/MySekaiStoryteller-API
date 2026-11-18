@@ -80,6 +80,11 @@ function baseLaunchArgs(config: HostConfig): string[] {
   return args
 }
 
+export interface RenderPoolTaskHooks {
+  onTaskStart?: (workerId: string, taskId: string) => void
+  onTaskCancel?: (taskId: string) => void | Promise<void>
+}
+
 /**
  * 无头浏览器渲染池。
  * 每个工作进程 = 一个独立浏览器实例（独立 WebGL 上下文），页面加载 webrenderer
@@ -107,7 +112,8 @@ export class RenderPool implements ExportDispatcher {
       }
     },
     private readonly bridgeToken?: string,
-    private readonly onWorkerCleanup?: (workerId: string) => void
+    private readonly onWorkerCleanup?: (workerId: string) => void,
+    private readonly taskHooks?: RenderPoolTaskHooks
   ) {
     this.logger = logger
     this.config = config
@@ -634,6 +640,7 @@ export class RenderPool implements ExportDispatcher {
     worker.busyTaskId = task.taskId
     worker.abortSent = false
     worker.taskDeadline = task.addedAt + task.timeoutMs
+    this.taskHooks?.onTaskStart?.(worker.workerId, task.taskId)
 
     const payload = {
       taskId: task.taskId,
@@ -662,6 +669,7 @@ export class RenderPool implements ExportDispatcher {
       worker.busyTaskId = null
       worker.taskDeadline = null
       worker.abortSent = false
+      this.onWorkerCleanup?.(worker.workerId)
       this.onExportResult?.(task.taskId, {
         taskId: task.taskId,
         success: false,
@@ -671,12 +679,14 @@ export class RenderPool implements ExportDispatcher {
     }
   }
 
-  cancel(taskId: string): void {
+  cancel(taskId: string): Promise<void> {
     const bufferedIndex = this.bufferedTasks.findIndex((task) => task.taskId === taskId)
     if (bufferedIndex !== -1) {
       this.bufferedTasks.splice(bufferedIndex, 1)
       this.logger.info(`[Pool] Cancelled buffered task ${taskId}`)
-      return
+      return this.taskHooks?.onTaskCancel
+        ? Promise.resolve(this.taskHooks.onTaskCancel(taskId))
+        : Promise.resolve()
     }
 
     // 通知渲染页中止当前导出。worker 保持 busy 直到收到 export-result，
@@ -684,19 +694,25 @@ export class RenderPool implements ExportDispatcher {
     // 白白阻塞下一个排队的任务（单 worker 时直接卡死）。
     for (const worker of this.workers.values()) {
       if (worker.busyTaskId === taskId) {
-        if (worker.abortSent) return
-        // 取消从现在起计宽限，不能让无响应页面继续占用 worker 直到原任务超时。
-        // 重复取消也不能延长宽限期。
-        worker.taskDeadline = Math.min(worker.taskDeadline ?? Date.now(), Date.now())
-        worker.abortSent = true
-        const sent = this.hub.send(worker.workerId, { type: 'api:abort-export', args: [taskId] })
-        this.logger.info(
-          `[Pool] Abort sent to ${worker.workerId} for task ${taskId} (sent=${sent})`
-        )
-        return
+        if (!worker.abortSent) {
+          // 取消从现在起计宽限，不能让无响应页面继续占用 worker 直到原任务超时。
+          // 重复取消也不能延长宽限期。
+          worker.taskDeadline = Math.min(worker.taskDeadline ?? Date.now(), Date.now())
+          worker.abortSent = true
+          const sent = this.hub.send(worker.workerId, { type: 'api:abort-export', args: [taskId] })
+          this.logger.info(
+            `[Pool] Abort sent to ${worker.workerId} for task ${taskId} (sent=${sent})`
+          )
+        }
+        return this.taskHooks?.onTaskCancel
+          ? Promise.resolve(this.taskHooks.onTaskCancel(taskId))
+          : Promise.resolve()
       }
     }
     this.logger.info(`[Pool] Cancel requested for task ${taskId} (no busy worker)`)
+    return this.taskHooks?.onTaskCancel
+      ? Promise.resolve(this.taskHooks.onTaskCancel(taskId))
+      : Promise.resolve()
   }
 
   /**
@@ -722,6 +738,7 @@ export class RenderPool implements ExportDispatcher {
         worker.taskDeadline = null
         worker.abortSent = false
         if (taskId) {
+          void Promise.resolve(this.taskHooks?.onTaskCancel?.(taskId)).catch(() => {})
           this.onExportResult?.(taskId, {
             taskId,
             success: false,

@@ -382,6 +382,15 @@ test('Rate limiting guards export, script/generate, and generate and caps rateLi
   for (const route of ['/api/v1/export', '/api/v1/script/generate', '/api/v1/generate']) {
     const limited = await httpRequest({ port, reqPath: route, method: 'POST', body: {} })
     assert.equal(limited.status, 429, `11th+ request to ${route} must return 429`)
+    assert.ok(
+      Number.isInteger(limited.json.retryAfterSeconds) && limited.json.retryAfterSeconds >= 1,
+      `expected retryAfterSeconds in 429 body for ${route}`
+    )
+    assert.equal(
+      limited.headers['retry-after'],
+      String(limited.json.retryAfterSeconds),
+      `expected Retry-After header matching retryAfterSeconds for ${route}`
+    )
   }
 
   // Cap check: inserting 20 distinct IPs must keep rateLimitMap.size <= 4
@@ -1031,4 +1040,249 @@ test('Eager server.createAuthMiddleware() in registerExtraRoutes and host main.j
     headers: { Authorization: `Bearer ${liveKey}` }
   })
   assert.equal(authedStatus.status, 200)
+})
+
+test('Cancelling active export immediately cleans mss-export-* and mss-hf-* temp dirs and blocks late writes', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-cancel-temp-'))
+  const outputDir = path.join(workDir, 'output')
+  const bridgeToken = 'cancel-bridge-token'
+  const apiKey = 'cancel-api-key'
+
+  t.mock.method(chromium, 'launch', async () => {
+    const browser = new EventEmitter()
+    browser.connected = true
+    browser.newPage = async () => {
+      const page = new EventEmitter()
+      page.closed = false
+      page.goto = async (url) => {
+        page.workerId = new URL(url).searchParams.get('worker')
+        pool.handleWorkerReady(page.workerId)
+      }
+      page.evaluate = async () => 'Test GPU'
+      page.close = async () => {
+        if (page.closed) return
+        page.closed = true
+        page.emit('close')
+      }
+      return page
+    }
+    browser.close = async () => {
+      browser.connected = false
+      browser.emit('disconnected')
+    }
+    return browser
+  })
+
+  const sentMessages = []
+  let bridgeController = null
+  const pool = new RenderPool(
+    new Logger({ type: 'hidden' }),
+    {
+      server: { port: 9881 },
+      render: {
+        workers: 1,
+        workerRecycleExports: 0,
+        browserChannels: [],
+        extraChromeArgs: '',
+        minFreeMemoryMb: 0
+      },
+      tts: { characters: [] },
+      bgm: { enabled: false }
+    },
+    {
+      send: (workerId, msg) => {
+        sentMessages.push({ workerId, msg })
+        return true
+      },
+      closeAll: () => {}
+    },
+    undefined,
+    bridgeToken,
+    (workerId) => {
+      void bridgeController?.cleanupWorker(workerId)
+    },
+    {
+      onTaskStart: (workerId, taskId) => {
+        bridgeController?.bindWorkerTask(workerId, taskId)
+      },
+      onTaskCancel: (taskId) => bridgeController?.cleanupTask(taskId)
+    }
+  )
+
+  const api = new VideoApiServer(new Logger({ type: 'hidden' }), {
+    port: 0,
+    host: '127.0.0.1',
+    outputDir,
+    video: { width: 1280, height: 720, fps: 30 },
+    apiKey,
+    bridgeToken,
+    registerExtraRoutes: (app) => {
+      app.use(
+        '/bridge',
+        createBridgeRouter({
+          logger: new Logger({ type: 'hidden' }),
+          config: {
+            paths: { output: outputDir },
+            video: { width: 1280, height: 720, fps: 30, crf: 23, encoder: 'cpu' },
+            render: { workers: 1 },
+            tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+            llm: { enabled: false }
+          },
+          bridgeToken,
+          onController: (ctrl) => {
+            bridgeController = ctrl
+          }
+        })
+      )
+    }
+  })
+  api.setDispatcher(pool)
+  pool.onExportResult = (taskId, result) => {
+    if (result.success) api.resolveExport(taskId, result)
+    else api.rejectExport(taskId, new Error(result.error || 'Export failed'))
+  }
+
+  await api.start()
+  await pool.start()
+  const server = api.getHttpServer()
+  const port = server.address().port
+
+  t.after(async () => {
+    await pool.stop()
+    await bridgeController?.disposeAll()
+    const closed = once(server, 'close')
+    api.stop()
+    server.closeAllConnections()
+    await closed
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  const authHeaders = { Authorization: `Bearer ${apiKey}` }
+  const workerBridgeHeaders = {
+    'x-mss-bridge-token': bridgeToken,
+    Referer: `http://127.0.0.1:${port}/?worker=w1&token=${bridgeToken}`
+  }
+
+  // 1. Start async export; worker w1 allocates mss-export-* and mss-hf-* plus open FileHandle
+  const startRes = await httpRequest({
+    port,
+    reqPath: '/api/v1/export',
+    method: 'POST',
+    headers: authHeaders,
+    body: { story, wait: false }
+  })
+  assert.equal(startRes.status, 202)
+  const taskId = startRes.json.taskId
+  assert.equal(
+    sentMessages.some(
+      (m) => m.msg.type === 'api:start-export' && m.msg.args?.[0]?.taskId === taskId
+    ),
+    true
+  )
+
+  const baseDirRes = await httpRequest({
+    port,
+    reqPath: '/bridge/invoke/electron%3Aget-temp-base-dir',
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: []
+  })
+  assert.equal(baseDirRes.status, 200)
+  const baseDir = baseDirRes.json.result
+  assert.equal(path.basename(baseDir).startsWith('mss-export-'), true)
+
+  const framesDirRes = await httpRequest({
+    port,
+    reqPath: '/bridge/invoke/electron%3Aget-temp-dir',
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: []
+  })
+  assert.equal(framesDirRes.status, 200)
+  const hfRootDir = path.dirname(framesDirRes.json.result)
+  assert.equal(path.basename(hfRootDir).startsWith('mss-hf-'), true)
+
+  const partialMp4 = path.join(baseDir, 'mss-fast-partial.mp4')
+  await writeFile(partialMp4, Buffer.from('ftyp'))
+  const writeChunkRes = await httpRequest({
+    port,
+    reqPath: `/bridge/bin/electron%3Awrite-file-at?args=${encodeURIComponent(JSON.stringify([{ filePath: partialMp4, position: 4 }]))}`,
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: Buffer.from('isom')
+  })
+  assert.equal(writeChunkRes.status, 200)
+
+  // Confirm temp dirs exist right before cancel
+  await stat(baseDir)
+  await stat(hfRootDir)
+
+  // 2. Cancel export via HTTP API; response must not return until temp dirs are removed
+  const cancelRes = await httpRequest({
+    port,
+    reqPath: `/api/v1/export/${taskId}/cancel`,
+    method: 'POST',
+    headers: authHeaders,
+    body: {}
+  })
+  assert.equal(cancelRes.status, 200)
+  assert.equal(cancelRes.json.cancelled, true)
+  assert.equal(
+    sentMessages.some((m) => m.msg.type === 'api:abort-export' && m.msg.args?.[0] === taskId),
+    true
+  )
+  await assert.rejects(stat(baseDir), { code: 'ENOENT' })
+  await assert.rejects(stat(hfRootDir), { code: 'ENOENT' })
+
+  // 3. Late writes / post-cancel temp allocations for cancelled task must fail and never recreate dir
+  const lateWriteRes = await httpRequest({
+    port,
+    reqPath: `/bridge/bin/electron%3Awrite-file-at?args=${encodeURIComponent(JSON.stringify([{ filePath: partialMp4, position: 8 }]))}`,
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: Buffer.from('late')
+  })
+  assert.equal(lateWriteRes.status, 499)
+  await assert.rejects(stat(baseDir), { code: 'ENOENT' })
+
+  const lateTempRes = await httpRequest({
+    port,
+    reqPath: '/bridge/invoke/electron%3Aget-temp-base-dir',
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: []
+  })
+  assert.equal(lateTempRes.status, 499)
+
+  // 4. Worker w1 completes abort & delivers export-result; next task on w1 succeeds cleanly
+  pool.handleWorkerMessage('w1', {
+    type: 'api:export-result',
+    args: [{ taskId, success: false, error: 'Export cancelled by user' }]
+  })
+
+  const nextRes = await httpRequest({
+    port,
+    reqPath: '/api/v1/export',
+    method: 'POST',
+    headers: authHeaders,
+    body: { story, wait: false }
+  })
+  assert.equal(nextRes.status, 202)
+  const nextTaskId = nextRes.json.taskId
+  const nextDirRes = await httpRequest({
+    port,
+    reqPath: '/bridge/invoke/electron%3Aget-temp-base-dir',
+    method: 'POST',
+    headers: workerBridgeHeaders,
+    body: []
+  })
+  assert.equal(nextDirRes.status, 200)
+  const nextBaseDir = nextDirRes.json.result
+  await stat(nextBaseDir)
+  pool.handleWorkerMessage('w1', {
+    type: 'api:export-result',
+    args: [{ taskId: nextTaskId, success: true, videoPath: path.join(outputDir, 'done.mp4') }]
+  })
+  await new Promise((r) => setTimeout(r, 30))
+  await assert.rejects(stat(nextBaseDir), { code: 'ENOENT' })
 })

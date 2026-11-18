@@ -17,6 +17,9 @@ import {
 } from '../../shared/ffmpeg'
 
 export interface BridgeController {
+  bindWorkerTask(workerId: string, taskId: string): void
+  unbindWorkerTask(workerId: string, taskId?: string): void
+  cleanupTask(taskId: string): Promise<void>
   cleanupWorker(workerId: string): Promise<void>
   disposeAll(): Promise<void>
   activePipeSessionCount(): number
@@ -41,6 +44,8 @@ interface BridgeDeps {
 
 const DEFAULT_FILE_HANDLE_IDLE_MS = 30_000
 const DEFAULT_FRAMES_PIPE_IDLE_MS = 125_000
+const TEMP_TOMBSTONE_TTL_MS = 5 * 60 * 1000
+const TEMP_TOMBSTONE_MAX_ENTRIES = 500
 const ALLOWED_PROXY_METHODS = new Set(['GET', 'HEAD', 'POST'])
 const SAFE_TEMP_PREFIX_RE = /^[a-zA-Z0-9_-]{1,64}$/
 const SAFE_TEMP_EXT_RE = /^[a-zA-Z0-9]{1,16}$/
@@ -259,6 +264,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     position: number,
     body: Buffer
   ): Promise<void> {
+    if (isUnderTombstonedPath(resolvedPath)) {
+      throw new BridgeSecurityError(
+        'Temp file directory was cleaned up after task cancellation',
+        499
+      )
+    }
     const key = normalizePathForCompare(path.resolve(resolvedPath))
     let entry = cachedFileHandles.get(key)
     if (!entry || entry.closed) {
@@ -273,8 +284,13 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
     const currentEntry = entry
     const op = currentEntry.tail.then(async () => {
-      if (currentEntry.closed) {
-        throw new Error('Cached file handle was closed')
+      if (currentEntry.closed || isUnderTombstonedPath(resolvedPath)) {
+        throw new BridgeSecurityError(
+          currentEntry.closed
+            ? 'Cached file handle was closed'
+            : 'Temp file directory was cleaned up after task cancellation',
+          499
+        )
       }
       if (!currentEntry.handle) {
         await fs.promises.mkdir(path.dirname(resolvedPath), { recursive: true })
@@ -298,12 +314,154 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     await op
   }
 
+  const workerToTask = new Map<string, string>()
+  const taskToWorker = new Map<string, string>()
+  const taskTempPaths = new Map<string, Set<string>>()
+  const workerTempPaths = new Map<string, Set<string>>()
+  const tombstonedTempPaths = new Map<string, number>()
+  const cancelledTaskTimes = new Map<string, number>()
+  const inFlightPathCleanups = new Map<string, Promise<void>>()
+
+  function pruneTimestampMap(map: Map<string, number>, now = Date.now()): void {
+    for (const [k, ts] of map.entries()) {
+      if (now - ts > TEMP_TOMBSTONE_TTL_MS) map.delete(k)
+    }
+    while (map.size > TEMP_TOMBSTONE_MAX_ENTRIES) {
+      const oldest = map.keys().next().value
+      if (oldest === undefined) break
+      map.delete(oldest)
+    }
+  }
+
+  function markTaskCancelled(taskId: string): void {
+    const now = Date.now()
+    cancelledTaskTimes.delete(taskId)
+    cancelledTaskTimes.set(taskId, now)
+    pruneTimestampMap(cancelledTaskTimes, now)
+  }
+
+  function isTaskCancelled(taskId: string): boolean {
+    const ts = cancelledTaskTimes.get(taskId)
+    if (ts === undefined) return false
+    if (Date.now() - ts > TEMP_TOMBSTONE_TTL_MS) {
+      cancelledTaskTimes.delete(taskId)
+      return false
+    }
+    return true
+  }
+
+  function canonicalComparePath(targetPath: string): string {
+    return normalizePathForCompare(resolveWithExistingRealpath(targetPath))
+  }
+
+  function markTombstonedPath(targetPath: string): void {
+    const now = Date.now()
+    const key = canonicalComparePath(targetPath)
+    tombstonedTempPaths.delete(key)
+    tombstonedTempPaths.set(key, now)
+    pruneTimestampMap(tombstonedTempPaths, now)
+  }
+
+  function isUnderTombstonedPath(targetPath: string): boolean {
+    if (tombstonedTempPaths.size === 0) return false
+    pruneTimestampMap(tombstonedTempPaths)
+    const candidate = canonicalComparePath(targetPath)
+    for (const key of tombstonedTempPaths.keys()) {
+      if (candidate === key || isStrictlyWithinRoot(candidate, key)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  function extractTaskId(req: Request, payload?: unknown, workerId?: string | null): string | null {
+    const fromPayload = (payload as { taskId?: unknown } | undefined)?.taskId
+    if (typeof fromPayload === 'string' && fromPayload.trim()) {
+      return fromPayload.trim()
+    }
+    const fromHeader = req.headers['x-mss-task-id']
+    if (typeof fromHeader === 'string' && fromHeader.trim()) {
+      return fromHeader.trim()
+    }
+    return workerId ? (workerToTask.get(workerId) ?? null) : null
+  }
+
+  function registerTempPath(
+    targetPath: string,
+    workerId: string | null,
+    taskId: string | null
+  ): void {
+    const resolved = path.resolve(targetPath)
+    if (taskId) {
+      let set = taskTempPaths.get(taskId)
+      if (!set) {
+        set = new Set<string>()
+        taskTempPaths.set(taskId, set)
+      }
+      set.add(resolved)
+    }
+    if (workerId) {
+      let set = workerTempPaths.get(workerId)
+      if (!set) {
+        set = new Set<string>()
+        workerTempPaths.set(workerId, set)
+      }
+      set.add(resolved)
+    }
+  }
+
+  function unregisterTempPath(targetPath: string): void {
+    const normTarget = normalizePathForCompare(path.resolve(targetPath))
+    for (const [taskId, set] of taskTempPaths.entries()) {
+      for (const entry of set) {
+        const normEntry = normalizePathForCompare(entry)
+        if (normEntry === normTarget || isStrictlyWithinRoot(normEntry, normTarget)) {
+          set.delete(entry)
+        }
+      }
+      if (set.size === 0) taskTempPaths.delete(taskId)
+    }
+    for (const [workerId, set] of workerTempPaths.entries()) {
+      for (const entry of set) {
+        const normEntry = normalizePathForCompare(entry)
+        if (normEntry === normTarget || isStrictlyWithinRoot(normEntry, normTarget)) {
+          set.delete(entry)
+        }
+      }
+      if (set.size === 0) workerTempPaths.delete(workerId)
+    }
+  }
+
+  async function cleanupTempPath(targetPath: string, tombstone: boolean): Promise<void> {
+    const resolved = path.resolve(targetPath)
+    if (tombstone) {
+      markTombstonedPath(resolved)
+    }
+    const key = normalizePathForCompare(resolved)
+    const existing = inFlightPathCleanups.get(key)
+    if (existing) {
+      await existing
+      return
+    }
+    const task = (async () => {
+      await closeCachedFileHandlesUnder(resolved)
+      await fs.promises
+        .rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 30 })
+        .catch(() => {})
+    })().finally(() => {
+      inFlightPathCleanups.delete(key)
+    })
+    inFlightPathCleanups.set(key, task)
+    await task
+  }
+
   interface PipeStreamEntry {
     id: string
     session: FramesPipeSession
     dir: string
     videoPath: string
     workerId: string | null
+    taskId: string | null
     idleTimer: ReturnType<typeof setTimeout> | null
     cleaning?: Promise<void>
   }
@@ -323,9 +481,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       clearTimeout(entry.idleTimer)
       entry.idleTimer = null
     }
+    markTombstonedPath(entry.dir)
+    unregisterTempPath(entry.dir)
     entry.cleaning = (async () => {
       await entry.session.abort(reason).catch(() => {})
-      await fs.promises.rm(entry.dir, { recursive: true, force: true }).catch(() => {})
+      await cleanupTempPath(entry.dir, true)
     })()
     await entry.cleaning
   }
@@ -340,28 +500,127 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     entry.idleTimer.unref?.()
   }
 
+  function snapshotAndDeleteTempPaths(paths: Iterable<string>, tombstone: boolean): string[] {
+    const unique = new Set<string>()
+    for (const p of paths) {
+      const resolved = path.resolve(p)
+      if (tombstone) markTombstonedPath(resolved)
+      unique.add(resolved)
+    }
+    return Array.from(unique)
+  }
+
   const controller: BridgeController = {
+    bindWorkerTask(workerId: string, taskId: string): void {
+      if (!workerId || !taskId) return
+      const previousTaskId = workerToTask.get(workerId)
+      if (
+        previousTaskId &&
+        previousTaskId !== taskId &&
+        taskToWorker.get(previousTaskId) === workerId
+      ) {
+        taskToWorker.delete(previousTaskId)
+      }
+      cancelledTaskTimes.delete(taskId)
+      workerToTask.set(workerId, taskId)
+      taskToWorker.set(taskId, workerId)
+    },
+    unbindWorkerTask(workerId: string, taskId?: string): void {
+      if (!workerId) return
+      const current = workerToTask.get(workerId)
+      if (!current) return
+      if (!taskId || current === taskId) {
+        workerToTask.delete(workerId)
+        if (taskToWorker.get(current) === workerId) {
+          taskToWorker.delete(current)
+        }
+      }
+    },
+    async cleanupTask(taskId: string): Promise<void> {
+      if (!taskId) return
+      markTaskCancelled(taskId)
+      const boundWorker = taskToWorker.get(taskId)
+      const collected: string[] = []
+      const taskSet = taskTempPaths.get(taskId)
+      if (taskSet) {
+        collected.push(...taskSet)
+        taskTempPaths.delete(taskId)
+      }
+      if (boundWorker && workerToTask.get(boundWorker) === taskId) {
+        const workerSet = workerTempPaths.get(boundWorker)
+        if (workerSet) {
+          collected.push(...workerSet)
+          workerTempPaths.delete(boundWorker)
+        }
+      }
+      const uniqueDirs = snapshotAndDeleteTempPaths(collected, true)
+      const pipeTargets = Array.from(framesPipeSessions.values())
+        .filter(
+          (entry) => entry.taskId === taskId || (boundWorker && entry.workerId === boundWorker)
+        )
+        .map((entry) => entry.id)
+
+      await Promise.allSettled([
+        ...pipeTargets.map((id) =>
+          cleanupPipeSession(id, new Error(`Export task ${taskId} cancelled`))
+        ),
+        ...uniqueDirs.map((dir) => cleanupTempPath(dir, true))
+      ])
+    },
     async cleanupWorker(workerId: string): Promise<void> {
+      const boundTaskId = workerToTask.get(workerId)
+      if (boundTaskId) {
+        workerToTask.delete(workerId)
+        if (taskToWorker.get(boundTaskId) === workerId) {
+          taskToWorker.delete(boundTaskId)
+        }
+      }
+      const collected: string[] = []
+      const workerSet = workerTempPaths.get(workerId)
+      if (workerSet) {
+        collected.push(...workerSet)
+        workerTempPaths.delete(workerId)
+      }
+      const wasCancelled = Boolean(boundTaskId && isTaskCancelled(boundTaskId))
+      if (boundTaskId) {
+        const taskSet = taskTempPaths.get(boundTaskId)
+        if (taskSet) {
+          collected.push(...taskSet)
+          taskTempPaths.delete(boundTaskId)
+        }
+      }
+      const uniqueDirs = snapshotAndDeleteTempPaths(collected, wasCancelled)
       const targets = Array.from(framesPipeSessions.values())
         .filter((entry) => entry.workerId === workerId)
         .map((entry) => entry.id)
-      if (targets.length === 0) return
-      logger.warn(
-        `[Bridge] Cleaning up ${targets.length} orphaned framesPipeSessions for worker ${workerId}`
-      )
-      await Promise.allSettled(
-        targets.map((id) =>
-          cleanupPipeSession(id, new Error(`Render worker ${workerId} recycled or disconnected`))
+      if (targets.length > 0) {
+        logger.warn(
+          `[Bridge] Cleaning up ${targets.length} orphaned framesPipeSessions for worker ${workerId}`
         )
-      )
+      }
+      await Promise.allSettled([
+        ...targets.map((id) =>
+          cleanupPipeSession(id, new Error(`Render worker ${workerId} recycled or disconnected`))
+        ),
+        ...uniqueDirs.map((dir) => cleanupTempPath(dir, wasCancelled))
+      ])
     },
     async disposeAll(): Promise<void> {
       activeBridgeControllers.delete(controller)
+      workerToTask.clear()
+      taskToWorker.clear()
+      const collected: string[] = []
+      for (const set of taskTempPaths.values()) collected.push(...set)
+      for (const set of workerTempPaths.values()) collected.push(...set)
+      taskTempPaths.clear()
+      workerTempPaths.clear()
+      const uniqueDirs = snapshotAndDeleteTempPaths(collected, true)
       const pipeIds = Array.from(framesPipeSessions.keys())
       const fileKeys = Array.from(cachedFileHandles.keys())
       await Promise.allSettled([
         ...pipeIds.map((id) => cleanupPipeSession(id, new Error('Bridge router shutting down'))),
-        ...fileKeys.map((key) => closeCachedFileHandle(key))
+        ...fileKeys.map((key) => closeCachedFileHandle(key)),
+        ...uniqueDirs.map((dir) => cleanupTempPath(dir, true))
       ])
     },
     activePipeSessionCount(): number {
@@ -451,7 +710,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         }
         result = started
       } else {
-        result = await handleInvoke(channel, args)
+        result = await handleInvoke(channel, args, req)
       }
       if (!res.destroyed) res.json({ ok: true, result })
     } catch (error) {
@@ -483,6 +742,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       inputHeight?: number
       crf?: number
       workerId?: string
+      taskId?: string
+    }
+    const workerId = extractWorkerId(req, payload)
+    const taskId = extractTaskId(req, payload, workerId)
+    if (taskId && isTaskCancelled(taskId)) {
+      throw new BridgeSecurityError('Export task was cancelled', 499)
     }
     const fps = Number(payload.fps) > 0 ? Number(payload.fps) : config.video.fps
     const width = Number(payload.width) > 0 ? Number(payload.width) : config.video.width
@@ -509,18 +774,20 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       throw error
     }
 
-    if (signal.aborted) {
+    if (signal.aborted || (taskId && isTaskCancelled(taskId))) {
       await session.abort(new Error('Frames stream start aborted')).catch(() => {})
       await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
       throw new BridgeSecurityError('Frames stream start aborted', 499)
     }
 
+    registerTempPath(dir, workerId, taskId)
     const entry: PipeStreamEntry = {
       id,
       session,
       dir,
       videoPath,
-      workerId: extractWorkerId(req, payload),
+      workerId,
+      taskId,
       idleTimer: null
     }
     framesPipeSessions.set(id, entry)
@@ -528,17 +795,38 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     return { id, videoPath }
   }
 
-  async function handleInvoke(channel: string, args: unknown[]): Promise<unknown> {
+  async function handleInvoke(channel: string, args: unknown[], req: Request): Promise<unknown> {
     switch (channel) {
       case 'electron:get-temp-dir': {
-        const framesDir = path.join(tmpdir(), `mss-hf-${Date.now()}-${randomSuffix()}`, 'frames')
+        const workerId = extractWorkerId(req, args[0])
+        const taskId = extractTaskId(req, args[0], workerId)
+        if (taskId && isTaskCancelled(taskId)) {
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
+        const rootDir = path.join(tmpdir(), `mss-hf-${Date.now()}-${randomSuffix()}`)
+        const framesDir = path.join(rootDir, 'frames')
         await fs.promises.mkdir(framesDir, { recursive: true })
+        if (taskId && isTaskCancelled(taskId)) {
+          await cleanupTempPath(rootDir, true)
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
+        registerTempPath(rootDir, workerId, taskId)
         return framesDir
       }
 
       case 'electron:get-temp-base-dir': {
+        const workerId = extractWorkerId(req, args[0])
+        const taskId = extractTaskId(req, args[0], workerId)
+        if (taskId && isTaskCancelled(taskId)) {
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
         const baseDir = path.join(tmpdir(), `mss-export-${Date.now()}-${randomSuffix()}`)
         await fs.promises.mkdir(baseDir, { recursive: true })
+        if (taskId && isTaskCancelled(taskId)) {
+          await cleanupTempPath(baseDir, true)
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
+        registerTempPath(baseDir, workerId, taskId)
         return baseDir
       }
 
@@ -555,6 +843,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         const payload = args[0] as { filePath: string }
         if (!payload?.filePath) return null
         const resolved = assertContainedPath(payload.filePath, allowedTempRoots, 'temp file path')
+        unregisterTempPath(resolved)
         await closeCachedFileHandlesUnder(resolved)
         await fs.promises.rm(resolved, { recursive: true, force: true })
         return null
@@ -612,6 +901,15 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           allowedOutputRoots,
           'outputPath'
         )
+        const workerId = extractWorkerId(req, payload)
+        const taskId = extractTaskId(req, payload, workerId)
+        if (
+          (taskId && isTaskCancelled(taskId)) ||
+          isUnderTombstonedPath(safeVideoPath) ||
+          (safeAudioPath ? isUnderTombstonedPath(safeAudioPath) : false)
+        ) {
+          return { success: false, error: 'Export task was cancelled' }
+        }
         await closeCachedFileHandle(safeVideoPath)
 
         logger.info(
@@ -715,6 +1013,15 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           allowedOutputRoots,
           'outputPath'
         )
+        const workerId = extractWorkerId(req, payload)
+        const taskId = extractTaskId(req, payload, workerId)
+        if (
+          (taskId && isTaskCancelled(taskId)) ||
+          isUnderTombstonedPath(safeVideoPath) ||
+          (safeAudioPath ? isUnderTombstonedPath(safeAudioPath) : false)
+        ) {
+          return { success: false, error: 'Export task was cancelled' }
+        }
         await closeCachedFileHandle(safeVideoPath)
 
         logger.info(
@@ -807,6 +1114,15 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           allowedOutputRoots,
           'outputPath'
         )
+        const workerId = extractWorkerId(req, payload)
+        const taskId = extractTaskId(req, payload, workerId)
+        if (
+          (taskId && isTaskCancelled(taskId)) ||
+          isUnderTombstonedPath(safeFramesDir) ||
+          (safeAudioPath ? isUnderTombstonedPath(safeAudioPath) : false)
+        ) {
+          return { success: false, error: 'Export task was cancelled' }
+        }
         logger.info(
           `[Bridge] API frames-encode: framesDir=${safeFramesDir}, audioPath=${safeAudioPath}, outputPath=${safeOutputPath}`
         )
@@ -901,6 +1217,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           path: assertContainedPath(item?.path, allowedTempRoots, 'frame path'),
           data: item.data
         }))
+        if (safeBatch.some((item) => isUnderTombstonedPath(item.path))) {
+          throw new BridgeSecurityError(
+            'Temp frame directory was cleaned up after task cancellation',
+            499
+          )
+        }
         await Promise.allSettled(
           safeBatch.map(async (item) => {
             const buffer = Buffer.from(item.data, 'base64')
@@ -945,7 +1267,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         res.off('close', onDisconnect)
       }
       try {
-        const result = await handleBinaryInvoke(channel, args, req.body as Buffer)
+        const result = await handleBinaryInvoke(channel, args, req.body as Buffer, req)
         if (!res.destroyed) res.json({ ok: true, result })
       } catch (error) {
         logger.error(`[Bridge] bin ${channel} failed`, error)
@@ -964,7 +1286,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   async function handleBinaryInvoke(
     channel: string,
     args: unknown[],
-    body: Buffer
+    body: Buffer,
+    req: Request
   ): Promise<unknown> {
     switch (channel) {
       case 'electron:frames-stream-chunk': {
@@ -986,6 +1309,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       case 'electron:append-to-file': {
         const payload = args[0] as { filePath: string }
         const safePath = assertContainedPath(payload?.filePath, allowedTempRoots, 'temp file path')
+        if (isUnderTombstonedPath(safePath)) {
+          throw new BridgeSecurityError(
+            'Temp file directory was cleaned up after task cancellation',
+            499
+          )
+        }
         await fs.promises.mkdir(path.dirname(safePath), { recursive: true })
         await fs.promises.appendFile(safePath, body)
         return null
@@ -1010,6 +1339,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       case 'electron:write-frame': {
         const payload = args[0] as { path: string }
         const safePath = assertContainedPath(payload?.path, allowedTempRoots, 'frame path')
+        if (isUnderTombstonedPath(safePath)) {
+          throw new BridgeSecurityError(
+            'Temp frame directory was cleaned up after task cancellation',
+            499
+          )
+        }
         await fs.promises.writeFile(safePath, body)
         return null
       }
@@ -1024,11 +1359,21 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         ) {
           throw new BridgeSecurityError('Invalid temp file prefix or extension', 400)
         }
+        const workerId = extractWorkerId(req, payload)
+        const taskId = extractTaskId(req, payload, workerId)
+        if (taskId && isTaskCancelled(taskId)) {
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
         const tempPath = path.join(
           tmpdir(),
           `${payload.prefix}-${Date.now()}-${randomSuffix()}.${payload.extension}`
         )
         await fs.promises.writeFile(tempPath, body)
+        if (taskId && isTaskCancelled(taskId)) {
+          await cleanupTempPath(tempPath, true)
+          throw new BridgeSecurityError('Export task was cancelled', 499)
+        }
+        registerTempPath(tempPath, workerId, taskId)
         logger.info(
           `[Bridge] Temp file written: ${tempPath}, size=${(body.length / 1024 / 1024).toFixed(2)} MB`
         )

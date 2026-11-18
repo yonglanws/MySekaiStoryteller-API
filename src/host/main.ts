@@ -132,11 +132,29 @@ async function bootstrap(): Promise<void> {
   const ttsLease = new TtsLeaseManager(logger)
 
   let bridgeController: BridgeController | null = null
-  const pool = new RenderPool(logger, config, hub, resourceCatalog, bridgeToken, (workerId) => {
-    void bridgeController?.cleanupWorker(workerId).catch((err) => {
-      logger.warn(`[Bridge] Failed to clean up pipe sessions for worker ${workerId}`, err)
-    })
-  })
+  const pool = new RenderPool(
+    logger,
+    config,
+    hub,
+    resourceCatalog,
+    bridgeToken,
+    (workerId) => {
+      void bridgeController?.cleanupWorker(workerId).catch((err) => {
+        logger.warn(`[Bridge] Failed to clean up pipe sessions for worker ${workerId}`, err)
+      })
+    },
+    {
+      onTaskStart: (workerId, taskId) => {
+        bridgeController?.bindWorkerTask(workerId, taskId)
+      },
+      onTaskCancel: (taskId) => {
+        if (!bridgeController) return
+        return bridgeController.cleanupTask(taskId).catch((err) => {
+          logger.warn(`[Bridge] Failed to clean up temp dirs for cancelled task ${taskId}`, err)
+        })
+      }
+    }
+  )
 
   const serverExtra = config.server as {
     apiKey?: unknown

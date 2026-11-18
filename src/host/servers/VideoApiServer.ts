@@ -65,7 +65,7 @@ export interface ExportTask {
  */
 export interface ExportDispatcher {
   dispatch(task: ExportTask): void
-  cancel(taskId: string): void
+  cancel(taskId: string): void | Promise<void>
 }
 
 interface PendingExport {
@@ -502,14 +502,20 @@ export class VideoApiServer {
     return true
   }
 
-  /** 对外限流入口：超限时直接写入 HTTP 429 并返回 false。 */
+  /** 对外限流入口：超限时设置 Retry-After 响应头、写入 HTTP 429 并返回 false。 */
   enforceRateLimit(req: Request, res: Response): boolean {
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown'
     if (!this.checkRateLimit(clientIp)) {
+      const entry = this.rateLimitMap.get(clientIp)
+      const remainingMs = entry
+        ? Math.max(1_000, RATE_LIMIT_WINDOW_MS - (Date.now() - entry.windowStart))
+        : RATE_LIMIT_WINDOW_MS
+      const retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000))
+      res.setHeader('Retry-After', String(retryAfterSeconds))
       res.status(429).json({
         success: false,
         message: 'Too many requests. Please try again later.',
-        retryAfterSeconds: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)
+        retryAfterSeconds
       })
       return false
     }
@@ -710,9 +716,10 @@ export class VideoApiServer {
       res.json({ taskId, status: 'unknown' })
     })
 
-    this.app.post('/api/v1/export/:taskId/cancel', (req: Request, res: Response) => {
+    this.app.post('/api/v1/export/:taskId/cancel', async (req: Request, res: Response) => {
       const taskId = req.params.taskId as string
-      const cancelled = this.cancelExport(taskId)
+      const { cancelled, cleanup } = this.cancelExportWithCleanup(taskId)
+      await cleanup
       res.json({ taskId, cancelled })
     })
 
@@ -1228,6 +1235,20 @@ export class VideoApiServer {
     reason = 'Export cancelled by user',
     recordStatus: 'cancelled' | 'failed' = 'cancelled'
   ): boolean {
+    const { cancelled } = this.cancelExportWithCleanup(taskId, reason, recordStatus)
+    return cancelled
+  }
+
+  private cancelExportWithCleanup(
+    taskId: string,
+    reason = 'Export cancelled by user',
+    recordStatus: 'cancelled' | 'failed' = 'cancelled'
+  ): { cancelled: boolean; cleanup: Promise<void> } {
+    const runDispatcherCancel = (): Promise<void> =>
+      Promise.resolve(this.dispatcher?.cancel(taskId)).catch((err) => {
+        this.logger.warn(`[API] Cancel cleanup failed for task ${taskId}`, err)
+      })
+
     const queueIndex = this.exportQueue.findIndex((t) => t.taskId === taskId)
     if (queueIndex > -1) {
       this.exportQueue.splice(queueIndex, 1)
@@ -1244,14 +1265,14 @@ export class VideoApiServer {
         pending.reject(new Error(reason))
         this.pendingExports.delete(taskId)
       }
-      this.dispatcher?.cancel(taskId)
+      const cleanup = runDispatcherCancel()
       this.logger.info(`[API] Cancelled queued export: ${taskId}`)
-      return true
+      return { cancelled: true, cleanup }
     }
 
     if (this.activeExports.has(taskId)) {
       this.activeExports.delete(taskId)
-      this.dispatcher?.cancel(taskId)
+      const cleanup = runDispatcherCancel()
       const pending = this.pendingExports.get(taskId)
       if (pending) {
         this.saveTaskRecord(taskId, {
@@ -1264,10 +1285,10 @@ export class VideoApiServer {
         this.pendingExports.delete(taskId)
       }
       this.logger.info(`[API] Cancelled active export: ${taskId}`)
-      return true
+      return { cancelled: true, cleanup }
     }
 
-    return false
+    return { cancelled: false, cleanup: Promise.resolve() }
   }
 
   private recordRecentExport(taskId: string, success: boolean): void {
