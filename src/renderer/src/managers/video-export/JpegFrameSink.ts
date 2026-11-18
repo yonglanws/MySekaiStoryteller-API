@@ -10,12 +10,15 @@ import { AsyncFrameCapturer } from './AsyncFrameCapturer'
  */
 export class JpegFrameSink {
   private readonly logger = new ExportLogger('JpegFrameSink')
-  private readonly capturer: AsyncFrameCapturer
-  private readonly framesDir: string
-  private readonly width: number
-  private readonly height: number
-  private readonly fps: number
-  private readonly crf: number
+  private readonly opts: {
+    width: number
+    height: number
+    quality: number
+    fps: number
+    crf: number
+  }
+  private capturer: AsyncFrameCapturer
+  private framesDir: string
   private frameCount = 0
   private pipeSessionId: string | null = null
   private pipeVideoPath: string | null = null
@@ -25,21 +28,24 @@ export class JpegFrameSink {
     width: number
     height: number
     quality: number
-    framesDir: string
+    framesDir?: string
     fps?: number
     crf?: number
   }) {
-    this.framesDir = opts.framesDir
-    this.width = opts.width
-    this.height = opts.height
-    this.fps = opts.fps ?? 30
-    this.crf = opts.crf ?? 23
-    this.capturer = new AsyncFrameCapturer(this.logger, {
+    this.framesDir = opts.framesDir ?? ''
+    this.opts = {
       width: opts.width,
       height: opts.height,
       quality: opts.quality,
+      fps: opts.fps ?? 30,
+      crf: opts.crf ?? 23
+    }
+    this.capturer = new AsyncFrameCapturer(this.logger, {
+      width: this.opts.width,
+      height: this.opts.height,
+      quality: this.opts.quality,
       batchSize: 60,
-      framesDir: opts.framesDir,
+      framesDir: this.framesDir,
       maxQueueSize: 120,
       maxInFlight: 3
     })
@@ -49,6 +55,10 @@ export class JpegFrameSink {
     return Boolean(this.pipeSessionId || this.finishedPipeVideoPath)
   }
 
+  get framesDirectory(): string {
+    return this.framesDir
+  }
+
   async initialize(canvas: HTMLCanvasElement): Promise<void> {
     await this.capturer.initialize(canvas)
 
@@ -56,12 +66,12 @@ export class JpegFrameSink {
       const started = (await window.electron?.ipcRenderer?.invoke?.(
         'electron:frames-stream-start',
         {
-          fps: this.fps,
-          width: this.width,
-          height: this.height,
-          inputWidth: this.width,
-          inputHeight: this.height,
-          crf: this.crf
+          fps: this.opts.fps,
+          width: this.opts.width,
+          height: this.opts.height,
+          inputWidth: this.opts.width,
+          inputHeight: this.opts.height,
+          crf: this.opts.crf
         }
       )) as { id?: string; videoPath?: string } | undefined
 
@@ -76,11 +86,30 @@ export class JpegFrameSink {
           })
         })
         this.logger.info(`JPEG pipe stream started: id=${sessionId} → ${started.videoPath}`)
+        return
       }
     } catch (error) {
       this.logger.warn('JPEG pipe stream unavailable, falling back to disk frame batches:', error)
       this.pipeSessionId = null
       this.pipeVideoPath = null
+    }
+
+    if (!this.framesDir && window.electron?.ipcRenderer?.invoke) {
+      const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
+      this.framesDir = dir || ''
+      if (this.framesDir) {
+        await this.capturer.dispose()
+        this.capturer = new AsyncFrameCapturer(this.logger, {
+          width: this.opts.width,
+          height: this.opts.height,
+          quality: this.opts.quality,
+          batchSize: 60,
+          framesDir: this.framesDir,
+          maxQueueSize: 120,
+          maxInFlight: 3
+        })
+        await this.capturer.initialize(canvas)
+      }
     }
   }
 

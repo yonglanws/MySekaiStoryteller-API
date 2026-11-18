@@ -655,12 +655,13 @@ function exportFixture(
     return applyTalkPatch(...args)
   }
   const calculator = f.load('utils/TimelineCalculator.ts')
-  class Empty {}
-  class StreamRecorder {
-    setOnErrorCallback = noop
-    startRecordingToSink = noop
-    stopRecordingToSink = async () => {}
-    dispose = noop
+  class Empty {
+    reset = noop
+    clearCheckpoint = noop
+    start = noop
+    update = noop
+    stop = noop
+    hasCheckpoint = () => false
   }
   class AudioMuxer {
     initialize = async () => {}
@@ -709,7 +710,6 @@ function exportFixture(
     CheckpointManager: Empty,
     ErrorRecoveryManager: Empty,
     ProgressTracker: Empty,
-    StreamRecorder,
     AudioMuxer,
     ConcurrentExportPipeline: Pipeline,
     SnippetTimestampRecorder,
@@ -770,11 +770,6 @@ function exportFixture(
   const manager = new Manager(f.app)
   manager.prepareStreamRecording = async () => ({ canvas, snippets, captureFps: fps })
   manager.resolveFastUseWebCodecs = async () => false
-  manager.saveApiVideoFromDisk = async () => ({
-    frameCount: 1,
-    durationMs: f.clock.now,
-    fileSize: 123
-  })
   const options = {
     fps,
     ...(fastFps !== undefined ? { fastFps } : {}),
@@ -788,19 +783,19 @@ function exportFixture(
     manager,
     planned,
     patchCalls,
-    async export(mode) {
+    async export(mode, extra = {}) {
       if (mode === 'record') {
-        const run = manager.exportVideoStream(options, null, null, noop)
-        await f.clock.runAllAsync()
+        const run = manager.exportVideo({ ...options, ...extra, exportMode: 'record' }, noop)
+        await f.clock.tickAsync(0)
         return run
       }
-      return manager.exportVideoFast(options, null, null, noop)
+      return manager.exportVideoFast({ ...options, ...extra, exportMode: 'fast' }, null, null, noop)
     }
   }
 }
 
 for (const mode of ['record', 'fast']) {
-  test(`${mode} entry uses the shared target helper/patch for success and failure`, async (t) => {
+  test(`${mode} (delegating to fast) uses the shared target helper/patch for success and failure`, async (t) => {
     const snippets = [
       talk(twentyChars, { ttsText: 'い'.repeat(40) }),
       talk(),
@@ -860,7 +855,7 @@ for (const mode of ['record', 'fast']) {
   })
 }
 
-test('fast export steps VirtualClockController in <=16.67ms sub-ticks at 30fps and computes ending envelope accurately', async (t) => {
+test('fast export steps VirtualClockController once per frame (~33.33ms at 30fps) and computes ending envelope accurately', async (t) => {
   const tickDeltas = []
   const mixedDurations = []
   const f = exportFixture(t, {
@@ -875,9 +870,15 @@ test('fast export steps VirtualClockController in <=16.67ms sub-ticks at 30fps a
   const resNoEnvelope = await f.export('fast')
   assert.equal(resNoEnvelope.success, true)
   assert.ok(tickDeltas.length > 0)
+  // FakeTimers truncates fractional ms per tickAsync(33.33ms), so every 3rd catchup step is ~34.0ms
+  // rather than invoking two <=16.67ms sub-ticks per frame.
   assert.ok(
-    tickDeltas.every((ms) => ms <= 16.67),
-    `Expected every sub-tick <= 16.67ms at 30fps, got max=${Math.max(...tickDeltas)}`
+    tickDeltas.every((ms) => ms <= 34.01),
+    `Expected single virtual step per frame (~33.33ms, catchup <= 34.01ms) at 30fps, got max=${Math.max(...tickDeltas)}`
+  )
+  assert.ok(
+    tickDeltas.some((ms) => ms >= 33),
+    `Expected >=33ms single-step tick (no 16.67ms split), got max=${Math.max(...tickDeltas)}`
   )
   // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
   const snippetDur = Math.round(f.planned[0])
@@ -899,7 +900,7 @@ test('fast export steps VirtualClockController in <=16.67ms sub-ticks at 30fps a
   )
 })
 
-test('stream export pre-decodes lip-sync envelopes before snippet loop and skips opening cover on BlackOut stories', async (t) => {
+test('serial fast export pre-decodes lip-sync envelopes before snippet loop and skips opening cover on BlackOut stories', async (t) => {
   let decodeCallsDuringSnippet = 0
   let inSnippetLoop = false
   let openingCoverCalled = 0
@@ -925,9 +926,9 @@ test('stream export pre-decodes lip-sync envelopes before snippet loop and skips
     if (snippet.type === 'BlackOut') return
     return origHandle(snippet, idx)
   }
-  const res = await f.export('record')
+  const res = await f.export('fast', { ttsMode: 'serial' })
   assert.equal(res.success, true)
-  assert.equal(decodeCallsDuringSnippet, 0, 'Serial stream export must pre-decode before recording loop')
+  assert.equal(decodeCallsDuringSnippet, 0, 'Serial fast export must pre-decode before snippet loop')
   assert.equal(openingCoverCalled, 0, 'Must skip setOpeningCover when story starts with BlackOut')
 })
 

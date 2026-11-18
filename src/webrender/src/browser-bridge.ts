@@ -13,10 +13,6 @@
 type IpcListener = (event: unknown, ...args: unknown[]) => void
 
 const JSON_INVOKE_CHANNELS = new Set([
-  'electron:record-start',
-  'electron:record-finish',
-  'electron:record-mux',
-  'electron:record-cancel',
   'electron:frames-stream-start',
   'electron:frames-stream-finish',
   'electron:frames-stream-cancel',
@@ -30,7 +26,6 @@ const JSON_INVOKE_CHANNELS = new Set([
 ])
 
 const BINARY_INVOKE_CHANNELS = new Set([
-  'electron:record-chunk',
   'electron:frames-stream-chunk',
   'electron:append-to-file',
   'electron:write-file-at',

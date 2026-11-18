@@ -9,7 +9,6 @@ import {
   ExportError,
   ExportErrorCode,
   ExportResult,
-  StreamRecorder,
   AudioMuxer,
   ConcurrentExportPipeline,
   SnippetTimestampRecorder,
@@ -24,7 +23,7 @@ import {
 import { VirtualClockController } from './video-export/VirtualClockController'
 import { BgmPlan } from './video-export/BgmPlan'
 import { SePlan } from './video-export/SePlan'
-import { WebCodecsMp4Encoder } from './video-export/WebCodecsMp4Encoder'
+import { WebCodecsMp4Encoder, type WebCodecsProbeResult } from './video-export/WebCodecsMp4Encoder'
 import { JpegFrameSink } from './video-export/JpegFrameSink'
 import { applyTalkPatch } from './video-export/talkPatch'
 import type { VideoExportOptions } from './video-export'
@@ -35,7 +34,6 @@ import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import {
-  FRAME_MS,
   OPENING_COVER_FADE_MS,
   PLAYED_WAIT_TIME_MS,
   SCENARIO_EXIT_BGM_FADE_MS,
@@ -64,49 +62,6 @@ export interface ExportProgress {
 type ProgressCallback = (progress: ExportProgress) => void
 type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 
-/**
- * 这些片段结束时画面本来就可能没有内容：准备指令、脚本黑场/白场、
- * 转场覆盖、镜头参数，以及把最后一个角色淡出后的 Clear。黑屏保护不能
- * 把它们当成“模型没渲染”，否则官方冷开场和纯黑背景剧本会被误杀。
- */
-const FRAME_VALIDATION_EXEMPT_SNIPPETS = new Set<string>([
-  'ChangeLayoutMode',
-  'ChangeBackgroundImage',
-  'ChangeBgm',
-  'BgmVolume',
-  'PlaySe',
-  'StopSe',
-  'HideTalk',
-  'BlackIn',
-  'BlackOut',
-  'SekaiIn',
-  'SekaiOut',
-  'Wipe',
-  'SideFade',
-  'FlashbackIn',
-  'FlashbackOut',
-  'SepiaIn',
-  'SepiaOut',
-  'BlurIn',
-  'BlurOut',
-  'BackgroundBlur',
-  'FullScreenText',
-  'Movie',
-  'CameraMove',
-  'CameraZoom',
-  'DollyZoom',
-  'ShakeWindow',
-  'StopShakeWindow',
-  'StopShakeScreen',
-  'StopShake',
-  'LayoutDepth',
-  'CostumeChange',
-  'AttachCharacterShader',
-  'PlayScenarioEffect',
-  'StopScenarioEffect',
-  'LayoutClear'
-])
-
 interface TalkSnippetLike {
   content: string
   ttsText?: string
@@ -131,6 +86,19 @@ export default class VideoExportManager {
     number,
     Promise<ReturnType<typeof buildLipSyncEnvelope> | null>
   >()
+  private pcmCache = new Map<
+    number,
+    { channel0: Float32Array; channel1: Float32Array; sampleRate: number }
+  >()
+  private lastWebCodecsProbeConfig: VideoEncoderConfig | null = null
+
+  /** 已在同一常驻 worker 页面上通过首次 WebGL/黑屏校验的 App 实例集合 */
+  private static readonly warmValidatedApps = new WeakSet<object>()
+  /** 按 App 实例隔离的 WebCodecs 探测缓存，避免跨复用页重复 5 帧测速 */
+  private static readonly webCodecsProbeCache = new WeakMap<
+    object,
+    Map<string, WebCodecsProbeResult | null>
+  >()
 
   private static readonly DEFAULT_BATCH_SIZE = 30
 
@@ -154,7 +122,8 @@ export default class VideoExportManager {
   }
 
   private async decodeLipSyncEnvelope(
-    audioBuffer: ArrayBuffer
+    audioBuffer: ArrayBuffer,
+    snippetIndex = -1
   ): Promise<ReturnType<typeof buildLipSyncEnvelope> | null> {
     try {
       // Offline decoding must not wait on timers while the fast frame pump is paused.
@@ -164,6 +133,15 @@ export default class VideoExportManager {
       const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) =>
         decoded.getChannelData(index)
       )
+      if (snippetIndex >= 0 && channels.length > 0 && channels[0].length > 0) {
+        const ch0 = channels[0]
+        const ch1 = channels.length > 1 ? channels[1] : ch0
+        this.pcmCache.set(snippetIndex, {
+          channel0: ch0,
+          channel1: ch1,
+          sampleRate: decoded.sampleRate
+        })
+      }
       return buildLipSyncEnvelope(channels, decoded.sampleRate)
     } catch (error) {
       this.checkAborted()
@@ -181,7 +159,7 @@ export default class VideoExportManager {
     ) {
       return
     }
-    const task = this.decodeLipSyncEnvelope(audioBuffer)
+    const task = this.decodeLipSyncEnvelope(audioBuffer, snippetIndex)
       .then((envelope) => {
         this.lipSyncCache.set(snippetIndex, envelope)
         return envelope
@@ -203,7 +181,7 @@ export default class VideoExportManager {
       return
     }
     if (!audioBuffer) return
-    const envelope = await this.decodeLipSyncEnvelope(audioBuffer)
+    const envelope = await this.decodeLipSyncEnvelope(audioBuffer, snippetIndex)
     if (snippetIndex >= 0) this.lipSyncCache.set(snippetIndex, envelope)
     this.app.currentTalkLipSync = envelope
   }
@@ -216,12 +194,12 @@ export default class VideoExportManager {
     return false
   }
 
-  private async prewarmReadyLipSync(
+  private prewarmReadyLipSync(
     snippets: SnippetData[],
     concurrentPipeline: ConcurrentExportPipeline,
     fromIndex: number,
     lookahead: number
-  ): Promise<void> {
+  ): void {
     if (!this.app.ttsManager) return
     let queued = 0
     for (let j = fromIndex; j < snippets.length && queued < lookahead; j++) {
@@ -229,7 +207,10 @@ export default class VideoExportManager {
       queued++
       if (this.lipSyncCache.has(j) || this.pendingLipSync.has(j)) continue
       if (!concurrentPipeline.isTTSReady(j)) continue
-      const res = await concurrentPipeline.waitForTTSReady(j)
+      const res =
+        typeof concurrentPipeline.getTTSResult === 'function'
+          ? concurrentPipeline.getTTSResult(j)
+          : null
       if (res?.success && res.duration > 0) {
         const buf = this.app.ttsManager.getAudioBufferForSnippet(j)
         if (buf) this.predecodeTalkLipSync(j, buf)
@@ -317,8 +298,9 @@ export default class VideoExportManager {
     this.talkSettleMsByIndex.clear()
     this.lipSyncCache.clear()
     this.pendingLipSync.clear()
+    this.pcmCache.clear()
     resetStageTiming(this.app)
-    this.app.snippetStrategyManager?.resetBackgroundSnippets()
+    this.app.snippetStrategyManager?.resetBackgroundSnippets?.()
   }
 
   private attachDiagnostics(
@@ -479,75 +461,19 @@ export default class VideoExportManager {
       await this.initializeExport(options, progressFill, exportStatus, progressCallback)
       this.checkAborted()
 
-      if (options.exportMode === 'stream') {
-        const maxRetries = 2
-        let lastError: Error | null = null
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            if (attempt > 0) {
-              this.logger.info(`Retrying stream export, attempt ${attempt + 1}/${maxRetries + 1}`)
-              if (exportStatus)
-                exportStatus.textContent = `重试导出 (${attempt + 1}/${maxRetries + 1})…`
-
-              this.app.lastSnippetActualDurationMs = 0
-              this.app.ttsManager?.clearAudioTracks()
-
-              await this.sleep(1000)
-            }
-            return await this.exportVideoStream(
-              options,
-              progressFill,
-              exportStatus,
-              progressCallback
-            )
-          } catch (error) {
-            lastError = error instanceof Error ? error : new Error(String(error))
-            const errorMsg = lastError.message
-            const isNotReadable =
-              errorMsg.includes('NotReadableError') || errorMsg.includes('could not be read')
-            const isContextLost =
-              errorMsg.includes('context lost') || errorMsg.includes('Context lost')
-
-            if ((isNotReadable || isContextLost) && attempt < maxRetries) {
-              this.logger.warn(
-                `Stream export failed (attempt ${attempt + 1}), will retry: ${errorMsg}`
-              )
-              continue
-            }
-            throw error
-          }
-        }
-        throw lastError
+      if (options.exportMode === 'record' || options.exportMode === 'stream') {
+        this.logger.warn(
+          `exportMode="${options.exportMode}" is deprecated and will be removed; delegating to "fast"`
+        )
       }
 
-      if (options.exportMode === 'fast') {
-        try {
-          return await this.exportVideoFast(options, progressFill, exportStatus, progressCallback)
-        } catch (error) {
-          // 取消不重试；其余失败整体回退实时录制模式，保证导出一定成功
-          if (error instanceof ExportError && error.code === ExportErrorCode.CANCELLED) {
-            throw error
-          }
-          this.logger.warn(
-            `Fast export failed (${error instanceof Error ? error.message : error}), ` +
-              `falling back to record mode`
-          )
-          // fast 模式下私有渲染 ticker 是停掉的，回退 record 前必须恢复，
-          // 否则 MediaRecorder 录到的是静止画面
-          try {
-            this.app.pixiApplication.ticker.start()
-          } catch {
-            /* renderer may already be destroyed */
-          }
-          this.app.lastSnippetActualDurationMs = 0
-          this.app.ttsManager?.clearAudioTracks()
-          return await this.exportVideoStream(
-            { ...options, exportMode: 'stream' },
-            progressFill,
-            exportStatus,
-            progressCallback
-          )
-        }
+      if (options.exportMode !== 'frames') {
+        return await this.exportVideoFast(
+          { ...options, exportMode: 'fast' },
+          progressFill,
+          exportStatus,
+          progressCallback
+        )
       }
 
       const { canvas, framesDir, totalSnippets, startSnippetIndex, startFrameIndex } =
@@ -579,699 +505,13 @@ export default class VideoExportManager {
 
       return result
     } catch (error) {
-      return await this.handleExportError(error, exportStatus || document.body, startTime)
+      return await this.handleExportError(
+        error,
+        exportStatus || (typeof document !== 'undefined' ? document.body : null),
+        startTime
+      )
     } finally {
       this.cleanup()
-    }
-  }
-
-  private async exportVideoStream(
-    options: VideoExportOptions,
-    progressFill: HTMLDivElement | null,
-    exportStatus: HTMLElement | null,
-    onProgress: InternalProgressCallback
-  ): Promise<ExportResult> {
-    const startTime = performance.now()
-    const isApiMode = options.apiMode === true
-
-    const { canvas, snippets, captureFps } = await this.prepareStreamRecording(
-      options,
-      progressFill,
-      exportStatus,
-      onProgress
-    )
-    this.checkAborted()
-
-    this.logger.info('Starting concurrent stream recording', {
-      fps: options.fps,
-      captureFps,
-      width: options.width,
-      height: options.height,
-      snippetCount: snippets.length,
-      apiMode: isApiMode
-    })
-
-    let totalDurationMs = 0
-    let timeline: SnippetTimelineEntry[] = []
-
-    const recorder = new StreamRecorder({
-      fps: captureFps,
-      width: options.width,
-      height: options.height,
-      bitrate: Math.round(
-        Math.min(40_000_000, Math.max(8_000_000, canvas.width * canvas.height * captureFps * 0.2))
-      ),
-      timeslice: 250,
-      preferMp4: true,
-      keyframeIntervalMs: 1000
-    })
-
-    let recordingError: Error | null = null
-    recorder.setOnErrorCallback((error) => {
-      recordingError = error
-      this.logger.error('StreamRecorder error during recording', error)
-    })
-
-    let videoFilePath: string | null = null
-    let recordSessionId: string | null = null
-    let encodedVideo:
-      | Promise<{ videoPath: string; frameCount: number; durationMs: number }>
-      | undefined
-    let finalVideo: { frameCount: number; durationMs: number; fileSize: number } | undefined
-    const cancelRecord = (): void => {
-      recorder.dispose()
-      if (recordSessionId) {
-        void window.electron.ipcRenderer
-          .invoke('electron:record-cancel', { id: recordSessionId })
-          .catch((error: unknown) => this.logger.warn('Could not cancel record encoder', error))
-      }
-    }
-    // 宿主收尾（桥接层 finally）会删除输入文件；未走到那一步时由下方兜底删除
-    const apiTempFiles: { audioPath: string | null; invoked: boolean } = {
-      audioPath: null,
-      invoked: false
-    }
-
-    let ttsEnabled = this.app.ttsManager?.isTTSEnabled() ?? false
-    if (ttsEnabled) {
-      this.logger.info('Checking TTS service availability...')
-      const available = await this.app.ttsManager!.checkTTSAvailability()
-      if (!available) {
-        this.logger.warn('TTS service not available. Disabling TTS for this export.')
-        ttsEnabled = false
-      } else {
-        this.logger.info('TTS service available')
-      }
-    }
-    const bgmConfig = this.app.ttsManager?.getBGMConfig()
-    const bgmEnabled = bgmConfig?.enabled ?? false
-    const bgmPlan = new BgmPlan(snippets)
-    const sePlan = new SePlan(snippets)
-    const audioMuxer = new AudioMuxer()
-    if (ttsEnabled || bgmEnabled || sePlan.hasChanges) {
-      await audioMuxer.initialize()
-    }
-
-    // 故事里出现带文件的 ChangeBgm 后，由剧本接管 BGM；否则沿用全局 bgm.yaml
-    const useGlobalBgm = bgmEnabled && !bgmPlan.hasStoryFiles
-    if (bgmEnabled && bgmPlan.hasStoryFiles) {
-      await bgmPlan.load(audioMuxer)
-    }
-    if (sePlan.hasChanges) {
-      await sePlan.load(audioMuxer)
-    }
-
-    let bgmBuffer: AudioBuffer | null = null
-    if (bgmEnabled && bgmConfig) {
-      audioMuxer.setBGMConfig(bgmConfig)
-      if (useGlobalBgm) {
-        try {
-          const bgmPath = resolveBgmUrl(bgmConfig.path)
-          this.logger.info(`Loading BGM from: ${bgmPath}`)
-          bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
-          this.logger.info(
-            `BGM loaded: ${bgmBuffer ? 'success' : 'failed'}, duration: ${bgmBuffer ? bgmBuffer.duration.toFixed(2) : 0}s`
-          )
-        } catch (error) {
-          this.logger.warn(`Failed to load BGM: ${error}`)
-        }
-      }
-    }
-    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
-
-    const concurrentPipeline = new ConcurrentExportPipeline({
-      ttsLookahead: 3,
-      ttsTimeoutMs: 15000,
-      targetFps: options.fps
-    })
-
-    const timestampRecorder = new SnippetTimestampRecorder()
-
-    const ttsAudioResults = new Map<
-      number,
-      {
-        audioBuffer: ArrayBuffer
-        pcmData?: {
-          channel0: Float32Array
-          channel1: Float32Array
-          sampleRate: number
-        }
-        durationMs: number
-        characterName: string
-        text: string
-        preDecoded: boolean
-      }
-    >()
-
-    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
-    if (ttsEnabled) {
-      this.logger.info(
-        serialTts
-          ? 'Serial mode: Synthesizing all TTS before recording'
-          : 'Concurrent mode: Starting TTS pipeline in background'
-      )
-      if (exportStatus) {
-        exportStatus.textContent = serialTts ? '正在合成语音…' : '启动并发语音合成…'
-      }
-
-      timeline = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
-      this.app.ttsManager.setTimeline(timeline)
-
-      concurrentPipeline.startTTSPipeline(
-        snippets,
-        this.app.ttsManager,
-        (current, total, message) => {
-          this.logger.info(`[TTS Pipeline] ${current}/${total}: ${message}`)
-        }
-      )
-
-      if (serialTts) {
-        onProgress({
-          stage: 'loading',
-          current: 0,
-          total: 1,
-          message: '正在串行合成语音…',
-          percentage: 20
-        })
-        await concurrentPipeline.waitForTTSPipeline()
-        this.checkAborted()
-        for (let idx = 0; idx < snippets.length; idx++) {
-          if (snippets[idx].type !== 'Talk') continue
-          const res = await concurrentPipeline.waitForTTSReady(idx)
-          if (res?.success && res.duration > 0) {
-            const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
-            if (buf) this.predecodeTalkLipSync(idx, buf)
-          }
-        }
-        if (this.pendingLipSync.size > 0) {
-          await Promise.allSettled([...this.pendingLipSync.values()])
-          this.checkAborted()
-        }
-        if (exportStatus) exportStatus.textContent = '语音合成完成，开始录制…'
-      }
-    } else {
-      timeline = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
-      this.app.ttsManager.setTimeline(timeline)
-    }
-
-    totalDurationMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
-
-    const totalSnippets = snippets.length
-    let contextLost = false
-    let contextRestoreAttempts = 0
-    const MAX_CONTEXT_RESTORE_ATTEMPTS = 3
-
-    const handleContextLost = (event: Event): void => {
-      event.preventDefault()
-      contextLost = true
-      this.logger.error('Canvas WebGL context lost during recording')
-    }
-
-    const handleContextRestored = (): void => {
-      contextLost = false
-      contextRestoreAttempts = 0
-      this.logger.info('Canvas WebGL context restored')
-    }
-
-    canvas.addEventListener('webglcontextlost', handleContextLost)
-    canvas.addEventListener('webglcontextrestored', handleContextRestored)
-
-    try {
-      if (isApiMode) {
-        const session = await window.electron.ipcRenderer.invoke('electron:record-start', {
-          inputWidth: canvas.width,
-          inputHeight: canvas.height
-        })
-        recordSessionId = session.id
-        this.signal?.addEventListener('abort', cancelRecord, { once: true })
-        this.checkAborted()
-      }
-      const recordStart = performance.now()
-      if (recordSessionId) {
-        const id = recordSessionId
-        recorder.startRecordingToSink(canvas, async (data) => {
-          await window.electron.ipcRenderer.invoke('electron:record-chunk', { id, data })
-        })
-      } else {
-        videoFilePath = await recorder.startRecordingToDisk(canvas)
-      }
-      concurrentPipeline.markRenderStart()
-      timestampRecorder.markRenderStart()
-
-      const extendedApp = this.app as unknown as ExtendedApp
-      const openingCoverTask = this.hasOpeningCurtain(snippets)
-        ? undefined
-        : extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
-      void openingCoverTask?.catch(() => undefined)
-
-      const pendingTimestampTasks: Promise<void>[] = []
-      const flushPendingTimestamps = async (): Promise<void> => {
-        if (pendingTimestampTasks.length === 0) return
-        const batch = [...pendingTimestampTasks]
-        pendingTimestampTasks.length = 0
-        await Promise.allSettled(batch)
-      }
-
-      this.logger.info('Concurrent mode: Video rendering started', {
-        fps: options.fps,
-        width: options.width,
-        height: options.height,
-        snippetCount: snippets.length,
-        ttsEnabled,
-        bgmEnabled
-      })
-
-      frameValidator.reset()
-      let blackFrameValidationCount = 0
-
-      for (let i = 0; i < snippets.length; i++) {
-        this.checkAborted()
-        if (recordingError) throw recordingError
-
-        if (contextLost) {
-          contextRestoreAttempts++
-          if (contextRestoreAttempts > MAX_CONTEXT_RESTORE_ATTEMPTS) {
-            this.logger.error('Max context restore attempts reached, aborting')
-            throw new Error(
-              'Canvas WebGL context was lost and could not be restored after multiple attempts'
-            )
-          }
-
-          this.logger.warn(
-            `Context lost, attempting restore (${contextRestoreAttempts}/${MAX_CONTEXT_RESTORE_ATTEMPTS})...`
-          )
-
-          const gl = canvas.getContext('webgl2') || canvas.getContext('webgl')
-          if (gl && gl.isContextLost()) {
-            const webglContext = gl as WebGLRenderingContext
-            const ext = webglContext.getExtension('WEBGL_lose_context')
-            if (ext) {
-              ext.restoreContext()
-            }
-          }
-
-          let waitMs = 0
-          while (contextLost && waitMs < 5000) {
-            await new Promise((resolve) => setTimeout(resolve, 200))
-            waitMs += 200
-          }
-
-          if (contextLost) {
-            this.logger.error('Context could not be restored within timeout')
-            throw new Error('Canvas WebGL context was lost during recording')
-          }
-
-          this.logger.info('Context restored, continuing recording')
-        }
-
-        const snippet = snippets[i]
-        // PlayCore 前置栅栏：WaitFinished（或 Talk）先等所有在跑任务结束，再解析 TTS/delay。
-        if (snippetHasPreFence(snippet)) {
-          await this.app.snippetStrategyManager?.waitForPreFence?.(snippet)
-          await flushPendingTimestamps()
-        }
-
-        exportTraceContext.setSnippet(i, snippet.type)
-        const isTalk = snippet.type === 'Talk'
-        const talkData = snippet.type === 'Talk' ? snippet.data : undefined
-
-        let ttsDurationMs = 0
-        if (ttsEnabled && talkData) {
-          const ttsResult = await concurrentPipeline.waitForTTSReady(i)
-          ttsDurationMs =
-            ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
-              ? ttsResult.duration
-              : 0
-          if (ttsDurationMs > 0) {
-            const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
-            if (rawAudioBuffer) {
-              ttsAudioResults.set(i, {
-                audioBuffer: rawAudioBuffer,
-                durationMs: ttsDurationMs,
-                characterName: talkData.speaker,
-                text: talkData.content,
-                preDecoded: false
-              })
-            }
-          }
-        }
-
-        // 先完成口型包络解码（serial 模式为 0ms 缓存命中），再采样 nowMs 与启动计时，避免解码/等 TTS 拉偏墙钟动画
-        if (isTalk) {
-          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer, i)
-          if (ttsEnabled && !serialTts) {
-            void this.prewarmReadyLipSync(snippets, concurrentPipeline, i + 1, 3)
-          }
-        }
-
-        const nowMs = performance.now()
-        const layoutRunningMs = isTalk ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs) : 0
-        const existingMotionSettleMs = isTalk
-          ? Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
-          : 0
-
-        let resolvedTalkDurationMs: number | undefined
-        if (ttsEnabled && talkData) {
-          resolvedTalkDurationMs = applyTalkPatch(
-            timeline,
-            i,
-            ttsDurationMs,
-            this.talkDurationWithMotionGate(
-              talkData as unknown as TalkSnippetLike,
-              ttsDurationMs,
-              this.talkWindowOpenMs(snippets, i),
-              i,
-              layoutRunningMs,
-              existingMotionSettleMs
-            )
-          )
-        }
-
-        const timelineEntry = timeline[i]
-        const pct = 30 + Math.round(((i + 1) / totalSnippets) * 60)
-
-        if (progressFill) progressFill.style.width = `${pct}%`
-        if (exportStatus) {
-          const ttsStatus =
-            ttsEnabled && isTalk ? (concurrentPipeline.isTTSReady(i) ? '✓' : '⏳') : ''
-          if (exportStatus)
-            exportStatus.textContent = `渲染中… ${i + 1}/${totalSnippets} ${ttsStatus}`
-        }
-
-        onProgress({
-          stage: 'capturing',
-          current: i + 1,
-          total: totalSnippets,
-          message: `处理片段 ${i + 1}/${totalSnippets}`,
-          percentage: pct
-        })
-
-        this.app.lastSnippetActualDurationMs =
-          resolvedTalkDurationMs ??
-          timelineEntry?.durationMs ??
-          (snippet.type === 'Talk'
-            ? this.talkDurationWithMotionGate(
-                snippet.data as unknown as TalkSnippetLike,
-                0,
-                this.talkWindowOpenMs(snippets, i),
-                i,
-                layoutRunningMs,
-                existingMotionSettleMs
-              )
-            : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
-
-        if (isTalk) {
-          this.app.currentTalkStartedAtMs = 0
-          timestampRecorder.markSnippetStart(i, snippet.type, {
-            speaker: talkData?.speaker,
-            content: talkData?.content
-          })
-        }
-
-        const snippetStartedAtMs = performance.now()
-        await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
-        const hasAsyncTaskTracker =
-          typeof this.app.snippetStrategyManager?.getLastLaunchedTask === 'function'
-        const launchedTask = hasAsyncTaskTracker
-          ? this.app.snippetStrategyManager.getLastLaunchedTask()
-          : null
-
-        // 剧本本来就可能是黑场（EffectType 1~4）、纯黑背景，或者处于没有
-        // 画面内容的准备片段；这些片段不能拿来判定“模型没渲染”。
-        if (!FRAME_VALIDATION_EXEMPT_SNIPPETS.has(snippet.type) && (i < 5 || (i + 1) % 30 === 0)) {
-          const frameValidation = frameValidator.validateFrame(canvas, i)
-          if (!frameValidation.isValid && frameValidation.error) {
-            throw new Error(
-              `Rendering validation failed at snippet ${i + 1}: ${frameValidation.error}. ` +
-                `Brightness: ${frameValidation.brightness.toFixed(2)}%. ` +
-                `Aborting export to prevent black screen video output.`
-            )
-          }
-          if (frameValidation.isBlackScreen) {
-            blackFrameValidationCount++
-            this.logger.warn(
-              `Black frame detected at snippet ${i + 1} (count: ${blackFrameValidationCount})`
-            )
-            if (blackFrameValidationCount >= 5) {
-              throw new Error(
-                `Detected ${blackFrameValidationCount} black frames during export. ` +
-                  `Models are not rendering. Aborting to prevent empty video output.`
-              )
-            }
-          } else {
-            blackFrameValidationCount = 0
-          }
-        }
-
-        const ttsDur = ttsAudioResults.get(i)?.durationMs
-        if (isTalk) {
-          const recordEnd = (): void => {
-            timestampRecorder.markSnippetEnd(
-              ttsDur,
-              this.app.currentTalkStartedAtMs > 0
-                ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
-                : 0
-            )
-          }
-          if (launchedTask) {
-            pendingTimestampTasks.push(launchedTask.then(recordEnd, () => {}))
-          } else {
-            recordEnd()
-          }
-        } else if (launchedTask) {
-          pendingTimestampTasks.push(
-            launchedTask.then(
-              () => {
-                timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
-              },
-              () => {}
-            )
-          )
-        } else {
-          timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
-        }
-
-        if (i % 50 === 0) {
-          this.logger.info(
-            `Snippet ${i}: type=${snippet.type}, duration=${timelineEntry?.durationMs}ms, ttsReady=${ttsEnabled && isTalk ? concurrentPipeline.isTTSReady(i) : 'N/A'}`
-          )
-        }
-
-        // 优化: 更频繁地让出主线程，但批量处理
-        if (i % 30 === 0) {
-          await this.yieldToBrowser()
-        }
-      }
-
-      // 官方 WaitAllFinished + 开场黑幕收尾 + 0.25s 停留 + 0.25s 淡出。
-      await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
-      await flushPendingTimestamps()
-      if (openingCoverTask) await openingCoverTask
-      await extendedApp.setEndingEnvelope?.(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
-
-      concurrentPipeline.markRenderEnd()
-      timestampRecorder.logSummary()
-
-      const recordedDurationMs = performance.now() - recordStart
-      if (recordSessionId) {
-        await recorder.stopRecordingToSink()
-        encodedVideo = window.electron.ipcRenderer.invoke('electron:record-finish', {
-          id: recordSessionId
-        })
-        // Audio mixing runs concurrently; attach a handler immediately to avoid unhandled rejection.
-        void encodedVideo!.catch(() => undefined)
-      } else {
-        videoFilePath = await recorder.stopRecordingToDisk()
-      }
-      const recordMs = performance.now() - recordStart
-      this.logger.info(`Video capture finished (recordMs=${recordMs.toFixed(0)})`)
-
-      onProgress({
-        stage: 'saving',
-        current: 1,
-        total: 1,
-        message: '正在保存视频...',
-        percentage: 95
-      })
-
-      if (exportStatus) exportStatus.textContent = '正在保存视频...'
-
-      this.logger.info('Phase 3: Audio mixing and final assembly')
-
-      const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      totalDurationMs = Math.max(
-        actualVideoDurationMs +
-          (typeof extendedApp.setEndingEnvelope === 'function'
-            ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS
-            : 0),
-        recordedDurationMs
-      )
-
-      const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
-      this.logger.info(
-        `Audio check: ttsEnabled=${ttsEnabled}, ttsAudioResults=${ttsAudioResults.size}, hasTtsTracks=${hasTtsTracks}, bgmActive=${bgmActive}`
-      )
-
-      // record 模式用实际片段起始时间：包含 snippet.delay，音画对位比估算时间线准
-      const actualStartTimesMs = snippets.map((_, index) =>
-        timestampRecorder.getVideoRelativeStartTimeMs(index)
-      )
-      if (bgmPlan.hasChanges) {
-        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
-      }
-      if (sePlan.hasChanges) {
-        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
-      }
-
-      let mergeMs = 0
-      if (isApiMode) {
-        if (!encodedVideo) throw new Error('Record encoder session is missing')
-        const mergeStart = performance.now()
-        finalVideo = await this.saveApiVideoFromDisk(
-          options,
-          encodedVideo,
-          hasTtsTracks,
-          bgmBuffer,
-          bgmEnabled,
-          audioMuxer,
-          totalDurationMs,
-          exportStatus,
-          onProgress,
-          ttsAudioResults,
-          timestampRecorder,
-          apiTempFiles,
-          recordSessionId!
-        )
-        mergeMs = performance.now() - mergeStart
-        this.logger.info(
-          `Record export phase timings: record=${recordMs.toFixed(0)}ms ` +
-            `merge=${mergeMs.toFixed(0)}ms ` +
-            `videoDuration=${(totalDurationMs / 1000).toFixed(1)}s`
-        )
-      } else if (hasTtsTracks || bgmActive) {
-        if (hasTtsTracks) {
-          this.logger.info(
-            `Mixing ${ttsAudioResults.size} audio tracks using timestamp-based placement...`
-          )
-          if (exportStatus)
-            exportStatus.textContent = `正在混合音频 (${ttsAudioResults.size} 条音轨)...`
-
-          const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
-
-          for (const placement of audioPlacements) {
-            audioMuxer.addAudioTrack({
-              audioBuffer: placement.audioBuffer,
-              pcmData: placement.pcmData,
-              startTime: placement.startTimeMs,
-              endTime: placement.endTimeMs,
-              characterName: placement.characterName,
-              text: placement.text
-            })
-            this.logger.info(
-              `Audio placed: "${placement.characterName}" at ${placement.startTimeMs}ms → ${placement.endTimeMs}ms (ttsDur=${placement.endTimeMs - placement.startTimeMs}ms)`
-            )
-          }
-        } else {
-          this.logger.info('No TTS tracks, BGM only mode')
-          if (exportStatus) exportStatus.textContent = '正在添加背景音乐...'
-        }
-
-        this.logger.info(
-          `Audio mixing: outputDuration=${totalDurationMs}ms, bgmBuffer=${bgmBuffer ? 'loaded' : 'none'}, bgmPlan=${bgmPlan.hasChanges ? bgmPlan.fileCount : 0} files, bgmEnabled=${bgmEnabled}`
-        )
-        const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
-          totalDurationMs,
-          bgmBuffer || undefined
-        )
-        const wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
-
-        this.logger.info(
-          `WAV buffer size: ${(wavBuffer.byteLength / 1024).toFixed(1)} KB, duration: ${(mixedAudioBuffer.duration * 1000).toFixed(0)}ms`
-        )
-
-        if (exportStatus) exportStatus.textContent = '正在写入临时文件...'
-        const audioTempPath = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
-          data: wavBuffer,
-          prefix: 'mss-audio',
-          extension: 'wav'
-        })
-
-        this.logger.info(`Temp files: video=${videoFilePath}, audio=${audioTempPath}`)
-
-        if (exportStatus) exportStatus.textContent = '正在合并音视频...'
-        await window.electron.ipcRenderer.invoke('electron:merge-video-audio-files', {
-          videoPath: videoFilePath,
-          audioPath: audioTempPath,
-          gpuRenderer: options.gpuRenderer || 'auto',
-          crf: options.crf ?? 18
-        })
-      } else {
-        this.logger.info('No audio to export (TTS and BGM both disabled)')
-
-        if (exportStatus) exportStatus.textContent = '正在编码视频...'
-        await window.electron.ipcRenderer.invoke('electron:convert-video-file', {
-          videoPath: videoFilePath,
-          gpuRenderer: options.gpuRenderer || 'auto',
-          crf: options.crf ?? 18
-        })
-      }
-
-      const result = {
-        success: true,
-        duration: (performance.now() - startTime) / 1000,
-        frameCount: finalVideo?.frameCount ?? Math.round((totalDurationMs / 1000) * captureFps),
-        outputSize: finalVideo?.fileSize,
-        timings: isApiMode
-          ? {
-              recordMs: Math.round(recordMs),
-              mergeMs: Math.round(mergeMs),
-              videoDurationMs: Math.round(finalVideo?.durationMs ?? totalDurationMs)
-            }
-          : undefined
-      }
-
-      this.logger.info('Concurrent stream recording completed successfully', result)
-      this.attachDiagnostics(
-        result,
-        snippets,
-        timeline,
-        timestampRecorder,
-        ttsAudioResults,
-        'stream',
-        options,
-        ttsEnabled
-      )
-
-      if (!isApiMode) {
-        await this.showCompletionMessage(progressFill!, exportStatus!, onProgress)
-      }
-
-      return result
-    } catch (error) {
-      this.logger.error('Concurrent stream recording failed', error)
-      throw error
-    } finally {
-      this.signal?.removeEventListener('abort', cancelRecord)
-      recorder.dispose()
-      if (recordSessionId) {
-        try {
-          await window.electron.ipcRenderer.invoke('electron:record-cancel', {
-            id: recordSessionId
-          })
-        } catch (error) {
-          this.logger.warn('Could not clean up record encoder session', error)
-        }
-      }
-      canvas.removeEventListener('webglcontextlost', handleContextLost)
-      canvas.removeEventListener('webglcontextrestored', handleContextRestored)
-      // 临时文件兜底清理：未进入宿主收尾时（取消/异常/重试）桥接层不会删除输入；
-      // 成功路径下桥接层只删文件不删目录，这里统一 rm -rf 整个 per-export 目录
-      // （force 语义：已删除的路径静默跳过）。重试循环每次 attempt 独立目录，同样覆盖。
-      const webmDir = videoFilePath ? videoFilePath.replace(/[\\/][^\\/]*$/, '') : null
-      await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
-      await concurrentPipeline.dispose()
-      audioMuxer.dispose()
-      this.app.ttsManager?.clearAudioTracks()
     }
   }
 
@@ -1290,10 +530,11 @@ export default class VideoExportManager {
   }
 
   /**
-   * fast 模式页内编码路径选择：
-   * - 'frames'：直接走 JPEG 帧序列
-   * - 'webcodecs'：只要 WebCodecs 可用就用
-   * - 'auto'：WebCodecs 可用，但 Linux+NVIDIA（软编 OpenH264，极慢）时改走帧序列
+   * fast 模式页内编码路径选择（对齐 ournotes-player 硬件探测与 5 帧测速）：
+   * - 'frames'：直接走 JPEG 帧序列（image2pipe）
+   * - 'webcodecs'：尽量走 WebCodecs
+   * - 'auto'：拒绝软件 WebGL / Linux+NVIDIA 等软编路径，校验 prefer-hardware 并做 5 帧 <=150ms 测速；
+   *           慢路径自动回落 image2pipe。结果按 app 实例缓存避免复用 worker 重复测速。
    */
   private async resolveFastUseWebCodecs(
     canvas: HTMLCanvasElement,
@@ -1301,48 +542,56 @@ export default class VideoExportManager {
     height: number,
     fps: number,
     bitrate: number,
-    choice: 'auto' | 'webcodecs' | 'frames'
+    choice: 'auto' | 'webcodecs' | 'frames',
+    gpuRenderer: 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu' = 'auto'
   ): Promise<boolean> {
+    this.lastWebCodecsProbeConfig = null
     if (choice === 'frames') return false
-    const available =
-      (await WebCodecsMp4Encoder.resolveConfig(width, height, fps, bitrate)) !== null
-    if (!available) return false
-    if (choice === 'webcodecs') return true
+    if (typeof WebCodecsMp4Encoder?.probeConfig !== 'function') return false
 
-    try {
-      const gl =
-        canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
-        canvas.getContext('webgl', { preserveDrawingBuffer: true })
-      if (!gl) return true
-      const dbg = (gl as WebGLRenderingContext).getExtension('WEBGL_debug_renderer_info')
-      const renderer = dbg
-        ? String((gl as WebGLRenderingContext).getParameter(dbg.UNMASKED_RENDERER_WEBGL))
-        : ''
-      const isLinux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)
-      const isNvidia = /nvidia|geforce|quadro/i.test(renderer)
-      if (isLinux && isNvidia) {
-        this.logger.warn(
-          `Fast export: Linux+NVIDIA detected (${renderer}); ` +
-            `WebCodecs would use software OpenH264, using JPEG frames + ffmpeg HW encoder instead`
-        )
-        return false
-      }
-    } catch {
-      // 探测失败按原样用 WebCodecs
+    const cacheKey = `${width}x${height}@${fps}:${bitrate}:${choice}:${gpuRenderer}`
+    let appCache = VideoExportManager.webCodecsProbeCache.get(this.app)
+    if (appCache?.has(cacheKey)) {
+      const cached = appCache.get(cacheKey) ?? null
+      this.lastWebCodecsProbeConfig = cached?.config ?? null
+      return cached !== null
+    }
+
+    const probe = await WebCodecsMp4Encoder.probeConfig({
+      width,
+      height,
+      fps,
+      bitrate,
+      mode: choice,
+      canvas,
+      gpuRenderer,
+      benchmark: choice === 'auto'
+    })
+
+    if (!appCache) {
+      appCache = new Map()
+      VideoExportManager.webCodecsProbeCache.set(this.app, appCache)
+    }
+    appCache.set(cacheKey, probe)
+
+    if (!probe) {
+      this.logger.info(
+        `Fast export: WebCodecs probe fell back to image2pipe (choice=${choice}, gpu=${gpuRenderer})`
+      )
+      return false
+    }
+
+    this.lastWebCodecsProbeConfig = probe.config
+    if (probe.elapsedMs > 0) {
+      this.logger.info(
+        `Fast export: WebCodecs ready (${probe.config.codec}, ${probe.elapsedMs.toFixed(1)}ms for 5 frames, gl=${probe.glRenderer || 'unknown'})`
+      )
     }
     return true
   }
 
   /**
-   * fast 导出模式：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编。
-   *
-   * 与 stream/record 的差异：
-   * - 时间由 VirtualClockController.tickAsync 推进，不再等墙钟。
-   * - TTS 与渲染重叠；等 TTS 时暂停帧泵，等待走真实时钟，
-   *   不把等待时间编进视频。
-   * - 抓帧用 VideoFrame(canvas)：不受显示器 vsync 限制，才能快于墙钟。
-   *   captureStream+requestFrame 受真实 vsync 约束，虚拟时钟下会和片段
-   *   setTimeout 死锁，因此不用。
+   * fast 导出模式：虚拟时钟逐帧渲染 + 页内 WebCodecs 直编（回退 image2pipe）。
    */
   private async exportVideoFast(
     options: VideoExportOptions,
@@ -1392,31 +641,7 @@ export default class VideoExportManager {
     const bgmPlan = new BgmPlan(snippets)
     const sePlan = new SePlan(snippets)
     const audioMuxer = new AudioMuxer()
-    if (ttsEnabled || bgmEnabled || sePlan.hasChanges) {
-      await audioMuxer.initialize()
-    }
-
     const useGlobalBgm = bgmEnabled && !bgmPlan.hasStoryFiles
-    if (bgmEnabled && bgmPlan.hasStoryFiles) {
-      await bgmPlan.load(audioMuxer)
-    }
-    if (sePlan.hasChanges) {
-      await sePlan.load(audioMuxer)
-    }
-
-    let bgmBuffer: AudioBuffer | null = null
-    if (bgmEnabled && bgmConfig) {
-      audioMuxer.setBGMConfig(bgmConfig)
-      if (useGlobalBgm) {
-        try {
-          const bgmPath = resolveBgmUrl(bgmConfig.path)
-          bgmBuffer = await audioMuxer.loadBGMBuffer(bgmPath)
-        } catch (error) {
-          this.logger.warn(`Failed to load BGM: ${error}`)
-        }
-      }
-    }
-    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     const ttsAudioResults = new Map<
       number,
@@ -1435,21 +660,32 @@ export default class VideoExportManager {
 
     const virtualClock = new VirtualClockController()
     const timestampRecorder = new SnippetTimestampRecorder()
+    const configuredTtsTimeoutMs = this.app.ttsManager?.getConfig?.().timeoutMs ?? 120_000
     const concurrentPipeline = new ConcurrentExportPipeline({
       ttsLookahead: 3,
-      ttsTimeoutMs: 15000,
+      ttsTimeoutMs: Math.max(30_000, configuredTtsTimeoutMs),
       targetFps: fps,
+      maxConcurrentTts: 3,
       waitMs: (ms) => virtualClock.realSleep(ms),
-      nowMs: () => virtualClock.realTimeMs()
+      nowMs: () => virtualClock.realTimeMs(),
+      onTtsReady: ttsEnabled
+        ? (snippetIndex, res) => {
+            if (res.success && res.duration > 0) {
+              const buf = this.app.ttsManager?.getAudioBufferForSnippet(snippetIndex)
+              if (buf) this.predecodeTalkLipSync(snippetIndex, buf)
+            }
+          }
+        : undefined
     })
 
-    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
+    const serialTts = (options.ttsMode ?? 'concurrent') === 'serial'
     if (ttsEnabled) {
       this.logger.info(
         serialTts
           ? 'Serial mode: Synthesizing all TTS before fast rendering'
-          : 'Concurrent mode: Starting TTS pipeline in background'
+          : 'Concurrent mode: Starting TTS pipeline (maxConcurrentTts=3) alongside rendering'
       )
+      // 尽早启动 TTS 管线，使其网络合成与 BGM/SE 加载、WebCodecs 探测完全重叠
       concurrentPipeline.startTTSPipeline(
         snippets,
         this.app.ttsManager,
@@ -1457,45 +693,64 @@ export default class VideoExportManager {
           this.logger.info(`[TTS Pipeline] ${current}/${total}: ${message}`)
         }
       )
-
-      if (serialTts) {
-        onProgress({
-          stage: 'loading',
-          current: 0,
-          total: 1,
-          message: '正在串行合成语音…',
-          percentage: 20
-        })
-        await concurrentPipeline.waitForTTSPipeline()
-        this.checkAborted()
-        for (let idx = 0; idx < snippets.length; idx++) {
-          if (snippets[idx].type !== 'Talk') continue
-          const res = await concurrentPipeline.waitForTTSReady(idx)
-          if (res?.success && res.duration > 0) {
-            const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
-            if (buf) this.predecodeTalkLipSync(idx, buf)
-          }
-        }
-        if (this.pendingLipSync.size > 0) {
-          await Promise.allSettled([...this.pendingLipSync.values()])
-          this.checkAborted()
-        }
-        if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
-      }
     }
 
-    // ---- 帧接收器：优先 WebCodecs 直编 MP4，回退 JPEG 帧序列 ----
-    // Linux + NVIDIA 的 Chromium 没有 NVENC/VAAPI，WebCodecs 只会落到
-    // OpenH264 纯软编（~200ms/帧@1080p），远慢于「JPEG 帧序列 + ffmpeg
-    // NVENC」。这类环境自动改走帧序列路径；可用 exportFastEncoder 强制。
-    const useWebCodecs = await this.resolveFastUseWebCodecs(
-      canvas,
-      outW,
-      outH,
-      encodeFps,
-      bitrate,
-      options.exportFastEncoder ?? 'auto'
-    )
+    const [useWebCodecs, bgmBuffer] = await Promise.all([
+      this.resolveFastUseWebCodecs(
+        canvas,
+        outW,
+        outH,
+        encodeFps,
+        bitrate,
+        options.exportFastEncoder ?? 'auto',
+        options.gpuRenderer ?? 'auto'
+      ),
+      (async (): Promise<AudioBuffer | null> => {
+        await Promise.all([
+          bgmEnabled && bgmPlan.hasStoryFiles ? bgmPlan.load(audioMuxer) : Promise.resolve(),
+          sePlan.hasChanges ? sePlan.load(audioMuxer) : Promise.resolve()
+        ])
+        if (bgmEnabled && bgmConfig) {
+          audioMuxer.setBGMConfig(bgmConfig)
+          if (useGlobalBgm) {
+            try {
+              return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
+            } catch (error) {
+              this.logger.warn(`Failed to load BGM: ${error}`)
+            }
+          }
+        }
+        return null
+      })()
+    ])
+    this.checkAborted()
+
+    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
+
+    if (ttsEnabled && serialTts) {
+      onProgress({
+        stage: 'loading',
+        current: 0,
+        total: 1,
+        message: '正在串行合成语音…',
+        percentage: 20
+      })
+      await concurrentPipeline.waitForTTSPipeline()
+      this.checkAborted()
+      for (let idx = 0; idx < snippets.length; idx++) {
+        if (snippets[idx].type !== 'Talk') continue
+        const res = await concurrentPipeline.waitForTTSReady(idx)
+        if (res?.success && res.duration > 0) {
+          const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
+          if (buf) this.predecodeTalkLipSync(idx, buf)
+        }
+      }
+      if (this.pendingLipSync.size > 0) {
+        await Promise.allSettled([...this.pendingLipSync.values()])
+        this.checkAborted()
+      }
+      if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
+    }
 
     // sink 由 createSink 异步创建；放进对象属性可避免 TS 控制流把裸 let
     // 收窄成 never（异步赋值不参与收窄）。
@@ -1515,57 +770,67 @@ export default class VideoExportManager {
       pipeTempDir: null
     }
 
+    const createJpegSink = async (): Promise<void> => {
+      const jpegSink = new JpegFrameSink({
+        width: outW,
+        height: outH,
+        quality: Math.max(this.getJpegQuality(options.quality), 0.92),
+        fps: encodeFps,
+        crf: options.apiCrf ?? options.crf ?? 23
+      })
+      await jpegSink.initialize(canvas)
+      sinks.jpegSink = jpegSink
+      sinks.framesDir = jpegSink.framesDirectory || null
+    }
+
     const createSink = async (): Promise<void> => {
       if (sinks.encoder || sinks.jpegSink) return
+      const encoderChoice = options.exportFastEncoder ?? 'auto'
       if (useWebCodecs) {
         const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
         sinks.tempBaseDir = tempDir
-        const videoFilePath = `${tempDir}/mss-fast-${Date.now()}.mp4`
+        const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const videoFilePath = `${tempDir}/mss-fast-${uniqueSuffix}.mp4`
         const encoder = new WebCodecsMp4Encoder({
           width: outW,
           height: outH,
           fps: encodeFps,
-          bitrate
+          bitrate,
+          encoderConfig: this.lastWebCodecsProbeConfig
         })
-        await encoder.initialize(videoFilePath)
-        sinks.encoder = encoder
-        this.logger.info(`Fast export: WebCodecs MP4 → ${videoFilePath}`)
-      } else {
-        const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
-        // 中间帧用高质量 JPEG：块噪声更少，成品码率更低、画质更好；
-        // 优先经 image2pipe 流式编码，不支持时回退落盘帧序列
-        const jpegSink = new JpegFrameSink({
-          width: outW,
-          height: outH,
-          quality: Math.max(this.getJpegQuality(options.quality), 0.92),
-          framesDir: dir,
-          fps: encodeFps,
-          crf: options.apiCrf ?? options.crf ?? 23
-        })
-        await jpegSink.initialize(canvas)
-        sinks.jpegSink = jpegSink
-        sinks.framesDir = dir
+        try {
+          await encoder.initialize(videoFilePath)
+          sinks.encoder = encoder
+          this.logger.info(`Fast export: WebCodecs MP4 → ${videoFilePath}`)
+          return
+        } catch (initErr) {
+          encoder.dispose()
+          if (encoderChoice === 'webcodecs') {
+            throw initErr
+          }
+          this.logger.warn(
+            'WebCodecs runtime initialization failed, falling back to JPEG pipe:',
+            initErr
+          )
+        }
       }
+      await createJpegSink()
     }
 
     await createSink()
 
     const realStart = virtualClock.realTimeMs()
 
-    // fast 模式每帧只渲染一次：
-    // pixi 的 Application 用私有 ticker（maxFPS=0 不限速），而 VirtualClockController
-    // 只接管 Ticker.shared。私有 ticker 跨过 install 后改挂假 rAF，于是每次
-    // tickAsync(frameMs)（假 rAF 是 16ms 栅格）会触发 2~3 次完整 renderer.render()，
-    // 其中只有最后一次的画面被捕获——其余全是纯浪费。
-    // 这里停掉私有渲染 ticker，由帧泵在 tick 之后显式 render 一次；Live2D 参数
-    // 更新仍走 Ticker.shared（帧数不变），因此画面与改造前一致。
+    // fast 模式每帧只渲染一次：停掉应用私有 ticker，由帧泵在推进虚拟时钟后显式 render；
+    // 在虚拟时钟下把 Ticker.shared.maxFPS 设为 0（不设内部节流阈值），避免 FakeTimers 16ms
+    // rAF 与 maxFPS=60 的 16.67ms 阈值撞车漏帧。
     this.app.pixiApplication.ticker.stop()
     this.logger.info('Fast export: app render ticker stopped, rendering once per frame')
 
-    // 虚拟时钟用 >=60Hz 步进动画/Live2D，即便编码帧率封顶在 30fps
     const simFps = Math.max(STORY_FPS, fps)
     AnimationManager.exportTargetFPS = simFps
-    Ticker.shared.maxFPS = simFps
+    const prevTickerMaxFps = Ticker.shared.maxFPS
+    Ticker.shared.maxFPS = 0
 
     virtualClock.install()
     const virtualRenderStartMs = virtualClock.now()
@@ -1584,8 +849,32 @@ export default class VideoExportManager {
 
     let pumpPaused = false
     let pumpDone = false
-    /** 尾部追帧目标（虚拟毫秒）：片段循环结束后让帧泵跑到这个虚拟时间再停，
-     *  避免最后几帧（TTS 尾垫、刚结束的出场动画）被丢导致视频戛然而止 */
+    let pumpResumeResolve: (() => void) | null = null
+    const setPumpPaused = (paused: boolean): void => {
+      pumpPaused = paused
+      if (!paused && pumpResumeResolve) {
+        const wake = pumpResumeResolve
+        pumpResumeResolve = null
+        wake()
+      }
+    }
+    const waitPumpResumed = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        if (!pumpPaused || pumpDone || this.isAborted) {
+          resolve()
+          return
+        }
+        pumpResumeResolve = resolve
+      })
+
+    const abortFastWait = (): void => {
+      concurrentPipeline.abort()
+      setPumpPaused(false)
+      pumpDone = true
+    }
+    this.signal?.addEventListener('abort', abortFastWait)
+
+    /** 尾部追帧目标（虚拟毫秒）：片段循环结束后让帧泵跑到这个虚拟时间再停 */
     let pumpTargetVirtualMs = -1
     let pumpError: Error | null = null
     let blackFrameValidationCount = 0
@@ -1594,7 +883,6 @@ export default class VideoExportManager {
 
     const framePump = (async (): Promise<void> => {
       try {
-        // 退出条件：请求停止 且 已追上尾部目标虚拟时间（追帧期间 pumpPaused 不生效）
         const shouldStop = (): boolean => {
           if (!pumpDone) return false
           if (pumpTargetVirtualMs < 0) return true
@@ -1603,14 +891,16 @@ export default class VideoExportManager {
         while (!shouldStop()) {
           this.checkAborted()
           if (pumpPaused && !pumpDone) {
-            await virtualClock.realSleep(4)
+            await waitPumpResumed()
             continue
           }
           const frameStart = virtualClock.realTimeMs()
 
           const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
           const deltaForFrame = Math.max(0, nextFrameVirtualMs - virtualClock.now())
-          const subTicks = Math.max(1, Math.ceil(deltaForFrame / FRAME_MS - 1e-6))
+          // 30fps（frameMs≈33.33ms）按单步推进 1 个虚拟 tick，消除每帧双倍 tickAsync 开销；
+          // Live2D Physics 内部会按 _physicsRig.fps 子步积分，AnimationManager 会完成区间内全部补间
+          const subTicks = deltaForFrame > 50 ? Math.max(1, Math.ceil(deltaForFrame / 34)) : 1
           const subStepMs = deltaForFrame / subTicks
 
           const tickStart = virtualClock.realTimeMs()
@@ -1619,8 +909,6 @@ export default class VideoExportManager {
           }
           tickMs += virtualClock.realTimeMs() - tickStart
 
-          // 显式渲染一次（私有渲染 ticker 已停）；放在 tick 之后可保证
-          // Live2D 参数更新完才绘制，捕获到的是最新状态
           const renderStart = virtualClock.realTimeMs()
           this.app.pixiApplication.render()
           renderMs += virtualClock.realTimeMs() - renderStart
@@ -1640,6 +928,7 @@ export default class VideoExportManager {
           if (frameIndex % (encodeFps * 5) === 0) {
             const v = frameValidator.validateFrame(canvas, frameIndex)
             if (!v.isValid && v.error) {
+              VideoExportManager.warmValidatedApps.delete(this.app)
               throw new Error(
                 `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
                   `Brightness: ${v.brightness.toFixed(2)}%`
@@ -1648,6 +937,7 @@ export default class VideoExportManager {
             if (v.isBlackScreen) {
               blackFrameValidationCount++
               if (blackFrameValidationCount >= 5) {
+                VideoExportManager.warmValidatedApps.delete(this.app)
                 throw new Error(
                   `Detected ${blackFrameValidationCount} black frames during fast export. ` +
                     `Models are not rendering.`
@@ -1703,12 +993,18 @@ export default class VideoExportManager {
 
         let resolvedTalkDurationMs: number | undefined
         if (ttsEnabled && talkData) {
-          pumpPaused = true
+          const ttsReadyNow = concurrentPipeline.isTTSReady(i)
+          if (!ttsReadyNow) {
+            setPumpPaused(true)
+          }
           const ttsWaitStart = virtualClock.realTimeMs()
-          const ttsResult = await concurrentPipeline.waitForTTSReady(i)
-          ttsWaitMs += virtualClock.realTimeMs() - ttsWaitStart
-          pumpPaused = false
-          if (pumpError) throw pumpError
+          const ttsResult =
+            ttsReadyNow && typeof concurrentPipeline.getTTSResult === 'function'
+              ? concurrentPipeline.getTTSResult(i)
+              : await concurrentPipeline.waitForTTSReady(i)
+          if (!ttsReadyNow) {
+            ttsWaitMs += virtualClock.realTimeMs() - ttsWaitStart
+          }
 
           const ttsDurationMs =
             ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
@@ -1732,6 +1028,7 @@ export default class VideoExportManager {
             if (rawAudioBuffer) {
               ttsAudioResults.set(i, {
                 audioBuffer: rawAudioBuffer,
+                pcmData: this.pcmCache.get(i),
                 durationMs: ttsDurationMs,
                 characterName: talkData.speaker,
                 text: talkData.content,
@@ -1740,6 +1037,28 @@ export default class VideoExportManager {
             }
           }
           this.app.ttsManager.setTimeline(timeline)
+          this.prewarmReadyLipSync(snippets, concurrentPipeline, i + 1, 3)
+
+          if (pumpError) {
+            setPumpPaused(false)
+            throw pumpError
+          }
+
+          const audioEntry = ttsAudioResults.get(i)
+          const needsDecodeWait = !this.lipSyncCache.has(i) && Boolean(audioEntry?.audioBuffer)
+          if (needsDecodeWait && !pumpPaused) {
+            setPumpPaused(true)
+          }
+          await this.prepareTalkLipSync(audioEntry?.audioBuffer, i)
+          const decodedPcm = this.pcmCache.get(i)
+          if (decodedPcm && audioEntry && !audioEntry.pcmData) {
+            audioEntry.pcmData = decodedPcm
+          }
+          if (pumpPaused) {
+            setPumpPaused(false)
+          }
+        } else if (isTalk) {
+          this.app.currentTalkLipSync = null
         }
 
         const timelineEntry = timeline[i]
@@ -1768,9 +1087,6 @@ export default class VideoExportManager {
             : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
         if (isTalk) {
-          pumpPaused = true
-          await this.prepareTalkLipSync(ttsAudioResults.get(i)?.audioBuffer, i)
-          pumpPaused = false
           this.app.currentTalkStartedAtMs = 0
           timestampRecorder.markSnippetStart(i, snippet.type, {
             speaker: talkData?.speaker,
@@ -1805,7 +1121,12 @@ export default class VideoExportManager {
           pendingTimestampTasks.push(
             launchedTask.then(
               () => {
-                timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+                timestampRecorder.recordSnippet(
+                  i,
+                  snippet.type,
+                  snippetStartedAtMs,
+                  performance.now()
+                )
               },
               () => {}
             )
@@ -1828,13 +1149,13 @@ export default class VideoExportManager {
         await extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
       }
 
-      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」，
-      // 保证 TTS 尾垫、出场动画与片尾淡出的最后一帧都在视频里
+      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」
       const maxTimelineEndMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
       pumpTargetVirtualMs = Math.max(
         virtualClock.now(),
         virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
       )
+      setPumpPaused(false)
       pumpDone = true
       await framePump
       if (pumpError) throw pumpError
@@ -1891,11 +1212,23 @@ export default class VideoExportManager {
           }
         }
 
-        const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
-          totalDurationMs,
-          bgmBuffer || undefined
-        )
-        const wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
+        let wavBuffer: ArrayBuffer
+        const mixInputBgm = bgmBuffer || undefined
+        if (
+          typeof (audioMuxer as unknown as { mixToInt16Interleaved?: unknown })
+            .mixToInt16Interleaved === 'function' &&
+          typeof (audioMuxer as unknown as { encodeWavFromInt16?: unknown }).encodeWavFromInt16 ===
+            'function'
+        ) {
+          const pcm = await audioMuxer.mixToInt16Interleaved(totalDurationMs, mixInputBgm)
+          wavBuffer = audioMuxer.encodeWavFromInt16(pcm)
+        } else {
+          const mixedAudioBuffer = await audioMuxer.mixAudioTracks(totalDurationMs, mixInputBgm)
+          wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
+        }
+        this.pcmCache.clear()
+        this.lipSyncCache.clear()
+
         audioFilePath = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
           data: wavBuffer,
           prefix: 'mss-audio',
@@ -1930,9 +1263,10 @@ export default class VideoExportManager {
           }
         )
       } else {
-        if (!sinks.framesDir) throw new Error('JPEG frame sink produced no frames directory')
+        const framesDir = sinks.framesDir || videoFilePath
+        if (!framesDir) throw new Error('JPEG frame sink produced no frames directory')
         saveResult = await window.electron.ipcRenderer.invoke('electron:api-encode-frames-video', {
-          framesDir: sinks.framesDir,
+          framesDir,
           audioPath: audioFilePath,
           outputPath,
           fps: encodeFps,
@@ -1946,6 +1280,8 @@ export default class VideoExportManager {
       if (!saveResult?.success) {
         throw new Error(saveResult?.error || 'Video assembly failed on host')
       }
+
+      VideoExportManager.warmValidatedApps.add(this.app)
 
       const timings: Record<string, number> = {
         pumpMs: Math.round(pumpMs),
@@ -1990,18 +1326,24 @@ export default class VideoExportManager {
       )
       return result
     } catch (error) {
+      VideoExportManager.warmValidatedApps.delete(this.app)
+      setPumpPaused(false)
       pumpDone = true
-      pumpPaused = false
+      sinks.encoder?.dispose()
+      if (sinks.jpegSink) {
+        await sinks.jpegSink.dispose().catch(() => undefined)
+      }
       await framePump.catch(() => undefined)
       this.logger.error('Fast export failed', error)
       throw error
     } finally {
+      this.signal?.removeEventListener('abort', abortFastWait)
+      Ticker.shared.maxFPS = prevTickerMaxFps
       try {
         virtualClock.uninstall()
       } catch {
         /* already uninstalled */
       }
-      // 恢复私有渲染 ticker：record 回退路径与后续任务都要靠它出画面
       try {
         this.app.pixiApplication.ticker.start()
         this.logger.info('Fast export: app render ticker restored')
@@ -2010,6 +1352,9 @@ export default class VideoExportManager {
       }
       sinks.encoder?.dispose()
       if (sinks.jpegSink) await sinks.jpegSink.dispose()
+      this.pcmCache.clear()
+      this.lipSyncCache.clear()
+      this.pendingLipSync.clear()
       const framesRootDir =
         typeof sinks.framesDir === 'string' ? sinks.framesDir.replace(/[\\/]+frames$/, '') : null
       await this.removeTempPaths([
@@ -2034,18 +1379,10 @@ export default class VideoExportManager {
 
     AnimationManager.setExportMode(true)
     AnimationManager.exportSpeedMultiplier = 1
-    const isFastLike = options.exportMode === 'fast'
     const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, options.fps))
-    AnimationManager.exportTargetFPS = isFastLike ? fastFpsCap : options.fps
-    if (isFastLike) {
-      Ticker.shared.maxFPS = fastFpsCap
-    }
+    AnimationManager.exportTargetFPS = Math.max(STORY_FPS, fastFpsCap)
 
     const captureFps = options.fps
-    if (!isFastLike) {
-      Ticker.shared.maxFPS = captureFps
-      this.app.pixiApplication.ticker.maxFPS = captureFps
-    }
 
     if (isApiMode) {
       this.logger.info('API mode: skipping story reload, using pre-initialized story data')
@@ -2060,37 +1397,50 @@ export default class VideoExportManager {
 
     const snippets = this.app.storyManager.snippets
 
-    this.logger.info('Performing pre-export WebGL validation...')
-    if (exportStatus) exportStatus.textContent = '正在验证渲染环境...'
+    const gl =
+      typeof canvas.getContext === 'function'
+        ? canvas.getContext('webgl2') || canvas.getContext('webgl')
+        : null
+    const glLost = Boolean(gl && typeof gl.isContextLost === 'function' && gl.isContextLost())
+    const skipWarmValidation = VideoExportManager.warmValidatedApps.has(this.app) && !glLost
 
-    const validationResult = await webGLValidator.validateCanvas(canvas)
-    if (!validationResult.success) {
-      const errorDetails = validationResult.errors.join('; ')
-      this.logger.error('WebGL validation failed before export:', validationResult)
-      throw new Error(
-        `WebGL rendering validation failed: ${errorDetails}. ` +
-          `Please check GPU drivers, model files, and rendering environment. ` +
-          `GPU: ${validationResult.contextInfo.renderer || 'unknown'}`
-      )
+    if (skipWarmValidation) {
+      this.logger.info('Warm worker page: skipping redundant WebGL shader/readPixels validation')
+      this.app.pixiApplication.render?.()
+    } else {
+      VideoExportManager.warmValidatedApps.delete(this.app)
+      this.logger.info('Performing pre-export WebGL validation...')
+      if (exportStatus) exportStatus.textContent = '正在验证渲染环境...'
+
+      const validationResult = await webGLValidator.validateCanvas(canvas)
+      if (!validationResult.success) {
+        const errorDetails = validationResult.errors.join('; ')
+        this.logger.error('WebGL validation failed before export:', validationResult)
+        throw new Error(
+          `WebGL rendering validation failed: ${errorDetails}. ` +
+            `Please check GPU drivers, model files, and rendering environment. ` +
+            `GPU: ${validationResult.contextInfo.renderer || 'unknown'}`
+        )
+      }
+
+      this.logger.info('Validating model rendering output...')
+      if (exportStatus) exportStatus.textContent = '正在验证模型渲染...'
+
+      this.app.pixiApplication.render?.()
+      const modelValidation = await webGLValidator.validateModelRendering(canvas, 3000)
+      if (!modelValidation.success) {
+        throw new Error(
+          `Model rendering validation failed: black screen detected ` +
+            `(brightness: ${modelValidation.averageBrightness.toFixed(2)}%). ` +
+            `Models are not rendering properly. Check WebGL context and model files.`
+        )
+      }
+
+      VideoExportManager.warmValidatedApps.add(this.app)
+      this.logger.info('Pre-export validation passed')
     }
 
-    this.logger.info('Validating model rendering output...')
-    if (exportStatus) exportStatus.textContent = '正在验证模型渲染...'
-
-    this.app.pixiApplication.render?.()
-    const modelValidation = await webGLValidator.validateModelRendering(canvas, 3000)
-    if (!modelValidation.success) {
-      throw new Error(
-        `Model rendering validation failed: black screen detected ` +
-          `(brightness: ${modelValidation.averageBrightness.toFixed(2)}%). ` +
-          `Models are not rendering properly. Check WebGL context and model files.`
-      )
-    }
-
-    this.logger.info('Pre-export validation passed')
-
-    // 第一次把角色加进舞台会触发纹理上传/着色器编译（约 50~120ms）。这发生在
-    // 第一条 LayoutAppear 的计时里，会表现成“第一次入场慢半拍”。在录制开始前
+    // 第一次把角色加进舞台会触发纹理上传/着色器编译（约 50~120ms）。在导出开始前
     // 以 alpha=0.01 预画一帧，让 GPU 资源就绪，但不影响成片。
     await this.prewarmStoryModels()
 
@@ -2315,7 +1665,7 @@ export default class VideoExportManager {
     >()
 
     let ttsPromise: Promise<void> | null = null
-    const serialTts = (options.ttsMode ?? 'serial') === 'serial'
+    const serialTts = (options.ttsMode ?? 'concurrent') === 'serial'
 
     if (ttsEnabled) {
       this.logger.info(
@@ -2663,10 +2013,10 @@ export default class VideoExportManager {
     this.app.lastSnippetActualDurationMs = 0
 
     this.app.ttsManager?.clearAudioTracks()
+    ;(Ticker.shared as { stop?: () => void })?.stop?.()
 
-    Ticker.shared.stop()
-
-    const overlay = document.getElementById('export-overlay')
+    const overlay =
+      typeof document !== 'undefined' ? document.getElementById('export-overlay') : null
     if (overlay) {
       overlay.hidden = true
     }
@@ -2714,231 +2064,6 @@ export default class VideoExportManager {
 
     const encodeTime = ((performance.now() - startTime) / 1000).toFixed(2)
     this.logger.info(`Video encoding completed in ${encodeTime}s`)
-  }
-
-  private async saveApiVideoFromDisk(
-    options: VideoExportOptions,
-    encodedVideo: Promise<{ videoPath: string; frameCount: number; durationMs: number }>,
-    hasTtsTracks: boolean,
-    bgmBuffer: AudioBuffer | null,
-    bgmEnabled: boolean,
-    audioMuxer: AudioMuxer,
-    totalDurationMs: number,
-    exportStatus: HTMLElement | null,
-    onProgress: InternalProgressCallback,
-    ttsAudioResults: Map<
-      number,
-      {
-        audioBuffer: ArrayBuffer
-        pcmData?: {
-          channel0: Float32Array
-          channel1: Float32Array
-          sampleRate: number
-        }
-        durationMs: number
-        characterName: string
-        text: string
-        preDecoded: boolean
-      }
-    >,
-    timestampRecorder: SnippetTimestampRecorder,
-    tempFiles: { audioPath: string | null; invoked: boolean },
-    recordSessionId: string
-  ): Promise<{ frameCount: number; durationMs: number; fileSize: number }> {
-    const audioBitrate = options.apiAudioBitrate ?? '128k'
-    const outputPath = options.apiOutputPath ?? ''
-    const bgmActive = bgmEnabled && (bgmBuffer !== null || audioMuxer.hasBgmCues())
-
-    let audioFilePath: string | undefined
-
-    if (hasTtsTracks || bgmActive) {
-      if (exportStatus) exportStatus.textContent = 'API: 正在混合音频...'
-      onProgress({
-        stage: 'saving',
-        current: 1,
-        total: 2,
-        message: 'API: 正在混合音频...',
-        percentage: 96
-      })
-
-      if (hasTtsTracks) {
-        this.logger.info(
-          `API: Mixing ${ttsAudioResults.size} audio tracks using timestamp-based placement...`
-        )
-        const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
-
-        for (const placement of audioPlacements) {
-          audioMuxer.addAudioTrack({
-            audioBuffer: placement.audioBuffer,
-            pcmData: placement.pcmData,
-            startTime: placement.startTimeMs,
-            endTime: placement.endTimeMs,
-            characterName: placement.characterName,
-            text: placement.text
-          })
-          this.logger.info(
-            `API Audio placed: "${placement.characterName}" at ${placement.startTimeMs}ms → ${placement.endTimeMs}ms`
-          )
-        }
-      }
-
-      // 混音直出 Int16 交错 PCM（与旧 Float32→WAV 路径数学一致），
-      // 避免全时长双 Float32Array + AudioBuffer 拷贝 + 逐样本 setInt16
-      const pcm = await audioMuxer.mixToInt16Interleaved(totalDurationMs, bgmBuffer || undefined)
-      const wavBuffer = audioMuxer.encodeWavFromInt16(pcm)
-
-      this.logger.info(`API: Audio mixed, size=${(wavBuffer.byteLength / 1024).toFixed(1)} KB`)
-
-      audioFilePath = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
-        data: wavBuffer,
-        prefix: 'mss-api-audio',
-        extension: 'wav'
-      })
-      tempFiles.audioPath = audioFilePath ?? null
-      this.logger.info(`API: Audio temp file: ${audioFilePath}`)
-    }
-
-    if (exportStatus) exportStatus.textContent = 'API: 正在压缩并保存视频...'
-    onProgress({
-      stage: 'saving',
-      current: 2,
-      total: 2,
-      message: 'API: 正在压缩并保存视频...',
-      percentage: 98
-    })
-
-    // 已中止则不进入宿主编码：渲染结果直接丢弃，worker 立即释放。
-    // 中止时 audioFilePath 尚未被桥接层管理，由 exportVideoStream 的 finally 兜底删除。
-    this.checkAborted()
-
-    const encoded = await encodedVideo
-    this.checkAborted()
-    tempFiles.invoked = true
-    const result = await window.electron.ipcRenderer.invoke('electron:record-mux', {
-      id: recordSessionId,
-      audioPath: audioFilePath,
-      outputPath,
-      audioBitrate,
-      // 体积上限（recordTargetSizeMb）预估用：时间轴总时长在录制前已知
-      durationSec: totalDurationMs / 1000
-    })
-    this.checkAborted()
-    if (!result?.success)
-      throw new Error(`API video mux failed: ${result?.error ?? 'Unknown error'}`)
-    return {
-      frameCount: encoded.frameCount,
-      durationMs: encoded.durationMs,
-      fileSize: result.fileSize
-    }
-  }
-
-  private async saveApiVideo(
-    options: VideoExportOptions,
-    videoUint8Array: Uint8Array,
-    hasTtsTracks: boolean,
-    bgmBuffer: AudioBuffer | null,
-    bgmEnabled: boolean,
-    audioMuxer: AudioMuxer,
-    totalDurationMs: number,
-    exportStatus: HTMLElement | null,
-    onProgress: InternalProgressCallback,
-    ttsAudioResults: Map<
-      number,
-      {
-        audioBuffer: ArrayBuffer
-        pcmData?: {
-          channel0: Float32Array
-          channel1: Float32Array
-          sampleRate: number
-        }
-        durationMs: number
-        characterName: string
-        text: string
-        preDecoded: boolean
-      }
-    >,
-    timestampRecorder: SnippetTimestampRecorder
-  ): Promise<void> {
-    const crf = options.apiCrf ?? 23
-    const audioBitrate = options.apiAudioBitrate ?? '128k'
-    const outputPath = options.apiOutputPath ?? ''
-    const bgmActive = bgmEnabled && (bgmBuffer !== null || audioMuxer.hasBgmCues())
-
-    this.logger.info(`API save: outputPath=${outputPath}, crf=${crf}, audioBitrate=${audioBitrate}`)
-
-    let audioData: ArrayBuffer | undefined
-
-    if (hasTtsTracks || bgmActive) {
-      if (exportStatus) exportStatus.textContent = 'API: 正在混合音频...'
-      onProgress({
-        stage: 'saving',
-        current: 1,
-        total: 2,
-        message: 'API: 正在混合音频...',
-        percentage: 96
-      })
-
-      if (hasTtsTracks) {
-        this.logger.info(
-          `API: Mixing ${ttsAudioResults.size} audio tracks using timestamp-based placement...`
-        )
-        const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
-
-        for (const placement of audioPlacements) {
-          audioMuxer.addAudioTrack({
-            audioBuffer: placement.audioBuffer,
-            pcmData: placement.pcmData,
-            startTime: placement.startTimeMs,
-            endTime: placement.endTimeMs,
-            characterName: placement.characterName,
-            text: placement.text
-          })
-          this.logger.info(
-            `API Audio placed: "${placement.characterName}" at ${placement.startTimeMs}ms → ${placement.endTimeMs}ms`
-          )
-        }
-      }
-
-      const mixedAudioBuffer = await audioMuxer.mixAudioTracks(
-        totalDurationMs,
-        bgmBuffer || undefined
-      )
-      const wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
-      audioData = wavBuffer
-
-      this.logger.info(`API: Audio mixed, size=${(wavBuffer.byteLength / 1024).toFixed(1)} KB`)
-    }
-
-    if (exportStatus) exportStatus.textContent = 'API: 正在压缩并保存视频...'
-    onProgress({
-      stage: 'saving',
-      current: 2,
-      total: 2,
-      message: 'API: 正在压缩并保存视频...',
-      percentage: 98
-    })
-
-    const apiResult = await window.electron.ipcRenderer.invoke('electron:api-export-stream-video', {
-      videoData: videoUint8Array.buffer.slice(
-        videoUint8Array.byteOffset,
-        videoUint8Array.byteOffset + videoUint8Array.byteLength
-      ),
-      audioData: audioData,
-      outputPath,
-      fps: options.fps,
-      width: options.width,
-      height: options.height,
-      crf,
-      audioBitrate
-    })
-
-    if (!apiResult.success) {
-      throw new Error(`API video export failed: ${apiResult.error || 'Unknown error'}`)
-    }
-
-    this.logger.info(
-      `API: Video saved to ${apiResult.outputPath}, size=${((apiResult.fileSize || 0) / 1024 / 1024).toFixed(2)} MB`
-    )
   }
 
   destroy(): void {

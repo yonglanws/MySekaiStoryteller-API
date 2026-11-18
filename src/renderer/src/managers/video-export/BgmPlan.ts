@@ -97,23 +97,34 @@ export class BgmPlan {
 
   async load(audioMuxer: AudioMuxer): Promise<void> {
     const files = [...new Set(this.changes.filter((change) => !change.stop).map((c) => c.file))]
-    for (const file of files) {
-      const url = resolveBgmUrl(`audio/bgm/${file}`)
-      this.logger.info(`Loading story BGM: ${file} (${url})`)
-      const [buffer, loopMeta] = await Promise.all([
-        audioMuxer.loadBGMBuffer(url),
-        this.loadLoopSidecar(url)
-      ])
-      if (buffer) {
-        this.buffers.set(file, buffer)
-        if (loopMeta) {
-          this.loops.set(file, loopMeta)
-          this.loopByBuffer.set(buffer, loopMeta)
+    if (files.length === 0) return
+
+    const MAX_CONCURRENCY = 4
+    let cursor = 0
+    const workerCount = Math.min(MAX_CONCURRENCY, files.length)
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (cursor < files.length) {
+          const file = files[cursor++]
+          const url = resolveBgmUrl(`audio/bgm/${file}`)
+          this.logger.info(`Loading story BGM: ${file} (${url})`)
+          const [buffer, loopMeta] = await Promise.all([
+            audioMuxer.loadBGMBuffer(url),
+            this.loadLoopSidecar(url)
+          ])
+          if (buffer) {
+            this.buffers.set(file, buffer)
+            if (loopMeta) {
+              this.loops.set(file, loopMeta)
+              this.loopByBuffer.set(buffer, loopMeta)
+            }
+          } else {
+            this.logger.warn(`Story BGM missing or decode failed, cue skipped: ${file}`)
+          }
         }
-      } else {
-        this.logger.warn(`Story BGM missing or decode failed, cue skipped: ${file}`)
-      }
-    }
+      })
+    )
   }
 
   private async loadLoopSidecar(bgmUrl: string): Promise<BgmLoopMetadata | null> {

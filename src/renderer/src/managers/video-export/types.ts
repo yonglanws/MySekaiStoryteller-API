@@ -13,7 +13,13 @@ export interface VideoExportOptions {
   batchSize?: number
   maxRetries?: number
   enableResumable?: boolean
-  exportMode?: 'frames' | 'stream' | 'fast'
+  /**
+   * 导出管线模式：
+   * - `'fast'`（默认）：虚拟时钟逐帧渲染（WebCodecs / frames 管道）
+   * - `'frames'`：直接走帧序列编码
+   * - `'record'` / `'stream'`：@deprecated 已废弃，自动委托为 `'fast'`
+   */
+  exportMode?: 'fast' | 'frames' | 'record' | 'stream'
   /** fast 模式视频码率（bps），缺省 12Mbps */
   exportBitrate?: number
   /** fast 模式的编码帧率上限（默认 30）；仍不超过 video.fps */
@@ -23,10 +29,10 @@ export interface VideoExportOptions {
    */
   exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
   /**
-   * TTS 与渲染调度：serial（默认）= 先合成完全部语音再开始录制/渲染；
-   * concurrent = 边渲染边合成，总耗时更短但会与渲染争抢 CPU/GPU
+   * TTS 与渲染调度：concurrent（默认）= 边渲染边并发合成，端到端耗时最短；
+   * serial = 先合成完全部语音再开始渲染，避免与 WebGL/编码争抢 CPU/GPU
    */
-  ttsMode?: 'serial' | 'concurrent'
+  ttsMode?: 'concurrent' | 'serial'
   apiMode?: boolean
   apiOutputPath?: string
   apiCrf?: number

@@ -11,6 +11,8 @@ export interface ConcurrentPipelineConfig {
   waitMs?: (ms: number) => Promise<void>
   /** 真实墙钟 now；fast 模式下 performance.now 是虚拟时间 */
   nowMs?: () => number
+  /** 单句 TTS 完成（含成功/失败）后的回调，用于提前异步预解码口型包络等 */
+  onTtsReady?: (snippetIndex: number, result: PipelineTTSResult) => void
 }
 
 export interface PipelineTTSResult {
@@ -69,9 +71,10 @@ export class ConcurrentExportPipeline {
       ttsLookahead: config?.ttsLookahead ?? 3,
       ttsTimeoutMs: config?.ttsTimeoutMs ?? 30000,
       targetFps: config?.targetFps ?? 30,
-      maxConcurrentTts: 1,
+      maxConcurrentTts: Math.max(1, config?.maxConcurrentTts ?? 3),
       waitMs: config?.waitMs,
-      nowMs: config?.nowMs
+      nowMs: config?.nowMs,
+      onTtsReady: config?.onTtsReady
     }
     this.metrics = this.createInitialMetrics()
   }
@@ -107,8 +110,8 @@ export class ConcurrentExportPipeline {
     this.isRunning = true
     this.isAborted = false
     this.metrics = this.createInitialMetrics()
-    this.metrics.pipelineStartTime = performance.now()
-    this.ttsPipelineStartTime = performance.now()
+    this.metrics.pipelineStartTime = this.now()
+    this.ttsPipelineStartTime = this.metrics.pipelineStartTime
     this.timeCursorIndex = 0
     this.timeCursorMs = 0
 
@@ -122,6 +125,7 @@ export class ConcurrentExportPipeline {
     this.logger.info('TTS pipeline started', {
       talkSnippetCount: this.ttsReadyFlags.size,
       lookahead: this.config.ttsLookahead,
+      concurrency: this.config.maxConcurrentTts,
       timeout: this.config.ttsTimeoutMs
     })
   }
@@ -131,23 +135,30 @@ export class ConcurrentExportPipeline {
     ttsManager: TTSManager,
     onProgress?: (current: number, total: number, message: string) => void
   ): Promise<void> {
-    const talkSnippets: { index: number; speaker: string; content: string; ttsText: string }[] = []
+    const talkSnippets: {
+      index: number
+      speaker: string
+      content: string
+      ttsText: string
+      emotion: string
+    }[] = []
 
     for (let i = 0; i < snippets.length; i++) {
       if (snippets[i].type === 'Talk') {
         const snippet = snippets[i] as SnippetData & {
-          data?: { speaker: string; content: string; ttsText?: string }
+          data?: { speaker: string; content: string; ttsText?: string; emotion?: string }
         }
         const data =
           snippet.data ||
           ((snippet as Record<string, unknown>).data as
-            | { speaker: string; content: string; ttsText?: string }
+            | { speaker: string; content: string; ttsText?: string; emotion?: string }
             | undefined)
         talkSnippets.push({
           index: i,
           speaker: data?.speaker || '',
           content: data?.content || '',
-          ttsText: data?.ttsText || ''
+          ttsText: data?.ttsText || '',
+          emotion: data?.emotion || ''
         })
       }
     }
@@ -155,19 +166,18 @@ export class ConcurrentExportPipeline {
     const total = talkSnippets.length
     let completed = 0
     const synthesizedDurations: Map<number, number> = new Map()
+    const concurrency = Math.min(Math.max(1, this.config.maxConcurrentTts), Math.max(1, total))
 
-    this.logger.info(`TTS pipeline: ${total} Talk snippets to synthesize`)
+    this.logger.info(
+      `TTS pipeline: ${total} Talk snippets to synthesize (concurrency=${concurrency})`
+    )
 
-    for (let i = 0; i < talkSnippets.length; i++) {
-      if (this.isAborted) {
-        this.logger.info('TTS pipeline aborted')
-        break
-      }
+    let nextTalkPos = 0
 
-      const talk = talkSnippets[i]
+    const processOneTalk = async (talk: (typeof talkSnippets)[number]): Promise<void> => {
+      if (this.isAborted) return
 
-      // 游标推进到当前 Talk：与原先「每条重算全部前序」等价
-      // （前序片段的 TTS 时长在更早的迭代中已全部确定），但从 O(n²) 降为 O(n)
+      // 游标增量推进到当前 Talk：任务按 talk.index 升序领取，同步段保证单调前进
       while (this.timeCursorIndex < talk.index) {
         const snippet = snippets[this.timeCursorIndex]
         const baseDelayMs = Math.max((snippet.delay || 0) * 1000, 200)
@@ -180,22 +190,27 @@ export class ConcurrentExportPipeline {
 
       ttsManager.setCurrentTime(this.timeCursorMs)
 
-      const startTime = performance.now()
+      const startTime = this.now()
+      let pipelineResult: PipelineTTSResult = { success: false, duration: 0 }
 
       try {
         let result: { success: boolean; duration: number }
 
         if (talk.ttsText) {
-          result = await ttsManager.synthesizeWithText(talk.ttsText, talk.speaker, talk.index)
+          result = await ttsManager.synthesizeWithText(
+            talk.ttsText,
+            talk.speaker,
+            talk.index,
+            talk.emotion
+          )
         } else {
           result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker, talk.index)
         }
 
-        const latency = performance.now() - startTime
-
+        const latency = this.now() - startTime
         this.metrics.ttsLatenciesMs.push(latency)
 
-        const pipelineResult: PipelineTTSResult = {
+        pipelineResult = {
           success: result.success,
           duration: result.duration
         }
@@ -214,16 +229,25 @@ export class ConcurrentExportPipeline {
             `TTS [${talk.index}] "${talk.speaker}": failed, latency=${latency.toFixed(0)}ms`
           )
         }
-
-        this.ttsResults.set(talk.index, pipelineResult)
       } catch (error) {
-        const latency = performance.now() - startTime
+        const latency = this.now() - startTime
         this.metrics.ttsLatenciesMs.push(latency)
         this.metrics.ttsFailureCount++
-        this.ttsResults.set(talk.index, { success: false, duration: 0 })
+        pipelineResult = { success: false, duration: 0 }
         this.logger.error(
           `TTS [${talk.index}] exception: ${error instanceof Error ? error.message : String(error)}`
         )
+      }
+
+      if (this.isAborted) return
+
+      this.ttsResults.set(talk.index, pipelineResult)
+      if (this.config.onTtsReady) {
+        try {
+          this.config.onTtsReady(talk.index, pipelineResult)
+        } catch (cbError) {
+          this.logger.warn(`onTtsReady callback failed for snippet ${talk.index}`, cbError)
+        }
       }
 
       this.ttsReadyFlags.set(talk.index, true)
@@ -235,13 +259,25 @@ export class ConcurrentExportPipeline {
 
       completed++
       onProgress?.(completed, total, `正在合成语音 ${completed}/${total}: ${talk.speaker}`)
-
-      if (completed % 5 === 0) {
-        await this.wait(0)
-      }
     }
 
-    this.ttsPipelineEndTime = performance.now()
+    if (talkSnippets.length > 0) {
+      await Promise.all(
+        Array.from({ length: concurrency }, async () => {
+          while (!this.isAborted) {
+            const idx = nextTalkPos++
+            if (idx >= talkSnippets.length) break
+            await processOneTalk(talkSnippets[idx])
+          }
+        })
+      )
+    }
+
+    if (this.isAborted) {
+      this.logger.info('TTS pipeline aborted')
+    }
+
+    this.ttsPipelineEndTime = this.now()
     this.logger.info(
       `TTS pipeline completed: ${this.metrics.ttsSuccessCount} succeeded, ${this.metrics.ttsFailureCount} failed, duration=${(this.ttsPipelineEndTime - this.ttsPipelineStartTime).toFixed(0)}ms`
     )
@@ -250,6 +286,10 @@ export class ConcurrentExportPipeline {
   async waitForTTSReady(snippetIndex: number): Promise<PipelineTTSResult | null> {
     if (!this.ttsReadyFlags.has(snippetIndex)) {
       return null
+    }
+
+    if (this.isAborted) {
+      return this.ttsResults.get(snippetIndex) ?? { success: false, duration: 0 }
     }
 
     if (this.ttsReadyFlags.get(snippetIndex)) {
@@ -332,11 +372,11 @@ export class ConcurrentExportPipeline {
   }
 
   markRenderStart(): void {
-    this.renderPipelineStartTime = performance.now()
+    this.renderPipelineStartTime = this.now()
   }
 
   markRenderEnd(): void {
-    this.renderPipelineEndTime = performance.now()
+    this.renderPipelineEndTime = this.now()
   }
 
   recordFrameCapture(frameTimeMs: number, dropped: boolean): void {
@@ -365,6 +405,7 @@ export class ConcurrentExportPipeline {
     const overlapEnd = Math.min(this.ttsPipelineEndTime, this.renderPipelineEndTime)
     const overlap = overlapEnd > overlapStart ? overlapEnd - overlapStart : 0
 
+    const now = this.now()
     return {
       ...this.metrics,
       averageTtsLatencyMs:
@@ -375,8 +416,8 @@ export class ConcurrentExportPipeline {
         frameTimes.length > 0 ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0,
       dropRate:
         this.metrics.totalFrames > 0 ? this.metrics.droppedFrames / this.metrics.totalFrames : 0,
-      pipelineEndTime: performance.now(),
-      totalDurationMs: performance.now() - this.metrics.pipelineStartTime,
+      pipelineEndTime: now,
+      totalDurationMs: now - this.metrics.pipelineStartTime,
       ttsPipelineDurationMs: ttsDuration,
       renderPipelineDurationMs: renderDuration,
       overlapDurationMs: overlap

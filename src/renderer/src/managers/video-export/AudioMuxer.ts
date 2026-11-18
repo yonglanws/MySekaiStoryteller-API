@@ -164,6 +164,8 @@ export interface BGMConfig {
 
 export class AudioMuxer {
   private audioContext: AudioContext | null = null
+  private offlineDecoder: OfflineAudioContext | null = null
+  private initPromise: Promise<void> | null = null
   private audioTracks: AudioTrackData[] = []
   private bgmConfig: BGMConfig | null = null
   private bgmCues: BgmAudioCue[] = []
@@ -171,6 +173,7 @@ export class AudioMuxer {
   private seCues: SeAudioCue[] = []
   private readonly logger: ExportLogger = new ExportLogger('AudioMuxer')
   private decodedBufferCache: Map<string, AudioBuffer> = new Map()
+  private inFlightDecodes: Map<string, Promise<AudioBuffer>> = new Map()
 
   constructor() {
     this.audioContext = null
@@ -181,23 +184,34 @@ export class AudioMuxer {
   }
 
   async initialize(): Promise<void> {
-    try {
-      if (!this.audioContext) {
-        this.audioContext = new AudioContext({ sampleRate: 48000 })
-        this.logger.info('AudioContext initialized', {
-          sampleRate: 48000,
-          state: this.audioContext.state
-        })
-      }
-      if (this.audioContext.state === 'suspended') {
-        this.logger.info('AudioContext is suspended, resuming...')
-        await this.audioContext.resume()
-      }
-    } catch (error) {
-      throw new Error(
-        `Failed to initialize AudioContext: ${error instanceof Error ? error.message : String(error)}`
-      )
+    if (this.audioContext && this.audioContext.state === 'running') {
+      return
     }
+    if (this.initPromise) {
+      return this.initPromise
+    }
+    this.initPromise = (async () => {
+      try {
+        if (!this.audioContext || this.audioContext.state === 'closed') {
+          this.audioContext = new AudioContext({ sampleRate: 48000 })
+          this.logger.info('AudioContext initialized', {
+            sampleRate: 48000,
+            state: this.audioContext.state
+          })
+        }
+        if (this.audioContext.state === 'suspended') {
+          this.logger.info('AudioContext is suspended, resuming...')
+          await this.audioContext.resume().catch(() => undefined)
+        }
+      } catch (error) {
+        throw new Error(
+          `Failed to initialize AudioContext: ${error instanceof Error ? error.message : String(error)}`
+        )
+      } finally {
+        this.initPromise = null
+      }
+    })()
+    return this.initPromise
   }
 
   setBGMConfig(bgmConfig: BGMConfig): void {
@@ -256,9 +270,31 @@ export class AudioMuxer {
     this.audioTracks = []
     this.bgmVolumeTweens = []
     this.decodedBufferCache.clear()
+    this.inFlightDecodes.clear()
   }
 
   async decodeAudioData(audioBuffer: ArrayBuffer): Promise<AudioBuffer> {
+    // 优先使用 OfflineAudioContext 解码：无用户手势限制、不会处于 suspended、无需 50ms 唤醒等待，
+    // 并发解码多条音轨时也不会与共享 AudioContext 的重建发生竞争。
+    if (typeof OfflineAudioContext === 'function') {
+      try {
+        if (!this.offlineDecoder) {
+          this.offlineDecoder = new OfflineAudioContext(1, 1, 48000)
+        }
+        const decoded = await this.offlineDecoder.decodeAudioData(audioBuffer.slice(0))
+        if (decoded) {
+          return decoded
+        }
+      } catch (offlineErr) {
+        this.offlineDecoder = null
+        this.logger.warn(
+          `OfflineAudioContext decode failed, falling back to AudioContext: ${
+            offlineErr instanceof Error ? offlineErr.message : String(offlineErr)
+          }`
+        )
+      }
+    }
+
     const MAX_RETRIES = 3
     let lastError: Error | null = null
 
@@ -266,22 +302,18 @@ export class AudioMuxer {
       try {
         if (!this.audioContext || this.audioContext.state === 'closed') {
           this.logger.info(`AudioContext unavailable (attempt ${attempt + 1}), recreating...`)
-          this.audioContext?.close()
-          this.audioContext = new AudioContext({ sampleRate: 48000 })
+          await this.initialize()
         }
 
-        if (this.audioContext!.state === 'suspended') {
+        if (this.audioContext?.state === 'suspended') {
           this.logger.info(`AudioContext suspended (attempt ${attempt + 1}), resuming...`)
-          await this.audioContext!.resume()
-          await new Promise((r) => setTimeout(r, 50))
+          await this.audioContext.resume().catch(() => undefined)
         }
 
         const decoded = await this.audioContext!.decodeAudioData(audioBuffer.slice(0))
-
         if (!decoded) {
           throw new Error('decodeAudioData returned null/undefined')
         }
-
         return decoded
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
@@ -290,9 +322,9 @@ export class AudioMuxer {
         )
 
         if (attempt < MAX_RETRIES - 1) {
-          this.audioContext?.close()
+          this.audioContext?.close().catch(() => undefined)
           this.audioContext = null
-          await new Promise((r) => setTimeout(r, 100 * (attempt + 1)))
+          await new Promise((r) => setTimeout(r, 25 * (attempt + 1)))
         }
       }
     }
@@ -301,25 +333,32 @@ export class AudioMuxer {
   }
 
   private async decodeAudioTrackCached(track: AudioTrackData): Promise<AudioBuffer> {
-    const cacheKey = `${track.characterName}-${track.startTime}-${track.audioBuffer.byteLength}`
-    let decoded = this.decodedBufferCache.get(cacheKey)
+    const cacheKey = `${track.snippetIndex ?? ''}:${track.characterName}:${track.startTime}:${track.audioBuffer.byteLength}`
+    const cached = this.decodedBufferCache.get(cacheKey)
+    if (cached) return cached
 
-    if (!decoded) {
-      decoded = await this.decodeAudioData(track.audioBuffer)
-      this.decodedBufferCache.set(cacheKey, decoded)
-    }
+    const inFlight = this.inFlightDecodes.get(cacheKey)
+    if (inFlight) return inFlight
 
-    return decoded
+    const promise = this.decodeAudioData(track.audioBuffer)
+      .then((decoded) => {
+        this.decodedBufferCache.set(cacheKey, decoded)
+        return decoded
+      })
+      .finally(() => {
+        this.inFlightDecodes.delete(cacheKey)
+      })
+    this.inFlightDecodes.set(cacheKey, promise)
+    return promise
   }
 
   private async ensureAudioContextReady(): Promise<void> {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       await this.initialize()
     }
-    if (this.audioContext!.state === 'suspended') {
+    if (this.audioContext?.state === 'suspended') {
       this.logger.info('AudioContext suspended before mixing, resuming...')
-      await this.audioContext!.resume()
-      await new Promise((r) => setTimeout(r, 100))
+      await this.audioContext.resume().catch(() => undefined)
     }
   }
 
@@ -332,8 +371,6 @@ export class AudioMuxer {
     outputDuration: number,
     bgmBuffer?: AudioBuffer
   ): Promise<{ leftBuffer: Float32Array; rightBuffer: Float32Array; totalSamples: number; sampleRate: number }> {
-    await this.ensureAudioContextReady()
-
     const sampleRate = 48000
     const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
     const leftBuffer = new Float32Array(totalSamples)
@@ -360,6 +397,7 @@ export class AudioMuxer {
     this.logger.info(
       `Mixing audio: outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}`
     )
+    await this.ensureAudioContextReady()
     const { leftBuffer, rightBuffer, totalSamples, sampleRate } = await this.mixIntoStereoBuffers(
       outputDuration,
       bgmBuffer
@@ -596,7 +634,7 @@ export class AudioMuxer {
     }
 
     const validTracks: ValidTrack[] = []
-    const decodePromises: Promise<void>[] = []
+    const tracksToDecode: AudioTrackData[] = []
 
     for (const track of this.audioTracks) {
       if (!track.audioBuffer || track.audioBuffer.byteLength === 0) {
@@ -612,7 +650,11 @@ export class AudioMuxer {
         continue
       }
 
-      if (track.pcmData && track.pcmData.channel0.length > 0) {
+      if (
+        track.pcmData &&
+        track.pcmData.channel0.length > 0 &&
+        track.pcmData.sampleRate === sampleRate
+      ) {
         validTracks.push({
           track,
           sourceCh0: track.pcmData.channel0,
@@ -620,21 +662,31 @@ export class AudioMuxer {
           isMono: track.pcmData.channel0 === track.pcmData.channel1
         })
       } else {
-        const decodePromise = this.decodeAudioTrackCached(track).then((decoded) => {
-          if (!decoded || typeof decoded.getChannelData !== 'function') {
-            this.logger.warn(`Decoded buffer invalid for "${track.characterName}", skipping`)
-            return
-          }
-          const ch0 = decoded.getChannelData(0)
-          const isMono = decoded.numberOfChannels <= 1
-          const ch1 = isMono ? ch0 : decoded.getChannelData(1)
-          validTracks.push({ track, sourceCh0: ch0, sourceCh1: ch1, isMono })
-        })
-        decodePromises.push(decodePromise)
+        tracksToDecode.push(track)
       }
     }
 
-    await Promise.all(decodePromises)
+    if (tracksToDecode.length > 0) {
+      const DECODE_CONCURRENCY = 4
+      let cursor = 0
+      const workerCount = Math.min(DECODE_CONCURRENCY, tracksToDecode.length)
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (cursor < tracksToDecode.length) {
+            const track = tracksToDecode[cursor++]
+            const decoded = await this.decodeAudioTrackCached(track)
+            if (!decoded || typeof decoded.getChannelData !== 'function') {
+              this.logger.warn(`Decoded buffer invalid for "${track.characterName}", skipping`)
+              continue
+            }
+            const ch0 = decoded.getChannelData(0)
+            const isMono = decoded.numberOfChannels <= 1
+            const ch1 = isMono ? ch0 : decoded.getChannelData(1)
+            validTracks.push({ track, sourceCh0: ch0, sourceCh1: ch1, isMono })
+          }
+        })
+      )
+    }
 
     let mixedTrackCount = 0
     let skippedTrackCount = 0
@@ -687,10 +739,6 @@ export class AudioMuxer {
   }
 
   async loadBGMBuffer(bgmPath: string): Promise<AudioBuffer | null> {
-    if (!this.audioContext) {
-      await this.initialize()
-    }
-
     try {
       this.logger.info(`Loading BGM from: ${bgmPath}`)
       const response = await fetch(bgmPath)
@@ -868,10 +916,13 @@ export class AudioMuxer {
         )
       this.audioContext = null
     }
+    this.offlineDecoder = null
+    this.initPromise = null
     this.audioTracks = []
     this.bgmConfig = null
     this.bgmCues = []
     this.seCues = []
     this.decodedBufferCache.clear()
+    this.inFlightDecodes.clear()
   }
 }

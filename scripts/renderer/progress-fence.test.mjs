@@ -694,7 +694,6 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
         },
         ExportError: Error,
         ExportErrorCode: {},
-        StreamRecorder: noopClass,
         AudioMuxer: noopClass,
         ConcurrentExportPipeline: noopClass,
         SnippetTimestampRecorder: noopClass,

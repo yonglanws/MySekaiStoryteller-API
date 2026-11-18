@@ -670,6 +670,10 @@ export class App {
       this.videoExportManager.abort()
     }
 
+    if (videoConfig.exportMode === 'record') {
+      this.logger.warn('video.exportMode="record" is deprecated; delegating to "fast"')
+    }
+
     const exportOptions: VideoExportOptions = {
       fps: videoConfig.fps,
       width: videoConfig.width,
@@ -680,11 +684,11 @@ export class App {
       crf: videoConfig.crf,
       useGpu: true,
       gpuRenderer: 'auto',
-      exportMode: videoConfig.exportMode === 'fast' ? 'fast' : 'stream',
+      exportMode: 'fast',
       exportBitrate: videoConfig.exportBitrate,
       exportFastEncoder: videoConfig.exportFastEncoder,
       fastFps: videoConfig.fastFps,
-      ttsMode: videoConfig.ttsMode,
+      ttsMode: videoConfig.ttsMode ?? 'concurrent',
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,

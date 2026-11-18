@@ -61,14 +61,18 @@ const VideoSchema = z.object({
   watermark: z.boolean().default(true),
   /** 自定义水印文字：显示在自带水印下一行；空 = 不追加 */
   watermarkText: z.string().default(''),
-  exportMode: z.enum(['record', 'fast']).default('record'),
+  /**
+   * 导出管线：
+   * - `'fast'`（默认）：虚拟时钟逐帧渲染，优先 WebCodecs，失败自动回落 frames 管道
+   * - `'record'`：@deprecated 已废弃，加载时打印告警并自动回落为 `'fast'`
+   */
+  exportMode: z.enum(['fast', 'record']).default('fast'),
   exportBitrate: z.number().default(12_000_000),
   exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto'),
   /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
   fastFps: z.number().default(30),
   /**
-   * record 收尾成片体积上限（MiB）。收尾预估（录制视频 + 音轨）超出上限 2% 时，
-   * 按精确码率重编码视频压回上限（分辨率与时间戳不变）；0 = 不限制。
+   * @deprecated record 模式已废弃，保留字段仅作配置向后兼容（请改用 video.exportBitrate）
    */
   recordTargetSizeMb: z.number().default(0),
   /**
@@ -80,11 +84,10 @@ const VideoSchema = z.object({
   idleChainGapSec: z.number().default(0),
   /**
    * TTS 与画面渲染的调度方式：
-   * - serial（默认）：先串行合成完全部语音，再开始录制/渲染，避免 TTS 推理与
-   *   WebGL/编码争抢 CPU/GPU；录制模式推荐
-   * - concurrent：边渲染边合成，总耗时更短，但两条流水线会并行争资源
+   * - concurrent（默认）：边渲染边并发合成语音，端到端耗时最短
+   * - serial：先合成完全部语音再开始渲染，避免与 WebGL/编码争抢 CPU/GPU
    */
-  ttsMode: z.enum(['serial', 'concurrent']).default('serial')
+  ttsMode: z.enum(['concurrent', 'serial']).default('concurrent')
 })
 
 const RenderSchema = z.object({
@@ -552,6 +555,18 @@ export function loadHostConfig(): HostConfig {
   }
 
   applyEnvOverrides(config)
+
+  if (config.video.exportMode === 'record') {
+    console.warn(
+      '[config] video.exportMode="record" is deprecated and will be removed in a future release; falling back to "fast".'
+    )
+    config.video.exportMode = 'fast'
+  }
+  if (config.video.recordTargetSizeMb > 0) {
+    console.warn(
+      '[config] video.recordTargetSizeMb is deprecated and ignored (record mode has been removed); configure video.exportBitrate instead.'
+    )
+  }
 
   const paths = {
     output: path.resolve(rootDir, pathsRaw.output),

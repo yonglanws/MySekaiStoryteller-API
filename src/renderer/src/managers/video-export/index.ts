@@ -1,11 +1,3 @@
-export { StreamMuxer } from './StreamMuxer'
-export type { EncodedFrame, MuxerConfig } from './StreamMuxer'
-export { StreamRecorder } from './StreamRecorder'
-export type {
-  StreamRecorderConfig,
-  StreamRecorderProgressCallback,
-  StreamRecorderMetrics
-} from './StreamRecorder'
 export { ExportLogger, LogLevel } from './ExportLogger'
 export type { ExportLogEntry } from './ExportLogger'
 export { ExportLogBus, exportLogBus } from './ExportLogBus'

@@ -37,18 +37,13 @@ video:
   watermarkText: ""   # 自定义水印文字：右对齐显示在自带两行水印的下一行，
                       # 支持最多 2 行（\n 换行），留空则只显示自带水印
                       # （env: MSS_VIDEO_WATERMARK_TEXT）
-  exportMode: record  # 导出管线：record | fast（env: MSS_EXPORT_MODE）
-                      # record = 实时采集，宿主并行编码并在末尾只合入音轨
-                      # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4，
-                      #          运行环境不支持时自动回退 record
-  recordTargetSizeMb: 0    # record 收尾成片体积上限 MiB（env: MSS_RECORD_TARGET_SIZE_MB）
-                           # 收尾预估（录制视频 + 音轨）超出上限 2% 时，按精确码率重编码
-                           # 视频压回上限（分辨率与时间戳不变）；0 = 不限制
+  exportMode: fast    # 导出管线：fast | record（env: MSS_EXPORT_MODE；record 已废弃，自动回落 fast）
+                      # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4（不支持时自动回落 frames 管道）
+  recordTargetSizeMb: 0    # [已废弃] 仅向后兼容保留；fast 模式请通过 exportBitrate 控制体积
   exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
-  ttsMode: serial          # TTS 与渲染调度：serial | concurrent（env: MSS_TTS_MODE）
-                           # serial（默认）= 先串行合成完全部语音，再开始录制/渲染，
-                           #                 避免 TTS 推理与 WebGL/编码抢 CPU/GPU
-                           # concurrent = 边渲染边合成，总耗时更短但两条流水线并行争资源
+  ttsMode: concurrent      # TTS 与渲染调度：concurrent | serial（env: MSS_TTS_MODE）
+                           # concurrent（默认）= 边渲染边并发合成语音，端到端耗时最短
+                           # serial = 先合成完全部语音再开始渲染，避免与 WebGL/编码争资源
 
   idleChainGapSec: 0       # 表演续演间隔秒数（0 = 关闭续演，默认）。
                            # 角色动作播完后：0 = 保持动作结束时的姿势（不回落站立），之后只有呼吸与眨眼
