@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { EventEmitter, once } from 'node:events'
 import { mkdtemp, mkdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import http from 'node:http'
+import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -71,8 +73,7 @@ test('VideoApiServer enforces Bearer auth, sanitizes health/errors, and blocks s
 
   const apiKey = 'wave4-secret-api-key'
   const bridgeToken = 'wave4-bridge-token'
-  let api = null
-  api = new VideoApiServer(new Logger({ type: 'hidden' }), {
+  const api = new VideoApiServer(new Logger({ type: 'hidden' }), {
     port: 0,
     host: '127.0.0.1',
     outputDir,
@@ -93,13 +94,13 @@ test('VideoApiServer enforces Bearer auth, sanitizes health/errors, and blocks s
     },
     apiKey,
     bridgeToken,
-    registerExtraRoutes: (app) => {
+    registerExtraRoutes: (app, server) => {
       app.post('/api/v1/script/generate', (req, res) => {
-        if (!api.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         res.json({ success: true, story })
       })
       app.post('/api/v1/generate', (req, res) => {
-        if (!api.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         res.json({ success: true, story })
       })
       app.post('/api/v1/tts/lease', (_req, res) => {
@@ -108,7 +109,7 @@ test('VideoApiServer enforces Bearer auth, sanitizes health/errors, and blocks s
       app.post('/api/v1/tts/lease/release', (_req, res) => {
         res.json({ success: true })
       })
-      app.use('/apifile', (req, res, next) => api.createAuthMiddleware()(req, res, next))
+      app.use('/apifile', server.createAuthMiddleware())
       app.use('/apifile', express.static(outputDir, { index: false }))
     }
   })
@@ -348,13 +349,13 @@ test('Rate limiting guards export, script/generate, and generate and caps rateLi
     outputDir,
     video: { width: 1280, height: 720, fps: 30 },
     rateLimitMaxEntries: 4,
-    registerExtraRoutes: (app) => {
+    registerExtraRoutes: (app, server) => {
       app.post('/api/v1/script/generate', (req, res) => {
-        if (!api.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         res.json({ success: true })
       })
       app.post('/api/v1/generate', (req, res) => {
-        if (!api.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         res.json({ success: true })
       })
     }
@@ -873,4 +874,161 @@ test('RenderPool prevents browser/page leaks on stop-during-launch, goto failure
   await startPromise
   assert.equal(browsers.length, 4)
   assert.equal(browsers[3].connected, false, 'browser resolved after stop() must be closed')
+})
+
+async function reserveLoopbackPort() {
+  const probe = net.createServer()
+  await new Promise((resolve, reject) => {
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', resolve)
+  })
+  const addr = probe.address()
+  const port = typeof addr === 'object' && addr ? addr.port : 0
+  await new Promise((resolve, reject) => probe.close((err) => (err ? reject(err) : resolve())))
+  return port
+}
+
+test('Eager server.createAuthMiddleware() in registerExtraRoutes and host main.js bootstrap avoid TDZ and guard /apifile', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-bootstrap-smoke-'))
+  const unitOutputDir = path.join(workDir, 'unit-output')
+  const hostRoot = path.join(workDir, 'host-root')
+  const hostOutputDir = path.join(hostRoot, 'output')
+  const hostResourcesDir = path.join(hostRoot, 'resources')
+  const hostWebDir = path.join(hostRoot, 'webrenderer')
+  await Promise.all([
+    mkdir(unitOutputDir, { recursive: true }),
+    mkdir(hostOutputDir, { recursive: true }),
+    mkdir(hostResourcesDir, { recursive: true }),
+    mkdir(hostWebDir, { recursive: true })
+  ])
+  await Promise.all([
+    writeFile(path.join(unitOutputDir, 'smoke.mp4'), 'unit-mp4'),
+    writeFile(path.join(hostOutputDir, 'smoke.mp4'), 'live-mp4'),
+    writeFile(path.join(hostWebDir, 'index.html'), '<!doctype html><html><body>ok</body></html>')
+  ])
+
+  let child = null
+  let childExited = false
+  t.after(async () => {
+    if (child && !childExited) {
+      child.kill()
+      await Promise.race([
+        once(child, 'exit').catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 2000))
+      ])
+    }
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  // 1. Direct constructor TDZ regression: calling server.createAuthMiddleware() synchronously
+  //    without a lazy wrapper succeeds cleanly when assigned to a fresh `const`.
+  const eagerKey = 'eager-tdz-secret'
+  const eagerApi = new VideoApiServer(new Logger({ type: 'hidden' }), {
+    port: 0,
+    host: '127.0.0.1',
+    outputDir: unitOutputDir,
+    video: { width: 1280, height: 720, fps: 30 },
+    apiKey: eagerKey,
+    registerExtraRoutes: (app, server) => {
+      assert.ok(server, 'registerExtraRoutes must receive the VideoApiServer instance')
+      const authMiddleware = server.createAuthMiddleware()
+      app.use('/apifile', authMiddleware)
+      app.use('/apifile', express.static(unitOutputDir, { index: false }))
+    }
+  })
+  await eagerApi.start()
+  const eagerServer = eagerApi.getHttpServer()
+  const eagerPort = eagerServer.address().port
+  try {
+    const unauth = await httpRequest({ port: eagerPort, reqPath: '/apifile/smoke.mp4' })
+    assert.equal(unauth.status, 401)
+    const authed = await httpRequest({
+      port: eagerPort,
+      reqPath: '/apifile/smoke.mp4',
+      headers: { Authorization: `Bearer ${eagerKey}` }
+    })
+    assert.equal(authed.status, 200)
+    assert.equal(authed.text, 'unit-mp4')
+  } finally {
+    const closed = once(eagerServer, 'close')
+    eagerApi.stop()
+    eagerServer.closeAllConnections()
+    await closed
+  }
+
+  // 2. Live host main.js bootstrap smoke test verifying registerExtraRoutes + /apifile Bearer auth
+  const livePort = await reserveLoopbackPort()
+  const liveKey = 'bootstrap-smoke-secret'
+  const mainEntry = path.resolve(process.cwd(), 'out-host', 'host', 'main.js')
+  let logs = ''
+  child = spawn(process.execPath, [mainEntry], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      MSS_HOST: '127.0.0.1',
+      MSS_PORT: String(livePort),
+      MSS_OUTPUT_DIR: hostOutputDir,
+      MSS_RESOURCE_DIR: hostResourcesDir,
+      MSS_WEB_RENDERER_DIR: hostWebDir,
+      MSS_ASSETS_CLOUD_CATALOG: 'false',
+      MSS_TTS_ENABLED: 'false',
+      MSS_WORKERS: '1',
+      MSS_BROWSER_CHANNELS: '',
+      MSS_BROWSER_EXECUTABLE: path.join(workDir, 'missing-browser.exe'),
+      MSST_API_KEY: liveKey
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  child.stdout?.on('data', (chunk) => {
+    logs += chunk.toString()
+  })
+  child.stderr?.on('data', (chunk) => {
+    logs += chunk.toString()
+  })
+  child.once('exit', () => {
+    childExited = true
+  })
+
+  let healthy = null
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline && !childExited) {
+    try {
+      const res = await httpRequest({ port: livePort, reqPath: '/api/v1/health' })
+      if (res.status === 200) {
+        healthy = res
+        break
+      }
+    } catch {
+      // still starting up
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
+  assert.equal(
+    childExited,
+    false,
+    `out-host/host/main.js exited prematurely during startup:\n${logs}`
+  )
+  assert.ok(healthy, `main.js failed to become healthy on port ${livePort}:\n${logs}`)
+  assert.equal(healthy.json.status, 'ok')
+
+  const unauthApifile = await httpRequest({ port: livePort, reqPath: '/apifile/smoke.mp4' })
+  assert.equal(unauthApifile.status, 401)
+  const unauthStatus = await httpRequest({ port: livePort, reqPath: '/api/v1/status' })
+  assert.equal(unauthStatus.status, 401)
+
+  const authedApifile = await httpRequest({
+    port: livePort,
+    reqPath: '/apifile/smoke.mp4',
+    headers: { Authorization: `Bearer ${liveKey}` }
+  })
+  assert.equal(authedApifile.status, 200)
+  assert.equal(authedApifile.text, 'live-mp4')
+
+  const authedStatus = await httpRequest({
+    port: livePort,
+    reqPath: '/api/v1/status',
+    headers: { Authorization: `Bearer ${liveKey}` }
+  })
+  assert.equal(authedStatus.status, 200)
 })

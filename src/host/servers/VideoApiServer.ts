@@ -194,7 +194,7 @@ export class VideoApiServer {
       /** 同时渲染的导出任务上限，应与 render.workers 对齐 */
       maxConcurrentExports?: number
       /** 在 API 路由之后挂载额外路由（静态资源、桥接层等），共享同一端口 */
-      registerExtraRoutes?: (app: express.Application) => void
+      registerExtraRoutes?: (app: express.Application, server: VideoApiServer) => void
       /** 导出前预处理；抛错时 HTTP 返回 400，不进入渲染队列 */
       prepareStory?: (story: StoryData) => Promise<void>
       /** 可选 Bearer API key（未传时读取 MSST_API_KEY / MSS_API_KEY 环境变量） */
@@ -239,7 +239,7 @@ export class VideoApiServer {
     this.app = express()
     this.setupMiddleware()
     this.setupRoutes()
-    options.registerExtraRoutes?.(this.app)
+    options.registerExtraRoutes?.(this.app, this)
     this.setupErrorHandler()
     this.startCleanupInterval()
   }

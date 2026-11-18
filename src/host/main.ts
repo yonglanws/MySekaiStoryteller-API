@@ -185,7 +185,7 @@ async function bootstrap(): Promise<void> {
         }
       }
     },
-    registerExtraRoutes: (app) => {
+    registerExtraRoutes: (app, server) => {
       app.use(
         '/bridge',
         createBridgeRouter({
@@ -566,7 +566,7 @@ async function bootstrap(): Promise<void> {
       }
 
       app.post('/api/v1/script/generate', async (req, res) => {
-        if (!apiServer.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         if (!acquireAiSlot(res)) return
         const body = (req.body ?? {}) as Parameters<typeof runGenerate>[0] & { timeout?: unknown }
         const timeoutMs =
@@ -600,7 +600,7 @@ async function bootstrap(): Promise<void> {
       })
 
       app.post('/api/v1/generate', async (req, res) => {
-        if (!apiServer.enforceRateLimit(req, res)) return
+        if (!server.enforceRateLimit(req, res)) return
         if (!acquireAiSlot(res)) return
         const body = (req.body ?? {}) as Parameters<typeof runGenerate>[0] & {
           scriptTimeout?: unknown
@@ -631,7 +631,7 @@ async function bootstrap(): Promise<void> {
           // 生成阶段结束：脚本超时闸不再适用于渲染阶段
           clearTimeout(timer)
           const scriptPath = writeScript(generated.story)
-          const exported = await apiServer.exportStory(
+          const exported = await server.exportStory(
             generated.story,
             exportTimeoutMs,
             controller.signal
@@ -648,9 +648,7 @@ async function bootstrap(): Promise<void> {
           if (generated) {
             res.status(500).json({
               success: false,
-              message: apiServer.redactPaths(
-                error instanceof Error ? error.message : String(error)
-              ),
+              message: server.redactPaths(error instanceof Error ? error.message : String(error)),
               story: generated.story,
               meta: generated.meta
             })
@@ -742,7 +740,7 @@ async function bootstrap(): Promise<void> {
         res.json({ success: true })
       })
 
-      app.use('/apifile', apiServer.createAuthMiddleware())
+      app.use('/apifile', server.createAuthMiddleware())
       app.use(createStaticRouter(config))
       logger.info('[Host] Bridge, resource catalog and static routes mounted')
     }
