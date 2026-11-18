@@ -10,6 +10,7 @@ import {
 import {
   formatBgmPromptLine,
   formatImagePromptLine,
+  isBackViewModel,
   isStandingMotion,
   type CatalogView
 } from './prompt'
@@ -391,13 +392,18 @@ function resolveModel(
   })
   if (exactCloudOrPath) return exactCloudOrPath
 
-  // 按默认服装优先匹配角色全名/简称
+  // 按正面模型与默认服装优先匹配角色全名/简称
   const directByName = view.models
     .filter(
       (model) =>
         model.name.toLowerCase() === lower || (model.shortName ?? '').toLowerCase() === lower
     )
-    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+    .sort(
+      (a, b) =>
+        Number(isBackViewModel(a)) - Number(isBackViewModel(b)) ||
+        Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+        a.id - b.id
+    )
   if (directByName.length > 0) return directByName[0]
 
   // 支持「角色名 服装」（如「星乃一歌 校服」「瑞希 私服」）
@@ -419,7 +425,12 @@ function resolveModel(
         ? [persona.name, ...persona.aliases].some((alias) => alias.toLowerCase() === lower)
         : false
     })
-    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+    .sort(
+      (a, b) =>
+        Number(isBackViewModel(a)) - Number(isBackViewModel(b)) ||
+        Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+        a.id - b.id
+    )
   if (aliasHits.length > 0) return aliasHits[0]
   return null
 }
@@ -917,17 +928,32 @@ export function normalizeCastPlan(
   }
 }
 
-/** 选角失败时的退路：优先匹配台词里点名的角色，否则按目录顺序取前两名。 */
+/** 选角失败时的退路：优先匹配台词里点名的角色（按角色去重且优先正面模型），否则按目录顺序取前两名。 */
 export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions): StagedCastPlan {
-  const mentioned = view.models.filter(
+  const sorted = [...view.models].sort(
+    (a, b) =>
+      Number(isBackViewModel(a)) - Number(isBackViewModel(b)) ||
+      Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+      a.id - b.id
+  )
+  const pool: CatalogModel[] = []
+  const seenChar = new Set<string>()
+  for (const model of sorted) {
+    const key =
+      typeof model.characterId === 'number'
+        ? `char:${model.characterId}`
+        : `name:${model.name.toLowerCase()}`
+    if (seenChar.has(key)) continue
+    seenChar.add(key)
+    pool.push(model)
+  }
+  const mentioned = pool.filter(
     (model) =>
       (model.name && options.scene.includes(model.name)) ||
       (model.shortName && model.shortName.length >= 2 && options.scene.includes(model.shortName))
   )
   const models =
-    mentioned.length >= 2
-      ? mentioned.slice(0, 5)
-      : view.models.slice(0, Math.min(2, view.models.length))
+    mentioned.length >= 2 ? mentioned.slice(0, 5) : pool.slice(0, Math.min(2, pool.length))
   const cast = models.map((model) => castMemberFor(view, model))
   const bg = view.defaultImage()
   return {

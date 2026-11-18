@@ -1025,3 +1025,90 @@ test('staged.ts preserves short-line motion, eliminates synthetic 2-beat injecti
     'Second actor first Talk must not repeat their LayoutAppear motion'
   )
 })
+
+test('CatalogView & staged fallback prefer front-facing outfits over _back models unless back view is explicitly requested', async () => {
+  const promptMod = await import('../../out-host/host/ai/prompt.js')
+  const staged = await import('../../out-host/host/ai/staged.js')
+  const catalog = new promptMod.CatalogView({
+    models: [
+      {
+        id: 2318,
+        characterId: 20,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        cloudId: 'v2_20mizuki_school_back',
+        outfitCategory: '校服',
+        outfitLabel: '校服(新立绘)',
+        isDefault: false,
+        path: 'cloud/v2_20mizuki_school_back/v2_20mizuki_school_back_t12/v2_20mizuki_school_back_t12.model3.json',
+        motions: ['w-normal01-nod'],
+        expressions: [],
+        facialMotions: ['face_smile_01']
+      },
+      {
+        id: 2319,
+        characterId: 20,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        cloudId: 'v2_20mizuki_school01_02',
+        outfitCategory: '校服',
+        outfitLabel: '校服(新立绘)',
+        isDefault: false,
+        path: 'cloud/v2_20mizuki_school01_02/20mizuki_uniform2_4_02_t10/20mizuki_uniform2_4_02_t10.model3.json',
+        motions: ['w-normal01-nod'],
+        expressions: [],
+        facialMotions: ['face_smile_01']
+      },
+      {
+        id: 2304,
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        cloudId: 'v2_19ena_school_back',
+        outfitCategory: '校服',
+        outfitLabel: '校服(新立绘)',
+        isDefault: false,
+        path: 'cloud/v2_19ena_school_back/v2_19ena_school_back_t06/v2_19ena_school_back_t06.model3.json',
+        motions: ['w-normal01-nod'],
+        expressions: [],
+        facialMotions: ['face_smile_01']
+      },
+      {
+        id: 2305,
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        cloudId: 'v2_19ena_school01',
+        outfitCategory: '校服',
+        outfitLabel: '校服(新立绘)',
+        isDefault: true,
+        path: 'cloud/v2_19ena_school01/19ena_uniform_t01/19ena_uniform_t01.model3.json',
+        motions: ['w-normal01-nod'],
+        expressions: [],
+        facialMotions: ['face_smile_01']
+      }
+    ],
+    images: ['bg_a000802.png'],
+    imageDetails: [],
+    bgmDetails: []
+  })
+
+  assert.equal(promptMod.isBackViewModel(catalog.modelById(2318)), true)
+  assert.equal(promptMod.isBackViewModel(catalog.modelById(2319)), false)
+  assert.equal(catalog.defaultModel()?.id, 2305)
+  assert.equal(catalog.resolveOutfitVariant(catalog.modelById(2318), '校服')?.id, 2319)
+  assert.equal(catalog.resolveOutfitVariant(catalog.modelById(2318), '背影')?.id, 2318)
+
+  const poolText = catalog.characterPool([], true)
+  assert.doesNotMatch(poolText, /modelId:2318\b/)
+  assert.match(poolText, /modelId:2319\b/)
+
+  const fb = staged.fallbackCastPlan(catalog, {
+    scene: '神山高校天台 晓山瑞希和东云绘名',
+    title: 'test'
+  })
+  assert.deepEqual(
+    fb.cast.map((c) => c.modelId).sort((a, b) => a - b),
+    [2305, 2319]
+  )
+})

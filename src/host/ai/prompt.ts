@@ -262,6 +262,13 @@ export function isStandingMotion(name: string): boolean {
   return lower.includes('default') || lower.includes('stand')
 }
 
+/** 判断模型是否为背影专用立绘（`_back`），默认对话选角应避开。 */
+export const isBackViewModel = (model: CatalogModel): boolean =>
+  /(?:^|[_-])back(?:\d*)$/i.test(model.cloudId ?? '') ||
+  /(?:^|[_/-])back(?:\d*)(?:[_/-]|\.)/i.test(model.path ?? '')
+
+const BACK_VIEW_QUERY_RE = /背影|背面|背对|back\s*view|\bback\b/i
+
 /**
  * 资源目录的提示词视图：把 ResourceCatalog 的原始数据整理成模型/动作/表情/背景/BGM/SE 文本，
  * 并提供校验所需的精确名称与模糊修复。
@@ -290,7 +297,13 @@ export class CatalogView {
   }
 
   defaultModel(): CatalogModel | null {
-    return this.models.find((model) => model.isDefault !== false) ?? this.models[0] ?? null
+    return (
+      this.models.find((model) => !isBackViewModel(model) && model.isDefault !== false) ??
+      this.models.find((model) => !isBackViewModel(model)) ??
+      this.models.find((model) => model.isDefault !== false) ??
+      this.models[0] ??
+      null
+    )
   }
 
   /**
@@ -299,6 +312,10 @@ export class CatalogView {
    */
   primaryModels(): CatalogModel[] {
     const byChar = new Map<string, CatalogModel>()
+    const rankOf = (m: CatalogModel): number =>
+      (isBackViewModel(m) ? 100 : 0) +
+      (m.source === 'local' ? 0 : 1) * 10 +
+      (m.isDefault !== false ? 0 : 1)
     for (const model of this.models) {
       const key =
         typeof model.characterId === 'number'
@@ -309,16 +326,14 @@ export class CatalogView {
         byChar.set(key, model)
         continue
       }
-      const existingRank = (existing.source === 'local' ? 0 : 1) * 10 + (existing.isDefault !== false ? 0 : 1)
-      const currentRank = (model.source === 'local' ? 0 : 1) * 10 + (model.isDefault !== false ? 0 : 1)
-      if (currentRank < existingRank) {
+      if (rankOf(model) < rankOf(existing)) {
         byChar.set(key, model)
       }
     }
     return [...byChar.values()]
   }
 
-  /** 查找同角色的全部服装变体（按默认服装优先排序）。 */
+  /** 查找同角色的全部服装变体（正面模型与默认服装优先排序）。 */
   outfitsFor(target: CatalogModel | string | number): CatalogModel[] {
     const refModel =
       typeof target === 'number'
@@ -338,7 +353,12 @@ export class CatalogView {
           ? m.characterId === refModel.characterId
           : m.name === refModel.name
       )
-      .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+      .sort(
+        (a, b) =>
+          Number(isBackViewModel(a)) - Number(isBackViewModel(b)) ||
+          Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+          a.id - b.id
+      )
   }
 
   /** 按服装关键词（如「校服」「私服」「队服」「泳装」）或云端 id 解析同角色服装。 */
@@ -354,8 +374,10 @@ export class CatalogView {
         m.path.toLowerCase() === q ||
         (m.outfitLabel ?? '').toLowerCase() === q
     )
-    if (exact) return exact
-    const byCat = variants.find(
+    if (exact && (!isBackViewModel(exact) || BACK_VIEW_QUERY_RE.test(query))) return exact
+    const nonBack = variants.filter((m) => !isBackViewModel(m))
+    const pool = BACK_VIEW_QUERY_RE.test(query) || nonBack.length === 0 ? variants : nonBack
+    const byCat = pool.find(
       (m) =>
         (m.outfitCategory ?? '').toLowerCase() === q ||
         (m.outfitLabel ?? '').toLowerCase().includes(q) ||
@@ -364,8 +386,12 @@ export class CatalogView {
     if (byCat) return byCat
     for (const [pattern, cats] of OUTFIT_QUERY_KEYWORDS) {
       if (!pattern.test(query)) continue
-      const hit = variants.find((m) => cats.includes(m.outfitCategory ?? ''))
+      const hit = pool.find((m) => cats.includes(m.outfitCategory ?? ''))
       if (hit) return hit
+    }
+    if (BACK_VIEW_QUERY_RE.test(query)) {
+      const backHit = pool.find((m) => isBackViewModel(m))
+      if (backHit) return backHit
     }
     return null
   }
@@ -752,13 +778,24 @@ export class CatalogView {
   }
 
   private promptScopeModels(): CatalogModel[] {
-    return this.models.length > 35 ? this.primaryModels() : this.models
+    if (this.models.length > 35) return this.primaryModels()
+    const charsWithFront = new Set(
+      this.models
+        .filter((m) => !isBackViewModel(m))
+        .map((m) => (typeof m.characterId === 'number' ? `char:${m.characterId}` : `name:${m.name.toLowerCase()}`))
+    )
+    return this.models.filter((m) => {
+      if (!isBackViewModel(m)) return true
+      const key = typeof m.characterId === 'number' ? `char:${m.characterId}` : `name:${m.name.toLowerCase()}`
+      return !charsWithFront.has(key)
+    })
   }
 
   modelTable(): string {
     return this.promptScopeModels()
       .map((model) => {
-        const outfitNote = model.outfitLabel ? ` [${model.outfitLabel}]` : ''
+        const backTag = isBackViewModel(model) ? '[背面视角]' : ''
+        const outfitNote = model.outfitLabel ? ` [${model.outfitLabel}${backTag ? '·背面视角' : ''}]` : backTag ? ` ${backTag}` : ''
         return `- ${this.shortName(model)}${outfitNote} → modelId=${model.id}, model路径=${model.path}`
       })
       .join('\n')
@@ -932,12 +969,15 @@ export class CatalogView {
       .map((model) => {
         const persona = personaFor(personas, model)
         const prompt = compact ? dialoguePersonaPrompt(persona) : (persona?.prompt?.trim() ?? '')
-        const outfitSummary = this.outfitsFor(model)
+        const allOutfits = this.outfitsFor(model)
+        const frontOutfits = allOutfits.filter((m) => !isBackViewModel(m))
+        const shownOutfits = frontOutfits.length > 0 ? frontOutfits : allOutfits
+        const outfitSummary = shownOutfits
           .slice(0, 8)
           .map((m) => `${m.outfitLabel || m.outfitCategory || m.cloudId || m.id}=${m.id}`)
           .join('、')
         const outfitLine =
-          this.outfitsFor(model).length > 1 ? `\n可选服装（直接写对应 modelId）：${outfitSummary}` : ''
+          shownOutfits.length > 1 ? `\n可选服装（直接写对应 modelId）：${outfitSummary}` : ''
         return `**${this.shortName(model)}** — modelId:${model.id}, model:${model.path}${outfitLine}\n${
           prompt || GENERIC_PROFILE
         }`
