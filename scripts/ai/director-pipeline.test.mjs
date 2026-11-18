@@ -1171,4 +1171,55 @@ test('Wave 5 regression: post-silent and tense-preceded 平静 beats never fall 
   assert.equal(l1Talk.data.actions[0].facial, 'face_smile_01')
   const l10Talk = story.snippets.find((s) => s.type === 'Talk' && s.data.content === '以后也会一起画下去哦♪')
   assert.equal(l10Talk.data.actions[0].facial, 'face_smile_01')
+
+  // Even when staging LLM explicitly emits face_smile_01 in silentReaction or direction listener,
+  // post-silent & tense-preceded beats must suppress incongruous smiles.
+  const explicitSmileStaging = staged.normalizeStaging(
+    {
+      scenes: [
+        { id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'normal', activeCast: [2321, 2305] },
+        { id: 's2', fromLineId: 'l6', background: 'bg_classroom.jpg', ambient: 'night', transitionIn: 'flashback', isFlashback: true, activeCast: [2321, 2305] },
+        { id: 's3', fromLineId: 'l9', background: 'bg_rooftop.jpg', ambient: 'normal', transitionIn: 'sideFade', activeCast: [2321, 2305] }
+      ],
+      events: [
+        {
+          lineId: 'l5',
+          closeWindowAfter: true,
+          silentReaction: { modelId: 2321, motion: 'w-normal01-nod', facial: 'face_smile_01' }
+        }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const explicitSmileDir = staged.normalizeDirection(
+    {
+      background: 'bg_rooftop.jpg',
+      lines: [
+        { id: 'l1', facial: 'face_smile_01' },
+        { id: 'l2', motion: 'w-normal16-angry', facial: 'face_angry_01' },
+        { id: 'l3', motion: 'w-normal03-forward', facial: 'face_serious_02' },
+        { id: 'l4', facial: 'face_trouble_01', listener: { modelId: 2305, facial: 'face_smile_01' } },
+        { id: 'l5', motion: 'w-happy14-lookaway', facial: 'face_closeeye_01', silentMotion: true }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const story2 = staged.composeStory(view, plan, dialogue, explicitSmileDir, explicitSmileStaging)
+  const l4Talk2 = story2.snippets.find((s) => s.type === 'Talk' && s.data.content === '（……糟糕。）')
+  const l4ListenerAct = l4Talk2.data.actions.find((a) => a.modelId === 2305)
+  assert.ok(
+    !l4ListenerAct?.facial || !/smile|smug|wink|sparkling/i.test(l4ListenerAct.facial),
+    `listener facial on tense beat must not keep face_smile_01, got: ${l4ListenerAct?.facial}`
+  )
+  const l5Idx2 = story2.snippets.findIndex((s) => s.type === 'Talk' && s.data.content === '…………')
+  const postSilent2 = story2.snippets[l5Idx2 + 1]
+  assert.equal(postSilent2?.type, 'Motion')
+  assert.ok(
+    postSilent2.data.facial && !/smile|smug|wink|sparkling/i.test(postSilent2.data.facial),
+    `explicit silentReaction.facial=face_smile_01 on silent/tense beat must be replaced, got: ${postSilent2.data.facial}`
+  )
 })

@@ -366,6 +366,13 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'CameraMove':
     case 'CameraZoom': {
       const dataDur = getSnippetDataField(snippet, 'duration')
+      if (dataDur === 0 && (snippet.type === 'BlackOut' || snippet.type === 'BlackIn')) {
+        return {
+          durationMs: 0,
+          source: 'data_duration',
+          detail: `${snippet.type}: data.duration=0 → 0ms`
+        }
+      }
       if (dataDur !== undefined && dataDur > 0) {
         // 官方 scenario 的 Duration 是秒（0.1/0.5/2），本项目 Story 用毫秒（100/500/2000）。
         // 以 10 为界：>=10 视为毫秒，<10 视为秒。

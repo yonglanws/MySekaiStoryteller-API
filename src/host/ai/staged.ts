@@ -351,12 +351,25 @@ const FACIAL_SMILE_EXCLUDE_RE =
 const TENSE_EMOTION_SET = new Set(['生气', '伤心', '害怕'])
 const SILENT_LINE_RE = /^[（(]?[\s.…,，。！？!?—\-~～]+[）)]?$/
 const SMILE_FACIAL_RE = /smile|smug|wink|sparkling/i
+const EXPLICIT_JOY_CUE_RE = /♪|～♪|哈哈|嘿嘿|太好了|开心/
 
 export interface SubtleFacialContext {
   precededByTense?: boolean
 }
 
 const isSilentBeatLine = (text: string): boolean => SILENT_LINE_RE.test((text ?? '').trim())
+
+const shouldAvoidIncongruousSmile = (
+  facial: string | undefined,
+  line: { content: string; emotion?: string },
+  precededByTense: boolean
+): boolean =>
+  Boolean(facial && SMILE_FACIAL_RE.test(facial)) &&
+  line.emotion !== '开心' &&
+  (isSilentBeatLine(line.content) ||
+    (precededByTense &&
+      (!line.emotion || line.emotion === '平静') &&
+      !EXPLICIT_JOY_CUE_RE.test(line.content)))
 
 function isPrecededByTenseBeat(
   lines: ReadonlyArray<{ content: string; emotion?: string; sceneId?: string }>,
@@ -3457,14 +3470,20 @@ export function composeStory(
       const surroundingTense = dialogue.lines
         .slice(Math.max(0, lineIndex - 2), Math.min(dialogue.lines.length, lineIndex + 6))
         .some((l) => TENSE_EMOTION_SET.has(l.emotion ?? ''))
+      const entryPrecededByTense =
+        firstLineIdx >= 0 ? isPrecededByTenseBeat(dialogue.lines, firstLineIdx) : surroundingTense
+      const safeDirectedFacial = shouldAvoidIncongruousSmile(
+        directedFacial,
+        firstLineForMember ?? { content: '', emotion: '平静' },
+        entryPrecededByTense
+      )
+        ? ''
+        : directedFacial
       const entryFacial =
-        directedFacial ||
+        safeDirectedFacial ||
         (firstLineForMember
           ? pickSpeakerSubtleFacial(view, id, firstLineForMember, undefined, member?.role, {
-              precededByTense:
-                firstLineIdx >= 0
-                  ? isPrecededByTenseBeat(dialogue.lines, firstLineIdx)
-                  : surroundingTense
+              precededByTense: entryPrecededByTense
             })
           : '') ||
         (surroundingTense
@@ -4058,23 +4077,24 @@ export function composeStory(
 
     // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸，或紧张/沉默拍误配 smile）
     const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
-    if (dialogue.lines.length >= 6 && direction.lines.length > 0 && actorState) {
+    if (actorState) {
       const speakerZeroAct = actions.find((a) => a.modelId === member.modelId && a.at === 0)
       const currentSpeakerFacial =
         typeof speakerZeroAct?.facial === 'string' ? speakerZeroAct.facial : undefined
+      const allowStaleCheck = dialogue.lines.length >= 6 && direction.lines.length > 0
       const stuckOnNormal =
+        allowStaleCheck &&
         Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
         /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
       const missingFacialStale =
+        allowStaleCheck &&
         !currentSpeakerFacial &&
         (actorState.linesSinceFacialChange >= 2 || /^face_normal/i.test(actorState.lastFacial))
-      const incongruousSmile =
-        Boolean(currentSpeakerFacial && SMILE_FACIAL_RE.test(currentSpeakerFacial)) &&
-        line.emotion !== '开心' &&
-        (isSilentBeatLine(line.content) ||
-          (precededByTense &&
-            (!line.emotion || line.emotion === '平静') &&
-            !/♪|～♪|哈哈|嘿嘿|太好了|开心/.test(line.content)))
+      const incongruousSmile = shouldAvoidIncongruousSmile(
+        currentSpeakerFacial,
+        line,
+        precededByTense
+      )
       if (stuckOnNormal || missingFacialStale || incongruousSmile) {
         const varied = pickSpeakerSubtleFacial(
           view,
@@ -4153,7 +4173,23 @@ export function composeStory(
         talkDelay < 0.8
       const listenerMotion =
         listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
-      const listenerFacial = directed.listener.facial
+      const listenerPrecededByTense =
+        precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+      const listenerFacialRaw = directed.listener.facial
+      const listenerFacial = shouldAvoidIncongruousSmile(
+        listenerFacialRaw,
+        line,
+        listenerPrecededByTense
+      )
+        ? pickListenerReactionFacial(
+            view,
+            directed.listener.modelId,
+            line,
+            cast.find((c) => c.modelId === directed.listener!.modelId)?.role,
+            listenerState?.lastFacial,
+            { precededByTense: listenerPrecededByTense }
+          )
+        : listenerFacialRaw
       if (listenerMotion || listenerFacial) {
         actions.push({
           at: 0,
@@ -4391,9 +4427,17 @@ export function composeStory(
           )
         const silentPrecededByTense =
           precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+        const rawSilentFacial = ev?.silentReaction?.facial || ''
+        const safeSilentFacial = shouldAvoidIncongruousSmile(
+          rawSilentFacial,
+          line,
+          silentPrecededByTense
+        )
+          ? ''
+          : rawSilentFacial
         const facial =
-          ev?.silentReaction?.facial ||
-          (directed?.silentMotion || autoSilentTargetId !== null
+          safeSilentFacial ||
+          (directed?.silentMotion || autoSilentTargetId !== null || rawSilentFacial
             ? targetId === member.modelId
               ? pickSpeakerSubtleFacial(
                   view,

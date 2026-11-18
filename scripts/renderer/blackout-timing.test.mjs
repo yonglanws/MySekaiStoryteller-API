@@ -124,3 +124,14 @@ test('BlackOut/BlackIn accept official seconds and project milliseconds', async 
 
   assert.deepEqual(record, [500, 500, 100, 100, 250, 250])
 })
+
+test('TimelineCalculator preserves duration=0 for instant BlackOut/BlackIn instead of 600ms default', () => {
+  const load = loadEffect()
+  const { calculateTimeline } = load('utils/TimelineCalculator.ts')
+  const result = calculateTimeline([
+    { type: 'BlackOut', wait: true, delay: 0, data: { duration: 0, color: 'black' } },
+    { type: 'BlackIn', wait: true, delay: 0, data: { duration: 0, color: 'black' } }
+  ])
+  assert.equal(result.entries[0].durationMs, 0)
+  assert.equal(result.entries[1].durationMs, 0)
+})

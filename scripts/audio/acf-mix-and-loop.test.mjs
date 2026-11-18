@@ -371,6 +371,7 @@ test('SE semantic inference, cloud catalog SE defaults, and inapp offline fallba
       legacyPath,
       JSON.stringify({
         format: 'msst.cloud-catalog/1',
+        schemaVersion: 2,
         region: 'jp',
         generatedAt: new Date().toISOString(),
         models: [],

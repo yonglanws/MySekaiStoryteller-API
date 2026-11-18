@@ -351,7 +351,7 @@ export default class AdvancedModel extends Live2DModel {
       this.lastNaturalUpdateMs = now
       const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
       if (!this.visible || alpha <= 0.01 || this.destroyed) return
-      if (this.autoBlink && eyeIds.length > 0) {
+      if (this.autoBlink !== false && eyeIds.length > 0) {
         const bases = eyeIds.map(
           (id) => core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
         )
