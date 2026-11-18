@@ -47,7 +47,13 @@ const TtsCharacterSchema = z.object({
 
 const ServerSchema = z.object({
   port: z.number().default(9881),
-  host: z.string().default('0.0.0.0')
+  host: z.string().default('0.0.0.0'),
+  /** Bearer 鉴权密钥（env: MSST_API_KEY / MSS_API_KEY）；空字符串表示不要求鉴权 */
+  apiKey: z.string().default(''),
+  /** 是否开启 CORS；省略时由宿主按默认值处理 */
+  cors: z.boolean().optional(),
+  /** 允许跨域的 Origin 列表；保持 optional 以便未配置时由 MSST_CORS_ORIGINS/MSS_CORS_ORIGINS 生效 */
+  corsOrigins: z.array(z.string()).optional()
 })
 
 const VideoSchema = z.object({
@@ -329,6 +335,8 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     if (Number.isFinite(port)) config.server.port = port
   }
   if (env.MSS_HOST) config.server.host = env.MSS_HOST
+  const apiKeyEnv = env.MSST_API_KEY ?? env.MSS_API_KEY
+  if (apiKeyEnv !== undefined) config.server.apiKey = apiKeyEnv
 
   // video
   if (env.MSS_FFMPEG_ENCODER) config.video.encoder = env.MSS_FFMPEG_ENCODER.toLowerCase()

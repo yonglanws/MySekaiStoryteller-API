@@ -116,8 +116,14 @@ function loadConfigFromTempRepo(tempRepo) {
 // 1. host config defaults & record deprecation
 // ============================================================================
 
-test('config.ts defaults exportMode to fast & ttsMode to concurrent, and deprecates record mode', (t) => {
-  const envKeys = ['MSS_EXPORT_MODE', 'MSS_TTS_MODE', 'MSS_RECORD_TARGET_SIZE_MB']
+test('config.ts defaults exportMode to fast & ttsMode to concurrent, preserves server auth/cors fields, and deprecates record mode', (t) => {
+  const envKeys = [
+    'MSS_EXPORT_MODE',
+    'MSS_TTS_MODE',
+    'MSS_RECORD_TARGET_SIZE_MB',
+    'MSST_API_KEY',
+    'MSS_API_KEY'
+  ]
   const savedEnv = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]))
   const origWarn = console.warn
   const warnings = []
@@ -141,26 +147,48 @@ test('config.ts defaults exportMode to fast & ttsMode to concurrent, and depreca
   const defaults = loadHostConfig()
   assert.equal(defaults.video.exportMode, 'fast')
   assert.equal(defaults.video.ttsMode, 'concurrent')
+  assert.equal(defaults.server.apiKey, '')
+  assert.equal(defaults.server.cors, undefined)
+  assert.equal(defaults.server.corsOrigins, undefined)
   assert.equal(warnings.length, 0)
 
-  // Explicit record + recordTargetSizeMb logs deprecation warning & delegates to fast
+  // Server auth/CORS YAML fields are preserved rather than stripped by Zod
   writeFileSync(
     path.join(tempRepo, 'config.yaml'),
-    'video:\n  exportMode: record\n  recordTargetSizeMb: 42\n',
+    [
+      'server:',
+      '  apiKey: yaml-secret',
+      '  cors: true',
+      '  corsOrigins:',
+      '    - https://example.com',
+      'video:',
+      '  exportMode: record',
+      '  recordTargetSizeMb: 42'
+    ].join('\n') + '\n',
     'utf8'
   )
   const legacyCfg = loadHostConfig()
+  assert.equal(legacyCfg.server.apiKey, 'yaml-secret')
+  assert.equal(legacyCfg.server.cors, true)
+  assert.deepEqual(legacyCfg.server.corsOrigins, ['https://example.com'])
   assert.equal(legacyCfg.video.exportMode, 'fast')
   assert.ok(warnings.some((w) => w.includes('exportMode="record" is deprecated')))
   assert.ok(warnings.some((w) => w.includes('recordTargetSizeMb is deprecated')))
 
-  // Env override MSS_EXPORT_MODE=record also delegates to fast
+  // Env overrides: MSS_API_KEY / MSST_API_KEY & MSS_EXPORT_MODE=record
   warnings.length = 0
   writeFileSync(path.join(tempRepo, 'config.yaml'), 'video:\n  exportMode: fast\n', 'utf8')
   process.env.MSS_EXPORT_MODE = 'record'
-  const envLegacyCfg = loadHostConfig()
-  assert.equal(envLegacyCfg.video.exportMode, 'fast')
+  process.env.MSS_API_KEY = 'mss-key'
+  const mssKeyCfg = loadHostConfig()
+  assert.equal(mssKeyCfg.video.exportMode, 'fast')
+  assert.equal(mssKeyCfg.server.apiKey, 'mss-key')
+  assert.equal(mssKeyCfg.server.corsOrigins, undefined)
   assert.ok(warnings.some((w) => w.includes('exportMode="record" is deprecated')))
+
+  process.env.MSST_API_KEY = 'msst-key'
+  const msstKeyCfg = loadHostConfig()
+  assert.equal(msstKeyCfg.server.apiKey, 'msst-key')
 })
 
 // ============================================================================

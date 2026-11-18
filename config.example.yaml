@@ -13,6 +13,10 @@
 server:
   port: 9881          # API / 静态资源 / 桥接层共用端口（env: MSS_PORT）
   host: 0.0.0.0       # 监听地址；仅本机使用可改 127.0.0.1（env: MSS_HOST）
+  apiKey: ""          # Bearer 鉴权密钥；留空表示关闭（env: MSST_API_KEY / MSS_API_KEY）
+  # cors: false       # 是否开启 CORS；省略时不主动覆盖宿主默认策略
+  # corsOrigins:      # CORS 允许的 Origin 白名单（env: MSST_CORS_ORIGINS / MSS_CORS_ORIGINS）
+  #   - http://localhost:3000
 
 # ---------------------------------------------------------------------------
 # 视频导出参数
