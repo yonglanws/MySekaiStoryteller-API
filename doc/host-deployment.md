@@ -22,7 +22,8 @@ Node 宿主
 ### 取消与故障恢复
 
 - 取消或客户端断连后，仍在缓冲队列中的任务会直接移除，不再开始渲染。
-- 正在渲染的任务收到中止通知后有 60 秒宽限期；超时未返回时，宿主在 15 秒巡检周期内重启该 worker 的浏览器并恢复就绪。
+- 通过 `POST /api/v1/export/:taskId/cancel` 或超时/断连取消正在渲染的任务时，宿主等待渲染池清理完成（`BridgeController.cleanupTask` 会关闭该任务在途句柄与 `FramesPipeSession` 管道、立即删除本次关联的 `mss-export-*` / `mss-hf-*` / `mss-fpipe-*` 临时目录并标记防回写）。
+- 正在渲染的任务收到中止通知后有 60 秒宽限期；超时或浏览器意外退出时，宿主在 15 秒巡检周期内重启该 worker 的浏览器并恢复就绪。
 - 其余 worker 上的任务互不干扰。
 
 `npm run test:pool` 可在无浏览器与模型资源的环境下验证取消、超时、并发隔离与恢复。
@@ -66,42 +67,45 @@ npm start
 
 宿主主配置位于根目录 `config.yaml`（由 [config.example.yaml](../config.example.yaml) 复制，不入库）；BGM 还可由 `resources/audio/bgm/bgm.yaml` 独立配置（不存在且无 `bg1.mp3` 时自动回落云端 `bgm00003`）。
 
-优先级：**`MSS_*` 环境变量 > `config.yaml` > `src/host/config.ts` 内置默认值**。
+优先级：**环境变量（`MSST_*` / `MSS_*`） > `config.yaml` > `src/host/config.ts` 内置默认值**。
 
-| 环境变量                                                                                        | 对应配置 / 作用                                                   |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `MSS_PORT` / `MSS_HOST`                                                                         | `server.port` / `server.host`                                     |
-| `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                      | 输出分辨率、帧率、质量因子                                        |
-| `MSS_FFMPEG_ENCODER` / `MSS_FFMPEG_PATH`                                                        | `video.encoder` / 显式 ffmpeg 可执行文件                          |
-| `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                                        | `video.exportMode`（`record`/`fast`）/ fast WebCodecs 码率        |
-| `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                                      | fast 编码路径（`auto`/`webcodecs`/`frames`）/ fast 帧率上限       |
-| `MSS_RECORD_TARGET_SIZE_MB`                                                                     | `video.recordTargetSizeMb`（record 收尾成片体积上限 MiB，0=不限） |
-| `MSS_VIDEO_WATERMARK` / `MSS_VIDEO_WATERMARK_TEXT`                                              | 水印开关 / 自定义水印文字                                         |
-| `MSS_IDLE_CHAIN_GAP_SEC` / `MSS_TTS_MODE`                                                       | 动作续演间隔秒数 / `serial` 或 `concurrent`                       |
-| `MSS_WORKERS` / `MSS_MAX_CONCURRENT_EXPORTS` / `MSS_WORKER_RECYCLE_EXPORTS`                     | worker 数量 / 导出并发上限 / 按导出次数回收周期                   |
-| `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS`                           | 浏览器探测顺序（逗号分隔）/ 可执行路径 / 附加参数                 |
-| `MSS_LINUX_GPU_ANGLE` / `MSS_MIN_FREE_MEMORY_MB`                                                | Linux ANGLE 开关 / 派发前最小可用内存 MB                          |
-| `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                  | 输出、资源与渲染端目录                                            |
-| `MSS_TTS_ENABLED` / `MSS_TTS_PROVIDER` / `MSS_TTS_API_BASE_URL` / `MSS_TTS_TIMEOUT_MS`          | TTS 开关、后端（`gpt-sovits`/`irodori`）、地址与超时              |
-| `MSS_IRODORI_MODEL` / `MSS_IRODORI_NUM_STEPS`                                                   | Irodori 模型名与采样步数                                          |
-| `MSS_LLM_ENABLED` / `MSS_LLM_BASE_URL` / `MSS_LLM_API_KEY_ENV` / `MSS_LLM_MODEL`                | LLM 开关、地址、密钥变量名、模型名                                |
-| `MSS_LLM_TEMPERATURE` / `MSS_LLM_MAX_TOKENS` / `MSS_LLM_TIMEOUT_MS` / `MSS_LLM_RETRIES`         | LLM 温度、token 上限、超时、重试次数                              |
-| `MSS_LLM_REPAIR_ROUNDS` / `MSS_LLM_PIPELINE` / `MSS_LLM_JSON_MODE`                              | 修复轮数、流水线（`staged`/`single`）、JSON 模式                  |
-| `MSS_LLM_TRANSLATE` / `MSS_LLM_TARGET_MINUTES` / `MSS_LLM_SYSTEM_PROMPT` / `MSS_LLM_EXTRA_BODY` | TTS 日语翻译开关、目标分钟数、系统提示词、额外请求体 JSON         |
-| `MSS_ASSETS_REGION` / `MSS_ASSETS_INDEX_BASE` / `MSS_ASSETS_LIBRARY_BASE` / `MSS_ASSETS_BASE`   | 云端区服（`jp`/`cn`/`tw`/`kr`/`en`）与镜像地址                    |
-| `MSS_ASSETS_SOUNDTRACK_BASE` / `MSS_ASSETS_CACHE_DIR`                                           | 曲名索引镜像 / 缓存目录                                           |
-| `MSS_ASSETS_CONCURRENCY` / `MSS_ASSETS_TIMEOUT_MS` / `MSS_ASSETS_RETRIES`                       | 下载并发、超时、重试                                              |
-| `MSS_ASSETS_CLOUD_CATALOG` / `MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS`                               | 云端目录开关（默认 `true`）与刷新周期                             |
-| `MSS_LOG_LEVEL`                                                                                 | `silly` / `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
+| 环境变量                                                                                        | 对应配置 / 作用                                                                   |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `MSS_PORT` / `MSS_HOST`                                                                         | `server.port` / `server.host`                                                     |
+| `MSST_API_KEY` / `MSS_API_KEY`                                                                  | `server.apiKey`（Bearer 鉴权密钥，空串关闭；`MSST_*` 优先）                       |
+| `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`                                                        | 逗号分隔的 `CORS` 允许来源（未设 `server.corsOrigins` 时回落读取；`MSST_*` 优先） |
+| `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                      | 输出分辨率、帧率、质量因子                                                        |
+| `MSS_FFMPEG_ENCODER` / `MSS_FFMPEG_PATH`                                                        | `video.encoder` / 显式 ffmpeg 可执行文件                                          |
+| `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                                        | `video.exportMode`（默认且唯一活跃管线 `fast`；`record` 已弃用）/ WebCodecs 码率  |
+| `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                                      | fast 编码路径（`auto`/`webcodecs`/`frames`）/ fast 帧率上限（默认 `30`）          |
+| `MSS_RECORD_TARGET_SIZE_MB`                                                                     | 已弃用兼容项（仅在设为 `> 0` 时输出弃用警告并忽略）                               |
+| `MSS_VIDEO_WATERMARK` / `MSS_VIDEO_WATERMARK_TEXT`                                              | 水印开关 / 自定义水印文字                                                         |
+| `MSS_IDLE_CHAIN_GAP_SEC` / `MSS_TTS_MODE`                                                       | 动作续演间隔秒数 / `concurrent`（默认）或 `serial`                                |
+| `MSS_WORKERS` / `MSS_MAX_CONCURRENT_EXPORTS` / `MSS_WORKER_RECYCLE_EXPORTS`                     | worker 数量 / 导出并发上限 / 按导出次数回收周期                                   |
+| `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS`                           | 浏览器探测顺序（逗号分隔）/ 可执行路径 / 附加参数                                 |
+| `MSS_LINUX_GPU_ANGLE` / `MSS_MIN_FREE_MEMORY_MB`                                                | Linux ANGLE 开关 / 派发前最小可用内存 MB                                          |
+| `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                  | 输出、资源与渲染端目录                                                            |
+| `MSS_TTS_ENABLED` / `MSS_TTS_PROVIDER` / `MSS_TTS_API_BASE_URL` / `MSS_TTS_TIMEOUT_MS`          | TTS 开关、后端（`gpt-sovits`/`irodori`）、地址与超时                              |
+| `MSS_IRODORI_MODEL` / `MSS_IRODORI_NUM_STEPS`                                                   | Irodori 模型名与采样步数                                                          |
+| `MSS_LLM_ENABLED` / `MSS_LLM_BASE_URL` / `MSS_LLM_API_KEY_ENV` / `MSS_LLM_MODEL`                | LLM 开关、地址、密钥变量名、模型名                                                |
+| `MSS_LLM_TEMPERATURE` / `MSS_LLM_MAX_TOKENS` / `MSS_LLM_TIMEOUT_MS` / `MSS_LLM_RETRIES`         | LLM 温度、token 上限、超时、重试次数                                              |
+| `MSS_LLM_REPAIR_ROUNDS` / `MSS_LLM_PIPELINE` / `MSS_LLM_JSON_MODE`                              | 修复轮数、流水线（`staged`/`single`）、JSON 模式                                  |
+| `MSS_LLM_TRANSLATE` / `MSS_LLM_TARGET_MINUTES` / `MSS_LLM_SYSTEM_PROMPT` / `MSS_LLM_EXTRA_BODY` | TTS 日语翻译开关、目标分钟数、系统提示词、额外请求体 JSON                         |
+| `MSS_ASSETS_REGION` / `MSS_ASSETS_INDEX_BASE` / `MSS_ASSETS_LIBRARY_BASE` / `MSS_ASSETS_BASE`   | 云端区服（`jp`/`cn`/`tw`/`kr`/`en`）与镜像地址                                    |
+| `MSS_ASSETS_SOUNDTRACK_BASE` / `MSS_ASSETS_CACHE_DIR`                                           | 曲名索引镜像 / 缓存目录                                                           |
+| `MSS_ASSETS_CONCURRENCY` / `MSS_ASSETS_TIMEOUT_MS` / `MSS_ASSETS_RETRIES`                       | 下载并发、超时、重试                                                              |
+| `MSS_ASSETS_CLOUD_CATALOG` / `MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS`                               | 云端目录开关（默认 `true`）与刷新周期                                             |
+| `MSS_LOG_LEVEL`                                                                                 | `silly` / `trace` / `debug` / `info` / `warn` / `error` / `fatal`                 |
 
 ## 启动后自检
 
 ```bash
 curl http://127.0.0.1:9881/api/v1/health
-curl http://127.0.0.1:9881/api/v1/resources
+# 若配置了 server.apiKey / MSST_API_KEY，除 /health 外的端点需附带 Authorization 头：
+curl -H "Authorization: Bearer $MSST_API_KEY" http://127.0.0.1:9881/api/v1/resources
 ```
 
-检查 `renderPool.readyWorkers`、真实 GPU `webglRenderers` 与 `cloud` 字段（`models` / `backgrounds` / `bgm` / `se`）。
+检查 `renderPool.readyWorkers`、真实 GPU `webglRenderers`、`videoConfig.exportMode`（`fast`）与 `cloud` 字段（`models` / `backgrounds` / `bgm` / `se`）。
 
 ## 常驻运行
 
@@ -145,13 +149,14 @@ npm run build
 server:
   host: 127.0.0.1
   port: 9881
+  apiKey: '' # 对外开放时设置强密钥，或改用环境变量 MSST_API_KEY
 
 video:
   width: 1280
   height: 720
   fps: 30
   renderScale: 1
-  exportMode: record
+  exportMode: fast
 
 tts:
   enabled: false
@@ -162,7 +167,7 @@ llm:
   model: gpt-4.1-mini
 ```
 
-注意：**省略 `video` 节时的内置默认是 1280×720 / 30fps / `renderScale: 1.5` / `crf: 23`，而 `config.example.yaml` 模板写的是 1920×1080 / 60fps / `renderScale: 1` / `crf: 28`**，详见 [导出模式](export-modes.md)。
+注意：**省略 `video` 节时的内置默认是 1280×720 / 30fps / `renderScale: 1.5` / `crf: 23` / `exportMode: fast` / `fastFps: 30` / `ttsMode: concurrent`，而 `config.example.yaml` 模板写的是 1920×1080 / 60fps（`fastFps: 30`） / `renderScale: 1` / `crf: 28`**，详见 [导出模式](export-modes.md)。
 
 ### 并发、热备与内存
 
@@ -170,7 +175,7 @@ llm:
 - 建议将 `render.workers` 设为比 `render.maxConcurrentExports` 多 1（如 `workers: 3`、`maxConcurrentExports: 2`），保留 1 个热备 worker 在其他 worker 回收或崩溃重启时无缝顶替。
 - `workerRecycleExports` 默认为 `5`，防止长驻 Live2D 纹理内存累积；`minFreeMemoryMb` 可在低内存服务器上延迟派发防止 OOM。
 - `idleChainGapSec` 默认 `0`（动作播完保持末帧姿势+呼吸眨眼），想改成连续摇晃风格可设正数。
-- 共享单槽 TTS 推理（如单 GPU Irodori）时保持默认 `ttsMode: serial`，避免 TTS 与 WebGL/编码争抢算力。
+- 默认 `ttsMode: concurrent`（`maxConcurrentTts = 3`，后台边渲染边合成并预热语音口型）；若使用共享单槽 TTS 推理（如单 GPU 本地 Irodori），可显式改回 `ttsMode: serial` 以避免 TTS 与 WebGL/编码争抢算力。
 
 ## 启动与停止检查清单
 
@@ -188,4 +193,9 @@ llm:
 
 ## 安全提示
 
-API 默认监听 `0.0.0.0` 且**没有内置鉴权**，IP 限流不能替代访问控制。请优先部署在可信内网；需要公网访问或对接远程机器人（如 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst)）时，应前置 nginx / Caddy 反向代理并配置鉴权与超时，同时禁止外部直接访问 `/bridge` 与内部管理端点。
+API 默认监听 `0.0.0.0`：
+
+- **开启 Bearer 鉴权**：公网或半开放部署请配置 `server.apiKey` 或环境变量 `MSST_API_KEY`（`/api/v1/*` 与 `/apifile/*` 强制校验 `Authorization: Bearer <token>`）；仅本机回环联调时可留空，但仍建议改 `server.host: 127.0.0.1`。
+- **CORS 与健康信息收敛**：`server.cors` 默认启用且在未配置 `server.corsOrigins` / `MSST_CORS_ORIGINS` 时仅放行本机回环源；启用 `apiKey` 后，未认证调用 `GET /api/v1/health` 会自动隐藏 `tts.apiBaseUrl`、`llm.baseUrl`、`assets.indexBase`/`libraryBase` 与 `ttsLease.currentWeights`。
+- **内部通道与下载边界**：`/api/v1/export`、`/api/v1/script/generate` 与 `/api/v1/generate` 均受按 IP 限流（10 次 / 60 秒，附 `Retry-After`）保护，`/api/v1/download/:filename` 通过 `fs.realpathSync` 阻断符号链接越界；外部部署应通过 nginx / Caddy 反向代理提供 HTTPS 与超时控制，并由防火墙禁止外部直接访问 `/bridge/*` 与未授权的内部管理接口。
+- **插件客户端适配**：对接 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) 时建议保持 `wait: false` 异步轮询与 `api_key` 配置一致（开启 `api_key` 后插件会阻止发送原始 `downloadUrl` 避免需要鉴权的裸链在群聊失效，并在取消时调用 `/cancel`）；对接 [astrbot_plugin_ournotes_script](https://github.com/StarMoe/astrbot_plugin_ournotes_script) 时，插件会展开 HTTP `400/422` `details` 并在 HTTP `429` 时按 `Retry-After` 退避或提示冷却时间。

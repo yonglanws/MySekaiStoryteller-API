@@ -36,20 +36,21 @@ npx playwright install chromium
 - 查看宿主日志中的 ffmpeg、渲染页面和资源加载错误，不要仅凭请求超时判断编码器故障。
 - 显存或内存不足时下调 `render.workers`。
 - `video.encoder` 应为 `auto` / `nvidia` / `amd` / `intel` / `libx264`，不要填 `nvenc`。
-  record 会试编码确认硬件可用，失败回退 CPU；fast 导出失败会回退 record，日志会提示。
+  `fast` 模式下 `exportFastEncoder: auto` 会先执行 5 帧 WebCodecs 硬件测速，失败或超过 150ms 自动回落到 `image2pipe`（JPEG 管道 + 宿主 ffmpeg）；`image2pipe` 不可用时再落盘 JPEG 帧序列并在 GPU 编码失败时回退 CPU `libx264`。
 - 导出请求的 `timeout` **包含排队时间**；客户端或反向代理提前断连也会取消任务，见 [API 参考](api.md#超时限流与失败)。
-- 取消后 worker 不立即就绪时，先检查中止与恢复日志。正在执行的页面有取消宽限期，见 [取消与故障恢复](host-deployment.md#取消与故障恢复)。
+- 取消后 worker 不立即就绪时，先检查中止与恢复日志。正在执行的页面有取消宽限期，宿主同时会立即回收中断的 `FramesPipeSession` 与临时目录，见 [取消与故障恢复](host-deployment.md#取消与故障恢复)。
 
-## fast 比 record 更慢
+## 导出速度偏慢
 
-fast 每帧都需要读取 WebGL 画布，这可能比实时录制开销更大。检查分辨率、帧率和 `video.renderScale`；
-如果正在使用 `1.5` 的超采样，可先降到 `1.0` 比较。不要为了追求模式名称而忽略实际耗时，详见 [导出模式](export-modes.md)。
+- 检查是否误用软件渲染（`renderPool.webglRenderers` 显示 `SwiftShader` / `llvmpipe`）或未启用硬件编码；查看日志确认当前走的是 WebCodecs 还是 `image2pipe`。
+- 检查分辨率、`fastFps`（默认 `30`）与 `video.renderScale`：若使用 `1.5` 超采样，可先降到 `1` 对比。
+- 如未配置或修改了 `video.ttsMode`，当前默认已为 `concurrent`（边渲染边并发合成最多 3 句）；若与单卡本地 TTS 争抢显存/算力，可尝试切回 `ttsMode: serial` 对比端到端耗时，详见 [导出模式](export-modes.md)。
 
 ## 画面模糊或文件过大
 
-- record 用 `video.crf` 平衡画质与体积，值越小越清晰、文件越大。
+- WebCodecs 路径由 `video.exportBitrate`（默认 `12000000` bps）控制目标码率；`image2pipe` / 帧序列路径由 `video.crf` 控制质量因子（越小越清晰、体积越大）。
 - 检查 `renderScale` 是否低于 `1`：低分辨率渲染后放大造成的模糊不能靠提高码率恢复。
-- 旧的 `recordTargetSizeMb`、`recordBitrate` 等设置不再生效，见 [旧配置迁移](export-modes.md#旧配置迁移)。
+- 旧的 `exportMode: record`、`recordTargetSizeMb`、`recordBitrate` 等设置已废弃或不再读取，见 [旧配置迁移](export-modes.md#旧配置迁移)。
 
 ## 资源没有出现在清单中或云端下载失败
 
@@ -133,7 +134,8 @@ YAML 的布尔值使用 `true` / `false`，数值字段不要误加引号。独�
 - `delay` 是片段开始前的秒数，黑场 `duration` 是毫秒；混用单位会产生很长或几乎看不见的过渡。
 - `offset` 以 1920 宽度为基准，`-100` 只是短距离偏移，不保证角色从画外开始。
 - `wait: false` 不是导出时的通用并发开关。要在台词中演出动作，应使用 `Talk.data.actions`。
-- 模型动作结束后保持姿势是默认行为，不一定是动画卡住；续演由 `idleChainGapSec` 控制。
+- 模型动作与 v2 `face_*` 表情在播完后保持末帧定格是默认行为，会在下一条 cue 到来时交叉淡化，不一定是动画卡住；`ParamEyeball*` 与通道 1 表情参数在身体动作期间保持隔离（眼睑隔离时自动眨眼持续生效）；续演由 `idleChainGapSec` 控制。
+- 常驻渲染池在连续导出时会自动重置舞台计时与模型时钟基线（`resetStageTiming` / `resetClockBaselines`），避免虚拟时钟重置引发的冻结或旧计时器串扰。
 
 文字溢出时先检查原始 `content` 的换行和长度。不要假定渲染 API 会自动采用宿主 AI 生成或 AstrBot 插件侧的排版、拆句或舞台约束。
 字段说明和示例见 [故事文件格式](story-format.md)。

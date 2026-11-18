@@ -77,7 +77,7 @@ Stage 2: dialogue（逐字对白定稿 + 长度补写/短句合并/标点柔化�
    └─── Stage 2.5c: translateDialogue（并行批量翻译日文 ttsText）
    │
    ▼ （等待 emotion + staging 回填后）
-Stage 3: direction（directActing：逐句动作/表情、约 20% 2拍微表演、听者反应）
+Stage 3: direction（directActing：单拍官方节奏动作/表情、短句保动作、听者反应与离轮静默反应）
    │
    ▼ （汇合 translateDialogue）
 Stage 4/5: composeStory + validateAndFixStory + OfficialLinter（编译官方时间线并校验七项硬指标）
@@ -103,7 +103,8 @@ Stage 4/5: composeStory + validateAndFixStory + OfficialLinter（编译官方时
 
 4. **Stage 3 — `direction`（精细演技导演，`directActing`）**
    - 携带已回填的情绪标签与分幕舞台上下文，以及按语义簇裁剪的动作/表情完整名称（防止模型编造不存在的编号）。
-   - 为约 60% 句子设计句首动作与表情，为约 20% 较长或带语气转折的句子增加 `at2`（0.45~0.75）两拍微表演（`motion2`/`facial2`），为约 15%~20% 句子分配同台听者反应（`listener`），并避开刚入场 0.4s 内的重复身体动作。
+   - 遵循官方 PJSK 约 **80% 单拍句首（`at: 0`）** 动作密度，取消人为 `at: 0.55` 双拍注入，且**不再剥离短句（`≤ 7` 字）的身体动作**、不在平稳段落砍出连续静态站桩空窗；为约 15%~20% 句子分配同台听者反应（`listener`），并避开刚入场 0.4s 内的重复身体动作。
+   - 在 `composeStory` 中，`LayoutAppear` 兜底入场动作会避开首句台词动作并按槽位分散；`Move` 统一补全非空 `motion` / `facial`；长剧本中的静默反应 `Motion`（`wait: true`、`delay: 0.25`）会优先选择不紧接下一句发言的在场角色（或处于足够停顿前的角色），避免被紧随其后的 `Talk` 在 400ms 内打断。
 
 5. **Stage 4/5 — `composeStory` + `validateAndFixStory` + `OfficialLinter`**
    - 将选角、台词、情绪、舞台调度与演技导演合并为完整 `StoryData` 时间线。
@@ -190,12 +191,12 @@ npm run test:stories
 
 ## 错误与排查
 
-| 状态码 | 含义                                  | 处理                                                      |
-| ------ | ------------------------------------- | --------------------------------------------------------- |
-| 422    | 生成/校验失败，或 `llm.enabled=false` | 查看 `details`；若提示 `cast` 无法匹配，检查角色名/id     |
-| 429    | 并发生成达到上限                      | 上限为 `max(1, min(4, render.workers))`，等待当前生成完成 |
-| 502    | LLM 网络或 HTTP 错误                  | 检查 `baseUrl`、`MSS_LLM_API_KEY`、模型名与 `jsonMode`    |
-| 504    | 生成阶段超时                          | 调大 `timeout` / `scriptTimeout` 或 `llm.timeoutMs`       |
-| 500    | 剧本生成成功但导出失败                | 使用响应中的 `story` 重新提交 `/api/v1/export`            |
+| 状态码 | 含义                                  | 处理                                                                                               |
+| ------ | ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| 422    | 生成/校验失败，或 `llm.enabled=false` | 查看 `details`；若提示 `cast` 无法匹配，检查角色名/id                                              |
+| 429    | AI 并发生成达到上限或触发 IP 限流     | 并发上限为 `max(1, min(4, render.workers))`；IP 限流为 60s 内 10 次，参考 `Retry-After` 等待后重试 |
+| 502    | LLM 网络或 HTTP 错误                  | 检查 `baseUrl`、`MSS_LLM_API_KEY`、模型名与 `jsonMode`                                             |
+| 504    | 生成阶段超时                          | 调大 `timeout` / `scriptTimeout` 或 `llm.timeoutMs`                                                |
+| 500    | 剧本生成成功但导出失败                | 使用响应中的 `story` 重新提交 `/api/v1/export`                                                     |
 
-通过 `GET /api/v1/health` 的 `llm` 字段可检查 `enabled`、`model`、`baseUrl`、`pipeline`、`apiKeyConfigured`、`activeGenerations` 与 `maxConcurrent`。
+通过 `GET /api/v1/health` 的 `llm` 字段可检查 `enabled`、`model`、`baseUrl`（配置 Bearer `apiKey` 且未携带合法令牌时省略）、`pipeline`、`apiKeyConfigured`、`activeGenerations` 与 `maxConcurrent`。

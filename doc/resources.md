@@ -196,4 +196,4 @@ volume: 0.2
 
 ### 预录语音字段（`voices/`）
 
-故事 Schema 仍保留 `Talk.data.voice`（相对 `voices/`），但当前 API 导出的 `record` 与 `fast` 管线均使用 TTS 音轨，不会因填写 `voice` 而混入预录音频。无本句 TTS 音频时退回文本步进或静音处理，详见 [台词时长与口型](story-format.md#台词时长与口型)。
+故事 Schema 仍保留 `Talk.data.voice`（相对 `voices/`），但当前 API 导出的 `fast` 管线统一使用 TTS 音轨，不会因填写 `voice` 而混入预录音频。无本句 TTS 音频时退回文本步进或静音处理，详见 [台词时长与口型](story-format.md#台词时长与口型)。

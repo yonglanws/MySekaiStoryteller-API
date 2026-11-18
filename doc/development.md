@@ -44,21 +44,21 @@ npm run build
 npm run test:all
 ```
 
-无需先启动宿主，也不需要浏览器或模型资源。测试覆盖 API 超时、渲染池取消与恢复、BGM 配置、record 管线、口型与对话计时，以及 AI 剧本校验和 sse-motion 转换。部分 record 测试直接使用依赖中的 `ffmpeg-static` 生成媒体，该可执行文件必须可用；仅设置 `MSS_FFMPEG_PATH` 不能替代这些用例的直接依赖。
+无需先启动宿主，也不需要浏览器或模型资源。测试覆盖 API 超时与安全加固、渲染池取消与恢复、BGM 配置、`fast` 导出与并发 TTS 预热、口型与对话计时，以及 AI 剧本校验和 `sse-motion` 转换。
 
 需要缩小验证范围时：
 
-| 命令                    | 验证内容                                                                                                        |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `npm test`              | API 导出超时、AI 剧本、Irodori 请求、日文 TTS 预检、导出诊断、动作转换、云端目录/按需物化与零本地全云端集成测试 |
-| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复                                                                              |
-| `npm run test:config`   | BGM 配置与云端目录合并测试                                                                                      |
-| `npm run test:tts`      | TTS 权重租约管理测试                                                                                            |
-| `npm run test:record`   | record 录制与编码管线                                                                                           |
-| `npm run test:renderer` | 官方 60fps 时序、Talk 自动播放、布局矩阵、交叉淡化参数、非阻塞调度、特效、自然动作、逐帧计划、导出日志          |
-| `npm run test:stories`  | 官方基线、AI 质量门、官方动作语义、批量 scenario 审计（语料存在时）                                             |
+| 命令                    | 验证内容                                                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `npm test`              | API 导出超时、ffmpeg/桥接安全、Irodori 请求、日文 TTS 预检、导出诊断、动作转换、云端目录/按需物化与零本地全云端集成测试 |
+| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复                                                                                      |
+| `npm run test:config`   | BGM 配置与云端目录合并测试                                                                                              |
+| `npm run test:tts`      | TTS 权重租约管理测试                                                                                                    |
+| `npm run test:export`   | `fast` 虚拟时钟导出、并发 TTS 预热、WebCodecs 5 帧探测与回退管线                                                        |
+| `npm run test:renderer` | 官方 60fps 时序、Talk 自动播放、布局矩阵、交叉淡化参数、非阻塞调度、特效、自然动作、逐帧计划、导出日志                  |
+| `npm run test:stories`  | 官方基线、AI 质量门、官方动作语义、批量 scenario 审计（语料存在时）                                                     |
 
-测试数量会随回归用例变化，以当前运行结果为准。纯逻辑测试不能代替实际视频验收。
+此外，`scripts/api/api-security-wave4.test.mjs` 与 `scripts/ai/motion-parity-wave4.test.mjs` 可用 `node --test` 单独运行，分别验证 Bearer 鉴权/CORS/限流/异步导出/生命周期清理与 Live2D 动作/时钟基线对齐。测试数量会随回归用例变化，以当前运行结果为准；纯逻辑测试不能代替实际视频验收。
 
 ## 端到端与并发验证
 
@@ -174,6 +174,6 @@ ffmpeg -i output.mp4 -vn -af volumedetect -f null -
 | 单片段演出行为                | `src/renderer/src/snippets/`                                       |
 | 台词时长                      | `src/renderer/src/utils/TalkTiming.ts` 与时间轴调用处              |
 | 视频导出与混音                | `src/renderer/src/managers/VideoExportManager.ts`、`video-export/` |
-| record 宿主编码与合流         | `src/host/record/`                                                 |
+| fast 帧管道与 shared ffmpeg   | `src/shared/ffmpeg.ts`、`src/host/bridge/bridgeRoutes.ts`          |
 
 修改共享故事字段时，同时检查 API 验证、资源解析、片段实现和文档示例。只改 schema 而不改渲染逻辑，可能得到“请求通过但画面不符合预期”的结果。

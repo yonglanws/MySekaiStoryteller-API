@@ -200,7 +200,8 @@
 
 - `speaker` 用于屏幕显示与 TTS 角色音色匹配；`modelId` 指定绑定口型的 Live2D 模型（`-1` 为旁白，不驱动口型）。
 - `content` 为字幕显示文本；`ttsText` 为实际送往 TTS 的文本（缺省时使用 `content`）；`emotion` 仅影响 IrodoriTTS 情绪音色选择。
-- `actions[]` 最多 24 项，每项须指定 `at`（`0..1`）、`modelId`（仅对已在场模型生效）及至少一个 `motion` 或 `facial`。动作与表情通道独立更新，省略不需要的字段即可，不要写空串。
+- `actions[]` 最多 24 项，每项须指定 `at`（`0..1`）、`modelId`（仅对已在场模型生效）及至少一个 `motion` 或 `facial`。动作与表情通道独立更新，省略不需要的字段即可，不要写空串（`bakeStoryPlan` 亦会忽略全空的动作/表情条目）。
+- 运行时非循环身体动作与 v2 `face_*` 表情会在播完后保持末帧定格直到下一条 cue 交叉淡化，并自动隔离 `ParamEyeball*` / `ParamEyeBall*` 与通道 1 表情参数，保持自动眨眼（`wakeBlink`）活跃。
 
 ## 台词时长与口型
 

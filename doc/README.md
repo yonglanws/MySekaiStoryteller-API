@@ -19,14 +19,14 @@
 
 ### 接入机器人或其他客户端
 
-先读 [API 参考](api.md)，了解长连接同步导出、排队超时、客户端断连取消与诊断产物路径；再读 [故事文件格式](story-format.md)，区分“渲染 Schema 通用契约”与“宿主 AI 导演规则”。
-使用 AstrBot 时，插件端指令、限流与机器人投递以 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) 为准。
+先读 [API 参考](api.md)，了解同步/异步导出（`wait: false` 轮询）、Bearer 鉴权、限流、客户端断连取消与诊断产物路径；再读 [故事文件格式](story-format.md)，区分“渲染 Schema 通用契约”与“宿主 AI 导演规则”。
+使用 AstrBot 时，插件端指令、异步导出轮询、限流与机器人投递以 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) 为准。
 
 ### 编写演出或调整画质
 
 - 编写或生成标准剧本：[故事文件格式](story-format.md)。
 - 配置角色声音、情绪标签、可选本地清单与 BGM：[资源与音频配置](resources.md)。
-- 调整 `record` / `fast` 导出管线、分辨率、帧率、画质与体积上限：[导出模式](export-modes.md)。
+- 调整 `fast` 导出管线、编码路径、分辨率、帧率、画质与并发 TTS 参数：[导出模式](export-modes.md)。
 - 排障与性能定位：[故障排除](troubleshooting.md)。
 
 ### 参与开发与验证
@@ -44,7 +44,7 @@
 | [宿主内置 AI 剧本生成](ai-script.md) | LLM 配置、5 阶段流水线、语义选角/选图/选曲、2 人 Normal 轮换、OfficialLinter 与人设 |
 | [故事文件格式](story-format.md) | 剧本 JSON 结构、全部 38 种片段定义、云端名称/id 引用、60fps 官方时序与舞台坐标 |
 | [资源与音频配置](resources.md) | `resources/` 目录、可选本地 YAML 覆盖、`bgm00003` 云端兜底、GPT-SoVITS / IrodoriTTS 与 BGM |
-| [导出模式](export-modes.md) | `record` / `fast` 管线差异、参数默认值、体积限制、回退顺序与耗时统计 |
+| [导出模式](export-modes.md) | `fast` 虚拟时钟管线、参数默认值、WebCodecs / `image2pipe` 回退顺序、并发 TTS 与耗时统计 |
 | [部署指南](host-deployment.md) | 平台依赖、配置与 `MSS_*` 环境变量、常驻服务、WebGL GPU 与安全边界 |
 | [故障排除](troubleshooting.md) | 浏览器启动、软件渲染、云端拉取、音频、配置与画面问题排查 |
 | [开发与验证](development.md) | 目录结构、构建命令、`npm test` / `test:all` / `e2e` 与成片检查清单 |

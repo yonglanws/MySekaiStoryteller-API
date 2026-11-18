@@ -26,9 +26,9 @@
 - **云端优先、零本地资源开箱即用**：默认开启 `assets.cloudCatalog`，无需预先下载模型、背景、BGM、SE 或手写 YAML 清单（空 `resources/` 目录即可启动、生成与导出）。全局默认 BGM 在本地缺失 `bgm.yaml` 与 `resources/audio/bgm/bg1.mp3` 时自动回落至云端日常曲 `bgm00003`；若在 `resources/` 下显式放置本地文件或 YAML 清单，本地资源依然优先。
 - **全量官方语义云端目录**：接入 Moesekai / exmeaning / Sekai-World / 官方剧情语料，覆盖 **511** 套 Live2D 模型（26 位主要角色多服装变体 + 48 位配角/特别角色）、**1,401** 张含中文地点/时段/室内外标签的背景、**421** 首剧情与区域 BGM（400 首剧情 BGM + 21 首 `area_bgm`）以及 **1,942** 条场景音效（SE），导出前按需物化至 `resources/*/cloud/`。
 - **五阶段宿主内置 AI 导演**：配置任意 OpenAI 兼容 LLM 后，由一句场景描述自动完成「选角与分幕 (`cast`) → 逐字对白 (`dialogue`) → 三路并行（TTS 情绪分段 `emotion` / 舞台调度与运镜音效 `directStaging` / 日文 `ttsText` 批量翻译）→ 精细演技与两拍微表演 (`direction`) → 官方时间线合成与七项硬指标校验 (`composeStory` + `OfficialLinter`)」。
-- **无头渲染与双导出管线**：PixiJS + Live2D 运行于 Playwright 管理的 Chrome / Edge 渲染池（`render.workers` 控制常驻渲染页数）；默认 `record` 实时录制，也支持 `fast` 虚拟时钟逐帧渲染，硬件编码失败自动回退 CPU `libx264`。
+- **无头渲染与 `fast` 导出管线**：PixiJS + Live2D 运行于 Playwright 管理的 Chrome / Edge 渲染池（`render.workers` 控制常驻渲染页数）；唯一活跃渲染管线为 `fast` 虚拟时钟逐帧渲染（默认并发 TTS `ttsMode: concurrent`、5 帧 WebCodecs 硬件测速 + `image2pipe` / 帧序列回退，硬件编码失败自动回退 CPU `libx264`）。
 - **可选配音与混音**：支持 GPT-SoVITS 与 IrodoriTTS（LoRA、参考音频、caption 与情绪标签）以及按公式对齐官方的 RMS 口型驱动；无 TTS 也可导出纯画面或纯 BGM 视频。
-- **任务管理**：排队、并发上限控制、取消、IP 限流、诊断日志（`.log` / `.log.json` / `.report.txt`）与过期文件自动清理。
+- **任务管理**：同步或异步（`wait: false` + 状态轮询）导出队列、并发上限控制、取消、Bearer 鉴权与 CORS 白名单、IP 限流（HTTP 429）、诊断日志（`.log` / `.log.json` / `.report.txt`）与过期文件/临时目录自动清理。
 
 ## 快速开始
 
@@ -97,10 +97,10 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
     -H "Content-Type: application/json" --data-binary @-
 ```
 
-请求同步等待导出完成，成功后返回 `downloadUrl`、`logPath`、`logJsonPath` 与 `reportPath`。`timeout` 包含排队时间，客户端断连或超时会取消任务。完整端点与参数见 [API 参考](doc/api.md)。
+默认同步等待导出完成，成功后返回 `downloadUrl`、`logPath`、`logJsonPath` 与 `reportPath`；也可传 `"wait": false` 获取 `taskId` 并轮询 `GET /api/v1/export/:taskId/status`。`timeout` 包含排队时间，客户端断连或超时会取消任务。完整端点与参数见 [API 参考](doc/api.md)。
 
 > [!WARNING]
-> API 默认监听 `0.0.0.0` 且无鉴权。不要直接暴露到公网；安全部署要求见 [部署指南](doc/host-deployment.md#安全提示)。
+> API 默认监听 `0.0.0.0`，未设置 `MSST_API_KEY`（或 `MSS_API_KEY`）时默认无鉴权。对外部署请开启 Bearer 鉴权并配置 `MSST_CORS_ORIGINS` 白名单与反向代理边界，详见 [部署指南](doc/host-deployment.md#安全提示)。
 
 ## 常用脚本
 
@@ -113,7 +113,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 | `npm run typecheck` | 分别检查宿主与渲染器 TypeScript 类型 |
 | `npm run lint` / `npm run format:check` | ESLint 与 Prettier 格式检查 |
 | `npm test` / `npm run test:all` | 运行核心回归测试 / 全量回归测试（含零本地全云端测试） |
-| `npm run test:pool` / `test:config` / `test:record` / `test:renderer` / `test:tts` | 按模块运行专项测试 |
+| `npm run test:pool` / `test:config` / `test:export` / `test:renderer` / `test:tts` | 按模块运行专项测试 |
 | `npm run fetch:models` / `npm run fetch:media` | 可选 CLI：离线拉取 Moesekai 模型或背景/BGM 到本地 `resources/` |
 | `npm run e2e` | 运行端到端导出验证脚本（需先启动宿主） |
 
@@ -127,7 +127,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 | [宿主内置 AI 剧本生成](doc/ai-script.md) | LLM 配置、5 阶段流水线、Normal 模式双人轮换、OfficialLinter 校验与人设配置 |
 | [故事文件格式](doc/story-format.md) | 完整 JSON 示例、全部片段定义、云端资源引用、60fps 官方时序与舞台坐标 |
 | [资源与音频配置](doc/resources.md) | `resources/` 目录、可选本地 YAML 覆盖、GPT-SoVITS / IrodoriTTS、情绪标签与 BGM |
-| [导出模式](doc/export-modes.md) | `record` / `fast` 管线、参数默认值、体积控制与耗时统计 |
+| [导出模式](doc/export-modes.md) | `fast` 虚拟时钟管线、参数默认值、WebCodecs / `image2pipe` 回退与耗时统计 |
 | [部署指南](doc/host-deployment.md) | 平台依赖、环境变量、systemd / Windows 常驻、GPU 加速与安全边界 |
 | [故障排除](doc/troubleshooting.md) | 浏览器启动、软件渲染、云端资源物化、音频与演出问题排查 |
 | [开发与验证](doc/development.md) | 目录结构、构建、自动化测试与端到端成片验证 |
