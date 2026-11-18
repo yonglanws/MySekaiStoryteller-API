@@ -4,7 +4,7 @@ import path from 'node:path'
 import { ILogObj, Logger } from 'tslog'
 import { loadHostConfig } from './config'
 import { VideoApiServer } from './servers/VideoApiServer'
-import { createBridgeRouter } from './bridge/bridgeRoutes'
+import { createBridgeRouter, type BridgeController } from './bridge/bridgeRoutes'
 import { WsHub } from './bridge/wsHub'
 import { RenderPool } from './pool/renderPool'
 import { createStaticRouter } from './static/staticRoutes'
@@ -131,7 +131,26 @@ async function bootstrap(): Promise<void> {
   // GSV 的权重是服务端全局状态：所有渲染 worker 的「切权重 + 合成」必须串行
   const ttsLease = new TtsLeaseManager(logger)
 
-  const pool = new RenderPool(logger, config, hub, resourceCatalog, bridgeToken)
+  let bridgeController: BridgeController | null = null
+  const pool = new RenderPool(logger, config, hub, resourceCatalog, bridgeToken, (workerId) => {
+    void bridgeController?.cleanupWorker(workerId).catch((err) => {
+      logger.warn(`[Bridge] Failed to clean up pipe sessions for worker ${workerId}`, err)
+    })
+  })
+
+  const serverExtra = config.server as {
+    apiKey?: unknown
+    cors?: unknown
+    corsOrigins?: unknown
+  }
+  const apiKey =
+    (typeof process.env.MSST_API_KEY === 'string' && process.env.MSST_API_KEY.trim()) ||
+    (typeof process.env.MSS_API_KEY === 'string' && process.env.MSS_API_KEY.trim()) ||
+    (typeof serverExtra.apiKey === 'string' ? serverExtra.apiKey.trim() : '')
+  const corsEnabled = typeof serverExtra.cors === 'boolean' ? serverExtra.cors : undefined
+  const corsOrigins = Array.isArray(serverExtra.corsOrigins)
+    ? serverExtra.corsOrigins.filter((item): item is string => typeof item === 'string')
+    : undefined
 
   const apiServer = new VideoApiServer(logger, {
     port: config.server.port,
@@ -139,6 +158,10 @@ async function bootstrap(): Promise<void> {
     outputDir: config.paths.output,
     video: config.video,
     maxConcurrentExports: config.render.maxConcurrentExports || config.render.workers,
+    apiKey,
+    bridgeToken,
+    cors: corsEnabled,
+    corsOrigins,
     // 云端资源物化：故事里的背景名/ID、BGM、Live2D 模型在这里变成
     // resources/cloud/ 下的真实文件；本地已有文件优先，不覆盖用户资源。
     prepareStory: async (story) => {
@@ -163,7 +186,17 @@ async function bootstrap(): Promise<void> {
       }
     },
     registerExtraRoutes: (app) => {
-      app.use('/bridge', createBridgeRouter({ logger, config, bridgeToken }))
+      app.use(
+        '/bridge',
+        createBridgeRouter({
+          logger,
+          config,
+          bridgeToken,
+          onController: (ctrl) => {
+            bridgeController = ctrl
+          }
+        })
+      )
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
       // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 60 秒）。
       app.get('/api/v1/resources', async (_req, res) => {
@@ -533,6 +566,7 @@ async function bootstrap(): Promise<void> {
       }
 
       app.post('/api/v1/script/generate', async (req, res) => {
+        if (!apiServer.enforceRateLimit(req, res)) return
         if (!acquireAiSlot(res)) return
         const body = (req.body ?? {}) as Parameters<typeof runGenerate>[0] & { timeout?: unknown }
         const timeoutMs =
@@ -566,6 +600,7 @@ async function bootstrap(): Promise<void> {
       })
 
       app.post('/api/v1/generate', async (req, res) => {
+        if (!apiServer.enforceRateLimit(req, res)) return
         if (!acquireAiSlot(res)) return
         const body = (req.body ?? {}) as Parameters<typeof runGenerate>[0] & {
           scriptTimeout?: unknown
@@ -613,7 +648,9 @@ async function bootstrap(): Promise<void> {
           if (generated) {
             res.status(500).json({
               success: false,
-              message: error instanceof Error ? error.message : String(error),
+              message: apiServer.redactPaths(
+                error instanceof Error ? error.message : String(error)
+              ),
               story: generated.story,
               meta: generated.meta
             })
@@ -705,6 +742,7 @@ async function bootstrap(): Promise<void> {
         res.json({ success: true })
       })
 
+      app.use('/apifile', apiServer.createAuthMiddleware())
       app.use(createStaticRouter(config))
       logger.info('[Host] Bridge, resource catalog and static routes mounted')
     }
@@ -728,39 +766,52 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  apiServer.setExtraHealthProvider(() => ({
-    renderPool: pool.stats(),
-    ttsLease: ttsLease.stats(),
-    tts: {
-      enabled: config.tts.enabled,
-      provider: config.tts.provider,
-      apiBaseUrl: config.tts.apiBaseUrl,
-      emotionLabels,
-      characters: config.tts.characters.length
-    },
-    llm: {
-      enabled: llmClient.enabled,
-      model: config.llm.model,
-      baseUrl: config.llm.baseUrl,
-      pipeline: config.llm.pipeline,
-      apiKeyConfigured: Boolean(llmClient.apiKey),
-      activeGenerations: aiActive,
-      maxConcurrent: AI_MAX_CONCURRENT
-    },
-    assets: {
-      source: config.assets.source,
-      region: config.assets.region,
-      indexBase: config.assets.indexBase,
-      libraryBase: config.assets.libraryBase,
-      fetching: assetFetchTask !== null
-    },
-    host: {
-      platform: process.platform,
-      node: process.version,
-      ffmpegEncoder: config.video.encoder,
-      ffmpegEncoderDetected: getCachedGpuEncoder()
+  apiServer.setExtraHealthProvider((authed) => {
+    const leaseStats = ttsLease.stats()
+    return {
+      renderPool: pool.stats(),
+      ttsLease: authed
+        ? leaseStats
+        : {
+            active: leaseStats.active,
+            waiters: leaseStats.waiters,
+            hasWeights: leaseStats.currentWeights !== null
+          },
+      tts: {
+        enabled: config.tts.enabled,
+        provider: config.tts.provider,
+        ...(authed ? { apiBaseUrl: config.tts.apiBaseUrl } : {}),
+        emotionLabels,
+        characters: config.tts.characters.length
+      },
+      llm: {
+        enabled: llmClient.enabled,
+        model: config.llm.model,
+        ...(authed ? { baseUrl: config.llm.baseUrl } : {}),
+        pipeline: config.llm.pipeline,
+        apiKeyConfigured: Boolean(llmClient.apiKey),
+        activeGenerations: aiActive,
+        maxConcurrent: AI_MAX_CONCURRENT
+      },
+      assets: {
+        source: config.assets.source,
+        region: config.assets.region,
+        ...(authed
+          ? {
+              indexBase: config.assets.indexBase,
+              libraryBase: config.assets.libraryBase
+            }
+          : {}),
+        fetching: assetFetchTask !== null
+      },
+      host: {
+        platform: process.platform,
+        node: process.version,
+        ffmpegEncoder: config.video.encoder,
+        ffmpegEncoderDetected: getCachedGpuEncoder()
+      }
     }
-  }))
+  })
 
   try {
     await apiServer.start()
@@ -801,6 +852,11 @@ async function bootstrap(): Promise<void> {
       await pool.stop()
     } catch (err) {
       logger.warn('Pool stop failed', err)
+    }
+    try {
+      await bridgeController?.disposeAll()
+    } catch (err) {
+      logger.warn('Bridge cleanup failed', err)
     }
     ttsLease.dispose()
     apiServer.stop()

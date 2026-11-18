@@ -26,6 +26,7 @@ interface WorkerState {
   browser: Browser | null
   page: Page | null
   ready: boolean
+  wsConnected: boolean
   busy: boolean
   busyTaskId: string | null
   exportsCompleted: number
@@ -37,10 +38,18 @@ interface WorkerState {
   taskDeadline: number | null
   /** 看门狗：是否已向该 worker 发过 abort */
   abortSent: boolean
+  /** 失败重启定时器，stop/close 时需清理 */
+  relaunchTimer: ReturnType<typeof setTimeout> | null
+}
+
+interface ReadyWaiter {
+  resolve: () => void
+  cancel: () => void
 }
 
 const WORKER_READY_TIMEOUT_MS = 60000
 const RELAUNCH_DELAY_MS = 30000
+const BROWSER_CLOSE_TIMEOUT_MS = 5000
 /** 看门狗巡检间隔 */
 const WATCHDOG_INTERVAL_MS = 15000
 /** 超过任务超时后、强制回收前的宽限（等待渲染端优雅退出） */
@@ -81,7 +90,7 @@ export class RenderPool implements ExportDispatcher {
   private readonly config: HostConfig
   private readonly hub: WsHub
   private readonly workers = new Map<string, WorkerState>()
-  private readonly readyWaiters = new Map<string, Array<() => void>>()
+  private readonly readyWaiters = new Map<string, ReadyWaiter[]>()
   private readonly bufferedTasks: ExportTask[] = []
   private stopping = false
   private watchdogInterval: ReturnType<typeof setInterval> | null = null
@@ -97,7 +106,8 @@ export class RenderPool implements ExportDispatcher {
         models: Array<{ id: number; name: string; shortName?: string }>
       }
     },
-    private readonly bridgeToken?: string
+    private readonly bridgeToken?: string,
+    private readonly onWorkerCleanup?: (workerId: string) => void
   ) {
     this.logger = logger
     this.config = config
@@ -123,6 +133,7 @@ export class RenderPool implements ExportDispatcher {
         this.flushBufferedTasks()
       }
     }, WATCHDOG_INTERVAL_MS)
+    this.watchdogInterval.unref?.()
   }
 
   async stop(): Promise<void> {
@@ -132,9 +143,12 @@ export class RenderPool implements ExportDispatcher {
       this.watchdogInterval = null
     }
     this.bufferedTasks.length = 0
-    for (const [, worker] of this.workers) {
-      await this.closeBrowser(worker)
+    for (const workerId of Array.from(this.readyWaiters.keys())) {
+      this.cancelReadyWaiters(workerId)
     }
+    await Promise.allSettled(
+      Array.from(this.workers.values()).map((worker) => this.closeBrowser(worker))
+    )
     this.hub.closeAll()
     this.logger.info('[Pool] All render workers stopped')
   }
@@ -160,6 +174,7 @@ export class RenderPool implements ExportDispatcher {
       browser: null,
       page: null,
       ready: false,
+      wsConnected: false,
       busy: false,
       busyTaskId: null,
       exportsCompleted: 0,
@@ -167,7 +182,17 @@ export class RenderPool implements ExportDispatcher {
       launching: false,
       recovering: false,
       taskDeadline: null,
-      abortSent: false
+      abortSent: false,
+      relaunchTimer: null
+    }
+  }
+
+  private cancelReadyWaiters(workerId: string): void {
+    const waiters = this.readyWaiters.get(workerId)
+    if (!waiters) return
+    this.readyWaiters.delete(workerId)
+    for (const waiter of waiters) {
+      waiter.cancel()
     }
   }
 
@@ -194,15 +219,24 @@ export class RenderPool implements ExportDispatcher {
   }
 
   private async launchWorker(worker: WorkerState, launchArgs?: string[]): Promise<void> {
+    if (worker.relaunchTimer) {
+      clearTimeout(worker.relaunchTimer)
+      worker.relaunchTimer = null
+    }
     if (this.stopping || worker.launching) return
     worker.launching = true
     worker.ready = false
+    worker.wsConnected = false
     worker.webglRenderer = null
 
     const args = launchArgs || baseLaunchArgs(this.config)
 
     try {
       const { browser, via } = await this.launchBrowser(args)
+      if (this.stopping) {
+        await browser.close().catch(() => undefined)
+        return
+      }
       worker.browser = browser
 
       browser.on('disconnected', () => {
@@ -211,67 +245,172 @@ export class RenderPool implements ExportDispatcher {
       })
 
       await this.openWorkerPage(worker)
-      this.logger.info(
-        `[Pool] Worker ${worker.workerId} ready (browser: ${via}, recycle every ${
-          this.config.render.workerRecycleExports || '∞'
-        } exports)`
-      )
+      if (!this.stopping && worker.ready) {
+        this.logger.info(
+          `[Pool] Worker ${worker.workerId} ready (browser: ${via}, recycle every ${
+            this.config.render.workerRecycleExports || '∞'
+          } exports)`
+        )
+      }
     } catch (err) {
       this.logger.error(`[Pool] Worker ${worker.workerId} launch failed`, err)
-      setTimeout(() => {
-        if (!this.stopping) {
-          void this.launchWorker(worker).catch(() => undefined)
-        }
-      }, RELAUNCH_DELAY_MS)
+      await this.closeBrowser(worker)
+      if (!this.stopping) {
+        worker.relaunchTimer = setTimeout(() => {
+          worker.relaunchTimer = null
+          if (!this.stopping) {
+            void this.launchWorker(worker).catch(() => undefined)
+          }
+        }, RELAUNCH_DELAY_MS)
+        worker.relaunchTimer.unref?.()
+      }
     } finally {
       worker.launching = false
     }
+
+    if (!this.stopping && worker.browser && !worker.wsConnected && !worker.recovering) {
+      this.logger.warn(`[Pool] Worker ${worker.workerId} disconnected during launch, recovering...`)
+      void this.recoverWorker(worker)
+    }
+  }
+
+  private handleUnexpectedPageLoss(worker: WorkerState, page: Page, reason: string): void {
+    if (worker.page !== page || this.stopping || worker.recovering) return
+    this.logger.warn(`[Pool] Worker ${worker.workerId} page ${reason}, recovering...`)
+    worker.page = null
+    worker.ready = false
+    worker.wsConnected = false
+    worker.taskDeadline = null
+    worker.abortSent = false
+    this.onWorkerCleanup?.(worker.workerId)
+
+    if (worker.busyTaskId) {
+      const taskId = worker.busyTaskId
+      worker.busy = false
+      worker.busyTaskId = null
+      this.onExportResult?.(taskId, {
+        taskId,
+        success: false,
+        error: `Render worker ${worker.workerId} page ${reason} during export`
+      })
+    }
+
+    void this.recoverWorker(worker)
   }
 
   private async openWorkerPage(worker: WorkerState): Promise<void> {
-    // 先关旧页：WS  flap 后重复 newPage 会累积多个带 WebGL 上下文的页面
+    // 先关旧页：WS flap 后重复 newPage 会累积多个带 WebGL 上下文的页面
     if (worker.page) {
+      const oldPage = worker.page
+      worker.page = null
       try {
-        await worker.page.close()
+        await oldPage.close()
       } catch {
         /* 旧页可能已随导航/崩溃销毁 */
       }
-      worker.page = null
     }
 
     const page = await worker.browser!.newPage()
+    if (this.stopping) {
+      await page.close().catch(() => undefined)
+      return
+    }
     worker.page = page
+    worker.wsConnected = false
 
-    const readyPromise = this.waitForReady(worker.workerId)
+    const pageWithEvents = page as unknown as {
+      on?: (event: string, fn: () => void) => void
+    }
+    pageWithEvents.on?.('crash', () => this.handleUnexpectedPageLoss(worker, page, 'crashed'))
+    pageWithEvents.on?.('close', () => this.handleUnexpectedPageLoss(worker, page, 'closed'))
 
-    const tokenQuery = this.bridgeToken ? `&token=${encodeURIComponent(this.bridgeToken)}` : ''
-    await page.goto(
-      `http://127.0.0.1:${this.config.server.port}/?worker=${worker.workerId}${tokenQuery}`,
-      {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
+    const ready = this.waitForReady(worker.workerId)
+
+    try {
+      const tokenQuery = this.bridgeToken ? `&token=${encodeURIComponent(this.bridgeToken)}` : ''
+      await page.goto(
+        `http://127.0.0.1:${this.config.server.port}/?worker=${worker.workerId}${tokenQuery}`,
+        {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        }
+      )
+
+      await ready.promise
+    } catch (err) {
+      ready.cancel()
+      if (worker.page === page) {
+        worker.page = null
+        await page.close().catch(() => undefined)
       }
-    )
+      throw err
+    }
 
-    await readyPromise
     await this.probeWebGL(worker)
-    if (this.stopping || worker.page !== page) return
+    if (this.stopping || worker.page !== page || !worker.wsConnected) return
     worker.ready = true
     this.flushBufferedTasks()
   }
 
-  private waitForReady(workerId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+  private waitForReady(workerId: string): { promise: Promise<void>; cancel: () => void } {
+    let waiterEntry: ReadyWaiter | null = null
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const removeWaiter = (): void => {
+      if (!waiterEntry) return
+      const list = this.readyWaiters.get(workerId)
+      if (list) {
+        const idx = list.indexOf(waiterEntry)
+        if (idx >= 0) list.splice(idx, 1)
+        if (list.length === 0) this.readyWaiters.delete(workerId)
+      }
+    }
+
+    let resolveFn!: () => void
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveFn = resolve
+      timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        removeWaiter()
         reject(new Error(`Worker ${workerId} not ready within ${WORKER_READY_TIMEOUT_MS}ms`))
       }, WORKER_READY_TIMEOUT_MS)
+
+      waiterEntry = {
+        resolve: () => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          timer = null
+          resolve()
+        },
+        cancel: () => {
+          if (settled) return
+          settled = true
+          if (timer) clearTimeout(timer)
+          timer = null
+          removeWaiter()
+          resolve()
+        }
+      }
+
       const waiters = this.readyWaiters.get(workerId) || []
-      waiters.push(() => {
-        clearTimeout(timer)
-        resolve()
-      })
+      waiters.push(waiterEntry)
       this.readyWaiters.set(workerId, waiters)
     })
+
+    return {
+      promise,
+      cancel: () => {
+        if (waiterEntry) waiterEntry.cancel()
+        else if (!settled) {
+          settled = true
+          if (timer) clearTimeout(timer)
+          resolveFn()
+        }
+      }
+    }
   }
 
   private async probeWebGL(worker: WorkerState): Promise<void> {
@@ -301,11 +440,14 @@ export class RenderPool implements ExportDispatcher {
   private handleBrowserDisconnected(worker: WorkerState): void {
     if (this.stopping) return
     this.logger.warn(`[Pool] Worker ${worker.workerId} browser disconnected, relaunching...`)
+    this.cancelReadyWaiters(worker.workerId)
     worker.browser = null
     worker.page = null
     worker.ready = false
+    worker.wsConnected = false
     worker.taskDeadline = null
     worker.abortSent = false
+    this.onWorkerCleanup?.(worker.workerId)
 
     if (worker.busyTaskId) {
       const taskId = worker.busyTaskId
@@ -324,15 +466,51 @@ export class RenderPool implements ExportDispatcher {
   }
 
   private async closeBrowser(worker: WorkerState): Promise<void> {
+    if (worker.relaunchTimer) {
+      clearTimeout(worker.relaunchTimer)
+      worker.relaunchTimer = null
+    }
+    this.cancelReadyWaiters(worker.workerId)
+    this.onWorkerCleanup?.(worker.workerId)
+
+    const page = worker.page
     const browser = worker.browser
     worker.browser = null
     worker.page = null
     worker.ready = false
-    if (browser) {
+    worker.wsConnected = false
+
+    if (page) {
       try {
-        await browser.close()
+        await page.close()
       } catch {
         // ignore
+      }
+    }
+    if (browser) {
+      let timer: ReturnType<typeof setTimeout> | null = null
+      try {
+        await Promise.race([
+          browser.close(),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              const proc = (
+                browser as unknown as { process?: () => { kill?: (sig?: string) => void } | null }
+              ).process?.()
+              try {
+                proc?.kill?.('SIGKILL')
+              } catch {
+                // ignore kill error
+              }
+              resolve()
+            }, BROWSER_CLOSE_TIMEOUT_MS)
+            timer.unref?.()
+          })
+        ])
+      } catch {
+        // ignore
+      } finally {
+        if (timer) clearTimeout(timer)
       }
     }
   }
@@ -341,10 +519,14 @@ export class RenderPool implements ExportDispatcher {
 
   handleWorkerReady(workerId: string): void {
     this.logger.info(`[Pool] Worker ${workerId} bridge connected`)
+    const worker = this.workers.get(workerId)
+    if (worker) {
+      worker.wsConnected = true
+    }
     const waiters = this.readyWaiters.get(workerId)
     if (waiters) {
-      for (const waiter of waiters) waiter()
       this.readyWaiters.delete(workerId)
+      for (const waiter of waiters) waiter.resolve()
     }
   }
 
@@ -374,10 +556,14 @@ export class RenderPool implements ExportDispatcher {
 
   handleWorkerDisconnected(workerId: string): void {
     const worker = this.workers.get(workerId)
+    if (worker) {
+      worker.wsConnected = false
+    }
     if (!worker || !worker.browser || this.stopping || worker.recovering || worker.launching) return
     worker.ready = false
     worker.taskDeadline = null
     worker.abortSent = false
+    this.onWorkerCleanup?.(workerId)
 
     // WS 断开：若正在导出则视为失败，重启浏览器以清除旧页面和 GPU 状态。
     if (worker.busyTaskId) {
@@ -403,6 +589,7 @@ export class RenderPool implements ExportDispatcher {
     worker.taskDeadline = null
     worker.abortSent = false
     worker.exportsCompleted++
+    this.onWorkerCleanup?.(worker.workerId)
 
     // 页面回收：按导出次数重建，防止 Live2D/Cubism 内存累积
     if (
@@ -412,11 +599,9 @@ export class RenderPool implements ExportDispatcher {
       this.logger.info(
         `[Pool] Recycling worker ${worker.workerId} after ${worker.exportsCompleted} exports`
       )
-      void this.closeBrowser(worker)
-        .then(() => this.launchWorker(worker))
-        .catch((err) =>
-          this.logger.error(`[Pool] Worker ${worker.workerId} recycle relaunch failed`, err)
-        )
+      void this.recoverWorker(worker).catch((err) =>
+        this.logger.error(`[Pool] Worker ${worker.workerId} recycle relaunch failed`, err)
+      )
     }
 
     this.flushBufferedTasks()
@@ -471,6 +656,8 @@ export class RenderPool implements ExportDispatcher {
 
     const sent = this.hub.send(worker.workerId, { type: 'api:start-export', args: [payload] })
     if (!sent) {
+      worker.ready = false
+      worker.wsConnected = false
       worker.busy = false
       worker.busyTaskId = null
       worker.taskDeadline = null
@@ -480,6 +667,7 @@ export class RenderPool implements ExportDispatcher {
         success: false,
         error: `Failed to send task to worker ${worker.workerId}`
       })
+      void this.recoverWorker(worker)
     }
   }
 

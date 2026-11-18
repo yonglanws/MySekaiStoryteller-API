@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from 'express'
+import crypto from 'node:crypto'
 import { ILogObj, Logger } from 'tslog'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,6 +12,7 @@ import { writeExportDiagnostics } from '../exportDiagnostics'
 export interface ApiExportRequest {
   story: StoryData
   timeout?: number
+  wait?: boolean
 }
 
 export interface ApiExportResponse {
@@ -82,21 +84,57 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const DEFAULT_FILE_RETENTION_MS = 24 * 60 * 60 * 1000
 const RATE_LIMIT_WINDOW_MS = 60 * 1000
 const RATE_LIMIT_MAX_REQUESTS = 10
+const RATE_LIMIT_MAX_ENTRIES_DEFAULT = 10_000
+const TASK_RECORD_RETENTION_MS = 60 * 60 * 1000
+const TASK_RECORD_MAX_ENTRIES = 200
 const FILES_PAGE_SIZE_DEFAULT = 20
 const FILES_PAGE_SIZE_MAX = 100
 
 const CLEANUP_EXTENSIONS = new Set(['.mp4', '.json', '.log', '.txt'])
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+const ORPHAN_FRAMES_VIDEO_RE = /^\.mss-frames-video-.*\.mp4$/
 
-/** 导出临时文件（录制 webm / 帧目录 / 混音 WAV）前缀，超过保留期后由宿主清扫 */
+/** 导出临时文件（帧目录 / 帧管道 / 混音 WAV）前缀，超过保留期后由宿主清扫 */
 const TEMP_SWEEP_PREFIXES = [
-  'mss-stream-',
+  'mss-fpipe-',
+  'mss-hf-',
   'mss-export-',
   'mss-api-audio-',
   'mss-audio-',
-  'mss-hf-',
   'mss-fast-'
 ]
 const TEMP_FILE_MAX_AGE_MS = 6 * 60 * 60 * 1000
+
+interface TaskStatusRecord {
+  status: 'completed' | 'failed' | 'cancelled'
+  elapsedSeconds: number
+  finishedAt: number
+  result?: ApiExportResponse & {
+    videoPath?: string
+    fileSize?: number
+    downloadUrl?: string
+  }
+  error?: { message: string }
+}
+
+function parseCorsOrigins(raw: string | undefined): string[] {
+  if (!raw) return []
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function isLoopbackRemoteAddress(addr: string | undefined): boolean {
+  if (!addr) return false
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+}
+
+function sha256Equal(provided: string, expected: string): boolean {
+  const a = crypto.createHash('sha256').update(provided).digest()
+  const b = crypto.createHash('sha256').update(expected).digest()
+  return crypto.timingSafeEqual(a, b)
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -118,19 +156,27 @@ export class VideoApiServer {
   private pendingExports: Map<string, PendingExport> = new Map()
   private exportQueue: ExportTask[] = []
   private activeExports: Set<string> = new Set()
+  private exportTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  private taskRecords: Map<string, TaskStatusRecord> = new Map()
   private readonly port: number
   private readonly host: string
   private readonly outputDir: string
   private readonly video: VideoSettings
   private readonly maxConcurrentExports: number
   private readonly fileRetentionMs: number
+  private readonly apiKey: string
+  private readonly bridgeToken: string
+  private readonly corsEnabled: boolean
+  private readonly corsOrigins: string[]
+  private readonly rateLimitMaxEntries: number
+  private readonly tempFileMaxAgeMs: number
   /** 导出前预处理（Irodori 日语 ttsText 预检等）；失败直接拒绝任务。 */
   private readonly storyPreparer: ((story: StoryData) => Promise<void>) | null
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
   private lastCleanup: number | null = null
   private totalFilesCleaned: number = 0
   private rateLimitMap: Map<string, RateLimitEntry> = new Map()
-  private extraHealthProvider: (() => Record<string, unknown>) | null = null
+  private extraHealthProvider: ((authed: boolean) => Record<string, unknown>) | null = null
   /** 最近完成的导出（滚动窗口，供 /api/v1/status 观测并行负载） */
   private recentExports: Array<{
     taskId: string
@@ -151,6 +197,18 @@ export class VideoApiServer {
       registerExtraRoutes?: (app: express.Application) => void
       /** 导出前预处理；抛错时 HTTP 返回 400，不进入渲染队列 */
       prepareStory?: (story: StoryData) => Promise<void>
+      /** 可选 Bearer API key（未传时读取 MSST_API_KEY / MSS_API_KEY 环境变量） */
+      apiKey?: string
+      /** 内部 RenderPool worker 令牌，用于授权同一宿主的 /api/v1/tts/lease* 请求 */
+      bridgeToken?: string
+      /** 是否启用 CORS（默认 true） */
+      cors?: boolean
+      /** 允许的 CORS Origin 列表；留空时仅允许 localhost / 127.0.0.1 / [::1] */
+      corsOrigins?: string[]
+      /** rateLimitMap 上限（默认 10000） */
+      rateLimitMaxEntries?: number
+      /** 临时文件清扫保留时长（默认 6 小时） */
+      tempFileMaxAgeMs?: number
     }
   ) {
     this.logger = logger
@@ -163,12 +221,26 @@ export class VideoApiServer {
       options.maxConcurrentExports ?? DEFAULT_MAX_CONCURRENT_EXPORTS
     )
     this.fileRetentionMs = DEFAULT_FILE_RETENTION_MS
+    const envApiKey = process.env.MSST_API_KEY ?? process.env.MSS_API_KEY ?? ''
+    this.apiKey = (options.apiKey !== undefined ? options.apiKey : envApiKey).trim()
+    this.bridgeToken = (options.bridgeToken ?? '').trim()
+    this.corsEnabled = options.cors !== false
+    this.corsOrigins =
+      options.corsOrigins !== undefined
+        ? options.corsOrigins.map((origin) => origin.trim()).filter(Boolean)
+        : parseCorsOrigins(process.env.MSST_CORS_ORIGINS ?? process.env.MSS_CORS_ORIGINS)
+    this.rateLimitMaxEntries = Math.max(
+      1,
+      options.rateLimitMaxEntries ?? RATE_LIMIT_MAX_ENTRIES_DEFAULT
+    )
+    this.tempFileMaxAgeMs = Math.max(0, options.tempFileMaxAgeMs ?? TEMP_FILE_MAX_AGE_MS)
     this.storyPreparer = options.prepareStory ?? null
     this.ensureOutputDir()
     this.app = express()
     this.setupMiddleware()
     this.setupRoutes()
     options.registerExtraRoutes?.(this.app)
+    this.setupErrorHandler()
     this.startCleanupInterval()
   }
 
@@ -181,13 +253,98 @@ export class VideoApiServer {
     this.logger.info('[API] Export dispatcher set')
   }
 
-  setExtraHealthProvider(provider: () => Record<string, unknown>): void {
+  setExtraHealthProvider(provider: (authed: boolean) => Record<string, unknown>): void {
     this.extraHealthProvider = provider
   }
 
   /** 是否仍有在途导出（关停排空用） */
   hasActiveExports(): boolean {
     return this.activeExports.size > 0 || this.exportQueue.length > 0
+  }
+
+  /** 校验外部 Bearer API Key（配置后生效，使用 SHA-256 + timingSafeEqual）。 */
+  isAuthorized(req: Request): boolean {
+    if (!this.apiKey) return true
+    const raw = String(req.headers.authorization || '')
+    const normalized = /^bearer /i.test(raw) ? `Bearer ${raw.slice(7)}` : raw
+    return sha256Equal(normalized, `Bearer ${this.apiKey}`)
+  }
+
+  private isBridgeRequestAuthorized(req: Request): boolean {
+    if (this.isAuthorized(req)) return true
+    if (!this.bridgeToken) return false
+
+    const headerToken =
+      typeof req.headers['x-mss-bridge-token'] === 'string' ? req.headers['x-mss-bridge-token'] : ''
+    if (headerToken && sha256Equal(headerToken, this.bridgeToken)) {
+      return true
+    }
+
+    if (
+      isLoopbackRemoteAddress(req.socket?.remoteAddress) &&
+      typeof req.headers.referer === 'string'
+    ) {
+      try {
+        const refUrl = new URL(req.headers.referer)
+        const refToken = refUrl.searchParams.get('token') || ''
+        if (refToken && sha256Equal(refToken, this.bridgeToken)) {
+          return true
+        }
+      } catch {
+        // invalid referer
+      }
+    }
+    return false
+  }
+
+  /** 可复用 Bearer 鉴权中间件（用于 /apifile 等受保护静态资源）。 */
+  createAuthMiddleware(): (req: Request, res: Response, next: NextFunction) => void {
+    return (req: Request, res: Response, next: NextFunction) => {
+      if (req.method === 'OPTIONS' || this.isAuthorized(req)) {
+        next()
+        return
+      }
+      res.status(401).json({ success: false, message: 'Unauthorized' })
+    }
+  }
+
+  /** 将本地输出目录或临时目录路径从对外错误消息中脱敏。 */
+  redactPaths(message: string): string {
+    if (!message) return message
+    const candidates = new Set<string>([
+      this.outputDir,
+      path.resolve(this.outputDir),
+      tmpdir(),
+      path.resolve(tmpdir())
+    ])
+    for (const dir of [this.outputDir, tmpdir()]) {
+      try {
+        candidates.add(fs.realpathSync(dir))
+      } catch {
+        // ignore missing dir
+      }
+    }
+    let sanitized = message
+    for (const root of Array.from(candidates).sort((a, b) => b.length - a.length)) {
+      if (!root) continue
+      sanitized = sanitized.split(root).join('[path]')
+    }
+    return sanitized
+  }
+
+  private isAllowedCorsOrigin(origin: string): boolean {
+    if (!this.corsEnabled) return false
+    if (this.corsOrigins.length > 0) {
+      return this.corsOrigins.includes(origin)
+    }
+    try {
+      const parsed = new URL(origin)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+      if (parsed.username || parsed.password) return false
+      return LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())
+    } catch {
+      return false
+    }
   }
 
   private ensureOutputDir(): void {
@@ -202,43 +359,60 @@ export class VideoApiServer {
       this.cleanupOldExports()
       this.cleanupStaleTempFiles()
       this.cleanupRateLimitMap()
+      this.cleanupTaskRecords()
     }, ONE_HOUR)
+    this.cleanupInterval.unref?.()
+  }
+
+  /** 对外触发临时文件清扫（启动兜底与定时巡检共用）。 */
+  runTempSweep(): { filesCleaned: number } {
+    return this.cleanupStaleTempFiles()
   }
 
   /**
-   * 清扫 tmpdir 下泄漏的导出临时文件（录制 webm、帧目录、混音 WAV）。
+   * 清扫 tmpdir 下与输出目录下泄漏的导出临时文件（帧目录、帧管道、中间 MP4、混音 WAV）。
    * 正常路径由桥接层 finally 删除；取消/崩溃/重试遗留的靠这里兜底。
    * 在途文件被持续追加，mtime 不会超过保留期，不会被误删。
    */
-  private cleanupStaleTempFiles(): void {
+  private cleanupStaleTempFiles(): { filesCleaned: number } {
     const now = Date.now()
-    let entries: string[]
-    try {
-      entries = fs.readdirSync(tmpdir())
-    } catch {
-      return
-    }
-
     let cleaned = 0
     let cleanedBytes = 0
-    for (const name of entries) {
-      if (!TEMP_SWEEP_PREFIXES.some((prefix) => name.startsWith(prefix))) continue
-      const fullPath = path.join(tmpdir(), name)
+
+    const sweepDir = (dir: string, matcher: (name: string) => boolean): void => {
+      let entries: string[]
       try {
-        const stats = fs.statSync(fullPath)
-        if (!stats.isFile() && !stats.isDirectory()) continue
-        if (now - stats.mtimeMs < TEMP_FILE_MAX_AGE_MS) continue
-        if (stats.isDirectory()) {
-          fs.rmSync(fullPath, { recursive: true, force: true })
-        } else {
-          fs.unlinkSync(fullPath)
-        }
-        cleaned++
-        cleanedBytes += stats.size
+        entries = fs.readdirSync(dir)
       } catch {
-        /* 并发删除或权限问题：忽略单项失败 */
+        return
+      }
+      for (const name of entries) {
+        if (!matcher(name)) continue
+        const fullPath = path.join(dir, name)
+        try {
+          const stats = fs.statSync(fullPath)
+          if (!stats.isFile() && !stats.isDirectory()) continue
+          if (now - stats.mtimeMs < this.tempFileMaxAgeMs) continue
+          if (stats.isDirectory()) {
+            fs.rmSync(fullPath, { recursive: true, force: true })
+          } else {
+            fs.unlinkSync(fullPath)
+          }
+          cleaned++
+          cleanedBytes += stats.size
+        } catch {
+          /* 并发删除或权限问题：忽略单项失败 */
+        }
       }
     }
+
+    sweepDir(
+      tmpdir(),
+      (name) =>
+        TEMP_SWEEP_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
+        ORPHAN_FRAMES_VIDEO_RE.test(name)
+    )
+    sweepDir(this.outputDir, (name) => ORPHAN_FRAMES_VIDEO_RE.test(name))
 
     if (cleaned > 0) {
       this.logger.info(
@@ -246,6 +420,7 @@ export class VideoApiServer {
           `(${(cleanedBytes / 1024 / 1024).toFixed(2)} MB)`
       )
     }
+    return { filesCleaned: cleaned }
   }
 
   private cleanupOldExports(): void {
@@ -302,21 +477,46 @@ export class VideoApiServer {
     const now = Date.now()
     const entry = this.rateLimitMap.get(ip)
 
-    if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-      this.rateLimitMap.set(ip, { count: 1, windowStart: now })
+    if (entry && now - entry.windowStart <= RATE_LIMIT_WINDOW_MS) {
+      if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
+        return false
+      }
+      entry.count++
       return true
     }
 
-    if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
-      return false
+    if (entry) {
+      this.rateLimitMap.delete(ip)
     }
 
-    entry.count++
+    if (this.rateLimitMap.size >= this.rateLimitMaxEntries) {
+      this.cleanupRateLimitMap(now)
+      while (this.rateLimitMap.size >= this.rateLimitMaxEntries) {
+        const oldestKey = this.rateLimitMap.keys().next().value
+        if (oldestKey === undefined) break
+        this.rateLimitMap.delete(oldestKey)
+      }
+    }
+
+    this.rateLimitMap.set(ip, { count: 1, windowStart: now })
     return true
   }
 
-  private cleanupRateLimitMap(): void {
-    const now = Date.now()
+  /** 对外限流入口：超限时直接写入 HTTP 429 并返回 false。 */
+  enforceRateLimit(req: Request, res: Response): boolean {
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown'
+    if (!this.checkRateLimit(clientIp)) {
+      res.status(429).json({
+        success: false,
+        message: 'Too many requests. Please try again later.',
+        retryAfterSeconds: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)
+      })
+      return false
+    }
+    return true
+  }
+
+  private cleanupRateLimitMap(now = Date.now()): void {
     for (const [ip, entry] of this.rateLimitMap.entries()) {
       if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
         this.rateLimitMap.delete(ip)
@@ -324,21 +524,93 @@ export class VideoApiServer {
     }
   }
 
-  private setupMiddleware(): void {
-    this.app.use(express.json({ limit: '50mb' }))
+  private cleanupTaskRecords(now = Date.now()): void {
+    for (const [taskId, record] of this.taskRecords.entries()) {
+      if (now - record.finishedAt > TASK_RECORD_RETENTION_MS) {
+        this.taskRecords.delete(taskId)
+      }
+    }
+    while (this.taskRecords.size > TASK_RECORD_MAX_ENTRIES) {
+      const oldest = this.taskRecords.keys().next().value
+      if (oldest === undefined) break
+      this.taskRecords.delete(oldest)
+    }
+  }
 
+  private saveTaskRecord(taskId: string, record: TaskStatusRecord): void {
+    this.taskRecords.delete(taskId)
+    this.taskRecords.set(taskId, record)
+    this.cleanupTaskRecords(record.finishedAt)
+  }
+
+  private setupMiddleware(): void {
     this.app.use((req: Request, res: Response, next: NextFunction) => {
       if (req.url !== '/api/v1/health' && req.url !== '/api/v1/status') {
         this.logger.info(`[API] ${req.method} ${req.url}`)
       }
-      res.setHeader('Access-Control-Allow-Origin', '*')
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+      res.setHeader('Vary', 'Origin')
+      const origin = typeof req.headers.origin === 'string' ? req.headers.origin : ''
+      if (origin && this.isAllowedCorsOrigin(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin)
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        res.setHeader('Access-Control-Max-Age', '86400')
+      }
       if (req.method === 'OPTIONS') {
         res.sendStatus(204)
         return
       }
       next()
+    })
+
+    this.app.use('/api/v1', (req: Request, res: Response, next: NextFunction) => {
+      if (req.method === 'OPTIONS') {
+        next()
+        return
+      }
+      const reqPath = req.path.replace(/\/+$/, '') || '/'
+      if (reqPath === '/health') {
+        next()
+        return
+      }
+      if (reqPath === '/tts/lease' || reqPath === '/tts/lease/release') {
+        if (this.isBridgeRequestAuthorized(req)) {
+          next()
+          return
+        }
+        res.status(401).json({ success: false, message: 'Unauthorized' })
+        return
+      }
+      if (!this.isAuthorized(req)) {
+        res.status(401).json({ success: false, message: 'Unauthorized' })
+        return
+      }
+      next()
+    })
+
+    this.app.use(express.json({ limit: '50mb' }))
+  }
+
+  private setupErrorHandler(): void {
+    this.app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+      if (
+        err instanceof SyntaxError &&
+        'status' in err &&
+        (err as { status?: unknown }).status === 400
+      ) {
+        res.status(400).json({
+          success: false,
+          message: 'Invalid JSON request body'
+        })
+        return
+      }
+      this.logger.error('[API] Unhandled error', err)
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Internal server error'
+        })
+      }
     })
   }
 
@@ -357,7 +629,8 @@ export class VideoApiServer {
   }
 
   private setupRoutes(): void {
-    this.app.get('/api/v1/health', (_req: Request, res: Response) => {
+    this.app.get('/api/v1/health', (req: Request, res: Response) => {
+      const authed = this.isAuthorized(req)
       res.json({
         status: 'ok',
         version: '2.0.0',
@@ -375,10 +648,13 @@ export class VideoApiServer {
           audioBitrate: this.video.audioBitrate,
           watermark: this.video.watermark,
           watermarkText: this.video.watermarkText,
+          exportMode: this.video.exportMode,
+          fastFps: this.video.fastFps,
+          exportFastEncoder: this.video.exportFastEncoder,
           idleChainGapSec: this.video.idleChainGapSec,
           ttsMode: this.video.ttsMode
         },
-        ...(this.extraHealthProvider ? this.extraHealthProvider() : {})
+        ...(this.extraHealthProvider ? this.extraHealthProvider(authed) : {})
       })
     })
 
@@ -395,13 +671,7 @@ export class VideoApiServer {
     })
 
     this.app.post('/api/v1/export', async (req: Request, res: Response) => {
-      const clientIp = req.ip || req.socket.remoteAddress || 'unknown'
-      if (!this.checkRateLimit(clientIp)) {
-        res.status(429).json({
-          success: false,
-          message: 'Too many requests. Please try again later.',
-          retryAfterSeconds: Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)
-        })
+      if (!this.enforceRateLimit(req, res)) {
         return
       }
       await this.handleExportRequest(req, res)
@@ -415,6 +685,7 @@ export class VideoApiServer {
         const isActive = this.activeExports.has(taskId)
         const isQueued = this.exportQueue.some((t) => t.taskId === taskId)
         res.json({
+          success: true,
           taskId,
           status: isActive ? 'processing' : isQueued ? 'queued' : 'pending',
           elapsedSeconds: elapsed,
@@ -422,9 +693,21 @@ export class VideoApiServer {
             ? this.exportQueue.findIndex((t) => t.taskId === taskId) + 1
             : null
         })
-      } else {
-        res.json({ taskId, status: 'unknown' })
+        return
       }
+      const recorded = this.taskRecords.get(taskId)
+      if (recorded) {
+        res.json({
+          success: true,
+          taskId,
+          status: recorded.status,
+          elapsedSeconds: recorded.elapsedSeconds,
+          ...(recorded.result ? { result: recorded.result } : {}),
+          ...(recorded.error ? { error: recorded.error } : {})
+        })
+        return
+      }
+      res.json({ taskId, status: 'unknown' })
     })
 
     this.app.post('/api/v1/export/:taskId/cancel', (req: Request, res: Response) => {
@@ -436,10 +719,13 @@ export class VideoApiServer {
     this.app.post('/api/v1/cleanup', (_req: Request, res: Response) => {
       const before = this.totalFilesCleaned
       this.cleanupOldExports()
+      const tempSweep = this.cleanupStaleTempFiles()
+      this.cleanupTaskRecords()
       const cleaned = this.totalFilesCleaned - before
       res.json({
         success: true,
         filesCleaned: cleaned,
+        tempEntriesCleaned: tempSweep.filesCleaned,
         totalFilesCleaned: this.totalFilesCleaned,
         retentionHours: this.fileRetentionMs / (60 * 60 * 1000)
       })
@@ -526,8 +812,15 @@ export class VideoApiServer {
       }
 
       let stats: fs.Stats
+      let realFilePath: string
       try {
-        stats = fs.statSync(filePath)
+        const realOutputDir = fs.realpathSync(resolvedOutputDir)
+        realFilePath = fs.realpathSync(filePath)
+        if (!realFilePath.startsWith(realOutputDir + path.sep)) {
+          res.status(404).json({ error: 'File not found' })
+          return
+        }
+        stats = fs.statSync(realFilePath)
       } catch {
         this.logger.error(`[API] Download requested but file not found: ${filePath}`)
         res.status(404).json({ error: 'File not found' })
@@ -550,14 +843,14 @@ export class VideoApiServer {
                 ? 'video/webm'
                 : 'application/octet-stream'
 
-      this.logger.info(`[API] Downloading file: ${filePath}, size=${stats.size} bytes`)
+      this.logger.info(`[API] Downloading file: ${realFilePath}, size=${stats.size} bytes`)
 
       res.setHeader('Content-Type', contentType)
       res.setHeader('Content-Length', stats.size)
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
       res.setHeader('Cache-Control', 'no-cache')
 
-      const stream = fs.createReadStream(filePath)
+      const stream = fs.createReadStream(realFilePath)
       stream.pipe(res)
 
       stream.on('error', (err) => {
@@ -575,14 +868,6 @@ export class VideoApiServer {
 
       res.on('close', () => {
         stream.destroy()
-      })
-    })
-
-    this.app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-      this.logger.error('[API] Unhandled error', err)
-      res.status(500).json({
-        success: false,
-        message: 'Internal server error'
       })
     })
   }
@@ -651,6 +936,49 @@ export class VideoApiServer {
     return { taskId, outputPath, exportPromise }
   }
 
+  private finalizeExportResult(
+    result: ApiExportResponse
+  ): ApiExportResponse & { videoPath: string; fileSize: number; downloadUrl: string } {
+    if (!result.success || !result.videoPath) {
+      throw new Error(result.message || 'Export failed')
+    }
+    const normalizedPath = path.normalize(result.videoPath)
+    if (!fs.existsSync(normalizedPath)) {
+      this.logger.error(`[API] File NOT found at: ${normalizedPath}`)
+      this.logger.error(`[API] Original videoPath: ${result.videoPath}`)
+      this.logger.error(`[API] outputDir: ${this.outputDir}`)
+      throw new Error('Exported video file not found')
+    }
+    const stat = fs.statSync(normalizedPath)
+    let logPath: string | undefined
+    let logJsonPath: string | undefined
+    let reportPath: string | undefined
+    if (result.diagnostics) {
+      try {
+        const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
+        logPath = written.textPath
+        logJsonPath = written.jsonPath
+        reportPath = written.reportPath
+        this.logger.info(
+          `[API] Export diagnostics written: ${written.textPath} / ${written.jsonPath} / ${written.reportPath}`
+        )
+      } catch (error) {
+        this.logger.warn('[API] Failed to write export diagnostics', error)
+      }
+    }
+    return {
+      ...result,
+      success: true,
+      message: 'Video exported successfully',
+      videoPath: normalizedPath,
+      fileSize: stat.size,
+      logPath,
+      logJsonPath,
+      reportPath,
+      downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
+    }
+  }
+
   /**
    * 程序内提交导出（供 /api/v1/generate 在剧本生成后直接渲染）。
    *
@@ -691,39 +1019,7 @@ export class VideoApiServer {
         })
       ])
 
-      if (!result.success || !result.videoPath) {
-        throw new Error(result.message || 'Export failed')
-      }
-      const normalizedPath = path.normalize(result.videoPath)
-      if (!fs.existsSync(normalizedPath)) {
-        throw new Error(`Video file not found at: ${normalizedPath}`)
-      }
-      let logPath: string | undefined
-      let logJsonPath: string | undefined
-      let reportPath: string | undefined
-      if (result.diagnostics) {
-        try {
-          const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
-          logPath = written.textPath
-          logJsonPath = written.jsonPath
-          reportPath = written.reportPath
-          this.logger.info(
-            `[API] Export diagnostics written: ${written.textPath} / ${written.jsonPath} / ${written.reportPath}`
-          )
-        } catch (error) {
-          this.logger.warn('[API] Failed to write export diagnostics', error)
-        }
-      }
-      return {
-        ...result,
-        success: true,
-        videoPath: normalizedPath,
-        fileSize: fs.statSync(normalizedPath).size,
-        logPath,
-        logJsonPath,
-        reportPath,
-        downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
-      }
+      return this.finalizeExportResult(result)
     } catch (error) {
       this.cancelExport(taskId)
       throw error
@@ -747,6 +1043,14 @@ export class VideoApiServer {
       res.status(400).json({
         success: false,
         message: 'Request body must contain a "story" field with valid story data.'
+      })
+      return
+    }
+
+    if (body.wait !== undefined && typeof body.wait !== 'boolean') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid wait flag: expected a boolean.'
       })
       return
     }
@@ -781,20 +1085,68 @@ export class VideoApiServer {
     try {
       await this.prepareStory(parsedStory)
     } catch (error) {
-      this.logger.warn(
-        `[API] Export rejected by story preflight: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
+      const message = this.redactPaths(error instanceof Error ? error.message : String(error))
+      this.logger.warn(`[API] Export rejected by story preflight: ${message}`)
       res.status(400).json({
         success: false,
-        message: error instanceof Error ? error.message : String(error)
+        message
       })
       return
     }
 
     const timeoutMs = body.timeout ?? DEFAULT_EXPORT_TIMEOUT_MS
+    const startedAt = Date.now()
+    const waitForCompletion = body.wait !== false
     const { taskId, exportPromise } = this.registerExport(parsedStory, timeoutMs)
+
+    if (!waitForCompletion) {
+      const timer = setTimeout(() => {
+        this.logger.warn(`[API] Async export ${taskId} timed out after ${timeoutMs / 1000} seconds`)
+        this.cancelExport(taskId, `Export timed out after ${timeoutMs / 1000} seconds`, 'failed')
+      }, timeoutMs)
+      this.exportTimers.set(taskId, timer)
+
+      void exportPromise
+        .then((result) => {
+          const finalized = this.finalizeExportResult(result)
+          this.saveTaskRecord(taskId, {
+            status: 'completed',
+            elapsedSeconds: (Date.now() - startedAt) / 1000,
+            finishedAt: Date.now(),
+            result: finalized
+          })
+        })
+        .catch((error) => {
+          if (!this.taskRecords.has(taskId)) {
+            this.logger.error('[API] Async export failed', error)
+            const msg = this.redactPaths(error instanceof Error ? error.message : 'Export failed')
+            this.saveTaskRecord(taskId, {
+              status: 'failed',
+              elapsedSeconds: (Date.now() - startedAt) / 1000,
+              finishedAt: Date.now(),
+              error: { message: msg }
+            })
+          }
+        })
+        .finally(() => {
+          const activeTimer = this.exportTimers.get(taskId)
+          if (activeTimer) {
+            clearTimeout(activeTimer)
+            this.exportTimers.delete(taskId)
+          }
+          this.pendingExports.delete(taskId)
+          this.activeExports.delete(taskId)
+          this.processQueue()
+        })
+
+      res.status(202).json({
+        success: true,
+        taskId,
+        status: 'queued',
+        statusUrl: `/api/v1/export/${taskId}/status`
+      })
+      return
+    }
 
     // 客户端断连（插件 httpx 超时普遍早于宿主 30 分钟上限）：任务跑完也没有
     // 接收方，继续渲染只是白占 worker/GPU，直接取消
@@ -817,72 +1169,32 @@ export class VideoApiServer {
       ])
 
       this.logger.info(`[API] Export promise resolved: taskId=${taskId}, success=${result.success}`)
-      this.logger.info(`[API] videoPath=${result.videoPath}`)
-
-      if (result.success && result.videoPath) {
-        const normalizedPath = path.normalize(result.videoPath)
-        this.logger.info(`[API] Checking file existence: ${normalizedPath}`)
-
-        if (fs.existsSync(normalizedPath)) {
-          const stat = fs.statSync(normalizedPath)
-          this.logger.info(`[API] File found: size=${stat.size} bytes`)
-          let logPath: string | undefined
-          let logJsonPath: string | undefined
-          let reportPath: string | undefined
-          if (result.diagnostics) {
-            try {
-              const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
-              logPath = written.textPath
-              logJsonPath = written.jsonPath
-              reportPath = written.reportPath
-              this.logger.info(
-                `[API] Export diagnostics written: ${written.textPath} / ${written.jsonPath} / ${written.reportPath}`
-              )
-            } catch (error) {
-              this.logger.warn('[API] Failed to write export diagnostics', error)
-            }
-          }
-          res.json({
-            success: true,
-            message: 'Video exported successfully',
-            videoPath: normalizedPath,
-            fileSize: stat.size,
-            duration: result.duration,
-            frameCount: result.frameCount,
-            timings: result.timings,
-            logPath,
-            logJsonPath,
-            reportPath,
-            downloadUrl: `/api/v1/download/${path.basename(normalizedPath)}`
-          })
-        } else {
-          this.logger.error(`[API] File NOT found at: ${normalizedPath}`)
-          this.logger.error(`[API] Original videoPath: ${result.videoPath}`)
-          this.logger.error(`[API] outputDir: ${this.outputDir}`)
-          try {
-            const files = fs.readdirSync(this.outputDir)
-            this.logger.info(`[API] Files in outputDir: ${JSON.stringify(files.slice(-10))}`)
-          } catch (e) {
-            this.logger.error(`[API] Cannot read outputDir: ${e}`)
-          }
-          res.status(500).json({
-            success: false,
-            message: `Video file not found at: ${normalizedPath}`
-          })
-        }
-      } else {
-        this.logger.error(
-          `[API] Export result invalid: success=${result.success}, hasVideoPath=${!!result.videoPath}`
-        )
-        res.status(500).json(result)
-      }
+      const finalized = this.finalizeExportResult(result)
+      this.saveTaskRecord(taskId, {
+        status: 'completed',
+        elapsedSeconds: (Date.now() - startedAt) / 1000,
+        finishedAt: Date.now(),
+        result: finalized
+      })
+      res.json(finalized)
     } catch (error) {
       this.logger.error('[API] Export failed', error)
       this.cancelExport(taskId)
-      res.status(500).json({
-        success: false,
-        message: error instanceof Error ? error.message : 'Export failed'
-      })
+      const msg = this.redactPaths(error instanceof Error ? error.message : 'Export failed')
+      if (!this.taskRecords.has(taskId)) {
+        this.saveTaskRecord(taskId, {
+          status: 'failed',
+          elapsedSeconds: (Date.now() - startedAt) / 1000,
+          finishedAt: Date.now(),
+          error: { message: msg }
+        })
+      }
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: msg
+        })
+      }
     } finally {
       if (timeoutId !== null) clearTimeout(timeoutId)
       this.pendingExports.delete(taskId)
@@ -911,7 +1223,11 @@ export class VideoApiServer {
     }
   }
 
-  private cancelExport(taskId: string): boolean {
+  private cancelExport(
+    taskId: string,
+    reason = 'Export cancelled by user',
+    recordStatus: 'cancelled' | 'failed' = 'cancelled'
+  ): boolean {
     const queueIndex = this.exportQueue.findIndex((t) => t.taskId === taskId)
     if (queueIndex > -1) {
       this.exportQueue.splice(queueIndex, 1)
@@ -919,7 +1235,13 @@ export class VideoApiServer {
       // 挂到超时竞赛结束（最长 30 分钟）才收到响应
       const pending = this.pendingExports.get(taskId)
       if (pending) {
-        pending.reject(new Error('Export cancelled by user'))
+        this.saveTaskRecord(taskId, {
+          status: recordStatus,
+          elapsedSeconds: (Date.now() - pending.startTime) / 1000,
+          finishedAt: Date.now(),
+          error: { message: reason }
+        })
+        pending.reject(new Error(reason))
         this.pendingExports.delete(taskId)
       }
       this.dispatcher?.cancel(taskId)
@@ -932,7 +1254,13 @@ export class VideoApiServer {
       this.dispatcher?.cancel(taskId)
       const pending = this.pendingExports.get(taskId)
       if (pending) {
-        pending.reject(new Error('Export cancelled by user'))
+        this.saveTaskRecord(taskId, {
+          status: recordStatus,
+          elapsedSeconds: (Date.now() - pending.startTime) / 1000,
+          finishedAt: Date.now(),
+          error: { message: reason }
+        })
+        pending.reject(new Error(reason))
         this.pendingExports.delete(taskId)
       }
       this.logger.info(`[API] Cancelled active export: ${taskId}`)
@@ -1010,6 +1338,7 @@ export class VideoApiServer {
   }
 
   start(): Promise<void> {
+    this.cleanupStaleTempFiles()
     return new Promise((resolve, reject) => {
       try {
         this.server = this.app.listen(this.port, this.host, () => {
@@ -1037,12 +1366,18 @@ export class VideoApiServer {
       this.cleanupInterval = null
     }
 
+    for (const timer of this.exportTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.exportTimers.clear()
+
     for (const [, pending] of this.pendingExports.entries()) {
       pending.reject(new Error('Server is shutting down'))
     }
     this.pendingExports.clear()
     this.exportQueue = []
     this.activeExports.clear()
+    this.taskRecords.clear()
 
     if (this.server) {
       this.server.close()

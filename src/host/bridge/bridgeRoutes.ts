@@ -6,11 +6,6 @@ import { tmpdir } from 'node:os'
 import { ILogObj, Logger } from 'tslog'
 import type { HostConfig } from '../config'
 import {
-  RecordSessionRegistry,
-  RecordSessionError,
-  type RecordSessionOptions
-} from '../record/recordSessions'
-import {
   apiConvertVideoWithCompression,
   apiMergeVideoAudioWithCompression,
   apiMuxVideoAudioCopy,
@@ -21,6 +16,12 @@ import {
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
+export interface BridgeController {
+  cleanupWorker(workerId: string): Promise<void>
+  disposeAll(): Promise<void>
+  activePipeSessionCount(): number
+}
+
 interface BridgeDeps {
   logger: Logger<ILogObj>
   config: HostConfig
@@ -28,16 +29,55 @@ interface BridgeDeps {
   bridgeToken?: string
   /** Optional additional writable output directories (for tests / custom roots). */
   allowedOutputDirs?: string[]
-  /** Optional host-only factory/timeout injection for deterministic bridge tests. */
-  recordSessionOptions?: RecordSessionOptions
   /** Optional idle timeout (ms) for cached write-file-at FileHandles. */
   fileHandleIdleMs?: number
+  /** Optional idle timeout (ms) for active FramesPipeSessions. */
+  framesPipeIdleMs?: number
+  /** Optional factory override for FramesPipeSession (used in tests). */
+  createFramesPipe?: typeof createFramesPipeSession
+  /** Callback receiving lifecycle controller for worker-recycle and shutdown cleanup. */
+  onController?: (controller: BridgeController) => void
 }
 
 const DEFAULT_FILE_HANDLE_IDLE_MS = 30_000
+const DEFAULT_FRAMES_PIPE_IDLE_MS = 125_000
 const ALLOWED_PROXY_METHODS = new Set(['GET', 'HEAD', 'POST'])
 const SAFE_TEMP_PREFIX_RE = /^[a-zA-Z0-9_-]{1,64}$/
 const SAFE_TEMP_EXT_RE = /^[a-zA-Z0-9]{1,16}$/
+
+const activeBridgeControllers = new Set<BridgeController>()
+let processBeforeExitHooked = false
+
+function ensureBeforeExitCleanup(): void {
+  if (processBeforeExitHooked) return
+  processBeforeExitHooked = true
+  process.on('beforeExit', () => {
+    for (const ctrl of Array.from(activeBridgeControllers)) {
+      void ctrl.disposeAll().catch(() => {})
+    }
+  })
+}
+
+function extractWorkerId(req: Request, payload?: unknown): string | null {
+  const fromPayload = (payload as { workerId?: unknown } | undefined)?.workerId
+  if (typeof fromPayload === 'string' && fromPayload.trim()) {
+    return fromPayload.trim()
+  }
+  const fromHeader = req.headers['x-mss-worker-id']
+  if (typeof fromHeader === 'string' && fromHeader.trim()) {
+    return fromHeader.trim()
+  }
+  const referer = req.headers.referer
+  if (typeof referer === 'string' && referer) {
+    try {
+      const worker = new URL(referer).searchParams.get('worker')
+      if (worker && worker.trim()) return worker.trim()
+    } catch {
+      // ignore invalid referer
+    }
+  }
+  return null
+}
 
 export class BridgeSecurityError extends Error {
   readonly statusCode: number
@@ -77,10 +117,7 @@ function resolveWithExistingRealpath(targetPath: string): string {
 }
 
 function isStrictlyWithinRoot(targetPath: string, rootDir: string): boolean {
-  const rel = path.relative(
-    normalizePathForCompare(rootDir),
-    normalizePathForCompare(targetPath)
-  )
+  const rel = path.relative(normalizePathForCompare(rootDir), normalizePathForCompare(targetPath))
   return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel)
 }
 
@@ -95,7 +132,9 @@ function assertContainedPath(targetPath: unknown, allowedRoots: string[], label:
   return resolved
 }
 
-function parseAllowlistedOrigin(rawUrl: string | undefined): { origin: string; basePath: string } | null {
+function parseAllowlistedOrigin(
+  rawUrl: string | undefined
+): { origin: string; basePath: string } | null {
   if (!rawUrl) return null
   try {
     const parsed = new URL(rawUrl)
@@ -107,7 +146,10 @@ function parseAllowlistedOrigin(rawUrl: string | undefined): { origin: string; b
   }
 }
 
-function isAllowedProxyTarget(rawUrl: unknown, allowlist: Array<{ origin: string; basePath: string }>): URL | null {
+function isAllowedProxyTarget(
+  rawUrl: unknown,
+  allowlist: Array<{ origin: string; basePath: string }>
+): URL | null {
   if (typeof rawUrl !== 'string' || !rawUrl) return null
   let parsed: URL
   try {
@@ -119,7 +161,11 @@ function isAllowedProxyTarget(rawUrl: unknown, allowlist: Array<{ origin: string
   if (parsed.username || parsed.password) return null
   for (const entry of allowlist) {
     if (parsed.origin !== entry.origin) continue
-    if (entry.basePath === '/' || parsed.pathname === entry.basePath.slice(0, -1) || parsed.pathname.startsWith(entry.basePath)) {
+    if (
+      entry.basePath === '/' ||
+      parsed.pathname === entry.basePath.slice(0, -1) ||
+      parsed.pathname.startsWith(entry.basePath)
+    ) {
       return parsed
     }
   }
@@ -253,11 +299,78 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   }
 
   interface PipeStreamEntry {
+    id: string
     session: FramesPipeSession
     dir: string
     videoPath: string
+    workerId: string | null
+    idleTimer: ReturnType<typeof setTimeout> | null
+    cleaning?: Promise<void>
   }
   const framesPipeSessions = new Map<string, PipeStreamEntry>()
+  const framesPipeIdleMs = deps.framesPipeIdleMs ?? DEFAULT_FRAMES_PIPE_IDLE_MS
+  const createPipe = deps.createFramesPipe ?? createFramesPipeSession
+
+  async function cleanupPipeSession(id: string, reason?: Error): Promise<void> {
+    const entry = framesPipeSessions.get(id)
+    if (!entry) return
+    if (entry.cleaning) {
+      await entry.cleaning
+      return
+    }
+    framesPipeSessions.delete(id)
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer)
+      entry.idleTimer = null
+    }
+    entry.cleaning = (async () => {
+      await entry.session.abort(reason).catch(() => {})
+      await fs.promises.rm(entry.dir, { recursive: true, force: true }).catch(() => {})
+    })()
+    await entry.cleaning
+  }
+
+  function touchPipeIdle(entry: PipeStreamEntry): void {
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer)
+    }
+    entry.idleTimer = setTimeout(() => {
+      void cleanupPipeSession(entry.id, new Error('Frames stream idle timeout'))
+    }, framesPipeIdleMs)
+    entry.idleTimer.unref?.()
+  }
+
+  const controller: BridgeController = {
+    async cleanupWorker(workerId: string): Promise<void> {
+      const targets = Array.from(framesPipeSessions.values())
+        .filter((entry) => entry.workerId === workerId)
+        .map((entry) => entry.id)
+      if (targets.length === 0) return
+      logger.warn(
+        `[Bridge] Cleaning up ${targets.length} orphaned framesPipeSessions for worker ${workerId}`
+      )
+      await Promise.allSettled(
+        targets.map((id) =>
+          cleanupPipeSession(id, new Error(`Render worker ${workerId} recycled or disconnected`))
+        )
+      )
+    },
+    async disposeAll(): Promise<void> {
+      activeBridgeControllers.delete(controller)
+      const pipeIds = Array.from(framesPipeSessions.keys())
+      const fileKeys = Array.from(cachedFileHandles.keys())
+      await Promise.allSettled([
+        ...pipeIds.map((id) => cleanupPipeSession(id, new Error('Bridge router shutting down'))),
+        ...fileKeys.map((key) => closeCachedFileHandle(key))
+      ])
+    },
+    activePipeSessionCount(): number {
+      return framesPipeSessions.size
+    }
+  }
+  activeBridgeControllers.add(controller)
+  ensureBeforeExitCleanup()
+  deps.onController?.(controller)
 
   // 桥接安全中间件：剥离全局 CORS、限制同源、验证 RenderPool 会话令牌
   router.use((req: Request, res: Response, next: NextFunction) => {
@@ -298,19 +411,6 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     next()
   })
 
-  const recordSessions = new RecordSessionRegistry(
-    {
-      width: config.video.width,
-      height: config.video.height,
-      fps: config.video.fps,
-      crf: config.video.crf,
-      encoder: config.video.encoder as VideoEncoderChoice,
-      targetSizeBytes: Math.max(0, config.video.recordTargetSizeMb ?? 0) * 1024 * 1024
-    },
-    config.render.workers,
-    deps.recordSessionOptions
-  )
-
   // ----- JSON invoke 通道 -----
 
   router.post('/invoke/:channel', express.json({ limit: '50mb' }), async (req, res) => {
@@ -318,15 +418,19 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     const args = (Array.isArray(req.body) ? req.body : []) as unknown[]
 
     const abort = new AbortController()
-    let startedId: string | undefined
+    let startedPipeId: string | undefined
     const onDisconnect = (): void => {
       if (res.writableFinished) return
       abort.abort()
-      const id = startedId ?? (args[0] as { id?: unknown } | undefined)?.id
-      if (channel === 'electron:record-finish' || channel === 'electron:record-mux' || startedId) {
-        void recordSessions
-          .cancel(id)
-          .catch((error) => logger.error('[Bridge] record disconnect cleanup failed', error))
+      const targetId =
+        startedPipeId ?? ((args[0] as { id?: unknown } | undefined)?.id as string | undefined)
+      if (
+        (channel === 'electron:frames-stream-start' ||
+          channel === 'electron:frames-stream-finish') &&
+        typeof targetId === 'string' &&
+        targetId
+      ) {
+        void cleanupPipeSession(targetId, new Error(`Bridge ${channel} request disconnected`))
       }
     }
     req.once('aborted', onDisconnect)
@@ -335,21 +439,14 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       req.off('aborted', onDisconnect)
       res.off('close', onDisconnect)
     }
-    res.once('finish', detach)
-    res.once('close', detach)
 
     try {
       let result: unknown
-      if (channel === 'electron:record-start') {
-        const payload = args[0] as { inputWidth?: unknown; inputHeight?: unknown } | undefined
-        const started = await recordSessions.start(
-          payload?.inputWidth,
-          payload?.inputHeight,
-          abort.signal
-        )
-        startedId = started.id
+      if (channel === 'electron:frames-stream-start') {
+        const started = await startFramesPipeSession(args[0], req, abort.signal)
+        startedPipeId = started.id
         if (abort.signal.aborted) {
-          await recordSessions.cancel(startedId)
+          await cleanupPipeSession(startedPipeId, new Error('Frames stream start aborted'))
           return
         }
         result = started
@@ -359,17 +456,77 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       if (!res.destroyed) res.json({ ok: true, result })
     } catch (error) {
       logger.error(`[Bridge] invoke ${channel} failed`, error)
-      const status =
-        error instanceof RecordSessionError || error instanceof BridgeSecurityError
-          ? error.statusCode
-          : 500
+      const status = error instanceof BridgeSecurityError ? error.statusCode : 500
       if (!res.destroyed)
         res.status(status).json({
           ok: false,
           error: error instanceof Error ? error.message : String(error)
         })
+    } finally {
+      detach()
     }
   })
+
+  async function startFramesPipeSession(
+    rawPayload: unknown,
+    req: Request,
+    signal: AbortSignal
+  ): Promise<{ id: string; videoPath: string }> {
+    if (signal.aborted) {
+      throw new BridgeSecurityError('Frames stream start aborted', 499)
+    }
+    const payload = (rawPayload ?? {}) as {
+      fps?: number
+      width?: number
+      height?: number
+      inputWidth?: number
+      inputHeight?: number
+      crf?: number
+      workerId?: string
+    }
+    const fps = Number(payload.fps) > 0 ? Number(payload.fps) : config.video.fps
+    const width = Number(payload.width) > 0 ? Number(payload.width) : config.video.width
+    const height = Number(payload.height) > 0 ? Number(payload.height) : config.video.height
+    const dir = path.join(tmpdir(), `mss-fpipe-${Date.now()}-${randomSuffix()}`)
+    await fs.promises.mkdir(dir, { recursive: true })
+    const videoPath = path.join(dir, 'video.mp4')
+    const id = randomSuffix()
+
+    let session: FramesPipeSession
+    try {
+      session = await createPipe({
+        fps,
+        width,
+        height,
+        inputWidth: payload.inputWidth,
+        inputHeight: payload.inputHeight,
+        crf: payload.crf ?? config.video.crf,
+        encoder: config.video.encoder as VideoEncoderChoice,
+        outputPath: videoPath
+      })
+    } catch (error) {
+      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
+
+    if (signal.aborted) {
+      await session.abort(new Error('Frames stream start aborted')).catch(() => {})
+      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
+      throw new BridgeSecurityError('Frames stream start aborted', 499)
+    }
+
+    const entry: PipeStreamEntry = {
+      id,
+      session,
+      dir,
+      videoPath,
+      workerId: extractWorkerId(req, payload),
+      idleTimer: null
+    }
+    framesPipeSessions.set(id, entry)
+    touchPipeIdle(entry)
+    return { id, videoPath }
+  }
 
   async function handleInvoke(channel: string, args: unknown[]): Promise<unknown> {
     switch (channel) {
@@ -403,93 +560,31 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return null
       }
 
-      case 'electron:frames-stream-start': {
-        const payload = (args[0] ?? {}) as {
-          fps?: number
-          width?: number
-          height?: number
-          inputWidth?: number
-          inputHeight?: number
-          crf?: number
-        }
-        const fps = Number(payload.fps) > 0 ? Number(payload.fps) : config.video.fps
-        const width = Number(payload.width) > 0 ? Number(payload.width) : config.video.width
-        const height = Number(payload.height) > 0 ? Number(payload.height) : config.video.height
-        const dir = path.join(tmpdir(), `mss-fpipe-${Date.now()}-${randomSuffix()}`)
-        await fs.promises.mkdir(dir, { recursive: true })
-        const videoPath = path.join(dir, 'video.mp4')
-        const id = randomSuffix()
-        const session = await createFramesPipeSession({
-          fps,
-          width,
-          height,
-          inputWidth: payload.inputWidth,
-          inputHeight: payload.inputHeight,
-          crf: payload.crf ?? config.video.crf,
-          encoder: config.video.encoder as VideoEncoderChoice,
-          outputPath: videoPath
-        })
-        framesPipeSessions.set(id, { session, dir, videoPath })
-        return { id, videoPath }
-      }
-
       case 'electron:frames-stream-finish': {
         const payload = args[0] as { id?: string } | undefined
-        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
-        if (!entry) throw new Error('Unknown frames stream session')
+        const id = payload?.id
+        const entry = id ? framesPipeSessions.get(id) : undefined
+        if (!entry || !id) throw new Error('Unknown frames stream session')
+        if (entry.idleTimer) {
+          clearTimeout(entry.idleTimer)
+          entry.idleTimer = null
+        }
         try {
           const videoPath = await entry.session.finish()
+          framesPipeSessions.delete(id)
           return { videoPath }
-        } finally {
-          framesPipeSessions.delete(payload!.id!)
+        } catch (error) {
+          await cleanupPipeSession(id, error instanceof Error ? error : new Error(String(error)))
+          throw error
         }
       }
 
       case 'electron:frames-stream-cancel': {
         const payload = args[0] as { id?: string } | undefined
-        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
-        if (!entry) return null
-        framesPipeSessions.delete(payload!.id!)
-        await entry.session.abort()
-        await fs.promises.rm(entry.dir, { recursive: true, force: true }).catch(() => {})
+        if (payload?.id) {
+          await cleanupPipeSession(payload.id, new Error('Frames stream cancelled'))
+        }
         return null
-      }
-
-      case 'electron:record-finish': {
-        const payload = args[0] as { id?: unknown } | undefined
-        return await recordSessions.finish(payload?.id)
-      }
-
-      case 'electron:record-cancel': {
-        const payload = args[0] as { id?: unknown } | undefined
-        return await recordSessions.cancel(payload?.id)
-      }
-
-      case 'electron:record-mux': {
-        const payload = args[0] as
-          | {
-              id?: unknown
-              audioPath?: unknown
-              outputPath?: unknown
-              audioBitrate?: unknown
-            }
-          | undefined
-        const safePayload = { ...(payload ?? {}) }
-        if (typeof safePayload.audioPath === 'string' && safePayload.audioPath) {
-          safePayload.audioPath = assertContainedPath(
-            safePayload.audioPath,
-            allowedTempRoots,
-            'audioPath'
-          )
-        }
-        if (typeof safePayload.outputPath === 'string' && safePayload.outputPath) {
-          safePayload.outputPath = assertContainedPath(
-            safePayload.outputPath,
-            allowedOutputRoots,
-            'outputPath'
-          )
-        }
-        return await recordSessions.mux(payload?.id, safePayload)
       }
 
       case 'electron:api-export-video-from-files': {
@@ -676,6 +771,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           } else {
             try {
               await fs.promises.unlink(safeVideoPath)
+              const parent = path.dirname(safeVideoPath)
+              if (path.basename(parent).startsWith('mss-fpipe-')) {
+                await fs.promises.rmdir(parent).catch(() => {})
+              }
             } catch {
               /* cleanup */
             }
@@ -833,11 +932,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       }
 
       const onDisconnect = (): void => {
-        if (res.writableFinished || channel !== 'electron:record-chunk') return
+        if (res.writableFinished || channel !== 'electron:frames-stream-chunk') return
         const id = (args[0] as { id?: unknown } | undefined)?.id
-        void recordSessions
-          .cancel(id)
-          .catch((error) => logger.error('[Bridge] record disconnect cleanup failed', error))
+        if (typeof id === 'string' && id) {
+          void cleanupPipeSession(id, new Error('Frames stream chunk request aborted'))
+        }
       }
       req.once('aborted', onDisconnect)
       res.once('close', onDisconnect)
@@ -845,22 +944,19 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         req.off('aborted', onDisconnect)
         res.off('close', onDisconnect)
       }
-      res.once('finish', detach)
-      res.once('close', detach)
       try {
         const result = await handleBinaryInvoke(channel, args, req.body as Buffer)
         if (!res.destroyed) res.json({ ok: true, result })
       } catch (error) {
         logger.error(`[Bridge] bin ${channel} failed`, error)
-        const status =
-          error instanceof RecordSessionError || error instanceof BridgeSecurityError
-            ? error.statusCode
-            : 500
+        const status = error instanceof BridgeSecurityError ? error.statusCode : 500
         if (!res.destroyed)
           res.status(status).json({
             ok: false,
             error: error instanceof Error ? error.message : String(error)
           })
+      } finally {
+        detach()
       }
     }
   )
@@ -871,17 +967,20 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     body: Buffer
   ): Promise<unknown> {
     switch (channel) {
-      case 'electron:record-chunk': {
-        const payload = args[0] as { id?: unknown } | undefined
-        return await recordSessions.append(payload?.id, body)
-      }
-
       case 'electron:frames-stream-chunk': {
         const payload = args[0] as { id?: string } | undefined
-        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
-        if (!entry) throw new Error('Unknown frames stream session')
-        await entry.session.write(body)
-        return null
+        const id = payload?.id
+        const entry = id ? framesPipeSessions.get(id) : undefined
+        if (!entry || !id) throw new Error('Unknown frames stream session')
+        touchPipeIdle(entry)
+        try {
+          await entry.session.write(body)
+          if (framesPipeSessions.has(id)) touchPipeIdle(entry)
+          return null
+        } catch (error) {
+          await cleanupPipeSession(id, error instanceof Error ? error : new Error(String(error)))
+          throw error
+        }
       }
 
       case 'electron:append-to-file': {
@@ -897,7 +996,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         // 避免每块 MP4 数据重复 open/close，结束或空闲超时再 flush/close。
         const payload = args[0] as { filePath: string; position: number }
         const safePath = assertContainedPath(payload?.filePath, allowedTempRoots, 'temp file path')
-        if (typeof payload.position !== 'number' || !Number.isFinite(payload.position) || payload.position < 0) {
+        if (
+          typeof payload.position !== 'number' ||
+          !Number.isFinite(payload.position) ||
+          payload.position < 0
+        ) {
           throw new BridgeSecurityError('Invalid file write position', 400)
         }
         await writeFileAtCached(safePath, payload.position, body)
