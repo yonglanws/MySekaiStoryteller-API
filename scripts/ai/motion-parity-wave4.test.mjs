@@ -928,31 +928,95 @@ test('staged.ts preserves short-line motion, eliminates synthetic 2-beat injecti
     standaloneMotions.every((m) => m.wait === true && m.delay >= 0.25),
     'Standalone Motion cues must wait after closed Talk cleanly'
   )
+  // No standalone Motion may start on an actor whose immediately following Talk (<400ms) acts on the same modelId
+  for (let idx = 0; idx < story.snippets.length - 1; idx++) {
+    const cur = story.snippets[idx]
+    const nxt = story.snippets[idx + 1]
+    if (
+      cur.type === 'Motion' &&
+      cur.data?.motion &&
+      nxt.type === 'Talk' &&
+      (nxt.delay ?? 0) < 0.8
+    ) {
+      const nxtActions = Array.isArray(nxt.data?.actions) ? nxt.data.actions : []
+      const hasImmediateConflict =
+        (nxt.data?.modelId === cur.data.modelId && Boolean(nxt.data?.motion)) ||
+        nxtActions.some(
+          (a) => a.modelId === cur.data.modelId && Boolean(a.motion) && (a.at ?? 0) < 0.35
+        )
+      assert.equal(
+        hasImmediateConflict,
+        false,
+        `Standalone Motion at snippets[${idx}] (modelId=${cur.data.modelId}) must not be interrupted <400ms by next Talk`
+      )
+    }
+  }
 
-  // Verify directed.silentMotion emits a standalone Motion cue AND Talk after partner LayoutAppear avoids repeating appear motion
+  // Verify directed.silentMotion picks an off-turn actor (!== nextTalkSpeaker), AND explicit same-speaker
+  // silentReaction preserves its pose across the next unpaused Talk without immediate body-motion cutoff
   const miniLines = [
     { id: 'l1', speaker: '一歌', content: '咲希，准备好了吗？', emotion: '平静' },
-    { id: 'l2', speaker: '咲希', content: '嗯，交给我吧。', emotion: '开心' }
+    { id: 'l2', speaker: '咲希', content: '嗯，交给我吧。', emotion: '开心' },
+    { id: 'l3', speaker: '一歌', content: '那就开始吧！', emotion: '开心' }
   ]
   const miniDialogue = staged.normalizeDialogue({ title: '测试', lines: miniLines }, plan)
-  const miniDir = staged.normalizeDirection(
+  const miniStaging = staged.normalizeStaging(
     {
-      background: 'bg_room.jpg',
-      lines: [
-        { id: 'l1', motion: 'w-normal-nod01', facial: 'face_normal_01', silentMotion: true },
-        { id: 'l2', motion: 'w-normal-tilthead01', facial: 'face_smile_01' }
+      scenes: [
+        {
+          id: 's1',
+          fromLineId: 'l1',
+          background: 'bg_room.jpg',
+          ambient: 'normal',
+          activeCast: [1, 2]
+        }
+      ],
+      events: [
+        {
+          lineId: 'l2',
+          silentReaction: { speaker: '一歌', motion: 'w-normal-relief01', facial: 'face_smile_01' }
+        }
       ]
     },
     view,
     plan,
     miniDialogue
   )
-  const miniStory = staged.composeStory(view, plan, miniDialogue, miniDir)
+  const miniDir = staged.normalizeDirection(
+    {
+      background: 'bg_room.jpg',
+      lines: [
+        { id: 'l1', motion: 'w-normal-nod01', facial: 'face_normal_01', silentMotion: true },
+        { id: 'l2', motion: 'w-normal-tilthead01', facial: 'face_smile_01' },
+        { id: 'l3', motion: 'w-normal-think01', facial: 'face_smile_01' }
+      ]
+    },
+    view,
+    plan,
+    miniDialogue
+  )
+  const miniStory = staged.composeStory(view, plan, miniDialogue, miniDir, miniStaging)
   const miniAppears = miniStory.snippets.filter((s) => s.type === 'LayoutAppear')
   const miniTalks = miniStory.snippets.filter((s) => s.type === 'Talk')
   const miniMotions = miniStory.snippets.filter((s) => s.type === 'Motion')
-  assert.equal(miniMotions.length, 1, 'directed.silentMotion must emit a standalone Motion snippet')
+  assert.equal(
+    miniMotions.length,
+    2,
+    'Both directed.silentMotion and ev.silentReaction emit Motion snippets'
+  )
   assert.equal(miniTalks[0].data.closeWindowOnFinish, true)
+  assert.notEqual(
+    miniMotions[0].data.modelId,
+    miniTalks[1].data.modelId,
+    'Auto/directed silentMotion must choose off-turn actor rather than immediate next Talk speaker'
+  )
+  assert.equal(
+    miniTalks[2].data.actions?.some(
+      (a) => a.modelId === miniMotions[1].data.modelId && Boolean(a.motion)
+    ),
+    false,
+    'Next unpaused Talk on explicit silentReaction target must not interrupt Motion <400ms'
+  )
   const sakiAppearMotion = miniAppears.find((s) => s.data.modelId === 2)?.data.motion
   const sakiFirstTalkMotion = miniTalks[1].data.actions?.find((a) => a.modelId === 2)?.motion
   assert.notEqual(

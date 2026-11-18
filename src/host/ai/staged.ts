@@ -2945,6 +2945,7 @@ export function composeStory(
   let shakeScreenActive = false
   let lastSpeakerId: number | null = null
   let lastSilentReactionLine = -10
+  let lastSilentReactionTargetId: number | null = null
   let silentReactionsEmitted = 0
   const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
@@ -3745,10 +3746,16 @@ export function composeStory(
       return rawMotion
     }
 
+    const justHadStandaloneMotion =
+      lastSilentReactionTargetId === member.modelId &&
+      index === lastSilentReactionLine + 1 &&
+      (ev?.pauseBefore ?? line.pauseBefore ?? 0) < 0.8
+    const skipImmediateBodyMotion = justAppeared || justHadStandaloneMotion
+
     const actions: JsonRecord[] = []
     if (directed?.beats && directed.beats.length > 0) {
       for (const beat of directed.beats) {
-        const skipMotion = justAppeared && beat.at < 0.35
+        const skipMotion = skipImmediateBodyMotion && beat.at < 0.35
         const motion = skipMotion ? undefined : dedupeFirstSpeakMotion(beat.motion)
         const facial = beat.facial
         if (!motion && !facial) continue
@@ -3760,7 +3767,7 @@ export function composeStory(
         })
       }
     } else if (directed?.motion || directed?.facial) {
-      const motion = justAppeared ? undefined : dedupeFirstSpeakMotion(directed.motion)
+      const motion = skipImmediateBodyMotion ? undefined : dedupeFirstSpeakMotion(directed.motion)
       const facial = directed.facial
       if (motion || facial) {
         actions.push({
@@ -3779,7 +3786,7 @@ export function composeStory(
     if (
       dialogue.lines.length >= 12 &&
       direction.lines.length > 0 &&
-      !justAppeared &&
+      !skipImmediateBodyMotion &&
       !hasSpeakerMotionInLine &&
       actorState &&
       actorState.linesSinceLastBodyMotion >= 2
@@ -3823,7 +3830,12 @@ export function composeStory(
         Boolean(listenerState?.appearedWithMotion) &&
         index === (listenerState?.appearedAtLine ?? -99) &&
         (ev?.pauseBefore ?? 0) === 0
-      const listenerMotion = listenerJustAppeared ? undefined : directed.listener.motion
+      const listenerJustHadStandalone =
+        lastSilentReactionTargetId === directed.listener.modelId &&
+        index === lastSilentReactionLine + 1 &&
+        (ev?.pauseBefore ?? line.pauseBefore ?? 0) < 0.8
+      const listenerMotion =
+        listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
       const listenerFacial = directed.listener.facial
       if (listenerMotion || listenerFacial) {
         actions.push({
@@ -3871,6 +3883,13 @@ export function composeStory(
       actorState.appearedWithMotion = false
     }
 
+    const nextLine = index + 1 < dialogue.lines.length ? dialogue.lines[index + 1] : undefined
+    const nextSpeakerId = nextLine
+      ? (cast.find((c) => c.name === nextLine.speaker)?.modelId ?? null)
+      : null
+    const nextEvent = index + 1 < dialogue.lines.length ? eventByIndex.get(index + 1) : undefined
+    const nextTalkPause = nextEvent?.pauseBefore ?? nextLine?.pauseBefore ?? 0
+
     const explicitSilentReaction = Boolean(ev?.silentReaction || directed?.silentMotion)
     let autoSilentTargetId: number | null = null
     if (
@@ -3883,19 +3902,24 @@ export function composeStory(
       index - lastSilentReactionLine >= 4 &&
       silentReactionsEmitted < Math.max(3, Math.round(dialogue.lines.length * 0.2))
     ) {
-      const nextLine = dialogue.lines[index + 1]
       const turnBoundary = nextLine && nextLine.speaker !== line.speaker
       const pauseOrEllipsis =
         /……|——/.test(line.content) || Boolean(ev?.closeWindowAfter || line.closeWindowAfter)
-      const idlePartner = [...onStage.entries()].find(
+      const eligibleCandidates = [...onStage.entries()].filter(
         ([pid, pst]) =>
-          pid !== member.modelId && index > pst.appearedAtLine && pst.linesSinceLastBodyMotion >= 2
+          index > pst.appearedAtLine && (pid !== nextSpeakerId || nextTalkPause >= 0.8)
       )
+      const idlePartner = eligibleCandidates.find(
+        ([pid, pst]) => pid !== member.modelId && pst.linesSinceLastBodyMotion >= 2
+      )
+      const fallbackOffTurn =
+        eligibleCandidates.find(([pid]) => pid !== member.modelId && pid !== nextSpeakerId) ??
+        eligibleCandidates.find(([pid]) => pid !== nextSpeakerId) ??
+        eligibleCandidates[0]
       if (pauseOrEllipsis || idlePartner || (turnBoundary && index % 5 === 3)) {
-        const candidateId = idlePartner ? idlePartner[0] : member.modelId
-        const candState = onStage.get(candidateId)
-        if (candState && index > candState.appearedAtLine) {
-          autoSilentTargetId = candidateId
+        const picked = idlePartner ?? fallbackOffTurn
+        if (picked) {
+          autoSilentTargetId = picked[0]
         }
       }
     }
@@ -3952,19 +3976,28 @@ export function composeStory(
     }
 
     if (hasSilentAfter) {
+      const offTurnCandidateId =
+        [...onStage.entries()].find(
+          ([id, st]) => id !== nextSpeakerId && id !== member.modelId && index > st.appearedAtLine
+        )?.[0] ??
+        [...onStage.entries()].find(
+          ([id, st]) => id !== nextSpeakerId && index > st.appearedAtLine
+        )?.[0]
       const partnerId = [...onStage.keys()].find((id) => id !== member.modelId)
       const targetId =
         ev?.silentReaction && onStage.has(ev.silentReaction.modelId)
           ? ev.silentReaction.modelId
           : autoSilentTargetId !== null && onStage.has(autoSilentTargetId)
             ? autoSilentTargetId
-            : directed?.silentMotion &&
-                partnerId !== undefined &&
-                index > (onStage.get(partnerId)?.appearedAtLine ?? -1)
-              ? partnerId
-              : onStage.has(member.modelId)
-                ? member.modelId
-                : -1
+            : directed?.silentMotion && offTurnCandidateId !== undefined
+              ? offTurnCandidateId
+              : directed?.silentMotion &&
+                  partnerId !== undefined &&
+                  index > (onStage.get(partnerId)?.appearedAtLine ?? -1)
+                ? partnerId
+                : onStage.has(member.modelId)
+                  ? member.modelId
+                  : -1
       if (targetId !== -1 && onStage.has(targetId)) {
         const targetState = onStage.get(targetId)!
         const motion =
@@ -3997,6 +4030,7 @@ export function composeStory(
           trackActorBodyMotion(targetState, motion)
           if (facial) targetState.lastFacial = facial
           lastSilentReactionLine = index
+          lastSilentReactionTargetId = targetId
           silentReactionsEmitted += 1
         }
       }
