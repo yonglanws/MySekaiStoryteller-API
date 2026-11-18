@@ -1267,7 +1267,7 @@ export default class VideoExportManager {
       // 临时文件兜底清理：未进入宿主收尾时（取消/异常/重试）桥接层不会删除输入；
       // 成功路径下桥接层只删文件不删目录，这里统一 rm -rf 整个 per-export 目录
       // （force 语义：已删除的路径静默跳过）。重试循环每次 attempt 独立目录，同样覆盖。
-      const webmDir = videoFilePath ? videoFilePath.replace(/\/[^/]*$/, '') : null
+      const webmDir = videoFilePath ? videoFilePath.replace(/[\\/][^\\/]*$/, '') : null
       await this.removeTempPaths([webmDir, apiTempFiles.audioPath])
       await concurrentPipeline.dispose()
       audioMuxer.dispose()
@@ -1503,12 +1503,23 @@ export default class VideoExportManager {
       encoder: WebCodecsMp4Encoder | null
       jpegSink: JpegFrameSink | null
       framesDir: string | null
-    } = { encoder: null, jpegSink: null, framesDir: null }
+      tempBaseDir: string | null
+      audioFilePath: string | null
+      pipeTempDir: string | null
+    } = {
+      encoder: null,
+      jpegSink: null,
+      framesDir: null,
+      tempBaseDir: null,
+      audioFilePath: null,
+      pipeTempDir: null
+    }
 
     const createSink = async (): Promise<void> => {
       if (sinks.encoder || sinks.jpegSink) return
       if (useWebCodecs) {
         const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
+        sinks.tempBaseDir = tempDir
         const videoFilePath = `${tempDir}/mss-fast-${Date.now()}.mp4`
         const encoder = new WebCodecsMp4Encoder({
           width: outW,
@@ -1522,12 +1533,14 @@ export default class VideoExportManager {
       } else {
         const dir = (await window.electron.ipcRenderer.invoke('electron:get-temp-dir')) as string
         // 中间帧用高质量 JPEG：块噪声更少，成品码率更低、画质更好；
-        // 帧只临时落盘，不占成品体积
+        // 优先经 image2pipe 流式编码，不支持时回退落盘帧序列
         const jpegSink = new JpegFrameSink({
           width: outW,
           height: outH,
           quality: Math.max(this.getJpegQuality(options.quality), 0.92),
-          framesDir: dir
+          framesDir: dir,
+          fps: encodeFps,
+          crf: options.apiCrf ?? options.crf ?? 23
         })
         await jpegSink.initialize(canvas)
         sinks.jpegSink = jpegSink
@@ -1835,6 +1848,9 @@ export default class VideoExportManager {
         videoFilePath = await sinks.encoder.finish()
       } else {
         videoFilePath = await sinks.jpegSink!.finish()
+        if (sinks.jpegSink!.isPipeMode) {
+          sinks.pipeTempDir = videoFilePath.replace(/[\\/][^\\/]*$/, '')
+        }
       }
       encodeMs = virtualClock.realTimeMs() - encodeStart
 
@@ -1885,6 +1901,7 @@ export default class VideoExportManager {
           prefix: 'mss-audio',
           extension: 'wav'
         })
+        sinks.audioFilePath = audioFilePath ?? null
         audioMs = virtualClock.realTimeMs() - audioStart
       }
 
@@ -1902,7 +1919,7 @@ export default class VideoExportManager {
 
       let saveResult: { success: boolean; error?: string; fileSize?: number }
       const invokeStart = virtualClock.realTimeMs()
-      if (sinks.encoder) {
+      if (sinks.encoder || sinks.jpegSink?.isPipeMode) {
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -1919,7 +1936,9 @@ export default class VideoExportManager {
           audioPath: audioFilePath,
           outputPath,
           fps: encodeFps,
-          audioBitrate
+          audioBitrate,
+          inputWidth: outW,
+          inputHeight: outH
         })
       }
       invokeMs = virtualClock.realTimeMs() - invokeStart
@@ -1991,6 +2010,14 @@ export default class VideoExportManager {
       }
       sinks.encoder?.dispose()
       if (sinks.jpegSink) await sinks.jpegSink.dispose()
+      const framesRootDir =
+        typeof sinks.framesDir === 'string' ? sinks.framesDir.replace(/[\\/]+frames$/, '') : null
+      await this.removeTempPaths([
+        sinks.tempBaseDir,
+        framesRootDir,
+        sinks.audioFilePath,
+        sinks.pipeTempDir
+      ])
       await concurrentPipeline.dispose()
       audioMuxer.dispose()
       this.app.ttsManager?.clearAudioTracks()
@@ -2050,7 +2077,7 @@ export default class VideoExportManager {
     this.logger.info('Validating model rendering output...')
     if (exportStatus) exportStatus.textContent = '正在验证模型渲染...'
 
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    this.app.pixiApplication.render?.()
     const modelValidation = await webGLValidator.validateModelRendering(canvas, 3000)
     if (!modelValidation.success) {
       throw new Error(

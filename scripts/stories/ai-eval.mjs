@@ -99,8 +99,6 @@ function parseArgs(argv) {
   return out
 }
 
-const slug = (value) => value.replace(/[^a-z0-9-]+/gi, '-').replace(/^-|-$/g, '')
-
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const config = loadHostConfig()

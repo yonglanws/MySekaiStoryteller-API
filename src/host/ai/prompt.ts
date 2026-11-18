@@ -225,7 +225,7 @@ function extractQueryKeywords(query: string): string[] {
 
 function stripImageTimeHint(text: string): string {
   return text
-    .replace(/[·\s（(【\[]*(白天|黄昏|傍晚|夜晚|夜间|深夜|通用|室内|室外)[）)】\]]*$/g, '')
+    .replace(/[·\s（(【[]*(白天|黄昏|傍晚|夜晚|夜间|深夜|通用|室内|室外)[）)】\]]*$/g, '')
     .trim()
 }
 

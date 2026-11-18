@@ -1,4 +1,5 @@
 import express, { Router, Request, Response, NextFunction } from 'express'
+import crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
@@ -15,14 +16,114 @@ import {
   apiMuxVideoAudioCopy,
   apiCopyVideo,
   encodeFramesToVideo,
+  createFramesPipeSession,
+  type FramesPipeSession,
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
 interface BridgeDeps {
   logger: Logger<ILogObj>
   config: HostConfig
+  /** Internal session token authenticating RenderPool worker pages & bridge calls. */
+  bridgeToken?: string
+  /** Optional additional writable output directories (for tests / custom roots). */
+  allowedOutputDirs?: string[]
   /** Optional host-only factory/timeout injection for deterministic bridge tests. */
   recordSessionOptions?: RecordSessionOptions
+  /** Optional idle timeout (ms) for cached write-file-at FileHandles. */
+  fileHandleIdleMs?: number
+}
+
+const DEFAULT_FILE_HANDLE_IDLE_MS = 30_000
+const ALLOWED_PROXY_METHODS = new Set(['GET', 'HEAD', 'POST'])
+const SAFE_TEMP_PREFIX_RE = /^[a-zA-Z0-9_-]{1,64}$/
+const SAFE_TEMP_EXT_RE = /^[a-zA-Z0-9]{1,16}$/
+
+export class BridgeSecurityError extends Error {
+  readonly statusCode: number
+  constructor(message: string, statusCode = 403) {
+    super(message)
+    this.name = 'BridgeSecurityError'
+    this.statusCode = statusCode
+  }
+}
+
+function timingSafeTokenEqual(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, 'utf8')
+  const b = Buffer.from(expected, 'utf8')
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
+
+function normalizePathForCompare(target: string): string {
+  return process.platform === 'win32' ? target.toLowerCase() : target
+}
+
+function resolveWithExistingRealpath(targetPath: string): string {
+  const resolved = path.resolve(targetPath)
+  const parts: string[] = []
+  let current = resolved
+  while (true) {
+    try {
+      const real = fs.realpathSync(current)
+      return parts.length ? path.join(real, ...parts.reverse()) : real
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return resolved
+      parts.push(path.basename(current))
+      current = parent
+    }
+  }
+}
+
+function isStrictlyWithinRoot(targetPath: string, rootDir: string): boolean {
+  const rel = path.relative(
+    normalizePathForCompare(rootDir),
+    normalizePathForCompare(targetPath)
+  )
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+function assertContainedPath(targetPath: unknown, allowedRoots: string[], label: string): string {
+  if (typeof targetPath !== 'string' || !targetPath || targetPath.includes('\0')) {
+    throw new BridgeSecurityError(`Invalid ${label}`, 400)
+  }
+  const resolved = resolveWithExistingRealpath(targetPath)
+  if (!allowedRoots.some((root) => isStrictlyWithinRoot(resolved, root))) {
+    throw new BridgeSecurityError(`Path outside allowed workspace/temp root (${label})`, 403)
+  }
+  return resolved
+}
+
+function parseAllowlistedOrigin(rawUrl: string | undefined): { origin: string; basePath: string } | null {
+  if (!rawUrl) return null
+  try {
+    const parsed = new URL(rawUrl)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    const basePath = parsed.pathname.endsWith('/') ? parsed.pathname : `${parsed.pathname}/`
+    return { origin: parsed.origin, basePath }
+  } catch {
+    return null
+  }
+}
+
+function isAllowedProxyTarget(rawUrl: unknown, allowlist: Array<{ origin: string; basePath: string }>): URL | null {
+  if (typeof rawUrl !== 'string' || !rawUrl) return null
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  if (parsed.username || parsed.password) return null
+  for (const entry of allowlist) {
+    if (parsed.origin !== entry.origin) continue
+    if (entry.basePath === '/' || parsed.pathname === entry.basePath.slice(0, -1) || parsed.pathname.startsWith(entry.basePath)) {
+      return parsed
+    }
+  }
+  return null
 }
 
 /** 临时名随机后缀：避免同毫秒并发导出共用同一路径 */
@@ -40,6 +141,163 @@ function randomSuffix(): string {
 export function createBridgeRouter(deps: BridgeDeps): Router {
   const { logger, config } = deps
   const router = Router()
+
+  const allowedTempRoots = Array.from(
+    new Set([resolveWithExistingRealpath(tmpdir()), path.resolve(tmpdir())])
+  )
+  const allowedOutputRoots = Array.from(
+    new Set([
+      ...allowedTempRoots,
+      ...[config.paths?.output, ...(deps.allowedOutputDirs ?? [])]
+        .filter((d): d is string => Boolean(d))
+        .map((d) => resolveWithExistingRealpath(d))
+    ])
+  )
+
+  const ttsAllowlist = [
+    parseAllowlistedOrigin(config.tts?.apiBaseUrl || 'http://127.0.0.1:9880')
+  ].filter((x): x is { origin: string; basePath: string } => x !== null)
+
+  const translationAllowlist = [
+    parseAllowlistedOrigin(config.llm?.enabled !== false ? config.llm?.baseUrl : undefined)
+  ].filter((x): x is { origin: string; basePath: string } => x !== null)
+
+  const fileHandleIdleMs = deps.fileHandleIdleMs ?? DEFAULT_FILE_HANDLE_IDLE_MS
+  interface CachedFileHandleEntry {
+    handle: fs.promises.FileHandle | null
+    tail: Promise<void>
+    idleTimer: ReturnType<typeof setTimeout> | null
+    closed: boolean
+  }
+  const cachedFileHandles = new Map<string, CachedFileHandleEntry>()
+
+  async function closeCachedFileHandle(filePath: string): Promise<void> {
+    const key = normalizePathForCompare(path.resolve(filePath))
+    const entry = cachedFileHandles.get(key)
+    if (!entry) return
+    cachedFileHandles.delete(key)
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer)
+      entry.idleTimer = null
+    }
+    entry.closed = true
+    await entry.tail.catch(() => {})
+    const handle = entry.handle
+    entry.handle = null
+    if (handle) {
+      try {
+        await handle.sync()
+      } catch {
+        /* ignore sync failure on close */
+      }
+      await handle.close().catch(() => {})
+    }
+  }
+
+  async function closeCachedFileHandlesUnder(targetPath: string): Promise<void> {
+    const resolvedTarget = path.resolve(targetPath)
+    const keysToClose: string[] = []
+    for (const key of cachedFileHandles.keys()) {
+      if (
+        key === normalizePathForCompare(resolvedTarget) ||
+        isStrictlyWithinRoot(key, normalizePathForCompare(resolvedTarget))
+      ) {
+        keysToClose.push(key)
+      }
+    }
+    await Promise.all(keysToClose.map((k) => closeCachedFileHandle(k)))
+  }
+
+  async function writeFileAtCached(
+    resolvedPath: string,
+    position: number,
+    body: Buffer
+  ): Promise<void> {
+    const key = normalizePathForCompare(path.resolve(resolvedPath))
+    let entry = cachedFileHandles.get(key)
+    if (!entry || entry.closed) {
+      entry = {
+        handle: null,
+        tail: Promise.resolve(),
+        idleTimer: null,
+        closed: false
+      }
+      cachedFileHandles.set(key, entry)
+    }
+
+    const currentEntry = entry
+    const op = currentEntry.tail.then(async () => {
+      if (currentEntry.closed) {
+        throw new Error('Cached file handle was closed')
+      }
+      if (!currentEntry.handle) {
+        await fs.promises.mkdir(path.dirname(resolvedPath), { recursive: true })
+        currentEntry.handle = await fs.promises.open(resolvedPath, 'r+')
+      }
+      if (currentEntry.idleTimer) {
+        clearTimeout(currentEntry.idleTimer)
+      }
+      currentEntry.idleTimer = setTimeout(() => {
+        void closeCachedFileHandle(resolvedPath)
+      }, fileHandleIdleMs)
+      currentEntry.idleTimer.unref?.()
+
+      await currentEntry.handle.write(body, 0, body.length, position)
+    })
+
+    currentEntry.tail = op.catch(async () => {
+      await closeCachedFileHandle(resolvedPath)
+    })
+
+    await op
+  }
+
+  interface PipeStreamEntry {
+    session: FramesPipeSession
+    dir: string
+    videoPath: string
+  }
+  const framesPipeSessions = new Map<string, PipeStreamEntry>()
+
+  // 桥接安全中间件：剥离全局 CORS、限制同源、验证 RenderPool 会话令牌
+  router.use((req: Request, res: Response, next: NextFunction) => {
+    res.removeHeader('Access-Control-Allow-Origin')
+    res.removeHeader('Access-Control-Allow-Methods')
+    res.removeHeader('Access-Control-Allow-Headers')
+
+    const origin = req.headers.origin
+    if (origin) {
+      let originHost = ''
+      try {
+        originHost = new URL(origin).host
+      } catch {
+        originHost = ''
+      }
+      if (!originHost || !req.headers.host || originHost !== req.headers.host) {
+        res.status(403).json({ ok: false, error: 'Cross-origin bridge requests are forbidden' })
+        return
+      }
+    }
+
+    if (deps.bridgeToken) {
+      const headerToken = req.headers['x-mss-bridge-token']
+      const authHeader = req.headers.authorization
+      const bearerToken =
+        typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+          ? authHeader.slice(7).trim()
+          : ''
+      const queryToken = typeof req.query.token === 'string' ? req.query.token : ''
+      const provided =
+        (typeof headerToken === 'string' ? headerToken : '') || bearerToken || queryToken
+      if (!provided || !timingSafeTokenEqual(provided, deps.bridgeToken)) {
+        res.status(401).json({ ok: false, error: 'Unauthorized bridge request' })
+        return
+      }
+    }
+
+    next()
+  })
+
   const recordSessions = new RecordSessionRegistry(
     {
       width: config.video.width,
@@ -101,8 +359,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       if (!res.destroyed) res.json({ ok: true, result })
     } catch (error) {
       logger.error(`[Bridge] invoke ${channel} failed`, error)
+      const status =
+        error instanceof RecordSessionError || error instanceof BridgeSecurityError
+          ? error.statusCode
+          : 500
       if (!res.destroyed)
-        res.status(error instanceof RecordSessionError ? error.statusCode : 500).json({
+        res.status(status).json({
           ok: false,
           error: error instanceof Error ? error.message : String(error)
         })
@@ -123,11 +385,73 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return baseDir
       }
 
+      case 'electron:close-file-handle': {
+        const payload = args[0] as { filePath?: string } | undefined
+        if (!payload?.filePath) return null
+        const resolved = assertContainedPath(payload.filePath, allowedTempRoots, 'temp file path')
+        await closeCachedFileHandle(resolved)
+        return null
+      }
+
       case 'electron:delete-temp-file': {
-        // 导出失败/取消时的临时文件清理（ENOENT 等错误静默）
+        // 导出失败/取消时的临时文件清理（ENOENT 等错误静默）；仅限 tmpdir 内路径
         const payload = args[0] as { filePath: string }
         if (!payload?.filePath) return null
-        await fs.promises.rm(payload.filePath, { recursive: true, force: true })
+        const resolved = assertContainedPath(payload.filePath, allowedTempRoots, 'temp file path')
+        await closeCachedFileHandlesUnder(resolved)
+        await fs.promises.rm(resolved, { recursive: true, force: true })
+        return null
+      }
+
+      case 'electron:frames-stream-start': {
+        const payload = (args[0] ?? {}) as {
+          fps?: number
+          width?: number
+          height?: number
+          inputWidth?: number
+          inputHeight?: number
+          crf?: number
+        }
+        const fps = Number(payload.fps) > 0 ? Number(payload.fps) : config.video.fps
+        const width = Number(payload.width) > 0 ? Number(payload.width) : config.video.width
+        const height = Number(payload.height) > 0 ? Number(payload.height) : config.video.height
+        const dir = path.join(tmpdir(), `mss-fpipe-${Date.now()}-${randomSuffix()}`)
+        await fs.promises.mkdir(dir, { recursive: true })
+        const videoPath = path.join(dir, 'video.mp4')
+        const id = randomSuffix()
+        const session = await createFramesPipeSession({
+          fps,
+          width,
+          height,
+          inputWidth: payload.inputWidth,
+          inputHeight: payload.inputHeight,
+          crf: payload.crf ?? config.video.crf,
+          encoder: config.video.encoder as VideoEncoderChoice,
+          outputPath: videoPath
+        })
+        framesPipeSessions.set(id, { session, dir, videoPath })
+        return { id, videoPath }
+      }
+
+      case 'electron:frames-stream-finish': {
+        const payload = args[0] as { id?: string } | undefined
+        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
+        if (!entry) throw new Error('Unknown frames stream session')
+        try {
+          const videoPath = await entry.session.finish()
+          return { videoPath }
+        } finally {
+          framesPipeSessions.delete(payload!.id!)
+        }
+      }
+
+      case 'electron:frames-stream-cancel': {
+        const payload = args[0] as { id?: string } | undefined
+        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
+        if (!entry) return null
+        framesPipeSessions.delete(payload!.id!)
+        await entry.session.abort()
+        await fs.promises.rm(entry.dir, { recursive: true, force: true }).catch(() => {})
         return null
       }
 
@@ -150,7 +474,22 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               audioBitrate?: unknown
             }
           | undefined
-        return await recordSessions.mux(payload?.id, payload ?? {})
+        const safePayload = { ...(payload ?? {}) }
+        if (typeof safePayload.audioPath === 'string' && safePayload.audioPath) {
+          safePayload.audioPath = assertContainedPath(
+            safePayload.audioPath,
+            allowedTempRoots,
+            'audioPath'
+          )
+        }
+        if (typeof safePayload.outputPath === 'string' && safePayload.outputPath) {
+          safePayload.outputPath = assertContainedPath(
+            safePayload.outputPath,
+            allowedOutputRoots,
+            'outputPath'
+          )
+        }
+        return await recordSessions.mux(payload?.id, safePayload)
       }
 
       case 'electron:api-export-video-from-files': {
@@ -169,13 +508,24 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           /** 录制时使用的视频码率（bps），用于 ffmpeg 超时/进度估算 */
           recordedBitrate?: number
         }
+        const safeVideoPath = assertContainedPath(payload?.videoPath, allowedTempRoots, 'videoPath')
+        const safeAudioPath = payload?.audioPath
+          ? assertContainedPath(payload.audioPath, allowedTempRoots, 'audioPath')
+          : undefined
+        const safeOutputPath = assertContainedPath(
+          payload?.outputPath,
+          allowedOutputRoots,
+          'outputPath'
+        )
+        await closeCachedFileHandle(safeVideoPath)
+
         logger.info(
-          `[Bridge] API: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
+          `[Bridge] API: videoPath=${safeVideoPath}, audioPath=${safeAudioPath}, outputPath=${safeOutputPath}`
         )
 
         try {
           const channelStart = Date.now()
-          const outputDir = path.dirname(payload.outputPath)
+          const outputDir = path.dirname(safeOutputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
           }
@@ -187,11 +537,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           const inputHeight = payload.inputHeight ?? config.video.height
           const recordedBitrate = payload.recordedBitrate ?? 8_000_000
 
-          if (payload.audioPath && fs.existsSync(payload.audioPath)) {
+          if (safeAudioPath && fs.existsSync(safeAudioPath)) {
             await apiMergeVideoAudioWithCompression(
-              payload.videoPath,
-              payload.audioPath,
-              payload.outputPath,
+              safeVideoPath,
+              safeAudioPath,
+              safeOutputPath,
               payload.crf,
               payload.audioBitrate,
               payload.fps,
@@ -204,8 +554,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             )
           } else {
             await apiConvertVideoWithCompression(
-              payload.videoPath,
-              payload.outputPath,
+              safeVideoPath,
+              safeOutputPath,
               payload.crf,
               payload.fps,
               encoder,
@@ -217,20 +567,20 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             )
           }
 
-          if (!fs.existsSync(payload.outputPath)) {
-            logger.error(`[Bridge] API: Output file NOT found at: ${payload.outputPath}`)
+          if (!fs.existsSync(safeOutputPath)) {
+            logger.error(`[Bridge] API: Output file NOT found at: ${safeOutputPath}`)
             return {
               success: false,
               error: 'Video encoding completed but output file not found'
             }
           }
 
-          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          const outputSize = (await fs.promises.stat(safeOutputPath)).size
           logger.info(
-            `[Bridge] API: Video exported successfully: ${payload.outputPath}, ` +
+            `[Bridge] API: Video exported successfully: ${safeOutputPath}, ` +
               `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
-          return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
+          return { success: true, outputPath: safeOutputPath, fileSize: outputSize }
         } catch (error) {
           logger.error('[Bridge] API: Failed to export video from files', error)
           return {
@@ -239,12 +589,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
         } finally {
           try {
-            if (payload.videoPath) await fs.promises.unlink(payload.videoPath)
+            await fs.promises.unlink(safeVideoPath)
           } catch {
             /* cleanup */
           }
           try {
-            if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+            if (safeAudioPath) await fs.promises.unlink(safeAudioPath)
           } catch {
             /* cleanup */
           }
@@ -261,45 +611,56 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           /** true 时保留输入文件由调用方自行清理（record 会在 finally 中取消 session） */
           keepInputs?: boolean
         }
+        const safeVideoPath = assertContainedPath(payload?.videoPath, allowedTempRoots, 'videoPath')
+        const safeAudioPath = payload?.audioPath
+          ? assertContainedPath(payload.audioPath, allowedTempRoots, 'audioPath')
+          : undefined
+        const safeOutputPath = assertContainedPath(
+          payload?.outputPath,
+          allowedOutputRoots,
+          'outputPath'
+        )
+        await closeCachedFileHandle(safeVideoPath)
+
         logger.info(
-          `[Bridge] API remux: videoPath=${payload.videoPath}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
+          `[Bridge] API remux: videoPath=${safeVideoPath}, audioPath=${safeAudioPath}, outputPath=${safeOutputPath}`
         )
 
         try {
           const channelStart = Date.now()
-          const outputDir = path.dirname(payload.outputPath)
+          const outputDir = path.dirname(safeOutputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
           }
 
-          const hasAudio = !!payload.audioPath && fs.existsSync(payload.audioPath)
+          const hasAudio = !!safeAudioPath && fs.existsSync(safeAudioPath)
           if (hasAudio) {
             await apiMuxVideoAudioCopy(
-              payload.videoPath,
-              payload.audioPath!,
-              payload.outputPath,
+              safeVideoPath,
+              safeAudioPath!,
+              safeOutputPath,
               payload.audioBitrate
             )
           } else {
-            await apiCopyVideo(payload.videoPath, payload.outputPath)
+            await apiCopyVideo(safeVideoPath, safeOutputPath)
           }
 
-          if (!fs.existsSync(payload.outputPath)) {
-            logger.error(`[Bridge] API remux: Output file NOT found at: ${payload.outputPath}`)
+          if (!fs.existsSync(safeOutputPath)) {
+            logger.error(`[Bridge] API remux: Output file NOT found at: ${safeOutputPath}`)
             return {
               success: false,
               error: 'Video remux completed but output file not found'
             }
           }
 
-          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          const outputSize = (await fs.promises.stat(safeOutputPath)).size
           logger.info(
-            `[Bridge] API remux: Video exported successfully: ${payload.outputPath}, ` +
+            `[Bridge] API remux: Video exported successfully: ${safeOutputPath}, ` +
               `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
           return {
             success: true,
-            outputPath: payload.outputPath,
+            outputPath: safeOutputPath,
             fileSize: outputSize,
             sizeCapped: false
           }
@@ -314,12 +675,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             // 输入保留给调用方（失败回退或自行清理）
           } else {
             try {
-              if (payload.videoPath) await fs.promises.unlink(payload.videoPath)
+              await fs.promises.unlink(safeVideoPath)
             } catch {
               /* cleanup */
             }
             try {
-              if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+              if (safeAudioPath) await fs.promises.unlink(safeAudioPath)
             } catch {
               /* cleanup */
             }
@@ -335,60 +696,73 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           outputPath: string
           fps: number
           audioBitrate: string
+          inputWidth?: number
+          inputHeight?: number
         }
+        const safeFramesDir = assertContainedPath(payload?.framesDir, allowedTempRoots, 'framesDir')
+        const safeAudioPath = payload?.audioPath
+          ? assertContainedPath(payload.audioPath, allowedTempRoots, 'audioPath')
+          : undefined
+        const safeOutputPath = assertContainedPath(
+          payload?.outputPath,
+          allowedOutputRoots,
+          'outputPath'
+        )
         logger.info(
-          `[Bridge] API frames-encode: framesDir=${payload.framesDir}, audioPath=${payload.audioPath}, outputPath=${payload.outputPath}`
+          `[Bridge] API frames-encode: framesDir=${safeFramesDir}, audioPath=${safeAudioPath}, outputPath=${safeOutputPath}`
         )
 
         let encoded = false
+        let intermediatePath: string | null = null
         try {
           const channelStart = Date.now()
-          const outputDir = path.dirname(payload.outputPath)
+          const outputDir = path.dirname(safeOutputPath)
           if (!fs.existsSync(outputDir)) {
             await fs.promises.mkdir(outputDir, { recursive: true })
           }
 
           const encoder = config.video.encoder as VideoEncoderChoice
-          const intermediatePath = payload.audioPath
+          const hasAudio = Boolean(safeAudioPath && fs.existsSync(safeAudioPath))
+          intermediatePath = hasAudio
             ? path.join(outputDir, `.mss-frames-video-${Date.now()}-${randomSuffix()}.mp4`)
-            : payload.outputPath
+            : safeOutputPath
 
           await encodeFramesToVideo(
             payload.fps,
-            payload.framesDir,
+            safeFramesDir,
             intermediatePath,
             encoder,
             config.video.width,
             config.video.height,
-            config.video.crf
+            config.video.crf,
+            payload.inputWidth ?? 0,
+            payload.inputHeight ?? 0
           )
 
-          if (payload.audioPath && fs.existsSync(payload.audioPath)) {
+          if (hasAudio && safeAudioPath) {
             await apiMuxVideoAudioCopy(
               intermediatePath,
-              payload.audioPath,
-              payload.outputPath,
+              safeAudioPath,
+              safeOutputPath,
               payload.audioBitrate
             )
           }
 
-          if (!fs.existsSync(payload.outputPath)) {
-            logger.error(
-              `[Bridge] API frames-encode: Output file NOT found at: ${payload.outputPath}`
-            )
+          if (!fs.existsSync(safeOutputPath)) {
+            logger.error(`[Bridge] API frames-encode: Output file NOT found at: ${safeOutputPath}`)
             return {
               success: false,
               error: 'Frame encoding completed but output file not found'
             }
           }
 
-          const outputSize = (await fs.promises.stat(payload.outputPath)).size
+          const outputSize = (await fs.promises.stat(safeOutputPath)).size
           logger.info(
-            `[Bridge] API frames-encode: Video exported successfully: ${payload.outputPath}, ` +
+            `[Bridge] API frames-encode: Video exported successfully: ${safeOutputPath}, ` +
               `size=${(outputSize / 1024 / 1024).toFixed(2)} MB, elapsedMs=${Date.now() - channelStart}`
           )
           encoded = true
-          return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
+          return { success: true, outputPath: safeOutputPath, fileSize: outputSize }
         } catch (error) {
           logger.error('[Bridge] API frames-encode failed', error)
           return {
@@ -396,16 +770,23 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             error: error instanceof Error ? error.message : String(error)
           }
         } finally {
+          if (intermediatePath && intermediatePath !== safeOutputPath) {
+            try {
+              await fs.promises.unlink(intermediatePath)
+            } catch {
+              /* cleanup */
+            }
+          }
           try {
-            if (payload.audioPath) await fs.promises.unlink(payload.audioPath)
+            if (safeAudioPath) await fs.promises.unlink(safeAudioPath)
           } catch {
             /* cleanup */
           }
           // 成片已写出，JPEG 帧序列不再需要；每份 50-400MB，放着会把 /tmp 撑满（6 小时的清扫兜底太慢）。
           if (encoded) {
             try {
-              await fs.promises.rm(payload.framesDir, { recursive: true, force: true })
-              const parent = path.dirname(payload.framesDir)
+              await fs.promises.rm(safeFramesDir, { recursive: true, force: true })
+              const parent = path.dirname(safeFramesDir)
               if (path.basename(parent).startsWith('mss-hf-')) await fs.promises.rmdir(parent)
             } catch {
               /* 目录可能已被清扫或仍被占用 */
@@ -417,8 +798,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       case 'electron:write-frame-batch': {
         // 帧捕获回退路径：批量 base64 帧写盘
         const batch = args[0] as Array<{ path: string; data: string }>
+        const safeBatch = batch.map((item) => ({
+          path: assertContainedPath(item?.path, allowedTempRoots, 'frame path'),
+          data: item.data
+        }))
         await Promise.allSettled(
-          batch.map(async (item) => {
+          safeBatch.map(async (item) => {
             const buffer = Buffer.from(item.data, 'base64')
             await fs.promises.writeFile(item.path, buffer)
           })
@@ -467,8 +852,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         if (!res.destroyed) res.json({ ok: true, result })
       } catch (error) {
         logger.error(`[Bridge] bin ${channel} failed`, error)
+        const status =
+          error instanceof RecordSessionError || error instanceof BridgeSecurityError
+            ? error.statusCode
+            : 500
         if (!res.destroyed)
-          res.status(error instanceof RecordSessionError ? error.statusCode : 500).json({
+          res.status(status).json({
             ok: false,
             error: error instanceof Error ? error.message : String(error)
           })
@@ -487,33 +876,51 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return await recordSessions.append(payload?.id, body)
       }
 
+      case 'electron:frames-stream-chunk': {
+        const payload = args[0] as { id?: string } | undefined
+        const entry = payload?.id ? framesPipeSessions.get(payload.id) : undefined
+        if (!entry) throw new Error('Unknown frames stream session')
+        await entry.session.write(body)
+        return null
+      }
+
       case 'electron:append-to-file': {
         const payload = args[0] as { filePath: string }
-        await fs.promises.appendFile(payload.filePath, body)
+        const safePath = assertContainedPath(payload?.filePath, allowedTempRoots, 'temp file path')
+        await fs.promises.mkdir(path.dirname(safePath), { recursive: true })
+        await fs.promises.appendFile(safePath, body)
         return null
       }
 
       case 'electron:write-file-at': {
-        // mp4-muxer StreamTarget 的定位写：fastStart 需要在文件头部回写 moov
+        // mp4-muxer StreamTarget 的定位写：按活跃导出文件缓存 FileHandle，
+        // 避免每块 MP4 数据重复 open/close，结束或空闲超时再 flush/close。
         const payload = args[0] as { filePath: string; position: number }
-        await fs.promises.mkdir(path.dirname(payload.filePath), { recursive: true })
-        const handle = await fs.promises.open(payload.filePath, 'r+')
-        try {
-          await handle.write(body, 0, body.length, payload.position)
-        } finally {
-          await handle.close()
+        const safePath = assertContainedPath(payload?.filePath, allowedTempRoots, 'temp file path')
+        if (typeof payload.position !== 'number' || !Number.isFinite(payload.position) || payload.position < 0) {
+          throw new BridgeSecurityError('Invalid file write position', 400)
         }
+        await writeFileAtCached(safePath, payload.position, body)
         return null
       }
 
       case 'electron:write-frame': {
         const payload = args[0] as { path: string }
-        await fs.promises.writeFile(payload.path, body)
+        const safePath = assertContainedPath(payload?.path, allowedTempRoots, 'frame path')
+        await fs.promises.writeFile(safePath, body)
         return null
       }
 
       case 'electron:write-temp-file': {
         const payload = args[0] as { prefix: string; extension: string }
+        if (
+          typeof payload?.prefix !== 'string' ||
+          !SAFE_TEMP_PREFIX_RE.test(payload.prefix) ||
+          typeof payload?.extension !== 'string' ||
+          !SAFE_TEMP_EXT_RE.test(payload.extension)
+        ) {
+          throw new BridgeSecurityError('Invalid temp file prefix or extension', 400)
+        }
         const tempPath = path.join(
           tmpdir(),
           `${payload.prefix}-${Date.now()}-${randomSuffix()}.${payload.extension}`
@@ -530,7 +937,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     }
   }
 
-  // ----- 网络代理（与原 tts-fetch / translation-fetch 语义一致） -----
+  // ----- 网络代理（与原 tts-fetch / translation-fetch 语义一致，限制目标白名单） -----
 
   router.post(
     '/proxy/tts-fetch',
@@ -542,17 +949,36 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         headers: Record<string, string>
         body: string
       }
-      logger.info(`[Bridge] TTS proxy: ${payload.method} ${payload.url}`)
+      const targetUrl = isAllowedProxyTarget(payload?.url, ttsAllowlist)
+      if (!targetUrl) {
+        logger.warn(`[Bridge] Blocked TTS proxy target: ${payload?.url}`)
+        res.status(403)
+        res.setHeader('x-mss-status', '0')
+        res.setHeader('x-mss-ok', '0')
+        res.send(Buffer.alloc(0))
+        return
+      }
+      const method = String(payload?.method || 'GET').toUpperCase()
+      if (!ALLOWED_PROXY_METHODS.has(method)) {
+        res.status(405)
+        res.setHeader('x-mss-status', '0')
+        res.setHeader('x-mss-ok', '0')
+        res.send(Buffer.alloc(0))
+        return
+      }
+
+      logger.info(`[Bridge] TTS proxy: ${method} ${targetUrl.href}`)
 
       try {
-        const response = await fetch(payload.url, {
-          method: payload.method,
+        const response = await fetch(targetUrl, {
+          method,
           headers: payload.headers,
+          redirect: 'manual',
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
-          body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined,
+          body: method !== 'GET' && method !== 'HEAD' ? payload.body : undefined,
           // Irodori 在聊天高峰会排队数分钟；代理超时必须跟 tts.timeoutMs 一致，
           // 否则会出现“宿主还没超时、桥接先掐断”的静音/重试行。
-          signal: AbortSignal.timeout(Math.max(120000, config.tts.timeoutMs))
+          signal: AbortSignal.timeout(Math.max(120000, config.tts?.timeoutMs ?? 120000))
         })
         const arrayBuffer = await response.arrayBuffer()
         res.setHeader('x-mss-status', String(response.status))
@@ -577,14 +1003,34 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         headers: Record<string, string>
         body: string
       }
-      logger.info(`[Bridge] Translation proxy: ${payload.method} ${payload.url}`)
+      const targetUrl = isAllowedProxyTarget(payload?.url, translationAllowlist)
+      if (!targetUrl) {
+        logger.warn(`[Bridge] Blocked translation proxy target: ${payload?.url}`)
+        res.status(403)
+        res.setHeader('x-mss-status', '0')
+        res.setHeader('x-mss-ok', '0')
+        res.send('{}')
+        return
+      }
+      const method = String(payload?.method || 'POST').toUpperCase()
+      if (!ALLOWED_PROXY_METHODS.has(method)) {
+        res.status(405)
+        res.setHeader('x-mss-status', '0')
+        res.setHeader('x-mss-ok', '0')
+        res.send('{}')
+        return
+      }
+
+      logger.info(`[Bridge] Translation proxy: ${method} ${targetUrl.href}`)
 
       try {
-        const response = await fetch(payload.url, {
-          method: payload.method,
+        const response = await fetch(targetUrl, {
+          method,
           headers: payload.headers,
+          redirect: 'manual',
           // GET/HEAD 请求不允许携带 body（Node fetch 会直接抛 TypeError）
-          body: payload.method !== 'GET' && payload.method !== 'HEAD' ? payload.body : undefined
+          body: method !== 'GET' && method !== 'HEAD' ? payload.body : undefined,
+          signal: AbortSignal.timeout(Math.max(30_000, config.llm?.timeoutMs ?? 120_000))
         })
         const text = await response.text()
         res.setHeader('x-mss-status', String(response.status))

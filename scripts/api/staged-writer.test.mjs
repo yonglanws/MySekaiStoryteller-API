@@ -527,8 +527,6 @@ test('staged pipeline repairs an empty dialogue pass once', async (t) => {
         return dialogueCalls === 1 ? { lines: [] } : dialogueReply
       case 'staging':
         return stagingReply
-      case 'staging':
-        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':
@@ -576,8 +574,6 @@ test('staged pipeline labels emotions in a separate stable pass', async (t) => {
             { from: 'l3', to: 'l3', emotion: '开心' }
           ]
         }
-      case 'staging':
-        return stagingReply
       case 'direction':
         return directionReply
       case 'translate':

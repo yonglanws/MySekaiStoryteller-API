@@ -89,4 +89,12 @@ export default class EnvironmentLayer extends BaseLayer {
   public async flashbackOut(duration = 100): Promise<void> {
     await this.setFlashback(false, duration)
   }
+
+  public destroy(): void {
+    this.flashbackGen++
+    this.sepiaGen++
+    this.filterSyncCallback = null
+    this.flashbackFilter.destroy()
+    this.sepiaFilter.destroy()
+  }
 }

@@ -4,7 +4,7 @@
  *   node scripts/bench-export.mjs <apiUrl> <story> <label> [timeoutMs]
  * 提交导出，记录墙钟耗时，打印 API 响应（含 phaseTimings）与 ffprobe 摘要。
  */
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import http from 'node:http'

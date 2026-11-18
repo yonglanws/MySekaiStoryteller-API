@@ -26,8 +26,22 @@ export interface WebGLValidationResult {
 
 export class WebGLContextValidator {
   private logger: Logger<ILogObj> = getSubLogger('WebGLContextValidator')
+  private cachedWarmValidation: WebGLValidationResult | null = null
 
   public async validateCanvas(canvas: HTMLCanvasElement): Promise<WebGLValidationResult> {
+    const existingGl =
+      canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ||
+      canvas.getContext('webgl', { preserveDrawingBuffer: true })
+    if (this.cachedWarmValidation && existingGl && !existingGl.isContextLost()) {
+      return {
+        ...this.cachedWarmValidation,
+        contextInfo: {
+          ...this.cachedWarmValidation.contextInfo,
+          isContextLost: false
+        }
+      }
+    }
+
     const result: WebGLValidationResult = {
       success: false,
       webglVersion: null,
@@ -61,6 +75,9 @@ export class WebGLContextValidator {
       result.shaderInfo.programLinked &&
       !result.contextInfo.isContextLost
 
+    if (result.success) {
+      this.cachedWarmValidation = result
+    }
     this.logResult(result)
     return result
   }
@@ -354,17 +371,24 @@ void main() {
     const sampleCount = 5
 
     for (let i = 0; i < sampleCount; i++) {
-      if (performance.now() - startTime > timeoutMs) {
-        this.logger.warn('Model validation timeout')
-        break
+      if (i > 0) {
+        if (performance.now() - startTime > timeoutMs) {
+          this.logger.warn('Model validation timeout')
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100))
       }
-
-      await new Promise((resolve) => setTimeout(resolve, 200))
 
       try {
         const brightness = await this.measureFrameBrightness(canvas)
         samples.push(brightness)
         this.logger.debug(`Frame brightness sample ${i + 1}: ${brightness.toFixed(2)}%`)
+        if (brightness >= 2) {
+          this.logger.info(
+            `Model rendering validation passed: brightness ${brightness.toFixed(2)}%`
+          )
+          return { success: true, averageBrightness: brightness }
+        }
       } catch (e) {
         this.logger.warn('Failed to measure frame brightness:', e)
       }

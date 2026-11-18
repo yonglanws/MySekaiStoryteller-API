@@ -231,6 +231,11 @@ export class WebCodecsMp4Encoder {
     this.muxer = null
 
     await this.writeChain
+    if (this.filePath) {
+      await window.electron.ipcRenderer
+        .invoke('electron:close-file-handle', { filePath: this.filePath })
+        .catch(() => {})
+    }
 
     this.logger.info(`WebCodecs encode finished: ${this.frameCount} frames → ${this.filePath}`)
     return this.filePath
@@ -248,5 +253,10 @@ export class WebCodecsMp4Encoder {
     }
     this.encoder = null
     this.muxer = null
+    if (this.filePath) {
+      void window.electron?.ipcRenderer
+        ?.invoke?.('electron:close-file-handle', { filePath: this.filePath })
+        ?.catch?.(() => {})
+    }
   }
 }

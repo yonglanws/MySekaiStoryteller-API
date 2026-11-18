@@ -23,7 +23,7 @@ export function emotionOfFacial(name) {
 
 const CJK = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]/
 const countChars = (text) =>
-  Array.from(String(text || '').replace(/\s/g, '')).filter((char) => !/[\u0000-\u001f]/.test(char))
+  Array.from(String(text || '').replace(/\s/g, '')).filter((char) => char.charCodeAt(0) >= 0x20)
     .length
 
 /** 粗略成片时长：中文约 5 字/秒，加上每句换气与动作停顿。 */

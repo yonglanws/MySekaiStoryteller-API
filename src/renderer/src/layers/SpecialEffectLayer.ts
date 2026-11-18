@@ -539,4 +539,18 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
     this.activeScenarioEffects.length = 0
   }
+
+  public destroy(): void {
+    this.reset()
+    if (this.tickerAttached) {
+      Ticker.shared.remove(this.stepEffects, this)
+      this.tickerAttached = false
+    }
+    this.filterSyncCallback = null
+    this.cameraBlurFilter.destroy()
+    for (const tex of this.sideFadeTextures.values()) {
+      tex.destroy(true)
+    }
+    this.sideFadeTextures.clear()
+  }
 }

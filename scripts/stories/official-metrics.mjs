@@ -164,16 +164,6 @@ function main() {
   const openingHistogram = {}
   for (const value of firstTwo) openingHistogram[value] = (openingHistogram[value] || 0) + 1
 
-  const actionDistribution = [0, 1, 2, 3, 4, 5].map((count) => ({
-    count,
-    share: Number(
-      (
-        windowSummaries.filter((summary) => summary.acting.speakerActionsMean >= count).length /
-        Math.max(1, windowSummaries.length)
-      ).toFixed(3)
-    )
-  }))
-
   const report = {
     generatedAt: new Date().toISOString(),
     corpus,

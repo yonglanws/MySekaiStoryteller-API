@@ -123,7 +123,7 @@ function makeBodyManager() {
   return manager
 }
 
-test('AdvancedModel records request/loaded/started/interrupted with clip duration', async (t) => {
+test('AdvancedModel records request/loaded/started/interrupted with clip duration', async () => {
   const f = fixture()
   const { default: AdvancedModel } = f.load('model/AdvancedModel.ts')
   const { motionTrace } = f.load('managers/video-export/MotionTraceCollector.ts')

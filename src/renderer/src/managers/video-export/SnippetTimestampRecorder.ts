@@ -183,16 +183,8 @@ export class SnippetTimestampRecorder {
       const ttsDurationMs = ttsResult.durationMs
       const snippetDurationMs = ts.wallDurationMs
 
-      let audioStartMs: number
-      let audioEndMs: number
-
-      if (ttsDurationMs <= snippetDurationMs) {
-        audioStartMs = videoRelativeStart
-        audioEndMs = videoRelativeStart + ttsDurationMs
-      } else {
-        audioStartMs = videoRelativeStart
-        audioEndMs = videoRelativeStart + ttsDurationMs
-      }
+      const audioStartMs = videoRelativeStart
+      const audioEndMs = videoRelativeStart + ttsDurationMs
 
       placements.push({
         audioBuffer: ttsResult.audioBuffer,

@@ -96,7 +96,8 @@ export class RenderPool implements ExportDispatcher {
       get(): {
         models: Array<{ id: number; name: string; shortName?: string }>
       }
-    }
+    },
+    private readonly bridgeToken?: string
   ) {
     this.logger = logger
     this.config = config
@@ -243,10 +244,14 @@ export class RenderPool implements ExportDispatcher {
 
     const readyPromise = this.waitForReady(worker.workerId)
 
-    await page.goto(`http://127.0.0.1:${this.config.server.port}/?worker=${worker.workerId}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    })
+    const tokenQuery = this.bridgeToken ? `&token=${encodeURIComponent(this.bridgeToken)}` : ''
+    await page.goto(
+      `http://127.0.0.1:${this.config.server.port}/?worker=${worker.workerId}${tokenQuery}`,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000
+      }
+    )
 
     await readyPromise
     await this.probeWebGL(worker)

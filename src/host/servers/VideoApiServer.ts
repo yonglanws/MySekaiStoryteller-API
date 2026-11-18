@@ -262,7 +262,7 @@ export class VideoApiServer {
         const ext = path.extname(file).toLowerCase()
         if (!CLEANUP_EXTENSIONS.has(ext)) continue
 
-        const taskId = file.replace(/\.[^.]+$/, '')
+        const taskId = file.replace(/\..+$/, '')
         if (this.activeExports.has(taskId)) {
           skipped++
           continue
@@ -506,22 +506,53 @@ export class VideoApiServer {
     this.app.get('/api/v1/download/:filename', (req: Request, res: Response) => {
       const filename = req.params.filename as string
 
-      if (!filename || filename.includes('..') || filename.includes('/')) {
+      if (
+        !filename ||
+        filename.includes('..') ||
+        filename.includes('/') ||
+        filename.includes('\\') ||
+        filename.includes('\0') ||
+        path.basename(filename) !== filename
+      ) {
         res.status(400).json({ error: 'Invalid filename' })
         return
       }
 
-      const filePath = path.join(this.outputDir, filename)
-      if (!fs.existsSync(filePath)) {
-        this.logger.error(`[API] Download requested but file not found: ${filePath}`)
-        res.status(404).json({ error: 'File not found', path: filePath })
+      const resolvedOutputDir = path.resolve(this.outputDir)
+      const filePath = path.resolve(resolvedOutputDir, filename)
+      if (!filePath.startsWith(resolvedOutputDir + path.sep)) {
+        res.status(400).json({ error: 'Invalid filename' })
         return
       }
 
-      const stats = fs.statSync(filePath)
+      let stats: fs.Stats
+      try {
+        stats = fs.statSync(filePath)
+      } catch {
+        this.logger.error(`[API] Download requested but file not found: ${filePath}`)
+        res.status(404).json({ error: 'File not found' })
+        return
+      }
+      if (!stats.isFile()) {
+        res.status(404).json({ error: 'File not found' })
+        return
+      }
+
+      const ext = path.extname(filename).toLowerCase()
+      const contentType =
+        ext === '.mp4'
+          ? 'video/mp4'
+          : ext === '.json'
+            ? 'application/json; charset=utf-8'
+            : ext === '.log' || ext === '.txt'
+              ? 'text/plain; charset=utf-8'
+              : ext === '.webm'
+                ? 'video/webm'
+                : 'application/octet-stream'
+
       this.logger.info(`[API] Downloading file: ${filePath}, size=${stats.size} bytes`)
 
-      res.setHeader('Content-Type', 'video/mp4')
+      res.setHeader('Content-Type', contentType)
       res.setHeader('Content-Length', stats.size)
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
       res.setHeader('Cache-Control', 'no-cache')

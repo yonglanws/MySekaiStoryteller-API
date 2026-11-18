@@ -8,6 +8,7 @@ export default tseslint.config([
       '**/dist',
       '**/out',
       '**/out-host',
+      'apifile/**',
       'src/renderer/public/live2d.min.js',
       'src/renderer/public/live2dcubismcore.min.js'
     ]
@@ -22,8 +23,24 @@ export default tseslint.config([
     }
   },
   {
+    // 测试桩常见空方法（如 noop logger），放开空函数规则
+    files: ['scripts/**/*.test.mjs', 'scripts/**/*.test.js'],
     rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }]
+      '@typescript-eslint/no-empty-function': 'off'
+    }
+  },
+  {
+    rules: {
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+          ignoreRestSiblings: true
+        }
+      ]
     }
   }
 ])

@@ -133,7 +133,6 @@ test('breath has a 3s cycle and 0.5 influence', () => {
 })
 
 test('official lip curve thresholds, clamps and smoothing', () => {
-  const natural = loadNatural()
   const timing = (() => {
     const context = vm.createContext({ console })
     const modules = new Map()

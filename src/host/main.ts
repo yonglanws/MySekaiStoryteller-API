@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ILogObj, Logger } from 'tslog'
@@ -82,11 +83,17 @@ async function bootstrap(): Promise<void> {
     `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder} (detected: ${detectedEncoder})`
   )
 
-  const hub = new WsHub(logger, {
-    onWorkerReady: (workerId) => pool.handleWorkerReady(workerId),
-    onWorkerMessage: (workerId, message) => pool.handleWorkerMessage(workerId, message),
-    onWorkerDisconnected: (workerId) => pool.handleWorkerDisconnected(workerId)
-  })
+  const bridgeToken = crypto.randomBytes(32).toString('hex')
+
+  const hub = new WsHub(
+    logger,
+    {
+      onWorkerReady: (workerId) => pool.handleWorkerReady(workerId),
+      onWorkerMessage: (workerId, message) => pool.handleWorkerMessage(workerId, message),
+      onWorkerDisconnected: (workerId) => pool.handleWorkerDisconnected(workerId)
+    },
+    bridgeToken
+  )
 
   const cloudCatalog = new CloudCatalogService(logger, config.assets, {
     ttlMs: Math.max(1, config.assets.cloudCatalogTtlHours) * 60 * 60 * 1000
@@ -124,7 +131,7 @@ async function bootstrap(): Promise<void> {
   // GSV 的权重是服务端全局状态：所有渲染 worker 的「切权重 + 合成」必须串行
   const ttsLease = new TtsLeaseManager(logger)
 
-  const pool = new RenderPool(logger, config, hub, resourceCatalog)
+  const pool = new RenderPool(logger, config, hub, resourceCatalog, bridgeToken)
 
   const apiServer = new VideoApiServer(logger, {
     port: config.server.port,
@@ -156,7 +163,7 @@ async function bootstrap(): Promise<void> {
       }
     },
     registerExtraRoutes: (app) => {
-      app.use('/bridge', createBridgeRouter({ logger, config }))
+      app.use('/bridge', createBridgeRouter({ logger, config, bridgeToken }))
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
       // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 60 秒）。
       app.get('/api/v1/resources', async (_req, res) => {

@@ -69,7 +69,7 @@ export async function checkFFmpegAvailableWithVersion(): Promise<{
   version?: string
 }> {
   return new Promise((resolve) => {
-    execFile(ffmpegPath(), ['-version'], { timeout: 5000 }, (error, stdout) => {
+    execFile(ffmpegPath(), ['-version'], { timeout: 5000, windowsHide: true }, (error, stdout) => {
       if (error) {
         resolve({ available: false })
       } else {
@@ -93,16 +93,125 @@ export type GpuRenderer = 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu'
  */
 export type VideoEncoderChoice = GpuRenderer | 'libx264'
 
-/** 编码器探测结果缓存：ffmpeg -encoders 每次导出只需跑一次 */
+const STDERR_LIMIT = 16 * 1024
+const SMOKE_PROBE_TIMEOUT_MS = 10_000
+
+/** 编码器探测结果缓存：按 binary+encoder 缓存真实 1 帧冒烟编码结果 */
+const gpuSmokeCache = new Map<string, Promise<boolean>>()
 let cachedEncoderChoice: 'nvidia' | 'amd' | 'intel' | 'cpu' | null = null
+let cachedEncoderBinary: string | null = null
 
 /** 已缓存探测结果时同步返回（health 上报用）；未探测过返回 null */
 export function getCachedGpuEncoder(): 'nvidia' | 'amd' | 'intel' | 'cpu' | null {
   return cachedEncoderChoice
 }
 
+/** 测试或运行时回退时清空/失效失败的 GPU 编码器缓存 */
+export function invalidateGpuEncoder(
+  encoder: 'nvidia' | 'amd' | 'intel',
+  binary: string = ffmpegPath()
+): void {
+  gpuSmokeCache.set(`${binary}\0${encoder}`, Promise.resolve(false))
+  if (cachedEncoderChoice === encoder) {
+    cachedEncoderChoice = null
+  }
+}
+
+export function resetGpuEncoderCache(): void {
+  gpuSmokeCache.clear()
+  cachedEncoderChoice = null
+  cachedEncoderBinary = null
+}
+
+function gpuNameFromCodec(codec: string): 'nvidia' | 'amd' | 'intel' | null {
+  if (codec === 'h264_nvenc') return 'nvidia'
+  if (codec === 'h264_amf') return 'amd'
+  if (codec === 'h264_qsv') return 'intel'
+  return null
+}
+
+function runSmokeProbe(binary: string, encoder: 'nvidia' | 'amd' | 'intel'): Promise<boolean> {
+  const key = `${binary}\0${encoder}`
+  const existing = gpuSmokeCache.get(key)
+  if (existing) return existing
+
+  const encArgs = getGpuEncoderArgs(encoder, 23)
+  const probeArgs = [
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-nostats',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=size=640x360:rate=30',
+    '-frames:v',
+    '1',
+    '-c:v',
+    encArgs.codec,
+    '-preset',
+    encArgs.preset,
+    '-pix_fmt',
+    encArgs.pixFmt,
+    ...encArgs.args,
+    '-f',
+    'null',
+    '-'
+  ]
+
+  const promise = new Promise<boolean>((resolve) => {
+    let settled = false
+    const child = spawn(binary, probeArgs, {
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe']
+    })
+    let stderr = ''
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true
+        child.kill('SIGKILL')
+        resolve(false)
+      }
+    }, SMOKE_PROBE_TIMEOUT_MS)
+    timer.unref?.()
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString()).slice(-STDERR_LIMIT)
+    })
+
+    child.once('close', (code) => {
+      clearTimeout(timer)
+      if (settled) return
+      settled = true
+      if (code === 0) {
+        resolve(true)
+      } else {
+        if (stderr.trim()) {
+          logger.debug(`GPU smoke probe failed for ${encArgs.codec}: ${stderr.trim()}`)
+        }
+        resolve(false)
+      }
+    })
+
+    child.once('error', () => {
+      clearTimeout(timer)
+      if (!settled) {
+        settled = true
+        resolve(false)
+      }
+    })
+  })
+
+  gpuSmokeCache.set(key, promise)
+  return promise
+}
+
 export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'intel' | 'cpu'> {
-  if (cachedEncoderChoice) return cachedEncoderChoice
+  const binary = ffmpegPath()
+  if (cachedEncoderChoice && cachedEncoderBinary === binary) {
+    return cachedEncoderChoice
+  }
 
   const gpuEncoders = [
     { name: 'nvidia', codec: 'h264_nvenc' },
@@ -112,32 +221,11 @@ export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'i
 
   for (const encoder of gpuEncoders) {
     try {
-      const result = await new Promise<boolean>((resolve) => {
-        const testProcess = spawn(ffmpegPath(), ['-hide_banner', '-encoders'])
-        let outputData = ''
-
-        testProcess.stdout?.on('data', (data) => {
-          outputData += data.toString()
-        })
-
-        testProcess.stderr?.on('data', (data) => {
-          outputData += data.toString()
-        })
-
-        testProcess.on('close', (code) => {
-          if (code === 0 && outputData.includes(encoder.codec)) {
-            resolve(true)
-          } else {
-            resolve(false)
-          }
-        })
-
-        testProcess.on('error', () => resolve(false))
-      })
-
-      if (result) {
-        logger.info(`Detected GPU encoder: ${encoder.codec} (${encoder.name})`)
+      const ok = await runSmokeProbe(binary, encoder.name)
+      if (ok) {
+        logger.info(`Detected GPU encoder (smoke probe OK): ${encoder.codec} (${encoder.name})`)
         cachedEncoderChoice = encoder.name
+        cachedEncoderBinary = binary
         return encoder.name
       }
     } catch {
@@ -145,8 +233,9 @@ export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'i
     }
   }
 
-  logger.info('No GPU encoder detected, falling back to CPU encoding')
+  logger.info('No working GPU encoder detected, falling back to CPU encoding')
   cachedEncoderChoice = 'cpu'
+  cachedEncoderBinary = binary
   return 'cpu'
 }
 
@@ -178,12 +267,13 @@ export function getGpuEncoderArgs(
         needsQsvInit: false
       }
     case 'intel':
+      // 系统内存输入下 QSV 自行初始化编码设备，无需 hw_upload / -init_hw_device
       return {
         codec: 'h264_qsv',
         preset: 'medium',
         pixFmt: 'nv12',
         args: ['-global_quality', String(crf)],
-        needsQsvInit: true
+        needsQsvInit: false
       }
     case 'cpu':
       return {
@@ -273,7 +363,9 @@ function spawnFfmpegOnce(
   onProgress?: (percent: number, message: string) => void
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const ffmpegProcess: ChildProcess = spawn(ffmpegPath(), ffmpegArgs)
+    const ffmpegProcess: ChildProcess = spawn(ffmpegPath(), ffmpegArgs, {
+      windowsHide: true
+    })
 
     let stderrData = ''
     let settled = false
@@ -287,9 +379,10 @@ function spawnFfmpegOnce(
     }, timeoutMs)
 
     ffmpegProcess.stderr?.on('data', (data) => {
-      stderrData += data.toString()
-      const progressMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/)
-      if (progressMatch) {
+      const text = data.toString()
+      stderrData = (stderrData + text).slice(-STDERR_LIMIT)
+      const progressMatch = text.match(/time=(\d{2}):(\d{2}):(\d{2})/)
+      if (progressMatch && totalDuration > 0) {
         const hours = parseInt(progressMatch[1])
         const minutes = parseInt(progressMatch[2])
         const seconds = parseInt(progressMatch[3])
@@ -335,14 +428,13 @@ function outputScaleFilter(width: number, height: number): string {
  * 解析收尾转码的缩放滤镜：
  * - 输入与输出完全一致（renderScale=1.0 时画布即输出分辨率）→ 返回 null，
  *   连 -vf 都不挂。恒等缩放仍要付出完整一遍 解码→缩放→编码 的成本。
- * - QSV 需要 hwupload 滤镜链把帧送显存，恒等输入也保留滤镜（由调用方处理）。
  */
-function resolveOutputScaleFilter(
+export function resolveOutputScaleFilter(
   inputWidth: number,
   inputHeight: number,
   outputWidth: number,
   outputHeight: number,
-  needsQsvInit: boolean
+  _needsQsvInit = false
 ): { filter: string | null; skip: boolean } {
   const identity =
     inputWidth === outputWidth &&
@@ -350,7 +442,7 @@ function resolveOutputScaleFilter(
     inputWidth % 2 === 0 &&
     inputHeight % 2 === 0
 
-  if (identity && !needsQsvInit) {
+  if (identity) {
     return { filter: null, skip: true }
   }
   return { filter: outputScaleFilter(outputWidth, outputHeight), skip: false }
@@ -382,8 +474,7 @@ export async function apiConvertVideoWithCompression(
     inputWidth,
     inputHeight,
     width,
-    height,
-    encoderArgs.needsQsvInit
+    height
   )
   if (skipScale) {
     logger.info(
@@ -391,13 +482,9 @@ export async function apiConvertVideoWithCompression(
     )
   }
 
-  const qsvInitArgs = encoderArgs.needsQsvInit
-    ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
-    : []
-  const vfArgs = scale ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`] : []
+  const vfArgs = scale ? ['-vf', scale] : []
 
   const ffmpegArgs = [
-    ...qsvInitArgs,
     '-i',
     inputPath,
     ...vfArgs,
@@ -450,6 +537,8 @@ export async function apiConvertVideoWithCompression(
       ]
       await runFfmpegWithProgress(fallbackArgs, estimatedDuration)
     } else {
+      const failedGpu = gpuNameFromCodec(encoderArgs.codec)
+      if (failedGpu) invalidateGpuEncoder(failedGpu)
       logger.warn(
         `API video conversion failed with ${encoderArgs.codec}, falling back to CPU:`,
         error
@@ -498,8 +587,7 @@ export async function apiMergeVideoAudioWithCompression(
     inputWidth,
     inputHeight,
     width,
-    height,
-    encoderArgs.needsQsvInit
+    height
   )
   if (skipScale) {
     logger.info(
@@ -507,13 +595,9 @@ export async function apiMergeVideoAudioWithCompression(
     )
   }
 
-  const qsvInitArgs = encoderArgs.needsQsvInit
-    ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
-    : []
-  const vfArgs = scale ? ['-vf', `${encoderArgs.needsQsvInit ? 'hw_upload,' : ''}${scale}`] : []
+  const vfArgs = scale ? ['-vf', scale] : []
 
   const ffmpegArgs = [
-    ...qsvInitArgs,
     '-i',
     videoPath,
     '-i',
@@ -582,6 +666,8 @@ export async function apiMergeVideoAudioWithCompression(
       ]
       await runFfmpegWithProgress(fallbackArgs, estimatedDuration)
     } else {
+      const failedGpu = gpuNameFromCodec(encoderArgs.codec)
+      if (failedGpu) invalidateGpuEncoder(failedGpu)
       logger.warn(`API merge failed with ${encoderArgs.codec}, falling back to CPU:`, error)
       await apiMergeVideoAudioWithCompression(
         videoPath,
@@ -773,6 +859,7 @@ export async function apiEncodeVideoAudioToBitrate(
       await runFfmpegWithProgress(build(gpu, bps, peak), Math.max(durationSec, 10))
     } catch (error) {
       if (gpu === 'cpu') throw error
+      invalidateGpuEncoder(gpu)
       logger.warn(`Size-capped re-encode failed with ${gpu}, falling back to libx264:`, error)
       gpu = 'cpu'
       await runFfmpegWithProgress(build(gpu, bps, peak), Math.max(durationSec, 10))
@@ -800,28 +887,28 @@ export async function encodeFramesToVideo(
   encoder: VideoEncoderChoice = 'auto',
   width: number,
   height: number,
-  crf: number = 23
+  crf: number = 23,
+  inputWidth: number = 0,
+  inputHeight: number = 0
 ): Promise<void> {
+  const entries = await fs.promises.readdir(framesDir)
+  const sampleFiles = entries.filter((f) => f.startsWith('frame-'))
   let framePattern = 'frame-%06d.png'
-  const sampleFiles = fs.readdirSync(framesDir).filter((f) => f.startsWith('frame-'))
   if (sampleFiles.some((f) => f.endsWith('.jpg') || f.endsWith('.jpeg'))) {
     framePattern = 'frame-%06d.jpg'
   }
+  const estimatedDuration = Math.max(sampleFiles.length / Math.max(1, fps), 10)
 
   const encoderArgs = await resolveVideoEncoderArgs(encoder, crf)
-  const qsvInitArgs = encoderArgs.needsQsvInit
-    ? ['-init_hw_device', 'qsv=hw', '-filter_hw_device', 'hw']
-    : []
-  const qsvVfPrefix = encoderArgs.needsQsvInit ? 'hw_upload,' : ''
+  const { filter: scale } = resolveOutputScaleFilter(inputWidth, inputHeight, width, height)
+  const vfArgs = scale ? ['-vf', scale] : []
 
   const ffmpegArgs = [
-    ...qsvInitArgs,
     '-framerate',
     String(fps),
     '-i',
-    framesDir + '/' + framePattern,
-    '-vf',
-    `${qsvVfPrefix}${outputScaleFilter(width, height)}`,
+    `${framesDir}/${framePattern}`,
+    ...vfArgs,
     '-c:v',
     encoderArgs.codec,
     '-preset',
@@ -835,6 +922,215 @@ export async function encodeFramesToVideo(
     outputPath
   ]
 
-  // 帧数未知，用保守估计值驱动进度/超时
-  await runFfmpegWithProgress(ffmpegArgs, 60)
+  try {
+    await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
+  } catch (error) {
+    const failedGpu = gpuNameFromCodec(encoderArgs.codec)
+    if (failedGpu) {
+      invalidateGpuEncoder(failedGpu)
+      logger.warn(`Frame encoding failed with ${encoderArgs.codec}, falling back to libx264:`, error)
+      await encodeFramesToVideo(
+        fps,
+        framesDir,
+        outputPath,
+        'libx264',
+        width,
+        height,
+        crf,
+        inputWidth,
+        inputHeight
+      )
+      return
+    }
+    throw error
+  }
+}
+
+export interface FramesPipeSessionOptions {
+  fps: number
+  width: number
+  height: number
+  inputWidth?: number
+  inputHeight?: number
+  crf?: number
+  encoder?: VideoEncoderChoice
+  outputPath: string
+}
+
+/**
+ * 流式 MJPEG image2pipe 编码会话：
+ * 直接把浏览器拍出的 JPEG 帧通过 stdin 喂给 FFmpeg 编码成 MP4，
+ * 省去成千上万个临时 JPEG 写盘与二次扫描。
+ */
+export class FramesPipeSession {
+  readonly outputPath: string
+  private readonly child: ChildProcess
+  private readonly done: Promise<void>
+  private readonly encoderCodec: string
+  private stderr = ''
+  private error: Error | null = null
+  private settled = false
+  private eofSent = false
+  private idleTimer: ReturnType<typeof setTimeout> | null = null
+  private finishTimer: ReturnType<typeof setTimeout> | null = null
+  private queue: Promise<void> = Promise.resolve()
+
+  private constructor(child: ChildProcess, outputPath: string, encoderCodec: string) {
+    this.child = child
+    this.outputPath = outputPath
+    this.encoderCodec = encoderCodec
+    this.done = new Promise<void>((resolve, reject) => {
+      this.child.stdin?.on('error', (err) => {
+        this.error ??= err
+      })
+      this.child.stderr?.on('data', (chunk: Buffer) => {
+        this.stderr = (this.stderr + chunk.toString()).slice(-STDERR_LIMIT)
+      })
+      this.child.once('error', (err) => {
+        this.error ??= err
+      })
+      this.child.once('close', (code, signal) => {
+        this.clearTimers()
+        if (this.settled) return
+        this.settled = true
+        if (code === 0 && this.eofSent && !this.error) {
+          resolve()
+          return
+        }
+        const gpu = gpuNameFromCodec(this.encoderCodec)
+        if (gpu) invalidateGpuEncoder(gpu)
+        const baseMsg =
+          this.error?.message ??
+          (code !== 0
+            ? `FFmpeg image2pipe exited with code ${code} (${signal ?? 'no signal'})`
+            : 'FFmpeg image2pipe closed before EOF')
+        reject(new Error(`${baseMsg}\n${this.stderr}`))
+      })
+    })
+    void this.done.catch(() => {})
+    this.touchIdle()
+  }
+
+  static async create(options: FramesPipeSessionOptions): Promise<FramesPipeSession> {
+    const crf = options.crf ?? 23
+    const encoderArgs = await resolveVideoEncoderArgs(options.encoder ?? 'auto', crf)
+    const inputW = options.inputWidth ?? options.width
+    const inputH = options.inputHeight ?? options.height
+    const { filter: scale } = resolveOutputScaleFilter(
+      inputW,
+      inputH,
+      options.width,
+      options.height
+    )
+
+    const args = [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'warning',
+      '-nostats',
+      '-y',
+      '-f',
+      'image2pipe',
+      '-vcodec',
+      'mjpeg',
+      '-framerate',
+      String(options.fps),
+      '-i',
+      'pipe:0',
+      ...(scale ? ['-vf', scale] : []),
+      '-c:v',
+      encoderArgs.codec,
+      '-preset',
+      encoderArgs.preset,
+      '-pix_fmt',
+      encoderArgs.pixFmt,
+      ...encoderArgs.args,
+      '-movflags',
+      '+faststart',
+      options.outputPath
+    ]
+
+    const child = spawn(ffmpegPath(), args, {
+      windowsHide: true,
+      stdio: ['pipe', 'ignore', 'pipe']
+    })
+    return new FramesPipeSession(child, options.outputPath, encoderArgs.codec)
+  }
+
+  private clearTimers(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer)
+      this.idleTimer = null
+    }
+    if (this.finishTimer) {
+      clearTimeout(this.finishTimer)
+      this.finishTimer = null
+    }
+  }
+
+  private touchIdle(): void {
+    if (this.settled) return
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = setTimeout(() => {
+      void this.abort(new Error('FFmpeg image2pipe idle timeout'))
+    }, 120_000)
+    this.idleTimer.unref?.()
+  }
+
+  write(chunk: Buffer): Promise<void> {
+    const task = this.queue.then(async () => {
+      if (this.settled) throw this.error ?? new Error('FFmpeg image2pipe closed')
+      if (this.error) throw this.error
+      if (!chunk.length) return
+      this.touchIdle()
+      await new Promise<void>((resolve, reject) => {
+        const stdin = this.child.stdin
+        if (!stdin || stdin.destroyed) {
+          reject(this.error ?? new Error('FFmpeg image2pipe stdin unavailable'))
+          return
+        }
+        stdin.write(chunk, (err) => {
+          if (err) reject(err)
+          else resolve()
+        })
+      })
+    })
+    this.queue = task.catch((err) => {
+      this.error ??= err instanceof Error ? err : new Error(String(err))
+    })
+    return task
+  }
+
+  async finish(timeoutMs = 300_000): Promise<string> {
+    await this.queue
+    if (this.error) throw this.error
+    if (!this.settled) {
+      this.eofSent = true
+      this.finishTimer = setTimeout(() => {
+        void this.abort(new Error('FFmpeg image2pipe finish timeout'))
+      }, timeoutMs)
+      this.finishTimer.unref?.()
+      this.child.stdin?.end()
+    }
+    await this.done
+    return this.outputPath
+  }
+
+  async abort(reason = new Error('FFmpeg image2pipe cancelled')): Promise<void> {
+    this.error ??= reason
+    this.clearTimers()
+    if (!this.settled) {
+      this.child.stdin?.destroy()
+      this.child.kill('SIGKILL')
+    }
+    await this.done.catch(() => {})
+    await fs.promises.rm(this.outputPath, { force: true }).catch(() => {})
+  }
+}
+
+export function createFramesPipeSession(
+  options: FramesPipeSessionOptions
+): Promise<FramesPipeSession> {
+  return FramesPipeSession.create(options)
 }

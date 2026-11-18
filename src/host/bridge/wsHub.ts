@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
@@ -28,14 +29,26 @@ export class WsHub {
   private readonly connections = new Map<string, WorkerConnection>()
   private wss: WebSocketServer | null = null
   private events: WsHubEvents
+  private readonly bridgeToken?: string
 
-  constructor(logger: Logger<ILogObj>, events: WsHubEvents) {
+  constructor(logger: Logger<ILogObj>, events: WsHubEvents, bridgeToken?: string) {
     this.logger = logger
     this.events = events
+    this.bridgeToken = bridgeToken
   }
 
   get connectedWorkerIds(): string[] {
     return Array.from(this.connections.keys())
+  }
+
+  private isAuthorizedUpgrade(request: IncomingMessage, url: URL): boolean {
+    if (!this.bridgeToken) return true
+    const headerToken = request.headers['x-mss-bridge-token']
+    const queryToken = url.searchParams.get('token')
+    const provided = (typeof headerToken === 'string' ? headerToken : '') || queryToken || ''
+    const a = Buffer.from(provided, 'utf8')
+    const b = Buffer.from(this.bridgeToken, 'utf8')
+    return a.length === b.length && crypto.timingSafeEqual(a, b)
   }
 
   attach(httpServer: {
@@ -47,6 +60,12 @@ export class WsHub {
       const request = req as IncomingMessage
       const url = new URL(request.url || '/', 'http://localhost')
       if (url.pathname !== '/bridge/ws') {
+        return
+      }
+      if (!this.isAuthorizedUpgrade(request, url)) {
+        const netSocket = socket as Duplex
+        netSocket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+        netSocket.destroy()
         return
       }
       this.wss?.handleUpgrade(request, socket as Duplex, head as Buffer, (ws) => {

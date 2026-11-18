@@ -119,4 +119,11 @@ export default class BackgroundLayer extends BaseLayer {
     this.fadeSprite.visible = false
     this.fadeSprite.alpha = 0
   }
+
+  public destroy(): void {
+    this.blurGeneration++
+    this.changeGeneration++
+    this.layerContainer.filters = null
+    this.blurFilter.destroy()
+  }
 }

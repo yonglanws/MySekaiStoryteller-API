@@ -17,6 +17,10 @@ const JSON_INVOKE_CHANNELS = new Set([
   'electron:record-finish',
   'electron:record-mux',
   'electron:record-cancel',
+  'electron:frames-stream-start',
+  'electron:frames-stream-finish',
+  'electron:frames-stream-cancel',
+  'electron:close-file-handle',
   'electron:get-temp-dir',
   'electron:get-temp-base-dir',
   'electron:delete-temp-file',
@@ -27,12 +31,19 @@ const JSON_INVOKE_CHANNELS = new Set([
 
 const BINARY_INVOKE_CHANNELS = new Set([
   'electron:record-chunk',
+  'electron:frames-stream-chunk',
   'electron:append-to-file',
   'electron:write-file-at',
   'electron:write-frame',
   'electron:write-frame-batch',
   'electron:write-temp-file'
 ])
+
+let bridgeToken: string | null = null
+
+function bridgeHeaders(base: Record<string, string>): Record<string, string> {
+  return bridgeToken ? { ...base, 'x-mss-bridge-token': bridgeToken } : base
+}
 
 function encodeChannel(channel: string): string {
   return encodeURIComponent(channel)
@@ -41,7 +52,7 @@ function encodeChannel(channel: string): string {
 async function invokeJson(channel: string, args: unknown[]): Promise<unknown> {
   const res = await fetch(`/bridge/invoke/${encodeChannel(channel)}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: bridgeHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(args)
   })
   const data = (await res.json()) as { ok: boolean; result?: unknown; error?: string }
@@ -93,7 +104,7 @@ async function invokeBinary(channel: string, args: unknown[]): Promise<unknown> 
     binary instanceof Uint8Array ? (binary.slice().buffer as ArrayBuffer) : binary
   const res = await fetch(`/bridge/bin/${encodeChannel(channel)}?args=${metaParam}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/octet-stream' },
+    headers: bridgeHeaders({ 'content-type': 'application/octet-stream' }),
     body
   })
   const data = (await res.json()) as { ok: boolean; result?: unknown; error?: string }
@@ -138,7 +149,7 @@ async function proxyFetch(
     }
     const res = await fetch(path, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: bridgeHeaders({ 'content-type': 'application/json' }),
       body: JSON.stringify({ url, method, headers, body })
     })
     const status = Number(res.headers.get('x-mss-status') ?? res.status)
@@ -171,9 +182,14 @@ function wsSend(message: { type: string; args: unknown[] }): void {
 function connectWs(): Promise<void> {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // 渲染池通过页面 URL 的 ?worker=<id> 标识工作进程，需透传给 WS
-    const workerParam = new URLSearchParams(location.search).get('worker')
-    const workerQuery = workerParam ? `?worker=${encodeURIComponent(workerParam)}` : ''
+    // 渲染池通过页面 URL 的 ?worker=<id>&token=<tok> 标识工作进程，需透传给 WS
+    const search = new URLSearchParams(location.search)
+    const workerParam = search.get('worker')
+    const wsParams = new URLSearchParams()
+    if (workerParam) wsParams.set('worker', workerParam)
+    if (bridgeToken) wsParams.set('token', bridgeToken)
+    const queryStr = wsParams.toString()
+    const workerQuery = queryStr ? `?${queryStr}` : ''
     const socket = new WebSocket(`${proto}//${location.host}/bridge/ws${workerQuery}`)
 
     socket.onopen = () => {
@@ -231,6 +247,7 @@ function send(channel: string, ...args: unknown[]): void {
 // ---------------------------------------------------------------------------
 
 export function installBrowserBridge(): Promise<void> {
+  bridgeToken = new URLSearchParams(location.search).get('token')
   ;(globalThis as unknown as Record<string, unknown>).__apiOnlyMode = true
   ;(globalThis as unknown as Record<string, unknown>).__hostMode = 'web'
   ;(window as unknown as Record<string, unknown>).electron = {

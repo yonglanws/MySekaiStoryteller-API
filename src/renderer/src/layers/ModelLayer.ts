@@ -47,12 +47,11 @@ export default class ModelLayer extends BaseLayer {
   public setAmbientColor(mode: 'normal' | 'evening' | 'night'): void {
     this.ambientMode = mode
     if (mode === 'normal') {
-      this.ambientFilter = null
       this.layerContainer.filters = null
       return
     }
     const [r, g, b] = mode === 'evening' ? MODEL_COLOR_EVENING : MODEL_COLOR_NIGHT
-    const filter = new ColorMatrixFilter()
+    const filter = this.ambientFilter ?? new ColorMatrixFilter()
     filter.matrix = [r, 0, 0, 0, 0, 0, g, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, 1, 0]
     this.ambientFilter = filter
     this.layerContainer.filters = [filter]
@@ -180,6 +179,12 @@ export default class ModelLayer extends BaseLayer {
       Ticker.shared.remove(prev.tickerFn)
     }
     this.characterShaders.delete(modelId)
+    const model = this.getModelById(modelId)
+    if (model && !model.destroyed && model.getCharacterShaderFilter() === prev.filter) {
+      model.setCharacterShaderFilter(null)
+    } else {
+      prev.filter.destroy()
+    }
   }
 
   /** 官方 `EffectType 22 AttachCharacterShader`: 全息扫描线 / 监视器 / 角色模糊 / 清除。 */
@@ -189,21 +194,36 @@ export default class ModelLayer extends BaseLayer {
     level = 1.5
   ): void {
     const model = this.getModelById(modelId)
-    this.clearShaderEntry(modelId)
-    if (!model || model.destroyed) return
+    if (!model || model.destroyed) {
+      this.clearShaderEntry(modelId)
+      return
+    }
 
     if (shader === 'none') {
+      this.clearShaderEntry(modelId)
       model.setCharacterShaderFilter(null)
       model.visualEffectManager?.disable('hologram')
       return
     }
 
+    const existing = this.characterShaders.get(modelId)
     if (shader === 'blur') {
+      if (
+        existing?.kind === 'blur' &&
+        existing.filter instanceof Live2DBlurFilter &&
+        model.getCharacterShaderFilter() === existing.filter
+      ) {
+        existing.filter.level = level
+        return
+      }
+      this.clearShaderEntry(modelId)
       const blurFilter = new Live2DBlurFilter(level)
       this.characterShaders.set(modelId, { kind: 'blur', filter: blurFilter })
       model.setCharacterShaderFilter(blurFilter)
       return
     }
+
+    this.clearShaderEntry(modelId)
 
     const isMonitor = shader === 'monitor'
     const holoFilter = new Live2DHologramShaderFilter({
@@ -351,5 +371,14 @@ export default class ModelLayer extends BaseLayer {
       filter.matrix = [cr, 0, 0, 0, 0, 0, cg, 0, 0, 0, 0, 0, cb, 0, 0, 0, 0, 0, 1, 0]
     }, durationMs)
     this.setAmbientColor(mode)
+  }
+
+  public destroy(): void {
+    this.clearAllShaders()
+    this.layerContainer.filters = null
+    if (this.ambientFilter) {
+      this.ambientFilter.destroy()
+      this.ambientFilter = null
+    }
   }
 }

@@ -175,6 +175,7 @@ export class App {
     if (this.pixiApplication) {
       try {
         Ticker.shared.stop()
+        this.disposeLayers()
         resetInappTextureCache()
         // Do NOT destroy shared base/global textures (Texture.WHITE / imported SVGs) across worker reuse
         this.pixiApplication.destroy(true, {
@@ -260,6 +261,13 @@ export class App {
     preloadCommonInappTextures()
 
     this.logger.info('Preloaded story assets')
+  }
+
+  private disposeLayers(): void {
+    this.layerBackground?.destroy?.()
+    this.layerModel?.destroy?.()
+    this.layerEnvironment?.destroy?.()
+    this.layerSpecialEffect?.destroy?.()
   }
 
   private syncScenarioFilters(): void {
@@ -645,13 +653,13 @@ export class App {
 
     await this.initializeManagers(storyData)
     this.initializeRenderer(videoConfig.renderScale, true, videoConfig.width, videoConfig.height)
-    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
 
     await this.preloadStoryAssets()
     this.initializeLayers()
     this.layerUI.setWatermarkVisible(videoConfig.watermark !== false)
     this.layerUI.setWatermarkText(videoConfig.watermarkText ?? '')
-    await new Promise<void>((resolve) => setTimeout(resolve, 100))
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
 
     this.videoExportManager = new VideoExportManager(this)
 
