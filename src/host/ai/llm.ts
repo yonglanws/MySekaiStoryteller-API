@@ -25,6 +25,12 @@ export interface ChatResult {
   model: string
   usage: ChatUsage | null
   latencyMs: number
+  finishReason?: string
+}
+
+export interface ExtractJsonContext {
+  finishReason?: string
+  maxTokens?: number
 }
 
 export class LlmError extends Error {
@@ -48,9 +54,13 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * 兼容 ```json 代码块、前后解释文字和 BOM；对象与数组都支持。
  * 用括号配对扫描而不是贪婪正则，避免把解释里的 `}` 吃进来。
  */
-export function extractJson(text: string): unknown {
+export function extractJson(text: string, context?: ExtractJsonContext): unknown {
+  const lengthSuffix =
+    context?.finishReason === 'length'
+      ? ` (finish_reason=length; output truncated at max_tokens=${context.maxTokens ?? 'unknown'} before complete JSON)`
+      : ''
   const cleaned = text.replace(/^\uFEFF/, '').trim()
-  if (!cleaned) throw new Error('empty model response')
+  if (!cleaned) throw new Error(`empty model response${lengthSuffix}`)
 
   const fenced = /```(?:json|JSON)?\s*([\s\S]*?)```/.exec(cleaned)
   const body = (fenced ? fenced[1] : cleaned).trim()
@@ -60,7 +70,9 @@ export function extractJson(text: string): unknown {
   let start = -1
   let open = ''
   let close = ''
-  if (startObject === -1 && startArray === -1) throw new Error('no JSON value in model response')
+  if (startObject === -1 && startArray === -1) {
+    throw new Error(`no JSON value in model response${lengthSuffix}`)
+  }
   if (startObject === -1) {
     start = startArray
     open = '['
@@ -102,12 +114,12 @@ export function extractJson(text: string): unknown {
         try {
           return JSON.parse(candidate)
         } catch (error) {
-          throw new Error(`invalid JSON in model response: ${String(error)}`)
+          throw new Error(`invalid JSON in model response${lengthSuffix}: ${String(error)}`)
         }
       }
     }
   }
-  throw new Error('unterminated JSON in model response')
+  throw new Error(`unterminated JSON in model response${lengthSuffix}`)
 }
 
 interface ChatCompletionResponse {
@@ -233,9 +245,24 @@ export class LlmClient {
           } catch (error) {
             throw new LlmError(`${url}: invalid JSON response: ${String(error)}`, null, true)
           }
-          const content = parsed.choices?.[0]?.message?.content
+          const maxTokens = options.maxTokens ?? this.config.maxTokens
+          const choice = parsed.choices?.[0]
+          const finishReason = choice?.finish_reason
+          const content = choice?.message?.content
           if (typeof content !== 'string' || content.trim().length === 0) {
+            if (finishReason === 'length') {
+              throw new LlmError(
+                `${url}: empty choice content (finish_reason=length; output truncated at max_tokens=${maxTokens} before JSON/text output)`,
+                null,
+                false
+              )
+            }
             throw new LlmError(`${url}: empty choice content`, null, true)
+          }
+          if (finishReason === 'length') {
+            this.logger.warn(
+              `[AI] LLM ${parsed.model ?? this.config.model} truncated with finish_reason=length (max_tokens=${maxTokens})`
+            )
           }
           const latencyMs = Date.now() - startedAt
           const usage = parsed.usage
@@ -253,7 +280,8 @@ export class LlmClient {
             content,
             model: parsed.model ?? this.config.model,
             usage,
-            latencyMs
+            latencyMs,
+            ...(finishReason ? { finishReason } : {})
           }
         }
       } catch (error) {
@@ -284,9 +312,10 @@ export class LlmClient {
     options: ChatOptions = {}
   ): Promise<{ data: T; result: ChatResult }> {
     const result = await this.chat(messages, { ...options, json: true })
+    const maxTokens = options.maxTokens ?? this.config.maxTokens
     let data: T
     try {
-      data = extractJson(result.content) as T
+      data = extractJson(result.content, { finishReason: result.finishReason, maxTokens }) as T
     } catch (error) {
       throw new LlmError(
         `LLM returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,

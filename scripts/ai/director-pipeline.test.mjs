@@ -1017,3 +1017,158 @@ test('Wave 5: opening/mid-scene curtain fences, post-Talk WaitFinished cues, day
   // Punctuation-only Talk clears punctuation-only ttsText
   assert.equal(snippets[l2TalkIdx].data.ttsText, '')
 })
+
+test('Wave 5 regression: post-silent and tense-preceded 平静 beats never fall back to face_smile_*', () => {
+  const { CatalogView } = promptMod
+  const view = new CatalogView({
+    models: [
+      {
+        id: 2321,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal01-default', 'w-normal01-nod', 'w-happy14-lookaway', 'w-normal17-fidget'],
+        facials: [
+          'face_smile_01',
+          'face_smile_02',
+          'face_normal_01',
+          'face_closeeye_01',
+          'face_serious_01',
+          'face_trouble_01',
+          'face_trouble_02',
+          'face_worry_01',
+          'face_sad_01',
+          'face_smallmouth_01'
+        ],
+        defaultMotion: 'w-normal01-default',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 2305,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal01-default', 'w-normal01-nod', 'w-normal16-angry', 'w-normal03-forward'],
+        facials: [
+          'face_smile_01',
+          'face_normal_01',
+          'face_angry_01',
+          'face_serious_01',
+          'face_serious_02',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_closeeye_01'
+        ],
+        defaultMotion: 'w-normal01-default',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg', 'bg_classroom.jpg'],
+    imageDetails: [
+      { file: 'bg_rooftop.jpg', name: '天台', timeOfDay: '白天', indoor: '室外', description: '天台' },
+      { file: 'bg_classroom.jpg', name: '教室', timeOfDay: '夜晚', indoor: '室内', description: '夜晚教室' }
+    ],
+    voices: [],
+    bgm: ['bgm00018.mp3', 'bgm00027.mp3'],
+    bgmDetails: [
+      { file: 'bgm00018.mp3', name: '日常', description: '日常' },
+      { file: 'bgm00027.mp3', name: '对峙', description: '紧张对峙' }
+    ]
+  })
+
+  const plan = staged.fallbackCastPlan(view, {
+    scene: '绘名生气地质问瑞希，瑞希沉默后进入回忆，之后重归于好',
+    personas: [],
+    targetMinutes: 2
+  })
+  const lines = [
+    { id: 'l1', speaker: '瑞希', content: '今天天气真不错呀♪', emotion: '开心', sceneId: 's1' },
+    { id: 'l2', speaker: '绘名', content: '别在那里笑着敷衍我了！', emotion: '生气', sceneId: 's1' },
+    { id: 'l3', speaker: '绘名', content: '你到底在顾虑什么？', emotion: '生气', sceneId: 's1' },
+    { id: 'l4', speaker: '瑞希', content: '（……糟糕。）', emotion: '平静', sceneId: 's1' },
+    {
+      id: 'l5',
+      speaker: '瑞希',
+      content: '…………',
+      emotion: '平静',
+      sceneId: 's1',
+      closeWindowAfter: true
+    },
+    { id: 'l6', speaker: '绘名', content: '——呐，瑞希。', emotion: '平静', sceneId: 's2' },
+    { id: 'l7', speaker: '瑞希', content: '……抱歉，绘名。', emotion: '伤心', sceneId: 's2' },
+    { id: 'l8', speaker: '瑞希', content: '总觉得自己快跟不上大家了。', emotion: '伤心', sceneId: 's2' },
+    { id: 'l9', speaker: '绘名', content: '笨蛋。', emotion: '平静', sceneId: 's3' },
+    { id: 'l10', speaker: '瑞希', content: '以后也会一起画下去哦♪', emotion: '开心', sceneId: 's3' },
+    { id: 'l11', speaker: '绘名', content: '一言为定。', emotion: '开心', sceneId: 's3' },
+    { id: 'l12', speaker: '瑞希', content: '那我们走吧～♪', emotion: '开心', sceneId: 's3' }
+  ]
+  const dialogue = { title: '天台对峙', lines }
+  const staging = staged.normalizeStaging(
+    {
+      scenes: [
+        { id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'normal', activeCast: [2321, 2305] },
+        { id: 's2', fromLineId: 'l6', background: 'bg_classroom.jpg', ambient: 'night', transitionIn: 'flashback', isFlashback: true, activeCast: [2321, 2305] },
+        { id: 's3', fromLineId: 'l9', background: 'bg_rooftop.jpg', ambient: 'normal', transitionIn: 'sideFade', activeCast: [2321, 2305] }
+      ],
+      events: [{ lineId: 'l5', closeWindowAfter: true, silentReaction: { modelId: 2321 } }]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const direction = staged.normalizeDirection(
+    {
+      background: 'bg_rooftop.jpg',
+      lines: [
+        { id: 'l1', facial: 'face_smile_01' },
+        { id: 'l2', motion: 'w-normal16-angry', facial: 'face_angry_01' },
+        { id: 'l3', motion: 'w-normal03-forward', facial: 'face_serious_02' },
+        // Deliberately test both LLM slip (face_smile_01 on silent/tense line) and silentMotion fallback
+        { id: 'l4', facial: 'face_smile_01' },
+        { id: 'l5', motion: 'w-happy14-lookaway', facial: 'face_closeeye_01', silentMotion: true },
+        { id: 'l6', motion: 'w-normal01-nod', facial: 'face_serious_01' },
+        { id: 'l7', facial: 'face_sad_01' },
+        { id: 'l8', facial: 'face_worry_01' },
+        { id: 'l9', facial: 'face_closeeye_01' },
+        { id: 'l10', facial: 'face_smile_01' },
+        { id: 'l11', facial: 'face_smile_01' },
+        { id: 'l12', facial: 'face_smile_02' }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+
+  const story = staged.composeStory(view, plan, dialogue, direction, staging)
+  const l4Idx = story.snippets.findIndex((s) => s.type === 'Talk' && s.data.content === '（……糟糕。）')
+  const l5Idx = story.snippets.findIndex((s) => s.type === 'Talk' && s.data.content === '…………')
+  assert.ok(l4Idx >= 0 && l5Idx > l4Idx)
+
+  const l4Talk = story.snippets[l4Idx]
+  const l4Facials = (l4Talk.data.actions ?? []).map((a) => a.facial).filter(Boolean)
+  assert.ok(
+    l4Facials.every((f) => !/smile|smug|wink|sparkling/i.test(f)),
+    `tense-preceded line l4 must not use smile facial, got: ${l4Facials.join(', ')}`
+  )
+
+  const l5Talk = story.snippets[l5Idx]
+  const l5Facials = (l5Talk.data.actions ?? []).map((a) => a.facial).filter(Boolean)
+  assert.ok(
+    l5Facials.every((f) => !/smile|smug|wink|sparkling/i.test(f)),
+    `silent pause l5 must not use smile facial, got: ${l5Facials.join(', ')}`
+  )
+
+  const postSilentMotion = story.snippets[l5Idx + 1]
+  assert.equal(postSilentMotion?.type, 'Motion', 'expected silent reaction Motion right after l5')
+  assert.ok(
+    !/smile|smug|wink|sparkling/i.test(postSilentMotion.data.facial || ''),
+    `post-silent Motion [47] must NOT assign face_smile_* after tense beat, got: ${postSilentMotion.data.facial}`
+  )
+
+  // Genuine cheerful lines at opening & epilogue still preserve smile
+  const l1Talk = story.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('♪'))
+  assert.equal(l1Talk.data.actions[0].facial, 'face_smile_01')
+  const l10Talk = story.snippets.find((s) => s.type === 'Talk' && s.data.content === '以后也会一起画下去哦♪')
+  assert.equal(l10Talk.data.actions[0].facial, 'face_smile_01')
+})

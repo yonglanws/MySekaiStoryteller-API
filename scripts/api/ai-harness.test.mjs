@@ -440,3 +440,86 @@ test('single story pipeline also casts before building the prompt', async (t) =>
   assert.ok(main.user.length + main.system.length < 30000)
   assert.equal(result.meta.pipeline, 'single')
 })
+
+test('LlmClient and StoryWriter surface finish_reason=length when output is truncated before JSON', async (t) => {
+  let replyPayload = { content: '', finish_reason: 'length' }
+  const server = http.createServer(async (req, res) => {
+    for await (const _chunk of req) {
+      /* drain */
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify({
+        model: 'mock-reasoning',
+        choices: [
+          {
+            message: { content: replyPayload.content },
+            finish_reason: replyPayload.finish_reason
+          }
+        ],
+        usage: { prompt_tokens: 100, completion_tokens: 8192, total_tokens: 8292 }
+      })
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`
+  const settings = {
+    enabled: true,
+    baseUrl,
+    apiKeyEnv: 'MSS_TEST_AI_HARNESS_KEY',
+    model: 'mock-reasoning',
+    temperature: 0.8,
+    maxTokens: 8192,
+    timeoutMs: 10_000,
+    retries: 0,
+    repairRounds: 0,
+    pipeline: 'single',
+    jsonMode: 'off',
+    translateForTts: false,
+    targetMinutes: 3,
+    systemPrompt: '',
+    personaDirs: [],
+    personas: []
+  }
+  process.env.MSS_TEST_AI_HARNESS_KEY = 'test-key'
+  const client = new LlmClient(settings, new Logger({ type: 'hidden' }))
+
+  // 1) Empty content + finish_reason=length
+  replyPayload = { content: '', finish_reason: 'length' }
+  await assert.rejects(
+    client.chatJson([{ role: 'user', content: 'hi' }]),
+    /finish_reason=length/
+  )
+
+  // 2) Reasoning prose with no JSON + finish_reason=length
+  replyPayload = { content: 'Let me think step by step about the dialogue...', finish_reason: 'length' }
+  await assert.rejects(
+    client.chatJson([{ role: 'user', content: 'hi' }]),
+    /no JSON value in model response \(finish_reason=length; output truncated at max_tokens=8192/
+  )
+
+  // 3) Truncated/unterminated JSON + finish_reason=length
+  replyPayload = { content: '{"snippets": [{"type": "Talk"', finish_reason: 'length' }
+  await assert.rejects(
+    client.chatJson([{ role: 'user', content: 'hi' }]),
+    /unterminated JSON in model response \(finish_reason=length; output truncated at max_tokens=8192/
+  )
+
+  // 4) StoryWriter.generate surfaces finish_reason=length in StoryGenerationError.details
+  replyPayload = { content: 'Still thinking without emitting JSON', finish_reason: 'length' }
+  const writer = makeWriter(baseUrl, { model: 'mock-reasoning', maxTokens: 8192, repairRounds: 0 })
+  await assert.rejects(
+    writer.generate({ pipeline: 'single', cast: ['1'], prompt: '天台聊天' }),
+    (err) => {
+      assert.ok(Array.isArray(err.details))
+      assert.ok(
+        err.details.some((d) => d.includes('finish_reason=length')),
+        `expected finish_reason=length in details, got: ${JSON.stringify(err.details)}`
+      )
+      return true
+    }
+  )
+})

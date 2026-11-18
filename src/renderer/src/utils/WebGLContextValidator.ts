@@ -368,6 +368,7 @@ void main() {
   ): Promise<{ success: boolean; averageBrightness: number }> {
     const startTime = performance.now()
     const samples: number[] = []
+    let anyHasContent = false
     const sampleCount = 5
 
     for (let i = 0; i < sampleCount; i++) {
@@ -380,14 +381,17 @@ void main() {
       }
 
       try {
-        const brightness = await this.measureFrameBrightness(canvas)
-        samples.push(brightness)
-        this.logger.debug(`Frame brightness sample ${i + 1}: ${brightness.toFixed(2)}%`)
-        if (brightness >= 2) {
+        const sample = await this.measureFrameSample(canvas)
+        samples.push(sample.averageBrightness)
+        if (sample.hasContent) anyHasContent = true
+        this.logger.debug(
+          `Frame brightness sample ${i + 1}: ${sample.averageBrightness.toFixed(2)}% (hasContent=${sample.hasContent})`
+        )
+        if (sample.averageBrightness >= 2 || sample.hasContent) {
           this.logger.info(
-            `Model rendering validation passed: brightness ${brightness.toFixed(2)}%`
+            `Model rendering validation passed: brightness ${sample.averageBrightness.toFixed(2)}%`
           )
-          return { success: true, averageBrightness: brightness }
+          return { success: true, averageBrightness: sample.averageBrightness }
         }
       } catch (e) {
         this.logger.warn('Failed to measure frame brightness:', e)
@@ -400,7 +404,7 @@ void main() {
 
     const averageBrightness = samples.reduce((a, b) => a + b, 0) / samples.length
 
-    const isBlackScreen = averageBrightness < 2
+    const isBlackScreen = averageBrightness < 2 && !anyHasContent
     if (isBlackScreen) {
       this.logger.error(
         `Model rendering validation failed: average brightness ${averageBrightness.toFixed(2)}% is too low (black screen detected)`
@@ -414,35 +418,63 @@ void main() {
     return { success: !isBlackScreen, averageBrightness }
   }
 
-  private async measureFrameBrightness(canvas: HTMLCanvasElement): Promise<number> {
+  private async measureFrameSample(
+    canvas: HTMLCanvasElement
+  ): Promise<{ averageBrightness: number; hasContent: boolean }> {
     const gl = canvas.getContext('webgl2') || canvas.getContext('webgl')
     if (!gl || gl.isContextLost()) {
       throw new Error('WebGL context not available')
     }
 
-    const width = Math.min(canvas.width, 128)
-    const height = Math.min(canvas.height, 128)
-    const pixels = new Uint8Array(width * height * 4)
+    const width = canvas.width
+    const height = canvas.height
+    if (width <= 0 || height <= 0) {
+      return { averageBrightness: 0, hasContent: false }
+    }
 
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+    const tileSize = Math.max(1, Math.min(64, width, height))
+    const fractions = [0.1, 0.5, 0.9]
+    const offsets = (total: number): number[] =>
+      fractions.map((fraction) =>
+        Math.max(0, Math.min(total - tileSize, Math.round(total * fraction - tileSize / 2)))
+      )
+    const tileXs = offsets(width)
+    const tileYs = offsets(height)
+    const pixels = new Uint8Array(tileSize * tileSize * 4)
+    const step = Math.max(1, Math.min(4, tileSize))
 
     let totalBrightness = 0
     let pixelCount = 0
+    let hasContent = false
 
-    for (let i = 0; i < pixels.length; i += 4) {
-      const r = pixels[i]
-      const g = pixels[i + 1]
-      const b = pixels[i + 2]
-      const a = pixels[i + 3]
+    for (const tileY of tileYs) {
+      for (const tileX of tileXs) {
+        gl.readPixels(tileX, tileY, tileSize, tileSize, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+        for (let y = 0; y < tileSize; y += step) {
+          for (let x = 0; x < tileSize; x += step) {
+            const idx = (y * tileSize + x) * 4
+            const r = pixels[idx]
+            const g = pixels[idx + 1]
+            const b = pixels[idx + 2]
+            const a = pixels[idx + 3]
 
-      if (a > 0) {
-        const brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
-        totalBrightness += brightness
-        pixelCount++
+            if (a > 10) {
+              const brightness = (r * 0.299 + g * 0.587 + b * 0.114) / 255
+              totalBrightness += brightness
+              pixelCount++
+              if (brightness > 0.05) {
+                hasContent = true
+              }
+            }
+          }
+        }
       }
     }
 
-    return pixelCount > 0 ? (totalBrightness / pixelCount) * 100 : 0
+    return {
+      averageBrightness: pixelCount > 0 ? (totalBrightness / pixelCount) * 100 : 0,
+      hasContent
+    }
   }
 
   private logResult(result: WebGLValidationResult): void {

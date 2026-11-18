@@ -366,7 +366,10 @@ export class StoryWriter {
 
       let parsed: unknown
       try {
-        parsed = extractJson(result.content)
+        parsed = extractJson(result.content, {
+          finishReason: result.finishReason,
+          maxTokens: this.settings.maxTokens
+        })
       } catch (error) {
         const message = errorMessage(error)
         details.push(message)
@@ -485,11 +488,17 @@ export class StoryWriter {
       }
     }
 
+    const parseStageJson = (result: ChatResult): unknown =>
+      extractJson(result.content, {
+        finishReason: result.finishReason,
+        maxTokens: this.settings.maxTokens
+      })
+
     // ---- 1. 选角与微事件 -----------------------------------------------------------------------------------
     let plan: StagedCastPlan | null = null
     try {
       const result = await runStage('cast', buildCastPrompt(view, promptOptions))
-      plan = normalizeCastPlan(extractJson(result.content), view, promptOptions)
+      plan = normalizeCastPlan(parseStageJson(result), view, promptOptions)
       if (!plan) {
         markStageFailed('没有返回目录中的角色')
         warnings.push('选角结果没有可用角色，已按目录顺序回退')
@@ -512,7 +521,7 @@ export class StoryWriter {
       const result = await runStage('dialogue', buildDialoguePrompt(view, plan, promptOptions))
       dialogueRaw = result.content
       dialogue = normalizeDialogue(
-        extractJson(result.content),
+        parseStageJson(result),
         plan,
         Math.max(12, Math.round(targetMinutes * 18)),
         this.emotionLabels
@@ -534,7 +543,7 @@ export class StoryWriter {
           buildDialogueRepairPrompt(view, plan, promptOptions, dialogueRaw)
         )
         dialogue = normalizeDialogue(
-          extractJson(repair.content),
+          parseStageJson(repair),
           plan,
           Math.max(12, Math.round(targetMinutes * 18)),
           this.emotionLabels
@@ -585,7 +594,7 @@ export class StoryWriter {
           )
         )
         const expandedDialogue = normalizeDialogue(
-          extractJson(expanded.content),
+          parseStageJson(expanded),
           plan,
           Math.max(12, Math.round(targetMinutes * 18)),
           this.emotionLabels
@@ -668,7 +677,7 @@ export class StoryWriter {
         )
         emotionRaw = result.content
         emotionPlan = normalizeEmotionPlan(
-          extractJson(result.content),
+          parseStageJson(result),
           dialogue,
           this.emotionLabels
         )
@@ -696,7 +705,7 @@ export class StoryWriter {
               { temperature: 0.2 }
             )
             const repairedPlan = normalizeEmotionPlan(
-              extractJson(repaired.content),
+              parseStageJson(repaired),
               dialogue,
               this.emotionLabels
             )
@@ -718,7 +727,7 @@ export class StoryWriter {
           'staging',
           buildStagingPrompt(view, plan, finalDialogue, promptOptions)
         )
-        return normalizeStaging(extractJson(result.content), view, plan, finalDialogue)
+        return normalizeStaging(parseStageJson(result), view, plan, finalDialogue)
       } catch (error) {
         if (options.signal?.aborted) throw error
         const message = errorMessage(error)
@@ -748,7 +757,7 @@ export class StoryWriter {
         buildDirectionPrompt(view, plan, dialogue, promptOptions, staging)
       )
       directionRaw = result.content
-      direction = normalizeDirection(extractJson(result.content), view, plan, dialogue)
+      direction = normalizeDirection(parseStageJson(result), view, plan, dialogue)
       if (direction.lines.length === 0) {
         markStageFailed('没有返回可用的表演设计')
         warnings.push('表演设计为空，已请求重写一次')
@@ -765,7 +774,7 @@ export class StoryWriter {
           'direction-repair',
           buildDirectionRepairPrompt(view, plan, dialogue, promptOptions, directionRaw, staging)
         )
-        direction = normalizeDirection(extractJson(repair.content), view, plan, dialogue)
+        direction = normalizeDirection(parseStageJson(repair), view, plan, dialogue)
       } catch (error) {
         if (options.signal?.aborted) throw error
         details.push(`表演设计重写：${errorMessage(error)}`)

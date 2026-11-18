@@ -1,6 +1,6 @@
 import { App } from '../app/App'
 import AnimationManager from './AnimationManager'
-import { Ticker } from 'pixi.js'
+import { Sprite, Texture, Ticker } from 'pixi.js'
 import {
   ExportLogger,
   CheckpointManager,
@@ -1466,15 +1466,17 @@ export default class VideoExportManager {
       this.logger.info('Validating model rendering output...')
       if (exportStatus) exportStatus.textContent = '正在验证模型渲染...'
 
-      this.app.pixiApplication.render?.()
-      const modelValidation = await webGLValidator.validateModelRendering(canvas, 3000)
-      if (!modelValidation.success) {
-        throw new Error(
-          `Model rendering validation failed: black screen detected ` +
-            `(brightness: ${modelValidation.averageBrightness.toFixed(2)}%). ` +
-            `Models are not rendering properly. Check WebGL context and model files.`
-        )
-      }
+      await this.runWithValidationProbe(canvas, async () => {
+        this.app.pixiApplication.render?.()
+        const modelValidation = await webGLValidator.validateModelRendering(canvas, 3000)
+        if (!modelValidation.success) {
+          throw new Error(
+            `Model rendering validation failed: black screen detected ` +
+              `(brightness: ${modelValidation.averageBrightness.toFixed(2)}%). ` +
+              `Models are not rendering properly. Check WebGL context and model files.`
+          )
+        }
+      })
 
       VideoExportManager.warmValidatedApps.add(this.app)
       this.logger.info('Pre-export validation passed')
@@ -1487,8 +1489,98 @@ export default class VideoExportManager {
     return { canvas, snippets, captureFps }
   }
 
+  /**
+   * 导出阶段 pixiApplication 背景为 0x000000（避免黑幕下透白闪屏），在故事尚未铺设
+   * 背景/角色前直接 render() 会得到全黑画面。这里临时挂载一个中心角色（或无角色时的白色
+   * Sprite 探针）验证 WebGL 实际渲染输出，结束后立即恢复并重绘回纯黑。
+   */
+  private async runWithValidationProbe(
+    canvas: HTMLCanvasElement,
+    fn: () => Promise<void>
+  ): Promise<void> {
+    let probedModel: ReturnType<App['getModelById']> | null = null
+    let prevVisible = true
+    let prevX = 0
+    let prevY = 0
+    let prevAlpha: number | undefined
+    let probeSprite: Sprite | null = null
+    let mountedProbe = false
+
+    const models = this.app.storyManager?.storyData?.models ?? []
+    if (
+      models.length > 0 &&
+      typeof this.app.getModelById === 'function' &&
+      typeof this.app.layerModel?.addModelToLayer === 'function' &&
+      typeof this.app.layerModel?.removeModel === 'function'
+    ) {
+      for (const descriptor of models) {
+        try {
+          const candidate = this.app.getModelById(descriptor.id)
+          if (!candidate?.internalModel) continue
+          probedModel = candidate
+          prevVisible = candidate.visible
+          prevX = candidate.position?.x ?? 0
+          prevY = candidate.position?.y ?? 0
+          const filter = (candidate.filters?.[0] ?? null) as { alpha?: number } | null
+          prevAlpha = filter?.alpha
+
+          this.app.layerModel.addModelToLayer(candidate)
+          if (typeof candidate.setPositionRel === 'function') {
+            candidate.setPositionRel(this.app.stage_size ?? [canvas.width, canvas.height], {
+              x: 0.5,
+              y: 0.5
+            })
+          } else {
+            candidate.position?.set?.(canvas.width / 2, canvas.height / 2)
+          }
+          if (filter) filter.alpha = 1
+          candidate.visible = true
+          mountedProbe = true
+          break
+        } catch (error) {
+          this.logger.warn(`Validation probe failed for model id=${descriptor.id}`, error)
+          probedModel = null
+        }
+      }
+    }
+
+    if (
+      !mountedProbe &&
+      typeof Sprite === 'function' &&
+      Texture?.WHITE &&
+      typeof this.app.pixiApplication?.stage?.addChild === 'function' &&
+      typeof this.app.pixiApplication?.stage?.removeChild === 'function'
+    ) {
+      probeSprite = new Sprite(Texture.WHITE)
+      probeSprite.width = this.app.pixiApplication.screen?.width ?? canvas.width
+      probeSprite.height = this.app.pixiApplication.screen?.height ?? canvas.height
+      this.app.pixiApplication.stage.addChild(probeSprite)
+      mountedProbe = true
+    }
+
+    try {
+      await fn()
+    } finally {
+      if (probedModel) {
+        const filter = (probedModel.filters?.[0] ?? null) as { alpha?: number } | null
+        if (filter) filter.alpha = prevAlpha ?? 0
+        probedModel.visible = prevVisible
+        probedModel.position?.set?.(prevX, prevY)
+        this.app.layerModel?.removeModel?.(probedModel)
+      }
+      if (probeSprite) {
+        this.app.pixiApplication?.stage?.removeChild?.(probeSprite)
+        probeSprite.destroy?.()
+      }
+      if (mountedProbe) {
+        this.app.pixiApplication?.render?.()
+      }
+    }
+  }
+
   private async prewarmStoryModels(): Promise<void> {
     const models = this.app.storyManager?.storyData?.models ?? []
+    let warmedAny = false
     for (const descriptor of models) {
       try {
         const model = this.app.getModelById(descriptor.id)
@@ -1505,9 +1597,13 @@ export default class VideoExportManager {
         // visible 设回 true；留成 false 会让整场角色都不渲染。
         model.visible = previousVisible
         this.app.layerModel.removeModel(model)
+        warmedAny = true
       } catch (error) {
         this.logger.warn(`Model prewarm failed for id=${descriptor.id}`, error)
       }
+    }
+    if (warmedAny) {
+      this.app.pixiApplication?.render?.()
     }
     await this.requestAnimationFrameOnce()
   }

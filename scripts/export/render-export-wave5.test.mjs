@@ -409,3 +409,306 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   assert.equal(seLoadCalls, 1, 'SePlan.load must run even when TTS & BGM are disabled')
   assert.equal(mixInt16Calls, 1, 'AudioMuxer.mixToInt16Interleaved must run when only sePlan has changes')
 })
+
+test('VideoExportManager mounts model/stage probe for validateModelRendering on 0x000000 background and resets cleanly', async (t) => {
+  const realSetTimeoutFn = setTimeout
+  const loader = createRendererLoader(new Map(), {
+    window: {
+      electron: {
+        ipcRenderer: {
+          invoke: async (ch) => {
+            if (ch === 'electron:frames-stream-start') return { id: 'pipe-2', videoPath: '/tmp/vid2.mp4' }
+            if (ch === 'electron:frames-stream-finish') return { videoPath: '/tmp/vid2.mp4' }
+            if (ch === 'electron:api-remux-video-from-files') return { success: true, fileSize: 999 }
+            return { success: true }
+          }
+        }
+      }
+    }
+  })
+
+  let virtualClock = null
+  t.after(() => virtualClock?.uninstall())
+
+  const { mocks } = loader
+  const logger = { info: noop, warn: noop, error: noop, debug: noop }
+  const { SnippetTimestampRecorder } = loader.load('managers/video-export/SnippetTimestampRecorder.ts')
+  const { applyTalkPatch } = loader.load('managers/video-export/talkPatch.ts')
+
+  class MockSprite {
+    constructor(texture) {
+      this.texture = texture
+      this.width = 0
+      this.height = 0
+      this.destroyed = false
+    }
+    destroy() {
+      this.destroyed = true
+    }
+  }
+
+  const stageChildren = []
+  const layerModelChildren = []
+  const modelAlphaFilter = { alpha: 0 }
+  const model = {
+    metadata: { id: 2321 },
+    internalModel: {},
+    visible: true,
+    position: {
+      x: 0,
+      y: 0,
+      set(nx, ny) {
+        this.x = nx
+        this.y = ny
+      }
+    },
+    filters: [modelAlphaFilter],
+    setPositionRel(stageSize, pos) {
+      this.position.set(stageSize[0] * pos.x, stageSize[1] * (pos.y + 0.3))
+    }
+  }
+
+  // Simulated 0x000000 framebuffer: stays pure black unless a visible probe (model alpha>0.5 or Sprite) is rendered
+  let brokenRendering = false
+  let frameIsLit = false
+  const renderStage = () => {
+    if (brokenRendering) {
+      frameIsLit = false
+      return
+    }
+    const modelLit = layerModelChildren.some(
+      (m) => m.visible && ((m.filters?.[0]?.alpha ?? 0) >= 0.5)
+    )
+    const spriteLit = stageChildren.some((c) => c instanceof MockSprite)
+    frameIsLit = modelLit || spriteLit
+  }
+
+  mocks.set('pixi.js', {
+    Text: class {},
+    AlphaFilter: class {},
+    TextStyle: class {},
+    Sprite: MockSprite,
+    Texture: { WHITE: { valid: true } },
+    Ticker: { shared: { maxFPS: 60, stop: noop, start: noop } }
+  })
+  mocks.set('pixi-live2d-display-advanced', {
+    Cubism4InternalModel: class extends EventEmitter {},
+    Cubism2InternalModel: class extends EventEmitter {}
+  })
+  mocks.set(path.join(rendererRoot, 'utils/Logger.ts'), { __esModule: true, default: () => logger })
+  mocks.set(path.join(rendererRoot, 'utils/WebGLContextValidator.ts'), {
+    webGLValidator: {
+      validateCanvas: async () => ({ success: true, errors: [], contextInfo: { renderer: 'TestGPU' } }),
+      validateModelRendering: async () => ({
+        success: frameIsLit,
+        averageBrightness: frameIsLit ? 42 : 0
+      })
+    }
+  })
+  mocks.set(path.join(rendererRoot, 'utils/FrameContentValidator.ts'), {
+    frameValidator: { reset: noop, validateFrame: () => ({ isValid: true, isBlackScreen: false, brightness: 50 }) }
+  })
+  mocks.set(path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveBgmUrl: (p) => p })
+  mocks.set(path.join(rendererRoot, 'managers/AnimationManager.ts'), {
+    __esModule: true,
+    default: { setExportMode: noop, exportSpeedMultiplier: 1, exportTargetFPS: 30, exportEncodeFPS: 30 }
+  })
+  mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {
+    getLayoutRunningEndMs: () => 0,
+    getMotionSettledEndMs: () => 0,
+    resetStageTiming: noop
+  })
+  mocks.set('./video-export', {
+    ExportLogger: class { info = noop; warn = noop; error = noop },
+    CheckpointManager: class { clearCheckpoint = noop; hasCheckpoint = () => false },
+    ErrorRecoveryManager: class { reset = noop },
+    ProgressTracker: class { start = noop; update = noop },
+    ExportError: class extends Error { constructor(c, m) { super(m); this.code = c } },
+    ExportErrorCode: { CANCELLED: 'CANCELLED', TIMEOUT: 'TIMEOUT', UNKNOWN: 'UNKNOWN' },
+    AudioMuxer: class { dispose = noop },
+    ConcurrentExportPipeline: class {
+      startTTSPipeline = noop
+      isTTSReady = () => false
+      getTTSResult = () => null
+      waitForTTSReady = async () => null
+      waitForTTSPipeline = async () => {}
+      markRenderStart = noop
+      markRenderEnd = noop
+      dispose = async () => {}
+    },
+    SnippetTimestampRecorder,
+    exportTraceContext: { setSnippet: noop, reset: noop },
+    motionTrace: { reset: noop, snapshot: () => [] },
+    exportLogBus: { reset: noop, snapshot: () => [] },
+    buildExportDiagnostics: () => ({ summary: {} }),
+    sanitizeDiagnostics: (d) => d
+  })
+  mocks.set('./video-export/VirtualClockController', {
+    VirtualClockController: class {
+      install() {
+        virtualClock = FakeTimers.withGlobal(loader.context).install({
+          now: 0,
+          toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate']
+        })
+      }
+      uninstall() {
+        virtualClock?.uninstall()
+        virtualClock = null
+      }
+      now = () => (virtualClock ? virtualClock.now : 0)
+      realTimeMs = () => performance.now()
+      realSleep = (ms) => new Promise((r) => realSetTimeoutFn(r, ms))
+      tick = (ms) => virtualClock.tickAsync(ms)
+    }
+  })
+  mocks.set('./video-export/BgmPlan', {
+    BgmPlan: class { hasStoryFiles = false; hasLoadedFiles = false; hasChanges = false; load = async () => {} }
+  })
+  mocks.set('./video-export/SePlan', {
+    SePlan: class { hasChanges = false; load = async () => {}; build = () => [] }
+  })
+  mocks.set('./video-export/WebCodecsMp4Encoder', {
+    WebCodecsMp4Encoder: class {
+      static async probeConfig() {
+        return {
+          config: { codec: 'avc1.640028', width: 1280, height: 720 },
+          glRenderer: 'TestGPU',
+          elapsedMs: 10
+        }
+      }
+      async initialize() {}
+      async encodeFrame() {}
+      async finish() { return '/tmp/pipe/video.mp4' }
+      dispose() {}
+    }
+  })
+  mocks.set('./video-export/JpegFrameSink', {
+    JpegFrameSink: class {
+      get isPipeMode() { return true }
+      get framesDirectory() { return '' }
+      async initialize() {}
+      async captureFrame() {}
+      async finish() { return '/tmp/pipe/video.mp4' }
+      async dispose() {}
+    }
+  })
+  mocks.set('./video-export/talkPatch', { applyTalkPatch })
+
+  const VideoExportManager = loader.load('managers/VideoExportManager.ts').default
+  const canvas = {
+    width: 1280,
+    height: 720,
+    getContext: () => ({ isContextLost: () => false, getExtension: () => null, getParameter: () => '' })
+  }
+  const makeApp = (storyModels) => ({
+    exporting: false,
+    lastSnippetActualDurationMs: 0,
+    currentTalkStartedAtMs: 0,
+    currentTalkLipSync: null,
+    stage_size: [1280, 720],
+    storyManager: {
+      snippets: [{ type: 'BlackOut', delay: 0, wait: true, data: { color: 'black', duration: 0 } }],
+      storyData: { models: storyModels, images: [] }
+    },
+    getModelById: (id) => (id === 2321 ? model : null),
+    pixiApplication: {
+      view: canvas,
+      screen: { width: 1280, height: 720 },
+      ticker: { start: noop, stop: noop },
+      render: renderStage,
+      renderer: { render: renderStage },
+      stage: {
+        addChild: (c) => stageChildren.push(c),
+        removeChild: (c) => {
+          const idx = stageChildren.indexOf(c)
+          if (idx >= 0) stageChildren.splice(idx, 1)
+        }
+      }
+    },
+    layerModel: {
+      isModelVisible: () => true,
+      addModelToLayer: (m) => {
+        if (!layerModelChildren.includes(m)) layerModelChildren.push(m)
+      },
+      removeModel: (m) => {
+        const idx = layerModelChildren.indexOf(m)
+        if (idx >= 0) layerModelChildren.splice(idx, 1)
+      }
+    },
+    layerSpecialEffect: { fadeOut: async () => {} },
+    setOpeningCover: async () => {},
+    setEndingEnvelope: async () => {},
+    ttsManager: {
+      isTTSEnabled: () => false,
+      getBGMConfig: () => ({ enabled: false }),
+      getConfig: () => ({ timeoutMs: 90_000 }),
+      buildTimelineWithoutTTS: () => [
+        { snippetIndex: 0, snippetType: 'BlackOut', delayStartTimeMs: 0, startTimeMs: 0, durationMs: 0, endTimeMs: 0, ttsDurationMs: 0, hasTTS: false, blocking: true, durationSource: 'fixed' }
+      ],
+      setTimeline: noop,
+      clearAudioTracks: noop
+    },
+    snippetStrategyManager: { resetBackgroundSnippets: noop, handleSnippetForExport: async () => {} }
+  })
+
+  // 1) Model probe passes on 0x000000 background and restores clean state
+  const appWithModel = makeApp([{ id: 2321 }])
+  const mgr1 = new VideoExportManager(appWithModel)
+  const res1 = await mgr1.exportVideo({
+    fps: 30,
+    fastFps: 30,
+    width: 1280,
+    height: 720,
+    quality: 'high',
+    format: 'mp4',
+    exportMode: 'fast',
+    exportFastEncoder: 'auto',
+    apiMode: true,
+    apiOutputPath: '/tmp/probe-model.mp4'
+  })
+  assert.equal(res1.success, true)
+  assert.equal(frameIsLit, false, 'stage must be reset to black 0x000000 after validation probe & prewarm')
+  assert.equal(layerModelChildren.length, 0, 'model probe must be removed from layerModel')
+  assert.equal(modelAlphaFilter.alpha, 0, 'model alpha must be restored to 0')
+  assert.equal(model.visible, true, 'model visible flag must be preserved')
+
+  // 2) Empty-model story uses Sprite(Texture.WHITE) probe and cleans up
+  const appNoModel = makeApp([])
+  const mgr2 = new VideoExportManager(appNoModel)
+  const res2 = await mgr2.exportVideo({
+    fps: 30,
+    fastFps: 30,
+    width: 1280,
+    height: 720,
+    quality: 'high',
+    format: 'mp4',
+    exportMode: 'fast',
+    exportFastEncoder: 'auto',
+    apiMode: true,
+    apiOutputPath: '/tmp/probe-sprite.mp4'
+  })
+  assert.equal(res2.success, true)
+  assert.equal(stageChildren.length, 0, 'probe sprite must be removed from stage')
+  assert.equal(frameIsLit, false, 'stage must be reset to black 0x000000 after sprite probe')
+
+  // 3) Genuinely broken WebGL (frame stays black even with probe) still fails validation
+  brokenRendering = true
+  const appBroken = makeApp([{ id: 2321 }])
+  const mgr3 = new VideoExportManager(appBroken)
+  await assert.rejects(
+    mgr3.exportVideo({
+      fps: 30,
+      fastFps: 30,
+      width: 1280,
+      height: 720,
+      quality: 'high',
+      format: 'mp4',
+      exportMode: 'fast',
+      exportFastEncoder: 'auto',
+      apiMode: true,
+      apiOutputPath: '/tmp/probe-broken.mp4'
+    }),
+    /Model rendering validation failed: black screen detected/
+  )
+  assert.equal(layerModelChildren.length, 0, 'probe must still clean up on validation failure')
+})

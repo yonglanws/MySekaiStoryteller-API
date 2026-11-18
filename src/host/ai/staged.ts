@@ -346,6 +346,41 @@ function pickMoveFacial(view: CatalogView, modelId: number, fallbackFacial?: str
 
 const FACIAL_EXTREME_EXCLUDE_RE =
   /angry|disgust|scared|cry|shock|dark|despair|fever|sneeze|disgorge/i
+const FACIAL_SMILE_EXCLUDE_RE =
+  /smile|smug|wink|sparkling|angry|disgust|scared|cry|shock|dark|despair|fever|sneeze|disgorge/i
+const TENSE_EMOTION_SET = new Set(['生气', '伤心', '害怕'])
+const SILENT_LINE_RE = /^[（(]?[\s.…,，。！？!?—\-~～]+[）)]?$/
+const SMILE_FACIAL_RE = /smile|smug|wink|sparkling/i
+
+export interface SubtleFacialContext {
+  precededByTense?: boolean
+}
+
+const isSilentBeatLine = (text: string): boolean => SILENT_LINE_RE.test((text ?? '').trim())
+
+function isPrecededByTenseBeat(
+  lines: ReadonlyArray<{ content: string; emotion?: string; sceneId?: string }>,
+  index: number,
+  lookback = 3
+): boolean {
+  const currentSceneId = lines[index]?.sceneId
+  const start = Math.max(0, index - lookback)
+  for (let j = index - 1; j >= start; j--) {
+    const prev = lines[j]
+    if (!prev) continue
+    if (currentSceneId && prev.sceneId && prev.sceneId !== currentSceneId) break
+    if (TENSE_EMOTION_SET.has(prev.emotion ?? '')) return true
+    if (
+      j === index - 1 &&
+      /别再|不要再|少啰嗦|骗人|为什么|搞什么|闭嘴|抱歉|对不起|糟糕|逃走|硬撑/.test(
+        prev.content ?? ''
+      )
+    ) {
+      return true
+    }
+  }
+  return false
+}
 
 const isRestrainedRole = (roleOrName = ''): boolean => /真冬|克制|冷静|寡言|内敛/.test(roleOrName)
 
@@ -368,13 +403,14 @@ function pickFacialFromHints(
   )
 }
 
-/** 为说话者挑选贴合当前台词语气与情绪的细腻表情（避免反复卡在 face_normal_01）。 */
+/** 为说话者挑选贴合当前台词语气与情绪的细腻表情（避免反复卡在 face_normal_01，也避免在沉默/紧张拍误笑）。 */
 function pickSpeakerSubtleFacial(
   view: CatalogView,
   modelId: number,
   line: { content: string; emotion?: string },
   currentFacial?: string,
-  role = ''
+  role = '',
+  context: SubtleFacialContext = {}
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
@@ -382,6 +418,7 @@ function pickSpeakerSubtleFacial(
   const emotion = line.emotion ?? ''
   const text = line.content ?? ''
   const restrained = isRestrainedRole(role) || isRestrainedRole(model.name)
+  const precededByTense = Boolean(context.precededByTense)
 
   if (emotion === '开心') {
     return pickFacialFromHints(
@@ -409,6 +446,14 @@ function pickSpeakerSubtleFacial(
       /smile|smug|wink|sparkling/i
     )
   }
+  if (emotion === '害怕') {
+    return pickFacialFromHints(
+      facials,
+      [/scared|worry|trouble|surprise|shock/i, /sad|lookaway|serious/i],
+      currentFacial,
+      /smile|smug|wink|sparkling|angry/i
+    )
+  }
   if (emotion === '惊讶') {
     return pickFacialFromHints(
       facials,
@@ -426,8 +471,22 @@ function pickSpeakerSubtleFacial(
     )
   }
 
+  // 沉默停顿句（如「…………」「（……）」）：绝不配微笑
+  if (isSilentBeatLine(text)) {
+    return pickFacialFromHints(
+      facials,
+      precededByTense
+        ? [/trouble|worry|closeeye|lookaway/i, /serious|smallmouth|sad|normal/i]
+        : [/closeeye|serious|smallmouth|lookaway/i, /trouble|notice|normal/i],
+      currentFacial,
+      FACIAL_SMILE_EXCLUDE_RE
+    )
+  }
+
   // 平静/无标签对话：按台词具体语气细分微表情，不再全锁成 face_normal_01
-  if (/♪|～|哈哈|嘿嘿|太好了|开心|喜欢|谢|早安|晚安|不错嘛/.test(text)) {
+  const explicitJoyRe = /♪|～♪|哈哈|嘿嘿|太好了|开心/
+  const mildJoyRe = /♪|～|哈哈|嘿嘿|太好了|开心|喜欢|谢|早安|晚安|不错嘛/
+  if (precededByTense ? explicitJoyRe.test(text) : mildJoyRe.test(text)) {
     return pickFacialFromHints(
       facials,
       restrained
@@ -448,24 +507,36 @@ function pickSpeakerSubtleFacial(
   if (/？|\?|什么|怎么|难道|为什么|真的吗|咦/.test(text)) {
     return pickFacialFromHints(
       facials,
-      [/notice|baffling|serious|trouble/i, /smallmouth|lookaway|smile/i],
+      precededByTense
+        ? [/notice|baffling|serious|trouble/i, /smallmouth|lookaway|worry/i]
+        : [/notice|baffling|serious|trouble/i, /smallmouth|lookaway|smile/i],
       currentFacial,
-      FACIAL_EXTREME_EXCLUDE_RE
+      precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
     )
   }
   if (/决定|一定|必须|其实|认真|听我说|总之/.test(text)) {
     return pickFacialFromHints(
       facials,
-      [/serious|closeeye|smallmouth/i, /notice|smile|normal/i],
+      precededByTense
+        ? [/serious|closeeye|smallmouth/i, /notice|trouble|normal/i]
+        : [/serious|closeeye|smallmouth/i, /notice|smile|normal/i],
       currentFacial,
-      FACIAL_EXTREME_EXCLUDE_RE
+      precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  if (precededByTense) {
+    return pickFacialFromHints(
+      facials,
+      [/serious|closeeye|smallmouth|trouble/i, /lookaway|worry|normal/i],
+      currentFacial,
+      FACIAL_SMILE_EXCLUDE_RE
     )
   }
   return pickFacialFromHints(
     facials,
     restrained
       ? [/smallmouth|closeeye|serious/i, /normal|trouble/i]
-      : [/smile|smallmouth|closeeye|serious/i, /lookaway|trouble|notice|normal/i],
+      : [/smallmouth|closeeye|serious|lookaway/i, /notice|trouble|smile|normal/i],
     currentFacial,
     FACIAL_EXTREME_EXCLUDE_RE
   )
@@ -480,7 +551,8 @@ function pickListenerReactionFacial(
   listenerId: number,
   speakerLine: { content: string; emotion?: string },
   listenerRole = '',
-  currentFacial?: string
+  currentFacial?: string,
+  context: SubtleFacialContext = {}
 ): string {
   const model = view.modelById(listenerId)
   if (!model) return ''
@@ -488,6 +560,7 @@ function pickListenerReactionFacial(
   const speakerEmotion = speakerLine.emotion ?? ''
   const text = speakerLine.content ?? ''
   const restrained = isRestrainedRole(listenerRole) || isRestrainedRole(model.name)
+  const precededByTense = Boolean(context.precededByTense)
 
   const isScoldingOrConfronting =
     speakerEmotion === '生气' ||
@@ -506,6 +579,14 @@ function pickListenerReactionFacial(
       [/worry|sad|trouble|closeeye/i, /serious|smallmouth/i],
       currentFacial,
       /smile|smug|wink|sparkling|angry|disgust/i
+    )
+  }
+  if (speakerEmotion === '害怕') {
+    return pickFacialFromHints(
+      facials,
+      [/worry|serious|trouble|surprise/i, /sad|closeeye|smallmouth/i],
+      currentFacial,
+      /smile|smug|wink|sparkling|angry/i
     )
   }
   if (speakerEmotion === '惊讶') {
@@ -543,10 +624,14 @@ function pickListenerReactionFacial(
       facials,
       [/serious|notice|trouble|lookaway/i, /smallmouth|closeeye|normal/i],
       currentFacial,
-      FACIAL_EXTREME_EXCLUDE_RE
+      precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
     )
   }
-  if (/♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
+  if (
+    precededByTense
+      ? /♪|～♪|太好了/.test(text)
+      : /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)
+  ) {
     return pickFacialFromHints(
       facials,
       restrained
@@ -558,9 +643,11 @@ function pickListenerReactionFacial(
   }
   return pickFacialFromHints(
     facials,
-    [/serious|smallmouth|closeeye|notice/i, /lookaway|trouble|smile|normal/i],
+    precededByTense
+      ? [/serious|smallmouth|closeeye|trouble/i, /lookaway|worry|normal/i]
+      : [/serious|smallmouth|closeeye|notice/i, /lookaway|trouble|smile|normal/i],
     currentFacial,
-    FACIAL_EXTREME_EXCLUDE_RE
+    precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
   )
 }
 
@@ -3366,10 +3453,29 @@ export function composeStory(
           ? directedMotion
           : pickAppearFallbackMotion(view, id, usedEntryMotions, firstFutureTalkMotion)
       if (entryMotion) usedEntryMotions.add(entryMotion)
+      const firstLineIdx = firstLineForMember ? dialogue.lines.indexOf(firstLineForMember) : -1
+      const surroundingTense = dialogue.lines
+        .slice(Math.max(0, lineIndex - 2), Math.min(dialogue.lines.length, lineIndex + 6))
+        .some((l) => TENSE_EMOTION_SET.has(l.emotion ?? ''))
       const entryFacial =
         directedFacial ||
         (firstLineForMember
-          ? pickSpeakerSubtleFacial(view, id, firstLineForMember, undefined, member?.role)
+          ? pickSpeakerSubtleFacial(view, id, firstLineForMember, undefined, member?.role, {
+              precededByTense:
+                firstLineIdx >= 0
+                  ? isPrecededByTenseBeat(dialogue.lines, firstLineIdx)
+                  : surroundingTense
+            })
+          : '') ||
+        (surroundingTense
+          ? pickSpeakerSubtleFacial(
+              view,
+              id,
+              { content: '', emotion: '平静' },
+              undefined,
+              member?.role,
+              { precededByTense: true }
+            )
           : '') ||
         view.exampleFacial(id) ||
         view.defaultFacial(id)
@@ -3950,7 +4056,8 @@ export function composeStory(
       }
     }
 
-    // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸）
+    // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸，或紧张/沉默拍误配 smile）
+    const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
     if (dialogue.lines.length >= 6 && direction.lines.length > 0 && actorState) {
       const speakerZeroAct = actions.find((a) => a.modelId === member.modelId && a.at === 0)
       const currentSpeakerFacial =
@@ -3961,13 +4068,21 @@ export function composeStory(
       const missingFacialStale =
         !currentSpeakerFacial &&
         (actorState.linesSinceFacialChange >= 2 || /^face_normal/i.test(actorState.lastFacial))
-      if (stuckOnNormal || missingFacialStale) {
+      const incongruousSmile =
+        Boolean(currentSpeakerFacial && SMILE_FACIAL_RE.test(currentSpeakerFacial)) &&
+        line.emotion !== '开心' &&
+        (isSilentBeatLine(line.content) ||
+          (precededByTense &&
+            (!line.emotion || line.emotion === '平静') &&
+            !/♪|～♪|哈哈|嘿嘿|太好了|开心/.test(line.content)))
+      if (stuckOnNormal || missingFacialStale || incongruousSmile) {
         const varied = pickSpeakerSubtleFacial(
           view,
           member.modelId,
           line,
           actorState.lastSpeakingFacial || actorState.lastFacial,
-          member.role
+          member.role,
+          { precededByTense }
         )
         if (varied && varied !== currentSpeakerFacial) {
           if (speakerZeroAct) {
@@ -4009,7 +4124,8 @@ export function composeStory(
             member.modelId,
             line,
             actorState.lastFacial,
-            member.role
+            member.role,
+            { precededByTense }
           )
           actions.unshift({
             at: 0,
@@ -4068,7 +4184,8 @@ export function composeStory(
           partnerId,
           line,
           partnerMember?.role,
-          partnerState.lastFacial
+          partnerState.lastFacial,
+          { precededByTense }
         )
         if (partnerMotion || partnerFacial) {
           actions.push({
@@ -4272,6 +4389,8 @@ export function composeStory(
             targetState.lastBodyMotion,
             new Set(targetState.recentBodyMotions)
           )
+        const silentPrecededByTense =
+          precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
         const facial =
           ev?.silentReaction?.facial ||
           (directed?.silentMotion || autoSilentTargetId !== null
@@ -4281,14 +4400,16 @@ export function composeStory(
                   targetId,
                   line,
                   targetState.lastFacial,
-                  targetMember?.role
+                  targetMember?.role,
+                  { precededByTense: silentPrecededByTense }
                 )
               : pickListenerReactionFacial(
                   view,
                   targetId,
                   line,
                   targetMember?.role,
-                  targetState.lastFacial
+                  targetState.lastFacial,
+                  { precededByTense: silentPrecededByTense }
                 )
             : '') ||
           ''

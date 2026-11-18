@@ -78,6 +78,40 @@ test('bright content in the centre is not reported as a black screen', () => {
   assert.equal(result.isBlackScreen, false, `brightness=${result.brightness}`)
 })
 
+function loadWebGLValidator() {
+  const context = vm.createContext({
+    console,
+    performance,
+    Uint8Array,
+    setTimeout,
+    clearTimeout,
+    Promise
+  })
+  const logger = {
+    debug() {},
+    info() {},
+    warn() {},
+    error() {},
+    getSubLogger() {
+      return this
+    }
+  }
+  const file = path.join(renderer, 'utils/WebGLContextValidator.ts')
+  const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    fileName: file
+  }).outputText
+  const module = { exports: {} }
+  const require = (name) => {
+    if (name.endsWith('utils/Logger')) return { default: () => logger }
+    throw new Error(`Unexpected dependency: ${name}`)
+  }
+  new vm.Script(`(function (exports, require) {\n${compiled}\n})`, { filename: file }).runInContext(
+    context
+  )(module.exports, require)
+  return module.exports
+}
+
 test('a genuinely black frame is still reported', () => {
   const { FrameContentValidator } = loadValidator()
   const validator = new FrameContentValidator()
@@ -85,4 +119,24 @@ test('a genuinely black frame is still reported', () => {
   const result = validator.validateFrame(canvas, 0)
   assert.equal(result.isBlackScreen, true)
   assert.equal(result.error, undefined, 'single black frame is tolerated, not fatal')
+})
+
+test('WebGLContextValidator.validateModelRendering passes on centered probe over 0x000000 and fails on genuinely black canvas', async () => {
+  const { WebGLContextValidator } = loadWebGLValidator()
+  const validator = new WebGLContextValidator()
+
+  // Centered model probe on 0x000000 background (bottom-left 128x128 is pure black)
+  const centeredProbeCanvas = makeCanvas(
+    (x, y) => (x > 540 && x < 740 && y > 260 && y < 460 ? [220, 200, 190, 255] : [0, 0, 0, 255]),
+    1280,
+    720
+  )
+  const passResult = await validator.validateModelRendering(centeredProbeCanvas, 500)
+  assert.equal(passResult.success, true)
+
+  // Genuinely black canvas (0x000000 everywhere)
+  const blackCanvas = makeCanvas(() => [0, 0, 0, 255], 1280, 720)
+  const failResult = await validator.validateModelRendering(blackCanvas, 10)
+  assert.equal(failResult.success, false)
+  assert.equal(failResult.averageBrightness, 0)
 })
