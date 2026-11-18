@@ -470,7 +470,7 @@ test('staged pipeline runs emotion and staging concurrently before passing full 
   const talks = result.story.snippets.filter((snippet) => snippet.type === 'Talk')
   assert.deepEqual(
     talks.map((talk) => talk.data.emotion),
-    ['平静', '平静', '平静', '平静', '开心', '开心', '开心', '开心', '开心']
+    ['平静', '平静', '平静', '平静', '开心', '开心', '开心', '伤心', '伤心']
   )
 })
 
@@ -837,19 +837,52 @@ test('condenseDialogue merges same-speaker short lines without changing text', (
   assert.equal(condensed.lines[2].content, '嗯。')
 })
 
-test('stabilizeEmotions keeps a calm baseline instead of all-strong labels', () => {
+test('stabilizeEmotions preserves coherent dramatic arcs without calm quotas and smooths 1-line whiplash', () => {
   const dialogue = {
     title: '',
     lines: Array.from({ length: 12 }, (_, index) => ({
       id: `l${index + 1}`,
       speaker: index % 2 === 0 ? 'A' : 'B',
-      content: '句'
+      content: index >= 10 ? '一起回去吧～♪' : '句'
     }))
   }
-  const plan = new Map(dialogue.lines.map((line, index) => [line.id, index < 6 ? '开心' : '生气']))
+  // 2-beat 情绪弧（6 句开心 + 4 句生气 + 2 句欢快尾声）：不再机械注入 >=25% 平静配额，保留尾声情绪
+  const plan = new Map(
+    dialogue.lines.map((line, index) => [
+      line.id,
+      index < 6 ? '开心' : index < 10 ? '生气' : '开心'
+    ])
+  )
   const stable = stabilizeEmotions(dialogue, plan, ['平静', '开心', '生气'])
   const values = dialogue.lines.map((line) => stable.get(line.id))
-  assert.ok(values.filter((emotion) => emotion === '平静').length >= 3)
+  assert.deepEqual(values.slice(0, 6), Array.from({ length: 6 }, () => '开心'))
+  assert.deepEqual(values.slice(6, 10), Array.from({ length: 4 }, () => '生气'))
+  assert.deepEqual(values.slice(10, 12), ['开心', '开心'])
+
+  // 连续高频 1 句锯齿跳变（A - B - C - A）中无强转折标记的单句毛刺会被温和抚平
+  const zigzagDialogue = {
+    title: '',
+    lines: Array.from({ length: 6 }, (_, index) => ({
+      id: `z${index + 1}`,
+      speaker: index % 2 === 0 ? 'A' : 'B',
+      content: '普通对话。'
+    }))
+  }
+  const zigzagPlan = new Map([
+    ['z1', '平静'],
+    ['z2', '开心'],
+    ['z3', '生气'],
+    ['z4', '伤心'],
+    ['z5', '平静'],
+    ['z6', '平静']
+  ])
+  const zigzagStable = stabilizeEmotions(zigzagDialogue, zigzagPlan, ['平静', '开心', '生气', '伤心'])
+  const zigzagValues = zigzagDialogue.lines.map((l) => zigzagStable.get(l.id))
+  let runs = 1
+  for (let i = 1; i < zigzagValues.length; i++) {
+    if (zigzagValues[i] !== zigzagValues[i - 1]) runs += 1
+  }
+  assert.ok(runs < 5, `expected anti-whiplash smoothing to reduce 5 runs, got ${runs}: ${zigzagValues.join(',')}`)
 })
 
 test('composed staging keeps ambient and second background through validation', () => {

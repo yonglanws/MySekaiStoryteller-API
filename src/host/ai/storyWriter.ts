@@ -683,13 +683,12 @@ export class StoryWriter {
         warnings.push(`情绪标注失败，整场使用默认情绪：${message}`)
       }
 
-      // 只有 2~3 段会让整场听起来没有起伏；低温重标一次，仍不行就接受。
-      if (emotionPlan && this.emotionLabels.length > 1) {
+      // 只有较长剧本完全锁死单一情绪（只有 1 段）时才低温重标一次；不再机械要求 3~4 段来回切。
+      if (emotionPlan && this.emotionLabels.length > 1 && dialogue.lines.length >= 16) {
         const runs = countEmotionRuns(emotionPlan, dialogue)
-        const minEmotionRuns = dialogue.lines.length >= 30 ? 4 : 3
-        if (runs < minEmotionRuns) {
-          markStageFailed(`情绪分段太少（${runs} 段）`, 'emotion')
-          warnings.push(`情绪只有 ${runs} 段，已请求重标（至少 ${minEmotionRuns} 段）`)
+        if (runs < 2) {
+          markStageFailed(`情绪分段过于单一（仅 ${runs} 段）`, 'emotion')
+          warnings.push(`长剧本情绪只有 ${runs} 段，已请求按起承转合重标`)
           try {
             const repaired = await runStage(
               'emotion-repair',

@@ -603,3 +603,417 @@ test('stage LayoutAppear uses calm entrance motion instead of alphabetically-fir
   assert.equal(appears[1].data.motion, 'w-normal-tilthead01')
   assert.ok(appears.every((s) => !/blushed/.test(s.data.motion)))
 })
+
+test('Wave 5: normalizeDirection preserves facial during body-motion pruning and breaks stuck face_normal_01', () => {
+  const { CatalogView } = promptMod
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-tilthead01', 'w-normal-glad01'],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_smile_02',
+          'face_closeeye_01',
+          'face_serious_01',
+          'face_trouble_01',
+          'face_smallmouth_01',
+          'face_lookaway_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01'],
+        facials: [
+          'face_normal_01',
+          'face_angry_01',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_worry_01',
+          'face_serious_01',
+          'face_closeeye_01',
+          'face_smile_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [
+      {
+        file: 'bg_rooftop.jpg',
+        id: 'bg_a002801',
+        name: '天台',
+        timeOfDay: '白天',
+        indoor: '室外',
+        description: '校园·白天·室外'
+      }
+    ],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: '日常', description: '日常旋律' }]
+  })
+
+  const curated = view.promptFacials(view.modelById(1))
+  assert.ok(curated.length <= 28)
+  assert.ok(curated.includes('face_smile_02'))
+  assert.ok(curated.includes('face_lookaway_01'))
+  assert.ok(curated.includes('face_smallmouth_01'))
+
+  const plan = staged.fallbackCastPlan(view, {
+    scene: '放学后天台对话',
+    personas: [],
+    targetMinutes: 2
+  })
+  const lines = Array.from({ length: 12 }, (_, idx) => ({
+    id: `l${idx + 1}`,
+    speaker: idx % 2 === 0 ? '瑞希' : '绘名',
+    content: idx === 0 ? '呀吼——，终于等到你了♪' : `第${idx + 1}句认真聊聊吧。`,
+    emotion: '平静'
+  }))
+  const dialogue = { title: '天台对话', lines }
+
+  // 100% lines have motion + facial -> body-motion budget trims 1 motion, NEVER facial
+  const rawDir = {
+    background: 'bg_rooftop.jpg',
+    lines: lines.map((l) => ({
+      id: l.id,
+      motion: l.speaker === '瑞希' ? 'w-normal-nod01' : 'w-normal-sigh01',
+      facial: 'face_normal_01'
+    }))
+  }
+  const normalized = staged.normalizeDirection(rawDir, view, plan, dialogue)
+  assert.equal(
+    normalized.lines.length,
+    12,
+    'all 12 lines must retain facial even when excess body motion is pruned'
+  )
+  assert.ok(
+    normalized.lines.every((l) => Boolean(l.facial)),
+    'normalizeDirection must never delete facial during motion budget pruning'
+  )
+
+  const dirPrompt = staged.buildDirectionPrompt(view, plan, dialogue, {
+    scene: '天台对话',
+    personas: [],
+    targetMinutes: 2
+  })
+  assert.ok(!dirPrompt.user.includes('平静用 normal / smallmouth / closeeye'))
+
+  // composeStory diversifies consecutive face_normal_01 on the same speaker
+  const story = staged.composeStory(view, plan, dialogue, normalized)
+  const mizukiFacials = story.snippets
+    .filter((s) => s.type === 'Talk' && s.data.modelId === 1)
+    .flatMap((s) => (s.data.actions ?? []).filter((a) => a.modelId === 1).map((a) => a.facial))
+    .filter(Boolean)
+  assert.ok(
+    mizukiFacials.some((f) => f !== 'face_normal_01'),
+    `expected varied facials beyond face_normal_01, got ${mizukiFacials.join(', ')}`
+  )
+})
+
+test('Wave 5: scolded listener never mirrors speaker angry/smile on reaction', () => {
+  const { CatalogView } = promptMod
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01'],
+        facials: [
+          'face_smile_01',
+          'face_angry_01',
+          'face_angry_02',
+          'face_serious_01',
+          'face_sad_01',
+          'face_trouble_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01', 'w-normal-tilthead01'],
+        facials: [
+          'face_smile_01',
+          'face_angry_01',
+          'face_angry_02',
+          'face_trouble_01',
+          'face_worry_01',
+          'face_sad_01',
+          'face_closeeye_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '天台', timeOfDay: '白天', indoor: '室外', description: '天台' }],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: '日常', description: '日常' }]
+  })
+
+  const plan = staged.fallbackCastPlan(view, {
+    scene: '绘名生气地质问瑞希',
+    personas: [],
+    targetMinutes: 2
+  })
+  const lines = Array.from({ length: 16 }, (_, idx) => ({
+    id: `l${idx + 1}`,
+    speaker: idx < 12 ? '绘名' : '瑞希',
+    content:
+      idx < 12
+        ? '不要再擅自替我决定！别再把我推开了！'
+        : '……抱歉，绘名。',
+    emotion: idx < 12 ? '生气' : '伤心'
+  }))
+  const dialogue = { title: '冲突', lines }
+  const direction = staged.normalizeDirection(
+    {
+      background: 'bg_rooftop.jpg',
+      lines: lines.map((l) => ({
+        id: l.id,
+        motion: l.speaker === '绘名' ? 'w-normal-nod01' : 'w-normal-sigh01',
+        facial: l.speaker === '绘名' ? 'face_angry_01' : 'face_sad_01'
+      }))
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const story = staged.composeStory(view, plan, dialogue, direction)
+
+  const mizukiReactionsWhileEnaScolds = []
+  let seenEnaAngry = false
+  for (const s of story.snippets) {
+    if (s.type === 'Talk' && s.data.modelId === 1) {
+      seenEnaAngry = true
+      for (const act of s.data.actions ?? []) {
+        if (act.modelId === 2 && act.facial) mizukiReactionsWhileEnaScolds.push(act.facial)
+      }
+    } else if (seenEnaAngry && s.type === 'Motion' && s.data.modelId === 2 && s.data.facial) {
+      mizukiReactionsWhileEnaScolds.push(s.data.facial)
+    }
+  }
+  assert.ok(mizukiReactionsWhileEnaScolds.length > 0, 'expected listener reactions during scolding')
+  assert.ok(
+    mizukiReactionsWhileEnaScolds.every((f) => !/angry|smile/i.test(f)),
+    `scolded listener must react with trouble/worry/sad/closeeye, not angry/smile: ${mizukiReactionsWhileEnaScolds.join(', ')}`
+  )
+})
+
+test('Wave 5: stabilizeEmotions preserves 2-line sad plea and cheerful ~♪ epilogue without quotas', () => {
+  const dialogue = {
+    title: '和解',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '今天天气不错呢。' },
+      { id: 'l2', speaker: '绘名', content: '嗯，先坐下吧。' },
+      { id: 'l3', speaker: '瑞希', content: '刚才的事，我其实一直在想。' },
+      { id: 'l4', speaker: '绘名', content: '不要擅自替我决定！' },
+      { id: 'l5', speaker: '绘名', content: '你总是这样装作没事！' },
+      { id: 'l6', speaker: '绘名', content: '别再把我推开了，瑞希。' },
+      { id: 'l7', speaker: '绘名', content: '拜托了……我想站在你这边。' },
+      { id: 'l8', speaker: '瑞希', content: '…………' },
+      { id: 'l9', speaker: '瑞希', content: '绘名，你果然很狡猾啊。' },
+      { id: 'l10', speaker: '瑞希', content: '那张画，明天再一起重新画吧～♪' },
+      { id: 'l11', speaker: '绘名', content: '嗯，一言为定～♪' },
+      { id: 'l12', speaker: '瑞希', content: '走吧，回去画画喽！' }
+    ]
+  }
+  const plan = new Map([
+    ['l1', '平静'],
+    ['l2', '平静'],
+    ['l3', '平静'],
+    ['l4', '生气'],
+    ['l5', '生气'],
+    ['l6', '伤心'],
+    ['l7', '伤心'],
+    ['l8', '伤心'],
+    ['l9', '开心'],
+    ['l10', '开心'],
+    ['l11', '开心'],
+    ['l12', '开心']
+  ])
+  const stable = staged.stabilizeEmotions(dialogue, plan, ['平静', '开心', '伤心', '生气'])
+  assert.equal(stable.get('l6'), '伤心')
+  assert.equal(stable.get('l7'), '伤心')
+  assert.equal(stable.get('l10'), '开心')
+  assert.equal(stable.get('l11'), '开心')
+  assert.equal(stable.get('l12'), '开心')
+
+  const prompt = staged.buildEmotionPrompt(
+    { title: '和解', event: '天台谈心', logline: '', outline: [], cast: [], background: '' },
+    dialogue,
+    { scene: '天台谈心', personas: [], targetMinutes: 2, emotionLabels: ['平静', '开心', '伤心', '生气'] }
+  )
+  assert.ok(!prompt.user.includes('至少 3 段、最多 6 段'))
+  assert.ok(!prompt.user.includes('相邻段不能使用同一个标签'))
+})
+
+test('Wave 5: opening/mid-scene curtain fences, post-Talk WaitFinished cues, daytime ambient clamp, and punctuation ttsText', () => {
+  const { CatalogView } = promptMod
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01'],
+        facials: ['face_smile_01', 'face_normal_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 2,
+        name: '绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-tilthead01'],
+        facials: ['face_normal_01', 'face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_a002801.jpg', 'bg_a000302.jpg'],
+    imageDetails: [
+      {
+        file: 'bg_a002801.jpg',
+        id: 'bg_a002801',
+        name: '天台',
+        timeOfDay: '白天',
+        indoor: '室外',
+        description: '校园·白天·室外'
+      },
+      {
+        file: 'bg_a000302.jpg',
+        id: 'bg_a000302',
+        name: '神山高校 空教室',
+        timeOfDay: '黄昏',
+        indoor: '室内',
+        description: '校园·黄昏·室内'
+      }
+    ],
+    voices: [],
+    bgm: ['bgm00003.mp3', 'bgm00006.mp3'],
+    bgmDetails: [
+      { file: 'bgm00003.mp3', name: '日常', description: '日常' },
+      { file: 'bgm00006.mp3', name: '黄昏', description: '黄昏' }
+    ],
+    se: [{ id: 'se00004_b', file: 'se00004_b.mp3', description: '提示音' }]
+  })
+
+  const plan = staged.normalizeCastPlan(
+    {
+      title: '时序测试',
+      background: 'bg_a002801.jpg',
+      cast: [
+        { modelId: 1, name: '瑞希', role: 'A' },
+        { modelId: 2, name: '绘名', role: 'B' }
+      ],
+      scenes: [
+        { id: 's1', location: 'bg_a002801.jpg', time: 'day', transition: 'black', summary: '白天' },
+        { id: 's2', location: 'bg_a000302.jpg', time: 'evening', transition: 'black', summary: '黄昏' }
+      ]
+    },
+    view,
+    '天台到教室'
+  )
+  const dialogue = {
+    title: '时序测试',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '先看下这里。' },
+      { id: 'l2', speaker: '绘名', content: '…………', ttsText: '……' },
+      { id: 'l3', speaker: '瑞希', content: '我们回教室吧。' }
+    ]
+  }
+  const staging = staged.normalizeStaging(
+    {
+      scenes: [
+        {
+          id: 's1',
+          fromLineId: 'l1',
+          background: 'bg_a002801.jpg',
+          ambient: 'evening',
+          bgm: 'bgm00003.mp3',
+          activeCast: [1, 2]
+        },
+        {
+          id: 's2',
+          fromLineId: 'l3',
+          background: 'bg_a000302.jpg',
+          ambient: 'evening',
+          bgm: 'bgm00006.mp3',
+          activeCast: [1, 2]
+        }
+      ],
+      events: [
+        {
+          lineId: 'l2',
+          se: { file: 'se00004_b.mp3', timing: 'before' },
+          characterShake: { modelId: 2, axis: 'X' },
+          camera: { kind: 'zoomIn', scale: 1.1 }
+        }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  assert.equal(staging.scenes[0].ambient, 'normal', 'daytime background must clamp evening ambient to normal')
+  assert.equal(staging.scenes[1].ambient, 'evening')
+
+  const direction = staged.normalizeDirection(
+    { background: 'bg_a002801.jpg', bgmStop: true, lines: [{ id: 'l1', facial: 'face_smile_01' }] },
+    view,
+    plan,
+    dialogue
+  )
+  const rawStory = staged.composeStory(view, plan, dialogue, direction, staging)
+  const { story } = validate.validateAndFixStory(rawStory, view)
+  const snippets = story.snippets
+
+  // Opening starts with instant BlackOut(0) before ChangeBackgroundImage(WaitFinished) -> BlackIn
+  const firstBlackOutIdx = snippets.findIndex((s) => s.type === 'BlackOut')
+  const firstBgIdx = snippets.findIndex((s) => s.type === 'ChangeBackgroundImage')
+  const firstBlackInIdx = snippets.findIndex((s) => s.type === 'BlackIn')
+  assert.ok(firstBlackOutIdx >= 0 && firstBlackOutIdx < firstBgIdx && firstBgIdx < firstBlackInIdx)
+  assert.equal(snippets[firstBlackOutIdx].data.duration, 0)
+  assert.equal(snippets[firstBgIdx].progressBehavior, 'WaitFinished')
+
+  // Mid-scene curtain ChangeBackgroundImage fences LayoutClear before LayoutAppear
+  const secondBgIdx = snippets.findIndex((s, i) => i > firstBlackInIdx && s.type === 'ChangeBackgroundImage')
+  assert.ok(secondBgIdx > firstBlackInIdx)
+  assert.equal(snippets[secondBgIdx].progressBehavior, 'WaitFinished')
+  const appearAfterSecondBg = snippets.findIndex((s, i) => i > secondBgIdx && s.type === 'LayoutAppear')
+  assert.equal(snippets[appearAfterSecondBg].progressBehavior, 'WaitFinished')
+
+  // Pre-line PlaySe, CharacterShake, and ChangeBgmWaitFinished fence after preceding Talk
+  const l2TalkIdx = snippets.findIndex((s) => s.type === 'Talk' && s.data.content === '…………')
+  const playSeBeforeL2 = snippets.find((s, i) => i < l2TalkIdx && s.type === 'PlaySe')
+  const shakeBeforeL2 = snippets.find((s, i) => i < l2TalkIdx && s.type === 'CharacterShake')
+  assert.equal(playSeBeforeL2.progressBehavior, 'WaitFinished')
+  assert.equal(shakeBeforeL2.progressBehavior, 'WaitFinished')
+  const camAfterL2 = snippets.find((s, i) => i > l2TalkIdx && s.type === 'CameraZoom')
+  assert.ok(camAfterL2 && camAfterL2.progressBehavior === 'Now')
+  const bgmStop = snippets.find((s) => s.type === 'ChangeBgm' && s.data.stop === true)
+  assert.equal(bgmStop.progressBehavior, 'WaitFinished')
+
+  // Punctuation-only Talk clears punctuation-only ttsText
+  assert.equal(snippets[l2TalkIdx].data.ttsText, '')
+})

@@ -116,6 +116,7 @@ const CURATED_BG_NAMES = {
   bg_a000000: { name: '纯黑过渡幕布', category: '特效与纯色', timeOfDay: '通用', indoor: '室内', tags: ['黑屏', '转场', '纯色'] },
   bg_a000007: { name: '柔和浅色氛围幕布', category: '特效与纯色', timeOfDay: '通用', indoor: '室外', tags: ['纯色', '回忆', '氛围'] },
   bg_a000025: { name: '暗夜静谧渐变幕布', category: '特效与纯色', timeOfDay: '深夜', indoor: '室内', tags: ['暗色', '回忆', '氛围'] },
+  bg_a000101: { name: '神山高校 中庭', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['神山高校', '中庭', '校园', '白天', '室外'] },
   bg_a000105: { name: '神山高校 中庭（文化祭）', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['神山高校', '中庭', '文化祭', '校园'] },
   bg_a000301: { name: '神山高校 三年一班', category: '校园', timeOfDay: '白天', indoor: '室内', tags: ['神山高校', '教室', '三年一班', '校园', '白天', '室内'] },
   bg_a000302: { name: '神山高校 空教室', category: '校园', timeOfDay: '黄昏', indoor: '室内', tags: ['神山高校', '教室', '空教室', '校园', '黄昏', '室内'] },
@@ -123,6 +124,8 @@ const CURATED_BG_NAMES = {
   bg_a000401: { name: '宫益坂女子学园 教室', category: '校园', timeOfDay: '白天', indoor: '室内', tags: ['宫益坂女子学园', '教室', '校园', '白天', '室内'] },
   bg_a000402: { name: '宫益坂女子学园 空教室', category: '校园', timeOfDay: '黄昏', indoor: '室内', tags: ['宫益坂女子学园', '教室', '空教室', '校园', '黄昏', '室内'] },
   bg_a000403: { name: '宫益坂女子学园 教室（夜晚）', category: '校园', timeOfDay: '夜晚', indoor: '室内', tags: ['宫益坂女子学园', '教室', '校园', '夜晚', '室内'] },
+  bg_a000901: { name: '宫益坂女子学园 操场', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['宫益坂女子学园', '操场', '校园', '白天', '室外'] },
+  bg_a002801: { name: '天台', aliases: ['病院 屋上'], category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['校园', '室外', '白天', '天台', '病院', '屋上'] },
   bg_a003101: { name: '郊野登山步道', category: '自然与旅行', timeOfDay: '白天', indoor: '室外', tags: ['郊外', '山路', '自然', '室外'] },
   bg_c003101: { name: '街头练习空间', category: '演出与排练', timeOfDay: '通用', indoor: '室内', tags: ['VBS', '排练室', '街头'] },
   bg_c003601: { name: '街头演出广场', category: '涩谷街景', timeOfDay: '夜晚', indoor: '室外', tags: ['VBS', '街头', 'Live', '室外'] },
@@ -348,6 +351,7 @@ function inferTimeOfDay(id, name, stat, siblingVariants) {
   if (/黄昏|傍晚|夕阳/.test(name)) return '黄昏'
   if (/夜晚|夜空|晚上|夜景|暗灯/.test(name)) return '夜晚'
   if (/白天|清晨|上午|中午|午休/.test(name)) return '白天'
+  if (id.startsWith('bg_h') || id.startsWith('bg_s')) return '通用'
 
   if (stat) {
     const { day, evening, night, midnight } = stat.timeHits
@@ -572,7 +576,7 @@ export async function buildRichBackgroundIndex(options = {}) {
           if (!rawTxt || PLACEHOLDER.test(rawTxt) || hasHangul(rawTxt)) continue
           const st = ensureStat(current)
           if (/深夜|25点|凌晨|半夜/.test(rawTxt)) st.timeHits.midnight += 2
-          else if (/傍晚|黄昏|夕阳|放学后|夕方/.test(rawTxt)) st.timeHits.evening += 2
+          else if (/傍晚|黄昏|夕阳|夕方/.test(rawTxt)) st.timeHits.evening += 2
           else if (/夜晚|夜|晚上|今晚/.test(rawTxt)) st.timeHits.night += 2
           else if (/早上|清晨|上午|中午|午休|白天|朝|昼/.test(rawTxt)) st.timeHits.day += 2
 
@@ -590,7 +594,7 @@ export async function buildRichBackgroundIndex(options = {}) {
         if (!body) continue
         const st = ensureStat(current)
         if (/深夜|25点|凌晨|半夜|熬夜/.test(body)) st.timeHits.midnight += 1
-        else if (/夕阳|黄昏|傍晚|晚霞|放学/.test(body)) st.timeHits.evening += 1
+        else if (/夕阳|黄昏|傍晚|晚霞/.test(body)) st.timeHits.evening += 1
         else if (/晚安|月亮|夜空|今晚|这么晚/.test(body)) st.timeHits.night += 1
         else if (/早上好|早安|午休|中午|太阳/.test(body)) st.timeHits.day += 1
       }
@@ -605,7 +609,7 @@ export async function buildRichBackgroundIndex(options = {}) {
   const baseGroups = new Map()
   const baseRankedNames = new Map()
   for (const id of allIds) {
-    if (/^bg_a0000\d{2}$/.test(id)) continue
+    if (/^bg_a0000\d{2}$/.test(id) || id.startsWith('bg_s') || id.startsWith('bg_h')) continue
     const base = id.replace(/\d{2}$/, '')
     if (!baseGroups.has(base)) baseGroups.set(base, [])
     baseGroups.get(base).push(id)

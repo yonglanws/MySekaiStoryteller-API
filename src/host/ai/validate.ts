@@ -5,6 +5,7 @@ import { enforceOfficialStoryInvariants, type OfficialLintReport } from './offic
 import { normalizePjskTerminology } from './personas'
 import { isStandingMotion, type CatalogView } from './prompt'
 import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
+import { hasTranslationContent } from './ttsText'
 
 const TALK_LINE_WIDTH_UNITS = 30
 const TALK_MAX_LINES = 3
@@ -814,7 +815,11 @@ export function validateAndFixStory(
       const content = normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
       data.content = sanitizeDisplayText(content) || '...'
       data.voice = toStr(data.voice, '')
-      data.ttsText = typeof data.ttsText === 'string' && data.ttsText.trim() ? data.ttsText : ''
+      const rawTtsText = typeof data.ttsText === 'string' ? data.ttsText.trim() : ''
+      data.ttsText =
+        hasTranslationContent(data.content as string) && hasTranslationContent(rawTtsText)
+          ? rawTtsText
+          : ''
       const rawEmotion = toStr(data.emotion, '').trim()
       const labels = options.emotionLabels ?? []
       data.emotion =

@@ -63,4 +63,15 @@ test('checked-in background name index is populated with rich Simplified Chinese
     assert.ok(['室内', '室外'].includes(entry.indoor))
     assert.ok(Array.isArray(entry.tags) && entry.tags.length > 0)
   }
+
+  // Daytime sky rooftop & base 01 daytime scenes must not be mislabeled 黄昏 by after-school dialogue
+  assert.equal(data.backgrounds.bg_a002801.timeOfDay, '白天')
+  assert.equal(data.backgrounds.bg_a000101.timeOfDay, '白天')
+  assert.equal(data.backgrounds.bg_a000901.timeOfDay, '白天')
+  assert.equal(data.backgrounds.bg_d001502.timeOfDay, '白天')
+  for (const [id, entry] of Object.entries(data.backgrounds ?? {})) {
+    if (id.startsWith('bg_h')) {
+      assert.equal(entry.timeOfDay, '通用', `${id} online voice UI must not be tinted day/evening`)
+    }
+  }
 })

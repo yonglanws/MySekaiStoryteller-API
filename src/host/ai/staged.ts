@@ -20,6 +20,7 @@ import {
   normalizeScenarioEffectName,
   resolveScenarioSe
 } from './scenarioCues'
+import { hasTranslationContent } from './ttsText'
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -343,31 +344,223 @@ function pickMoveFacial(view: CatalogView, modelId: number, fallbackFacial?: str
   return view.exampleFacial(modelId) || view.defaultFacial(modelId) || ''
 }
 
-function pickCalmOrMatchingFacial(
+const FACIAL_EXTREME_EXCLUDE_RE =
+  /angry|disgust|scared|cry|shock|dark|despair|fever|sneeze|disgorge/i
+
+const isRestrainedRole = (roleOrName = ''): boolean => /真冬|克制|冷静|寡言|内敛/.test(roleOrName)
+
+function pickFacialFromHints(
+  facials: string[],
+  hints: RegExp[],
+  currentFacial?: string,
+  excludeRe?: RegExp
+): string {
+  const pool = excludeRe ? facials.filter((name) => !excludeRe.test(name)) : facials
+  const effectivePool = pool.length > 0 ? pool : facials
+  for (const hint of hints) {
+    const fresh = effectivePool.find((name) => name !== currentFacial && hint.test(name))
+    if (fresh) return fresh
+  }
+  return (
+    effectivePool.find((name) => name !== currentFacial) ??
+    effectivePool[0] ??
+    ''
+  )
+}
+
+/** 为说话者挑选贴合当前台词语气与情绪的细腻表情（避免反复卡在 face_normal_01）。 */
+function pickSpeakerSubtleFacial(
   view: CatalogView,
   modelId: number,
-  emotion: string | undefined,
-  currentFacial?: string
+  line: { content: string; emotion?: string },
+  currentFacial?: string,
+  role = ''
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
   const facials = view.promptFacials(model)
-  const hint =
-    emotion === '开心'
-      ? /smile|happy|smug/i
-      : emotion === '伤心'
-        ? /sad|worry|closeeye|trouble/i
-        : emotion === '生气'
-          ? /angry|serious|disgust/i
-          : emotion === '惊讶'
-            ? /surprise|shock/i
-            : emotion === '害羞'
-              ? /shy|blush|trouble/i
-              : /serious|smallmouth|closeeye|normal|smile/i
-  return (
-    facials.find((name) => name !== currentFacial && hint.test(name)) ??
-    facials.find((name) => name !== currentFacial) ??
-    ''
+  const emotion = line.emotion ?? ''
+  const text = line.content ?? ''
+  const restrained = isRestrainedRole(role) || isRestrainedRole(model.name)
+
+  if (emotion === '开心') {
+    return pickFacialFromHints(
+      facials,
+      restrained
+        ? [/smallmouth|closeeye|smile/i, /normal/i]
+        : [/smile|sparkling|wink|smug/i, /closeeye|normal/i],
+      currentFacial,
+      /angry|sad|cry|disgust|scared/i
+    )
+  }
+  if (emotion === '伤心') {
+    return pickFacialFromHints(
+      facials,
+      [/sad|worry|cry|closeeye/i, /trouble|lookaway|smallmouth/i],
+      currentFacial,
+      /smile|smug|wink|sparkling|angry/i
+    )
+  }
+  if (emotion === '生气') {
+    return pickFacialFromHints(
+      facials,
+      [/angry|serious|disgust/i, /sharp|trouble|smallmouth/i],
+      currentFacial,
+      /smile|smug|wink|sparkling/i
+    )
+  }
+  if (emotion === '惊讶') {
+    return pickFacialFromHints(
+      facials,
+      [/surprise|shock|notice/i, /baffling|serious/i],
+      currentFacial,
+      /smile|sleepy/i
+    )
+  }
+  if (emotion === '害羞') {
+    return pickFacialFromHints(
+      facials,
+      [/shy|blush|trouble|lookaway/i, /smallmouth|smile/i],
+      currentFacial,
+      /angry|disgust|scared/i
+    )
+  }
+
+  // 平静/无标签对话：按台词具体语气细分微表情，不再全锁成 face_normal_01
+  if (/♪|～|哈哈|嘿嘿|太好了|开心|喜欢|谢|早安|晚安|不错嘛/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      restrained
+        ? [/smallmouth|closeeye|smile/i, /serious|normal/i]
+        : [/smile|wink|smug|sparkling/i, /closeeye|smallmouth/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  if (/对不起|抱歉|糟|烦|无奈|叹|算了|没办法|真是的|别这样/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      [/trouble|worry|lookaway|closeeye/i, /sad|smallmouth|serious/i],
+      currentFacial,
+      /smile|sparkling|smug|angry/i
+    )
+  }
+  if (/？|\?|什么|怎么|难道|为什么|真的吗|咦/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      [/notice|baffling|serious|trouble/i, /smallmouth|lookaway|smile/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  if (/决定|一定|必须|其实|认真|听我说|总之/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      [/serious|closeeye|smallmouth/i, /notice|smile|normal/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  return pickFacialFromHints(
+    facials,
+    restrained
+      ? [/smallmouth|closeeye|serious/i, /normal|trouble/i]
+      : [/smile|smallmouth|closeeye|serious/i, /lookaway|trouble|notice|normal/i],
+    currentFacial,
+    FACIAL_EXTREME_EXCLUDE_RE
+  )
+}
+
+/**
+ * 为在场听者 / 静默反应角色推导符合「倾听者视角」的表情：
+ * 绝不把说话者的「生气」「害怕」「害羞」机械复制到被责备或被倾诉的听者脸上。
+ */
+function pickListenerReactionFacial(
+  view: CatalogView,
+  listenerId: number,
+  speakerLine: { content: string; emotion?: string },
+  listenerRole = '',
+  currentFacial?: string
+): string {
+  const model = view.modelById(listenerId)
+  if (!model) return ''
+  const facials = view.promptFacials(model)
+  const speakerEmotion = speakerLine.emotion ?? ''
+  const text = speakerLine.content ?? ''
+  const restrained = isRestrainedRole(listenerRole) || isRestrainedRole(model.name)
+
+  const isScoldingOrConfronting =
+    speakerEmotion === '生气' ||
+    /别再|不要再|少啰嗦|笨蛋|推开|擅自|搞什么|为什么|吵|责怪|闭嘴/.test(text)
+  if (isScoldingOrConfronting) {
+    return pickFacialFromHints(
+      facials,
+      [/trouble|worry|sad|lookaway/i, /closeeye|serious|smallmouth/i],
+      currentFacial,
+      /angry|disgust|scared|smile|smug|wink|sparkling/i
+    )
+  }
+  if (speakerEmotion === '伤心') {
+    return pickFacialFromHints(
+      facials,
+      [/worry|sad|trouble|closeeye/i, /serious|smallmouth/i],
+      currentFacial,
+      /smile|smug|wink|sparkling|angry|disgust/i
+    )
+  }
+  if (speakerEmotion === '惊讶') {
+    return pickFacialFromHints(
+      facials,
+      [/surprise|notice|baffling/i, /serious|smallmouth|trouble/i],
+      currentFacial,
+      /angry|disgust|cry/i
+    )
+  }
+  if (speakerEmotion === '害羞') {
+    return pickFacialFromHints(
+      facials,
+      restrained
+        ? [/smallmouth|serious|closeeye/i, /normal/i]
+        : [/smile|wink|smug|notice/i, /serious|normal/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  if (speakerEmotion === '开心') {
+    return pickFacialFromHints(
+      facials,
+      restrained
+        ? [/smallmouth|closeeye|serious/i, /normal/i]
+        : [/smile|sparkling|wink/i, /closeeye|normal/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+
+  // 说话者平静：根据内容判断倾听者神情（疑惑/担忧 vs 轻松赞同 vs 认真倾听）
+  if (/？|\?|……|难道|怎么|是不是|真的/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      [/serious|notice|trouble|lookaway/i, /smallmouth|closeeye|normal/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  if (/♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
+    return pickFacialFromHints(
+      facials,
+      restrained
+        ? [/smallmouth|closeeye|serious/i, /normal/i]
+        : [/smile|wink|closeeye/i, /smallmouth|normal/i],
+      currentFacial,
+      FACIAL_EXTREME_EXCLUDE_RE
+    )
+  }
+  return pickFacialFromHints(
+    facials,
+    [/serious|smallmouth|closeeye|notice/i, /lookaway|trouble|smile|normal/i],
+    currentFacial,
+    FACIAL_EXTREME_EXCLUDE_RE
   )
 }
 
@@ -1374,7 +1567,6 @@ export function buildEmotionPrompt(
   const labels = (options.emotionLabels ?? []).map((label) => label.trim()).filter(Boolean)
   const defaultEmotion = labels.includes('平静') ? '平静' : labels[0]
   const strongLabels = labels.filter((label) => label !== defaultEmotion)
-  const minEmotionSegments = dialogue.lines.length >= 30 ? 4 : 3
   const lineLines = dialogue.lines
     .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
     .join('\n')
@@ -1383,26 +1575,24 @@ export function buildEmotionPrompt(
     .map((member) => `- ${member.name}：${member.role || '出场角色'}`)
     .join('\n')
 
+  const mid = Math.max(2, Math.floor(dialogue.lines.length * 0.45))
+  const late = Math.max(mid + 1, Math.min(dialogue.lines.length, Math.floor(dialogue.lines.length * 0.78)))
+  const endId = dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'
   const example = {
     segments: [
-      { from: 'l1', to: 'l7', emotion: defaultEmotion },
-      { from: 'l8', to: 'l14', emotion: strongLabels[0] ?? defaultEmotion },
-      {
-        from: 'l15',
-        to:
-          dialogue.lines.length >= 20
-            ? 'l20'
-            : `l${Math.max(15, Math.min(dialogue.lines.length, 20))}`,
-        emotion: defaultEmotion
-      }
+      { from: 'l1', to: `l${Math.max(1, mid - 1)}`, emotion: defaultEmotion },
+      { from: `l${mid}`, to: `l${Math.max(mid, late - 1)}`, emotion: strongLabels[0] ?? defaultEmotion },
+      ...(dialogue.lines.length >= 6
+        ? [{ from: `l${late}`, to: endId, emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion }]
+        : [])
     ]
   }
 
   return {
     system: [
       '你是 Project SEKAI 官方剧情的配音情绪标注员。',
-      '台词已经定稿，你只做一件事：把整场台词切成连续的情绪段，每段给一个情绪标签。',
-      'TTS 换情绪会换参考音频、音色差异明显，所以同一段内绝对不要来回切换。只输出一个 JSON 对象。',
+      '台词已经定稿，你只做一件事：顺着剧情起承转合把整场台词划成情绪段，每段给一个最贴合语境的 TTS 情绪标签。',
+      'TTS 切换情绪会切换参考音频，因此同一情绪拍内保持连贯，不要每句乱跳；但遇到真正的情感转折、哭诉或释怀收尾时，必须忠实标出对应情绪。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
       .filter(Boolean)
@@ -1420,16 +1610,17 @@ ${lineLines}
 ${labels.join('、')}
 
 ## 标注规则
-- 按段落标，不按句标：每段 5~10 句；${dialogue.lines.length} 句至少 ${minEmotionSegments} 段、最多 6 段；
-  少于 ${minEmotionSegments} 段整场会显得没有起伏。
-- 情绪分布：整场约 1/3 的句子是「${defaultEmotion}」底色，但不要超过一半；
-  另外一半以上落在 1~3 个有起伏的段落里。不要整场都用「${defaultEmotion}」，也不要把每一段都标成强情绪。
-- 默认「${defaultEmotion}」：日常陈述、普通对话、没有明显起伏的段落都用它。
-- 只有文本明显进入另一情绪时才换段：开心用于轻松/玩笑/被逗笑；伤心用于失落、告白、回忆；
-  生气用于争执、被戳痛；害羞用于被夸、慌张、不好意思；惊讶只用于突然的揭示或意外，整场最多 1 段。
-- 相邻段不能使用同一个标签；不要在一段中间改标签；不要给单独一句开一段。
-- 情绪段必须从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}，不重叠、不遗漏。
-- 宁可少切：整场 3~5 次变化就够了。拿不准时用「${defaultEmotion}」。
+- **按戏剧节拍（起承转合）划分**：通常同一情绪拍连续覆盖 3~10 句，避免逐句 A/B 来回震荡；但**绝不**强凑段数或硬塞配额。
+- **忠实贴合真情实感（不要被机械配额扭曲）**：
+  - 平静：日常寒暄、温和叙述、冷静思考；不必强行凑够固定比例，如果结尾已经是释怀/欢快（如带「～♪」、互相打趣、和好约定），末尾完全可以用「开心」，不要硬压回「平静」。
+  - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾。
+  - 伤心：失落、脆弱倾诉、愧疚、带泪恳求（例如吵架后的含泪挽留「别再把我推开了」应转入「伤心」，不要锁死在「生气」里）。
+  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问。
+  - 害羞：被夸、慌张掩饰、不好意思。
+  - 惊讶：突然的揭示、意外或惊呼。
+- **冲突场景允许不同情绪交接**：当两人情绪明显不同步（例如一人质问「生气」，另一人退缩或恳求「伤心」），可以按节拍或关键转折切段，只要同一说话人不出现无意义的逐句反复横跳。
+- **高潮/尾声短转折保留**：关键的 2~3 句含泪恳求或 2~4 句欢快尾声可以独立成段，不必强行拉长或吞并。
+- 情绪段必须从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${endId}，不重叠、不遗漏。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -1507,14 +1698,10 @@ export function buildEmotionRepairPrompt(
 ): StagedMessages {
   const base = buildEmotionPrompt(plan, dialogue, options)
   const raw = typeof previous === 'string' ? previous : JSON.stringify(previous)
-  const minEmotionSegments = dialogue.lines.length >= 30 ? 4 : 3
   return {
     system: base.system,
     user: `${base.user}\n\n## 上一轮的问题
-上一轮只标了 ${actualSegments} 段，整场会显得没有起伏。至少需要 ${minEmotionSegments} 段、最多 6 段：
-- 每段 5~10 句，段内不要换标签；
-- 平静约占 1/3 但不超过一半，其余段落要有明显情绪；
-- 仍然要从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
+上一轮整场只给了 ${actualSegments} 个单一情绪标签，长剧本完全没有情绪推进。请按剧情起承转合划分成自然的 2~5 个连续情绪段（保留关键转折、哭诉或欢快收尾，不要逐句跳变），并从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
 上一轮的输出开头如下：
 ${raw.slice(0, 3000)}
 
@@ -1522,144 +1709,96 @@ ${raw.slice(0, 3000)}
   }
 }
 
+const isEmotionPivotCue = (text: string, emotion: string): boolean => {
+  if (emotion === '开心') return /♪|～♪|哈哈|太好了/.test(text)
+  if (emotion === '伤心') return /对不起|别.*推开|不要.*走|求你|眼泪|哭/.test(text)
+  if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然/.test(text)
+  return false
+}
+
 export function stabilizeEmotions(
   dialogue: StagedDialogue,
   plan: Map<string, string> | null,
-  labels: string[],
-  minRun = 3
+  labels: string[]
 ): Map<string, string> {
   const allowed = labels.map((label) => label.trim()).filter(Boolean)
   const fallback = allowed.includes('平静') ? '平静' : (allowed[0] ?? '')
-  const emotions = dialogue.lines.map((line) => {
+  const lines = dialogue.lines
+  if (lines.length === 0) return new Map()
+
+  const rawValues = lines.map((line) => {
     const value = plan?.get(line.id)?.trim() ?? ''
-    return allowed.includes(value) ? value : fallback
+    return allowed.includes(value) ? value : ''
   })
-  if (emotions.length === 0) return new Map()
 
-  const runsOf = (values: string[]): StagedEmotionSegment[] => {
-    const runs: StagedEmotionSegment[] = []
-    for (let index = 0; index < values.length; index++) {
-      const last = runs[runs.length - 1]
-      if (last && last.emotion === values[index]) last.to = index
-      else runs.push({ from: index, to: index, emotion: values[index] })
-    }
-    return runs
-  }
-
-  const applyRuns = (runs: StagedEmotionSegment[]): string[] => {
-    const values = new Array<string>(emotions.length)
-    for (const run of runs) {
-      for (let index = run.from; index <= run.to; index++) values[index] = run.emotion
-    }
-    return values
-  }
-
-  let runs = runsOf(emotions)
-  const mergeShort = (): boolean => {
-    const short = runs.find((run) => run.to - run.from + 1 < minRun)
-    if (!short) return false
-    const index = runs.indexOf(short)
-    const previous = runs[index - 1]
-    const next = runs[index + 1]
-    const target =
-      previous && next
-        ? previous.to - previous.from >= next.to - next.from
-          ? previous
-          : next
-        : (previous ?? next)
-    if (!target) return false
-    runs.splice(index, 1)
-    target.from = Math.min(target.from, short.from)
-    target.to = Math.max(target.to, short.to)
-    runs = runsOf(applyRuns(runs))
-    return true
-  }
-  while (mergeShort()) {
-    // keep merging
-  }
-  runs = runsOf(applyRuns(runs))
-
-  const maxSegments = Math.max(2, Math.min(8, Math.round(emotions.length / 7)))
-  const mergeShortest = (): void => {
-    if (runs.length <= maxSegments) return
-    let index = 0
-    for (let i = 1; i < runs.length; i++) {
-      if (runs[i].to - runs[i].from < runs[index].to - runs[index].from) index = i
-    }
-    const target = runs[index - 1] ?? runs[index + 1]
-    if (!target) return
-    const short = runs[index]
-    runs.splice(index, 1)
-    target.from = Math.min(target.from, short.from)
-    target.to = Math.max(target.to, short.to)
-    runs = runsOf(applyRuns(runs))
-    mergeShortest()
-  }
-  mergeShortest()
-
-  const smoothed = applyRuns(runs)
-  const previousBySpeaker = new Map<string, number>()
-  for (let index = 0; index < dialogue.lines.length; index++) {
-    const speaker = dialogue.lines[index].speaker
-    const previous = previousBySpeaker.get(speaker)
-    if (previous !== undefined) {
-      const previousEmotion = smoothed[previous]
-      const currentEmotion = smoothed[index]
-      if (previousEmotion !== currentEmotion) {
-        let nextSame = -1
-        for (let scan = index + 1; scan < dialogue.lines.length; scan++) {
-          if (dialogue.lines[scan].speaker === speaker) {
-            nextSame = scan
-            break
-          }
-        }
-        if (nextSame === -1 || smoothed[nextSame] === previousEmotion) {
-          smoothed[index] = previousEmotion
-        }
+  // 1) 未知/缺失标签优先继承相邻句有效情绪，避免突然插入孤立的 fallback 断层
+  const values = [...rawValues]
+  for (let i = 0; i < values.length; i++) {
+    if (values[i]) continue
+    const prev = i > 0 ? values[i - 1] : ''
+    let next = ''
+    for (let j = i + 1; j < rawValues.length; j++) {
+      if (rawValues[j]) {
+        next = rawValues[j]
+        break
       }
     }
-    previousBySpeaker.set(speaker, index)
-  }
-  runs = runsOf(smoothed)
-
-  const caps: Record<string, number> = { 惊讶: 1, 害羞: 1, 生气: 2 }
-  for (const [label, cap] of Object.entries(caps)) {
-    const matching = runs.filter((run) => run.emotion === label)
-    if (matching.length <= cap) continue
-    matching
-      .sort((a, b) => a.to - a.from - (b.to - b.from))
-      .slice(0, matching.length - cap)
-      .forEach((run) => {
-        run.emotion = fallback
-      })
-    runs = runsOf(applyRuns(runs))
+    values[i] = prev || next || fallback
   }
 
-  runs = runsOf(applyRuns(runs))
-  while (mergeShort()) {
-    // keep all runs >= minRun
+  // 2) 仅平滑夹在同情绪中间的孤立单句毛刺（A - B - A），保留 >=2 句高潮/尾声及明确强转折句
+  for (let i = 1; i < values.length - 1; i++) {
+    const prev = values[i - 1]
+    const curr = values[i]
+    const next = values[i + 1]
+    if (curr !== prev && prev === next && !isEmotionPivotCue(lines[i].content, curr)) {
+      values[i] = prev
+    }
   }
-  runs = runsOf(applyRuns(runs))
 
-  if (fallback && emotions.length >= 12) {
-    const calmTarget = Math.ceil(emotions.length * 0.25)
-    let calmCount = applyRuns(runs).filter((emotion) => emotion === fallback).length
-    while (calmCount < calmTarget) {
-      const candidates = runs
-        .filter((run) => run.emotion !== fallback)
-        .sort((a, b) => a.to - a.from - (b.to - b.from))
-      const shortest = candidates[0]
-      if (!shortest) break
-      shortest.emotion = fallback
-      runs = runsOf(applyRuns(runs))
-      calmCount = applyRuns(runs).filter((emotion) => emotion === fallback).length
+  // 3) 同一说话人的孤立单句跳变（前一句与下一句为同一情绪，中间仅夹一句全局长度为 1 的毛刺）平滑回一致
+  const previousBySpeaker = new Map<string, number>()
+  for (let i = 0; i < lines.length; i++) {
+    const speaker = lines[i].speaker
+    const prevIdx = previousBySpeaker.get(speaker)
+    const isGlobalSingleton =
+      (i === 0 || values[i - 1] !== values[i]) &&
+      (i === lines.length - 1 || values[i + 1] !== values[i])
+    if (prevIdx !== undefined && isGlobalSingleton && !isEmotionPivotCue(lines[i].content, values[i])) {
+      const prevEmotion = values[prevIdx]
+      let nextSame = -1
+      for (let scan = i + 1; scan < lines.length; scan++) {
+        if (lines[scan].speaker === speaker) {
+          nextSame = scan
+          break
+        }
+      }
+      if (
+        prevEmotion !== values[i] &&
+        nextSame !== -1 &&
+        values[nextSame] === prevEmotion
+      ) {
+        values[i] = prevEmotion
+      }
+    }
+    previousBySpeaker.set(speaker, i)
+  }
+
+  // 4) 若仍出现连续 3 个以上长度为 1 的高频锯齿段（A - B - C - D），温和并掉无强标记的中间单句毛刺
+  for (let i = 1; i < values.length - 1; i++) {
+    const prevSame = values[i - 1] === values[i]
+    const nextSame = values[i + 1] === values[i]
+    if (prevSame || nextSame) continue
+    const prevIsSingleton = i - 2 < 0 || values[i - 2] !== values[i - 1]
+    const nextIsSingleton = i + 2 >= values.length || values[i + 2] !== values[i + 1]
+    if (prevIsSingleton && nextIsSingleton && !isEmotionPivotCue(lines[i].content, values[i])) {
+      values[i] = values[i - 1]
     }
   }
 
   const result = new Map<string, string>()
-  const finalValues = applyRuns(runs)
-  dialogue.lines.forEach((line, index) => {
-    if (finalValues[index]) result.set(line.id, finalValues[index])
+  lines.forEach((line, index) => {
+    if (values[index]) result.set(line.id, values[index])
   })
   return result
 }
@@ -1951,12 +2090,16 @@ export function fallbackStaging(
       activeCast = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
     }
     const bgDetail = view.canonicalImageEntry(ps.background)
+    const ambient =
+      bgDetail?.timeOfDay === '白天' && ps.ambient === 'evening' && !ps.isFlashback
+        ? 'normal'
+        : ps.ambient
     scenes.push({
       id: ps.id,
       fromLineId: lines[fromIndex]?.id ?? 'l1',
       fromIndex,
       background: normalizeBackground(view, ps.background),
-      ambient: ps.ambient,
+      ambient,
       ...(ps.telop ? { telop: ps.telop } : {}),
       ...(ps.placeInfo
         ? { placeInfo: ps.placeInfo }
@@ -2129,12 +2272,18 @@ export function normalizeStaging(
     const walkOutCast = resolveCastIds(item.walkOutCast, plan, view)
     const effect = normalizeScenarioEffectName(item.scenarioEffect ?? item.effect)
 
+    const bg = normalizeBackground(view, item.background ?? item.image ?? plan.background)
+    const bgDetail = view.canonicalImageEntry(bg)
+    let ambient = normalizeAmbient(item.ambient ?? item.timeOfDay)
+    if (bgDetail?.timeOfDay === '白天' && ambient === 'evening' && !isFlashback) {
+      ambient = 'normal'
+    }
     scenes.push({
       id: str(item.id).trim() || `s${scenes.length + 1}`,
       fromLineId: lines[idx].id,
       fromIndex: idx,
-      background: normalizeBackground(view, item.background ?? item.image ?? plan.background),
-      ambient: normalizeAmbient(item.ambient ?? item.timeOfDay),
+      background: bg,
+      ambient,
       ...(oneLine(item.telop, 40) ? { telop: oneLine(item.telop, 40) } : {}),
       ...(oneLine(item.placeInfo ?? item.place, 40)
         ? { placeInfo: oneLine(item.placeInfo ?? item.place, 40) }
@@ -2479,13 +2628,13 @@ ${
 - **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
 - **静默反应**：需要留白感叹或沉默回应时，可加 \`silentMotion: true\`。
-- **听者反应**：约 15%~20% 的句子给同台另一位角色 1 个 \`listener\`（表情或轻微动作），优先放在长独白中段或话题转折处，防止在场听者长时间静止。
-- **表情一致性**：${
+- **听者反应（listener）**：约 15%~20% 的句子给同台另一位角色 1 个 \`listener\`（表情或轻微动作），优先放在长独白中段或话题转折处，防止在场听者长时间静止。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上。
+- **表情细腻切换与语境贴合**：${
       hasEmotionTags
-        ? '严格跟随每句标注的〔情绪〕：平静用 normal / smallmouth / closeeye；开心用 smile；伤心用 sad / cry / worry；生气用 angry / serious；惊讶用 surprise / shock；害羞用 shy / blush。'
-        : '跟随台词语气：日常陈述用 normal / smallmouth / closeeye；开心用 smile；伤心用 sad / cry；生气用 angry；惊讶用 surprise；害羞用 shy。'
+        ? '〔情绪〕只代表 TTS 语音基调，**严禁把〔平静〕死板锁死在 face_normal_01**！即使在〔平静〕段内，也要根据每句台词的实际语气细腻切换微表情：温和/寒暄/赞同/调侃用 smile / wink / smug；认真/思索/倾听用 serious / closeeye / smallmouth / notice；无奈/窘迫/犹豫用 trouble / lookaway / worry / baffling；只有毫无波澜的平铺陈述才用 normal。开心用 smile / sparkling；伤心用 sad / cry / worry；生气用 angry / serious；惊讶用 surprise / shock；害羞用 shy / blushed。'
+        : '随每句台词语气细腻切换表情：温和/寒暄/赞同用 smile / wink / smug；认真/思索用 serious / closeeye / smallmouth；无奈/犹豫用 trouble / lookaway / worry；开心用 smile / sparkling；伤心用 sad / cry / worry；生气用 angry / serious；惊讶用 surprise / shock；害羞用 shy / blushed。'
     }
-- 动作幅度小而自然；同一角色连续多句换不同动作；**朝比奈真冬**保持克制表情与动作。
+- 同一角色连续说话时**避免连续重复同一表情**（尤其禁止连续多句挂着 face_normal_01），也避免连续多句重复同一动作；**朝比奈真冬**保持克制内敛的表情与动作。
 - 背景的时段（白天/黄昏/夜晚）和室内外要和台词写的时间一致；优先选有描述的条目。
 
 ## 输出 JSON
@@ -2646,10 +2795,24 @@ export function normalizeDirection(
     if (!speaker) continue
 
     const fields = readDirectionFields(item, speaker, view)
-    const motion = view.canonicalAnimation(speaker.modelId, 'motion', fields.motion)
-    const facial = view.canonicalAnimation(speaker.modelId, 'facial', fields.facial)
+    let motion = view.canonicalAnimation(speaker.modelId, 'motion', fields.motion)
+    let facial = view.canonicalAnimation(speaker.modelId, 'facial', fields.facial)
     const listener = resolveDirectionListener(view, plan, speaker, fields.listener)
-    const beats = fields.beats
+    let beats = fields.beats
+    // 短台词（<=16字）不要在句中切第二个 body motion，以免刚起的短动作被腰斩（保留第二个表情）
+    if (beats && beats.length >= 2 && cleanText(line.content).length <= 16) {
+      beats = beats.map((beat, beatIdx) => {
+        if (beatIdx === 0 || !beat.motion) return beat
+        const { motion: _drop, ...restBeat } = beat
+        return restBeat
+      })
+      beats = beats.filter((beat) => Boolean(beat.motion || beat.facial))
+      if (beats.length < 2) {
+        motion = motion ?? beats[0]?.motion ?? null
+        facial = facial ?? beats[0]?.facial ?? null
+        beats = undefined
+      }
+    }
     if (!motion && !facial && !listener && (!beats || beats.length === 0)) continue
     result.set(id, {
       id,
@@ -2687,19 +2850,18 @@ export function normalizeDirection(
   }
 
   // 动作预算控制：
-  // 遵循官方 PJSK ~80% 单拍动作密度；不因台词短（<=7字）剥夺 body motion，
-  // 也不在平稳段落砍出连续静态站桩空窗，同时取消人工 at=0.55 双拍注入。
+  // 遵循官方 PJSK ~80% 单拍动作密度；仅统计并裁剪多余的 body motion，绝对保留每句的 facial 表情！
   const maxSpeakerActions = Math.ceil(dialogue.lines.length * 0.9)
-  const speakerLinesWithAct = dialogue.lines.filter((line) => {
-    const d = result.get(line.id)
-    return Boolean(d?.motion || d?.facial || (d?.beats && d.beats.length > 0))
-  }).length
-  if (speakerLinesWithAct > maxSpeakerActions) {
+  const hasMotionInDirection = (d: StagedDirectionLine | undefined): boolean =>
+    Boolean(d?.motion || (d?.beats && d.beats.some((b) => Boolean(b.motion))))
+  const speakerLinesWithMotion = dialogue.lines.filter((line) =>
+    hasMotionInDirection(result.get(line.id))
+  ).length
+  if (speakerLinesWithMotion > maxSpeakerActions) {
     const lineIdxById = new Map(dialogue.lines.map((l, idx) => [l.id, idx]))
     const hasMotionOnIndex = (idx: number): boolean => {
       if (idx < 0 || idx >= dialogue.lines.length) return false
-      const d = result.get(dialogue.lines[idx].id)
-      return Boolean(d?.motion || (d?.beats && d.beats.some((b) => Boolean(b.motion))))
+      return hasMotionInDirection(result.get(dialogue.lines[idx].id))
     }
     const candidates = dialogue.lines
       .map((line, index) => ({
@@ -2707,18 +2869,14 @@ export function normalizeDirection(
         index,
         directed: result.get(line.id)
       }))
-      .filter(
-        (item) =>
-          item.directed &&
-          (item.directed.motion || item.directed.facial || (item.directed.beats?.length ?? 0) > 0)
-      )
+      .filter((item) => hasMotionInDirection(item.directed))
       .sort((a, b) => {
         const aCalm = !a.line.emotion || a.line.emotion === '平静' ? 0 : 1
         const bCalm = !b.line.emotion || b.line.emotion === '平静' ? 0 : 1
         if (aCalm !== bCalm) return aCalm - bCalm
         return b.index - a.index
       })
-    let remaining = speakerLinesWithAct
+    let remaining = speakerLinesWithMotion
     for (const candidate of candidates) {
       if (remaining <= maxSpeakerActions) break
       const idx = lineIdxById.get(candidate.line.id) ?? candidate.index
@@ -2726,9 +2884,15 @@ export function normalizeDirection(
       if (!hasMotionOnIndex(idx - 1) || !hasMotionOnIndex(idx + 1)) continue
       const directed = result.get(candidate.line.id)
       if (!directed) continue
-      const { motion: _motion, facial: _facial, beats: _beats, ...rest } = directed
-      if (rest.listener || rest.silentMotion) result.set(candidate.line.id, rest)
-      else result.delete(candidate.line.id)
+      const preservedFacial =
+        directed.facial ?? directed.beats?.find((b) => Boolean(b.facial))?.facial
+      const { motion: _motion, beats: _beats, ...rest } = directed
+      if (preservedFacial) rest.facial = preservedFacial
+      if (rest.facial || rest.listener || rest.silentMotion) {
+        result.set(candidate.line.id, rest)
+      } else {
+        result.delete(candidate.line.id)
+      }
       remaining -= 1
     }
   }
@@ -2768,7 +2932,7 @@ export function normalizeDirection(
     ambient,
     bgm: bgm === 'silence' ? '' : bgm,
     ...(useSecondBgm ? { bgm2: secondBgm as string, bgm2From: secondBgmFromIndex } : {}),
-    bgmStop: bgm && bgm !== 'silence' ? toBool(doc.bgmStop ?? doc.stopBgm) : false,
+    bgmStop: toBool(doc.bgmStop ?? doc.stopBgm),
     lines: dialogue.lines
       .map((line) => result.get(line.id))
       .filter((line): line is StagedDirectionLine => Boolean(line))
@@ -2948,6 +3112,9 @@ export function composeStory(
     appearFacial: string
     lastBodyMotion: string
     lastFacial: string
+    lastSpeakingFacial: string
+    lastSpeakingWasShortWithMotion: boolean
+    linesSinceFacialChange: number
     recentBodyMotions: string[]
     speakingCountSinceAppear: number
     linesSinceLastBodyMotion: number
@@ -2997,8 +3164,8 @@ export function composeStory(
     if (!cameraDirty) return
     snippets.push({
       type: 'CameraZoom',
-      wait: false,
-      progressBehavior: 'Now',
+      wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: { scale: 1, duration: 400, ease: 'OutQuad' }
     })
@@ -3016,8 +3183,8 @@ export function composeStory(
     if (!shakeScreenActive) return
     snippets.push({
       type: 'StopShakeScreen',
-      wait: false,
-      progressBehavior: 'Now',
+      wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: {}
     })
@@ -3039,18 +3206,18 @@ export function composeStory(
   const clearActors = (ids: number[], walkOutSet = new Set<number>()): number => {
     const toClear = ids.filter((id) => onStage.has(id))
     if (toClear.length === 0) return 0
-    for (const id of toClear) {
+    toClear.forEach((id, idx) => {
       const state = onStage.get(id)!
       if (state.hologram) {
         snippets.push({
           type: 'AttachCharacterShader',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: idx === 0,
+          progressBehavior: idx === 0 ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { modelId: id, shader: 'none' }
         })
       }
-    }
+    })
     toClear.forEach((id, idx) => {
       const state = onStage.get(id)!
       const isWalk = walkOutSet.has(id)
@@ -3163,7 +3330,7 @@ export function composeStory(
     }
 
     const overlapsPreceding =
-      Boolean(options.hadPrecedingClear) || clearedCount > 0 || movedExisting
+      (!options.hadPrecedingClear && clearedCount > 0) || movedExisting
     const lineAtEntry = dialogue.lines[lineIndex]
     const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
@@ -3174,7 +3341,8 @@ export function composeStory(
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
         : { side: slot, offset: 0 }
-      const memberName = cast.find((c) => c.modelId === id)?.name
+      const member = cast.find((c) => c.modelId === id)
+      const memberName = member?.name
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
       const directedMotion =
         isEntrySpeaker && directedAtEntry
@@ -3185,11 +3353,12 @@ export function composeStory(
           ? (directedAtEntry.beats?.[0]?.facial ?? directedAtEntry.facial)
           : undefined
       let firstFutureTalkMotion = ''
+      let firstLineForMember = isEntrySpeaker ? lineAtEntry : undefined
       if (!isEntrySpeaker && memberName) {
-        const nextLineForMember = dialogue.lines
+        firstLineForMember = dialogue.lines
           .slice(lineIndex + 1, Math.min(dialogue.lines.length, lineIndex + 8))
           .find((l) => l.speaker === memberName)
-        const nextDir = nextLineForMember ? directionById.get(nextLineForMember.id) : undefined
+        const nextDir = firstLineForMember ? directionById.get(firstLineForMember.id) : undefined
         firstFutureTalkMotion = nextDir?.beats?.[0]?.motion ?? nextDir?.motion ?? ''
       }
       const entryMotion =
@@ -3197,7 +3366,13 @@ export function composeStory(
           ? directedMotion
           : pickAppearFallbackMotion(view, id, usedEntryMotions, firstFutureTalkMotion)
       if (entryMotion) usedEntryMotions.add(entryMotion)
-      const entryFacial = directedFacial || view.exampleFacial(id) || view.defaultFacial(id)
+      const entryFacial =
+        directedFacial ||
+        (firstLineForMember
+          ? pickSpeakerSubtleFacial(view, id, firstLineForMember, undefined, member?.role)
+          : '') ||
+        view.exampleFacial(id) ||
+        view.defaultFacial(id)
       const isHolo = hologramSet.has(id)
       const waitFirst = !overlapsPreceding && idx === 0
       snippets.push({
@@ -3235,6 +3410,9 @@ export function composeStory(
         appearFacial: entryFacial,
         lastBodyMotion: entryMotion,
         lastFacial: entryFacial,
+        lastSpeakingFacial: '',
+        lastSpeakingWasShortWithMotion: false,
+        linesSinceFacialChange: 0,
         recentBodyMotions: entryMotion ? [entryMotion] : [],
         speakingCountSinceAppear: 0,
         linesSinceLastBodyMotion: 0
@@ -3248,8 +3426,8 @@ export function composeStory(
       if (currentBgm) {
         snippets.push({
           type: 'ChangeBgm',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { file: '', stop: true, fadeMs }
         })
@@ -3260,8 +3438,8 @@ export function composeStory(
     if (bgmDirective !== currentBgm) {
       snippets.push({
         type: 'ChangeBgm',
-        wait: false,
-        progressBehavior: 'Now',
+        wait: true,
+        progressBehavior: 'WaitFinished',
         delay: 0,
         data: { file: bgmDirective, stop: false, fadeMs }
       })
@@ -3280,12 +3458,12 @@ export function composeStory(
       wait: true,
       progressBehavior: 'WaitFinished',
       delay: 0,
-      data: { duration: 500, color: 'black' }
+      data: { duration: 0, color: 'black' }
     })
     snippets.push({
       type: 'ChangeBackgroundImage',
-      wait: false,
-      progressBehavior: 'Now',
+      wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: { imageId: bgId }
     })
@@ -3352,8 +3530,8 @@ export function composeStory(
       if (currentEffect) {
         snippets.push({
           type: 'StopScenarioEffect',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { effectName: currentEffect }
         })
@@ -3369,8 +3547,8 @@ export function composeStory(
         if (!leavingFlashback) return
         snippets.push({
           type: 'FlashbackOut',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { duration: 100 }
         })
@@ -3392,18 +3570,18 @@ export function composeStory(
         if (enteringFlashback) {
           snippets.push({
             type: 'PlaySe',
-            wait: false,
-            progressBehavior: 'Now',
+            wait: true,
+            progressBehavior: 'WaitFinished',
             delay: 0,
             data: { file: 'se00053_b.mp3', volume: 0.9, loop: false, fadeMs: 0 }
           })
         }
-        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         if (enteringFlashback) {
           snippets.push({
             type: 'FlashbackIn',
-            wait: clearedCount === 0,
-            progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
+            wait: true,
+            progressBehavior: 'WaitFinished',
             delay: 0,
             data: { duration: 100, alpha: 0.3 }
           })
@@ -3413,8 +3591,8 @@ export function composeStory(
         }
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: clearedCount === 0 && !enteringFlashback,
-          progressBehavior: clearedCount === 0 && !enteringFlashback ? 'WaitFinished' : 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3446,12 +3624,12 @@ export function composeStory(
           delay: 0,
           data: { duration: 500, variant: 'v2' }
         })
-        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         closeFlashbackBehindCurtain()
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: clearedCount === 0,
-          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3483,12 +3661,12 @@ export function composeStory(
           delay: 0,
           data: { direction: 'Left', edge: 'left', mode: 'Out', duration: 450 }
         })
-        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         closeFlashbackBehindCurtain()
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: clearedCount === 0,
-          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3521,11 +3699,11 @@ export function composeStory(
           delay: 0,
           data: { duration: 400, color: fadeColor }
         })
-        const clearedCount = clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
+        clearActors([...onStage.keys()], new Set(nextScene.walkOutCast ?? []))
         snippets.push({
           type: 'ChangeBackgroundImage',
-          wait: clearedCount === 0,
-          progressBehavior: clearedCount === 0 ? 'WaitFinished' : 'Now',
+          wait: true,
+          progressBehavior: 'WaitFinished',
           delay: 0,
           data: { imageId: bgId }
         })
@@ -3626,8 +3804,8 @@ export function composeStory(
     if (ev?.se && ev.se.timing !== 'during') {
       snippets.push({
         type: 'PlaySe',
-        wait: false,
-        progressBehavior: 'Now',
+        wait: true,
+        progressBehavior: 'WaitFinished',
         delay: ev.se.delay ?? 0,
         data: { file: ev.se.file, volume: ev.se.volume ?? 0.9, loop: false, fadeMs: 0 }
       })
@@ -3638,8 +3816,8 @@ export function composeStory(
       st.hologram = ev.hologram.enabled
       snippets.push({
         type: 'AttachCharacterShader',
-        wait: false,
-        progressBehavior: 'Now',
+        wait: true,
+        progressBehavior: 'WaitFinished',
         delay: 0,
         data: { modelId: ev.hologram.modelId, shader: ev.hologram.enabled ? 'hologram' : 'none' }
       })
@@ -3694,59 +3872,21 @@ export function composeStory(
     if (ev?.characterShake && onStage.has(ev.characterShake.modelId)) {
       snippets.push({
         type: 'CharacterShake',
-        wait: false,
-        progressBehavior: 'Now',
+        wait: true,
+        progressBehavior: 'WaitFinished',
         delay: 0,
         data: { modelId: ev.characterShake.modelId, axis: ev.characterShake.axis }
       })
     }
 
-    if (ev?.camera) {
-      const cam = ev.camera
-      if (cam.kind === 'zoomIn') {
-        snippets.push({
-          type: 'CameraZoom',
-          wait: false,
-          progressBehavior: 'Now',
-          delay: 0,
-          data: { scale: cam.scale ?? 1.1, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
-        })
-        cameraDirty = true
-      } else if (cam.kind === 'pan') {
-        snippets.push({
-          type: 'CameraMove',
-          wait: false,
-          progressBehavior: 'Now',
-          delay: 0,
-          data: { x: cam.x ?? 60, y: cam.y ?? 0, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
-        })
-        cameraDirty = true
-      } else if (cam.kind === 'zoomReset') {
-        resetCameraIfNeeded()
-      } else if (cam.kind === 'shakeWindow') {
-        snippets.push({
-          type: 'ShakeWindow',
-          wait: false,
-          progressBehavior: 'Now',
-          delay: 0,
-          data: { duration: cam.durationMs ?? 450 }
-        })
-      } else if (cam.kind === 'shakeScreen') {
-        const dur = cam.durationMs ?? 450
-        snippets.push({
-          type: 'ShakeScreen',
-          wait: false,
-          progressBehavior: 'Now',
-          delay: 0,
-          data: { duration: dur, amplitude: 0.01 }
-        })
-        if (dur >= 10000) shakeScreenActive = true
-      }
+    if (ev?.camera?.kind === 'zoomReset') {
+      resetCameraIfNeeded()
     }
 
     // ---- Talk 动作与入场去重 --------------------------------------------------------------------------------
     const directed = directionById.get(line.id)
     const actorState = onStage.get(member.modelId)
+    const talkDelay = ev?.pauseBefore ?? line.pauseBefore ?? 0
     const justAppeared =
       Boolean(actorState?.appearedWithMotion) &&
       actorState!.speakingCountSinceAppear === 0 &&
@@ -3775,8 +3915,13 @@ export function composeStory(
     const justHadStandaloneMotion =
       lastSilentReactionTargetId === member.modelId &&
       index === lastSilentReactionLine + 1 &&
-      (ev?.pauseBefore ?? line.pauseBefore ?? 0) < 0.8
-    const skipImmediateBodyMotion = justAppeared || justHadStandaloneMotion
+      talkDelay < 0.8
+    const justHadShortClipMotion =
+      lastSpeakerId === member.modelId &&
+      Boolean(actorState?.lastSpeakingWasShortWithMotion) &&
+      talkDelay < 0.8
+    const skipImmediateBodyMotion =
+      justAppeared || justHadStandaloneMotion || justHadShortClipMotion
 
     const actions: JsonRecord[] = []
     if (directed?.beats && directed.beats.length > 0) {
@@ -3805,6 +3950,35 @@ export function composeStory(
       }
     }
 
+    // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸）
+    if (dialogue.lines.length >= 6 && direction.lines.length > 0 && actorState) {
+      const speakerZeroAct = actions.find((a) => a.modelId === member.modelId && a.at === 0)
+      const currentSpeakerFacial =
+        typeof speakerZeroAct?.facial === 'string' ? speakerZeroAct.facial : undefined
+      const stuckOnNormal =
+        Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
+        /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
+      const missingFacialStale =
+        !currentSpeakerFacial &&
+        (actorState.linesSinceFacialChange >= 2 || /^face_normal/i.test(actorState.lastFacial))
+      if (stuckOnNormal || missingFacialStale) {
+        const varied = pickSpeakerSubtleFacial(
+          view,
+          member.modelId,
+          line,
+          actorState.lastSpeakingFacial || actorState.lastFacial,
+          member.role
+        )
+        if (varied && varied !== currentSpeakerFacial) {
+          if (speakerZeroAct) {
+            speakerZeroAct.facial = varied
+          } else {
+            actions.unshift({ at: 0, modelId: member.modelId, facial: varied })
+          }
+        }
+      }
+    }
+
     // 防止说话人连续多句没有 body motion 导致站桩；仅在完整对话（>=12句且已有导演结果）启用。
     const hasSpeakerMotionInLine = actions.some(
       (a) => a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.length > 0
@@ -3830,11 +4004,12 @@ export function composeStory(
         if (existingSpeakerAction) {
           existingSpeakerAction.motion = rescueMotion
         } else {
-          const fallbackFacial = pickCalmOrMatchingFacial(
+          const fallbackFacial = pickSpeakerSubtleFacial(
             view,
             member.modelId,
-            line.emotion,
-            actorState.lastFacial
+            line,
+            actorState.lastFacial,
+            member.role
           )
           actions.unshift({
             at: 0,
@@ -3859,7 +4034,7 @@ export function composeStory(
       const listenerJustHadStandalone =
         lastSilentReactionTargetId === directed.listener.modelId &&
         index === lastSilentReactionLine + 1 &&
-        (ev?.pauseBefore ?? line.pauseBefore ?? 0) < 0.8
+        talkDelay < 0.8
       const listenerMotion =
         listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
       const listenerFacial = directed.listener.facial
@@ -3873,7 +4048,7 @@ export function composeStory(
       }
     }
 
-    // 防止同台听者长时间（>=3句）一动不动站桩。
+    // 防止同台听者长时间（>=3句）一动不动站桩；派生符合「倾听者视角」的反应表情。
     if (dialogue.lines.length >= 12 && direction.lines.length > 0) {
       for (const [partnerId, partnerState] of onStage) {
         if (partnerId === member.modelId) continue
@@ -3881,16 +4056,18 @@ export function composeStory(
         if (partnerState.linesSinceLastBodyMotion < 3) continue
         const alreadyHasPartner = actions.some((a) => a.modelId === partnerId)
         if (alreadyHasPartner) continue
+        const partnerMember = cast.find((c) => c.modelId === partnerId)
         const partnerMotion = pickFollowupMotion(
           view,
           partnerId,
           partnerState.lastBodyMotion,
           new Set(partnerState.recentBodyMotions)
         )
-        const partnerFacial = pickCalmOrMatchingFacial(
+        const partnerFacial = pickListenerReactionFacial(
           view,
           partnerId,
-          line.emotion,
+          line,
+          partnerMember?.role,
           partnerState.lastFacial
         )
         if (partnerMotion || partnerFacial) {
@@ -3952,7 +4129,6 @@ export function composeStory(
 
     const hasSilentAfter = explicitSilentReaction || autoSilentTargetId !== null
     const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter || hasSilentAfter)
-    const talkDelay = ev?.pauseBefore ?? line.pauseBefore ?? 0
 
     snippets.push({
       type: 'Talk',
@@ -3972,7 +4148,50 @@ export function composeStory(
     windowOpen = !closeAfter
     lastSpeakerId = member.modelId
 
+    // 随本句 Talk 同步触发的镜头推进/震动放在 Talk 之后并置 Now，保证在本句起始帧同步启动而非提前在上句抢跑
+    if (ev?.camera && ev.camera.kind !== 'zoomReset') {
+      const cam = ev.camera
+      if (cam.kind === 'zoomIn') {
+        snippets.push({
+          type: 'CameraZoom',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { scale: cam.scale ?? 1.1, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
+        })
+        cameraDirty = true
+      } else if (cam.kind === 'pan') {
+        snippets.push({
+          type: 'CameraMove',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { x: cam.x ?? 60, y: cam.y ?? 0, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
+        })
+        cameraDirty = true
+      } else if (cam.kind === 'shakeWindow') {
+        snippets.push({
+          type: 'ShakeWindow',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { duration: cam.durationMs ?? 450 }
+        })
+      } else if (cam.kind === 'shakeScreen') {
+        const dur = cam.durationMs ?? 450
+        snippets.push({
+          type: 'ShakeScreen',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { duration: dur, amplitude: 0.01 }
+        })
+        if (dur >= 10000) shakeScreenActive = true
+      }
+    }
+
     const actedBodyThisLine = new Set<number>()
+    let speakerChangedFacial = false
     for (const act of actions) {
       const aid = typeof act.modelId === 'number' ? act.modelId : member.modelId
       const ast = onStage.get(aid)
@@ -3982,8 +4201,21 @@ export function composeStory(
         actedBodyThisLine.add(aid)
       }
       if (typeof act.facial === 'string' && act.facial.length > 0) {
+        if (aid === member.modelId) {
+          if (act.facial !== ast.lastSpeakingFacial) speakerChangedFacial = true
+          ast.lastSpeakingFacial = act.facial
+        }
         ast.lastFacial = act.facial
       }
+    }
+    if (actorState) {
+      const visibleLen = cleanText(line.content).replace(/\s+/g, '').length
+      actorState.lastSpeakingWasShortWithMotion =
+        actedBodyThisLine.has(member.modelId) &&
+        (!hasTranslationContent(line.content) || visibleLen <= 5)
+      actorState.linesSinceFacialChange = speakerChangedFacial
+        ? 0
+        : actorState.linesSinceFacialChange + 1
     }
     for (const [aid, ast] of onStage) {
       if (!actedBodyThisLine.has(aid)) {
@@ -4024,8 +4256,14 @@ export function composeStory(
                 : onStage.has(member.modelId)
                   ? member.modelId
                   : -1
-      if (targetId !== -1 && onStage.has(targetId)) {
+      const avoidClobberingShortSelfMotion =
+        !ev?.silentReaction &&
+        targetId === member.modelId &&
+        !hasTranslationContent(line.content) &&
+        actedBodyThisLine.has(member.modelId)
+      if (targetId !== -1 && onStage.has(targetId) && !avoidClobberingShortSelfMotion) {
         const targetState = onStage.get(targetId)!
+        const targetMember = cast.find((c) => c.modelId === targetId)
         const motion =
           ev?.silentReaction?.motion ||
           pickFollowupMotion(
@@ -4037,7 +4275,21 @@ export function composeStory(
         const facial =
           ev?.silentReaction?.facial ||
           (directed?.silentMotion || autoSilentTargetId !== null
-            ? pickCalmOrMatchingFacial(view, targetId, line.emotion, targetState.lastFacial)
+            ? targetId === member.modelId
+              ? pickSpeakerSubtleFacial(
+                  view,
+                  targetId,
+                  line,
+                  targetState.lastFacial,
+                  targetMember?.role
+                )
+              : pickListenerReactionFacial(
+                  view,
+                  targetId,
+                  line,
+                  targetMember?.role,
+                  targetState.lastFacial
+                )
             : '') ||
           ''
         if (motion || facial) {
@@ -4070,8 +4322,8 @@ export function composeStory(
   if (currentEffect) {
     snippets.push({
       type: 'StopScenarioEffect',
-      wait: false,
-      progressBehavior: 'Now',
+      wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: { effectName: currentEffect }
     })
@@ -4079,8 +4331,8 @@ export function composeStory(
   if (currentBgm && direction.bgmStop) {
     snippets.push({
       type: 'ChangeBgm',
-      wait: false,
-      progressBehavior: 'Now',
+      wait: true,
+      progressBehavior: 'WaitFinished',
       delay: 0,
       data: { file: '', stop: true, fadeMs: 800 }
     })

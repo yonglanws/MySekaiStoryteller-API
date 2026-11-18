@@ -43,31 +43,32 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['default', 1]
 ]
 const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
-  ['face_normal', 1],
-  ['face_smile', 2],
-  ['face_sad', 2],
+  ['face_smile', 3],
+  ['face_closeeye', 2],
+  ['face_serious', 2],
   ['face_trouble', 2],
+  ['face_sad', 2],
   ['face_angry', 2],
-  ['face_surprise', 1],
-  ['face_shy', 1],
-  ['face_closeeye', 1],
-  ['face_cry', 1],
-  ['face_serious', 1],
-  ['face_sleepy', 1],
-  ['face_sparkling', 1],
-  ['face_disgust', 1],
-  ['face_scared', 1],
+  ['face_normal', 1],
+  ['face_smallmouth', 1],
+  ['face_lookaway', 1],
+  ['face_worry', 1],
   ['face_smug', 1],
   ['face_wink', 1],
+  ['face_sparkling', 1],
+  ['face_surprise', 1],
+  ['face_shy', 1],
+  ['face_cry', 1],
+  ['face_notice', 1],
   ['face_shock', 1],
-  ['face_worry', 1],
-  ['face_tired', 1],
-  ['face_lookaway', 1],
+  ['face_scared', 1],
+  ['face_disgust', 1],
+  ['face_sleepy', 1],
   ['face_blushed', 1],
-  ['face_smallmouth', 1],
+  ['face_tired', 1],
+  ['face_baffling', 1],
   ['face_play', 1],
-  ['face_sing', 1],
-  ['face_baffling', 1]
+  ['face_sing', 1]
 ]
 
 function motionKind(name: string): string {
@@ -842,12 +843,12 @@ export class CatalogView {
     )
   }
 
-  /** 示例表情：平静或微笑优先，避免示例与示例台词的情绪相反。 */
+  /** 示例表情：优先温和微笑或自然神情，避免开场全员死板挂着面无表情的 face_normal_01。 */
   exampleFacial(modelId: number): string {
     const model = this.modelById(modelId) ?? this.defaultModel()
     if (!model) return ''
     const names = this.promptFacials(model)
-    for (const kind of ['face_normal', 'face_smile']) {
+    for (const kind of ['face_smile', 'face_smallmouth', 'face_normal']) {
       for (const name of names) {
         if (facialKind(name) === kind) return name
       }
