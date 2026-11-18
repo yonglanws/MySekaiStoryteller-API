@@ -3,9 +3,8 @@ import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
 import {
-  CHARACTER_FADE_MS,
   HIDE_DELAY_IN_PLACE_MS,
-  HIDE_IN_PLACE_TOTAL_MS
+  resolveCharacterFadeMs
 } from '../../../common/official/timing'
 import {
   nowMs,
@@ -44,11 +43,13 @@ export default class LayoutClearSnippet extends BaseSnippet {
       this.data.data.to.under
     )
 
+    const isExporting = Boolean(AnimationManager.isExporting?.())
+    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS)
     const is_moved = from.x !== to.x || from.y !== to.y
     const move_duration_ms = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
     const totalClearMs = is_moved
-      ? Math.max(CHARACTER_FADE_MS, move_duration_ms)
-      : HIDE_IN_PLACE_TOTAL_MS
+      ? Math.max(fadeMs, move_duration_ms)
+      : HIDE_DELAY_IN_PLACE_MS + fadeMs
     recordLayoutRunningEnd(this.app, nowMs() + totalClearMs)
 
     // 退场动作先加载并启动；淡出只在最后 0.1s 发生，角色边演边走边隐。
@@ -76,13 +77,13 @@ export default class LayoutClearSnippet extends BaseSnippet {
     // - 原地：delay 0.15s，然后 0.1s 淡出，共 0.25s；
     // - 滑动：delay = max(0, move_duration - 0.1s)，淡出结束时正好滑到位。
     const delay_ms = is_moved
-      ? Math.max(0, move_duration_ms - CHARACTER_FADE_MS)
+      ? Math.max(0, move_duration_ms - fadeMs)
       : HIDE_DELAY_IN_PLACE_MS
     if (delay_ms > 0) {
       await AnimationManager.delay(delay_ms)
       if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
     }
-    await model.hide(CHARACTER_FADE_MS, visibilityToken)
+    await model.hide(fadeMs, visibilityToken)
     if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
     if (move_task) await move_task
     if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return

@@ -204,7 +204,7 @@ export class App {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- PixiJS v7 的 ApplicationOptions 未导出 resizeTo 宽泛类型
       const appOptions: any = {
-        backgroundColor: 0xffffff,
+        backgroundColor: forExport ? 0x000000 : 0xffffff,
         autoDensity: true,
         antialias: true,
         resolution,

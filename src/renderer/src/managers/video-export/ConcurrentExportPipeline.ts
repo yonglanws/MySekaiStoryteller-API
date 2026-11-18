@@ -1,6 +1,7 @@
 import { ExportLogger } from './ExportLogger'
 import type { TTSManager } from '../TTSManager'
 import type { SnippetData } from '../../../../common/types/Story'
+import { hasSpeakableSpeechText } from '../../../../common/tts/speechText'
 
 export interface ConcurrentPipelineConfig {
   ttsLookahead: number
@@ -194,40 +195,50 @@ export class ConcurrentExportPipeline {
       let pipelineResult: PipelineTTSResult = { success: false, duration: 0 }
 
       try {
-        let result: { success: boolean; duration: number }
+        const hasSpeakableTts = hasSpeakableSpeechText(talk.ttsText)
+        const hasSpeakableContent = hasSpeakableSpeechText(talk.content)
 
-        if (talk.ttsText) {
-          result = await ttsManager.synthesizeWithText(
-            talk.ttsText,
-            talk.speaker,
-            talk.index,
-            talk.emotion
+        if (!hasSpeakableTts && !hasSpeakableContent) {
+          this.logger.info(
+            `TTS [${talk.index}] "${talk.speaker}": skipped (punctuation-only silent beat)`
           )
+          pipelineResult = { success: false, duration: 0 }
         } else {
-          result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker, talk.index)
-        }
+          let result: { success: boolean; duration: number }
 
-        const latency = this.now() - startTime
-        this.metrics.ttsLatenciesMs.push(latency)
+          if (hasSpeakableTts) {
+            result = await ttsManager.synthesizeWithText(
+              talk.ttsText,
+              talk.speaker,
+              talk.index,
+              talk.emotion
+            )
+          } else {
+            result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker, talk.index)
+          }
 
-        pipelineResult = {
-          success: result.success,
-          duration: result.duration
-        }
+          const latency = this.now() - startTime
+          this.metrics.ttsLatenciesMs.push(latency)
 
-        if (result.success) {
-          this.metrics.ttsSuccessCount++
-          synthesizedDurations.set(talk.index, result.duration)
-          if (completed % 10 === 0) {
-            this.logger.info(
-              `TTS [${talk.index}] "${talk.speaker}": success, duration=${result.duration}ms, latency=${latency.toFixed(0)}ms`
+          pipelineResult = {
+            success: result.success,
+            duration: result.duration
+          }
+
+          if (result.success) {
+            this.metrics.ttsSuccessCount++
+            synthesizedDurations.set(talk.index, result.duration)
+            if (completed % 10 === 0) {
+              this.logger.info(
+                `TTS [${talk.index}] "${talk.speaker}": success, duration=${result.duration}ms, latency=${latency.toFixed(0)}ms`
+              )
+            }
+          } else {
+            this.metrics.ttsFailureCount++
+            this.logger.warn(
+              `TTS [${talk.index}] "${talk.speaker}": failed, latency=${latency.toFixed(0)}ms`
             )
           }
-        } else {
-          this.metrics.ttsFailureCount++
-          this.logger.warn(
-            `TTS [${talk.index}] "${talk.speaker}": failed, latency=${latency.toFixed(0)}ms`
-          )
         }
       } catch (error) {
         const latency = this.now() - startTime

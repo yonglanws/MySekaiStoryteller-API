@@ -37,9 +37,12 @@ import {
   OPENING_COVER_FADE_MS,
   PLAYED_WAIT_TIME_MS,
   SCENARIO_EXIT_BGM_FADE_MS,
+  SILENT_PUNCTUATION_HOLD_MS,
   STORY_FPS,
   TALK_WINDOW_OPEN_CLOSE_MS
 } from '../../../common/official/timing'
+import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
+import type { TimelineOptions } from '../utils/TimelineCalculator'
 import {
   getLayoutRunningEndMs,
   getMotionSettledEndMs,
@@ -186,12 +189,19 @@ export default class VideoExportManager {
     this.app.currentTalkLipSync = envelope
   }
 
-  private hasOpeningCurtain(snippets: SnippetData[]): boolean {
+  private getOpeningCurtainColor(snippets: SnippetData[]): 'black' | 'white' | null {
     for (const snippet of snippets) {
-      if (snippet.type === 'BlackOut' || snippet.type === 'BlackIn') return true
-      if (snippet.type === 'LayoutAppear' || snippet.type === 'Talk') return false
+      if (snippet.type === 'BlackOut' || snippet.type === 'BlackIn') {
+        const color = (snippet as { data?: { color?: string } }).data?.color
+        return color === 'white' ? 'white' : 'black'
+      }
+      if (snippet.type === 'LayoutAppear' || snippet.type === 'Talk') return null
     }
-    return false
+    return null
+  }
+
+  private hasOpeningCurtain(snippets: SnippetData[]): boolean {
+    return this.getOpeningCurtainColor(snippets) !== null
   }
 
   private prewarmReadyLipSync(
@@ -228,12 +238,14 @@ export default class VideoExportManager {
     windowOpenMs = 0,
     snippetIndex = -1,
     layoutRunningMs = 0,
-    existingMotionSettleMs = 0
+    existingMotionSettleMs = 0,
+    silentHoldMs?: number
   ): number {
     const base = calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
       windowOpenMs,
       layoutRunningMs,
-      motionSettleMs: existingMotionSettleMs
+      motionSettleMs: existingMotionSettleMs,
+      silentHoldMs
     })
     if (!(ttsDurationMs > 0)) return base
     const cues: Array<{ at: number; modelId: number; motion?: string }> = []
@@ -261,7 +273,8 @@ export default class VideoExportManager {
       ? calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
           motionSettleMs: settleMs,
           layoutRunningMs,
-          windowOpenMs
+          windowOpenMs,
+          silentHoldMs
         })
       : base
   }
@@ -655,7 +668,13 @@ export default class VideoExportManager {
       }
     >()
 
-    const timeline: SnippetTimelineEntry[] = this.app.ttsManager.buildTimelineWithoutTTS(snippets)
+    const timelineOptions: TimelineOptions = { exportFps: encodeFps, ttsEnabled }
+    const timeline: SnippetTimelineEntry[] = (
+      this.app.ttsManager.buildTimelineWithoutTTS as (
+        s: SnippetData[],
+        o?: TimelineOptions
+      ) => SnippetTimelineEntry[]
+    )(snippets, timelineOptions)
     this.app.ttsManager.setTimeline(timeline)
 
     const virtualClock = new VirtualClockController()
@@ -829,6 +848,7 @@ export default class VideoExportManager {
 
     const simFps = Math.max(STORY_FPS, fps)
     AnimationManager.exportTargetFPS = simFps
+    AnimationManager.exportEncodeFPS = encodeFps
     const prevTickerMaxFps = Ticker.shared.maxFPS
     Ticker.shared.maxFPS = 0
 
@@ -959,7 +979,18 @@ export default class VideoExportManager {
     try {
       const totalSnippets = snippets.length
       const extendedApp = this.app as unknown as ExtendedApp
-      const openingCoverTask = this.hasOpeningCurtain(snippets)
+      const openingCurtainColor = this.getOpeningCurtainColor(snippets)
+      if (openingCurtainColor) {
+        const sfxLayer = (
+          this.app as {
+            layerSpecialEffect?: {
+              fadeOut?: (duration: number, color?: 'black' | 'white') => Promise<void>
+            }
+          }
+        ).layerSpecialEffect
+        await sfxLayer?.fadeOut?.(0, openingCurtainColor)
+      }
+      const openingCoverTask = openingCurtainColor
         ? undefined
         : extendedApp.setOpeningCover?.(OPENING_COVER_FADE_MS)
       void openingCoverTask?.catch(() => undefined)
@@ -1010,6 +1041,13 @@ export default class VideoExportManager {
             ttsResult?.success && Number.isFinite(ttsResult.duration) && ttsResult.duration > 0
               ? ttsResult.duration
               : 0
+          const silentHoldMs =
+            ttsDurationMs <= 0 &&
+            !(talkData as { voice?: string }).voice &&
+            !hasSpeakableSpeechText(talkData.ttsText ?? '') &&
+            !hasSpeakableSpeechText(talkData.content ?? '')
+              ? SILENT_PUNCTUATION_HOLD_MS
+              : undefined
           resolvedTalkDurationMs = applyTalkPatch(
             timeline,
             i,
@@ -1020,7 +1058,8 @@ export default class VideoExportManager {
               this.talkWindowOpenMs(snippets, i),
               i,
               layoutRunningMs,
-              existingMotionSettleMs
+              existingMotionSettleMs,
+              silentHoldMs
             )
           )
           if (ttsDurationMs > 0) {
@@ -1196,7 +1235,7 @@ export default class VideoExportManager {
       }
 
       let audioFilePath: string | undefined
-      if (hasTtsTracks || bgmActive) {
+      if (hasTtsTracks || bgmActive || sePlan.hasChanges) {
         const audioStart = virtualClock.realTimeMs()
         if (hasTtsTracks) {
           const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
@@ -1381,6 +1420,7 @@ export default class VideoExportManager {
     AnimationManager.exportSpeedMultiplier = 1
     const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, options.fps))
     AnimationManager.exportTargetFPS = Math.max(STORY_FPS, fastFpsCap)
+    AnimationManager.exportEncodeFPS = fastFpsCap
 
     const captureFps = options.fps
 
@@ -1866,7 +1906,7 @@ export default class VideoExportManager {
       audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
     }
 
-    if ((hasTtsTracks || bgmActive) && (ttsEnabled || bgmEnabled)) {
+    if ((hasTtsTracks || bgmActive || sePlan.hasChanges) && (ttsEnabled || bgmEnabled || sePlan.hasChanges)) {
       if (hasTtsTracks) {
         if (exportStatus)
           exportStatus.textContent = `正在混合音频 (${ttsAudioResults.size} 条音轨)...`

@@ -2,16 +2,19 @@ import type { SnippetData } from '../../../common/types/Story'
 import { snippetBlocksTimeline } from '../../../common/export/snippetSemantics'
 import { calculateTalkDurationMs } from './TalkTiming'
 import { visibleTextLength } from '../../../common/official/text'
+import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
 import {
   APPEAR_FADE_TOTAL_MS,
   APPEAR_SHOWN_MOVE_MS,
   CHARACTER_FADE_MS,
   CHARACTER_SHAKE_MS,
   FLASHBACK_DEFAULT_MS,
+  FRAME_MS,
   FULLSCREEN_BARS_MS,
   FULLSCREEN_CHAR_FADE_MS,
   FULLSCREEN_TEXT_HOLD_MS,
   FULLSCREEN_TEXT_PRE_DELAY_MS,
+  HIDE_DELAY_IN_PLACE_MS,
   HIDE_IN_PLACE_TOTAL_MS,
   MOVE_DURATION_FAST_MS,
   MOVE_DURATION_NORMAL_MS,
@@ -20,13 +23,15 @@ import {
   SEKAI_IN_PRE_DELAY_MS,
   SEKAI_OUT_PRE_DELAY_MS,
   SEPIA_DEFAULT_MS,
+  SILENT_PUNCTUATION_HOLD_MS,
   SIMPLE_SELECTABLE_TOTAL_MS,
   TALK_WINDOW_OPEN_CLOSE_MS,
   TELOP_TOTAL_MS,
   framesForSeconds,
   framesToMs,
   normalizeEffectDurationMs,
-  quantizeMsToFrame
+  quantizeMsToFrame,
+  resolveCharacterFadeMs
 } from '../../../common/official/timing'
 
 export interface TimelineEntry {
@@ -95,6 +100,11 @@ export interface TTSMapping {
   durationMs: number
   audioBuffer?: ArrayBuffer
   audioPath?: string
+}
+
+export interface TimelineOptions {
+  exportFps?: number
+  ttsEnabled?: boolean
 }
 
 const MIN_DURATION_MS = 500
@@ -538,7 +548,8 @@ function crossValidate(
   snippet: SnippetData,
   ttsMapping: TTSMapping | undefined,
   windowOpenMs = 0,
-  layoutRunningMs = 0
+  layoutRunningMs = 0,
+  silentHoldMs?: number
 ): {
   finalDurationMs: number
   selectedSource: DurationSource
@@ -567,7 +578,8 @@ function crossValidate(
       finalDurationMs: calculateTalkDurationMs(content, ttsDurationMs, ttsText, {
         hasVoice: Boolean(voice),
         windowOpenMs,
-        layoutRunningMs
+        layoutRunningMs,
+        silentHoldMs
       }),
       selectedSource: hasTTS ? 'tts_audio' : 'content_estimation',
       decisionReason: 'Shared dialogue body timing; pre-dialogue delay is handled separately',
@@ -641,11 +653,14 @@ function crossValidate(
 
 export function calculateTimeline(
   snippets: SnippetData[],
-  ttsMappings: Map<number, TTSMapping> = new Map()
+  ttsMappings: Map<number, TTSMapping> = new Map(),
+  options: TimelineOptions = {}
 ): TimelineCalculationResult {
   const entries: TimelineEntry[] = []
   const traceLog: TimelineTraceRecord[] = []
   const anomalies: string[] = []
+  const isExport = options.exportFps !== undefined
+  const fadeMs = isExport ? resolveCharacterFadeMs(true, options.exportFps) : CHARACTER_FADE_MS
   let cursorMs = 0
   let runningEndMs = 0
   let activeLayoutEndMs = 0
@@ -712,13 +727,24 @@ export function calculateTimeline(
     }
 
     const layoutRunningMs = isTalk ? Math.max(0, activeLayoutEndMs - startTimeMs) : 0
+    const silentHoldMs =
+      isExport &&
+      options.ttsEnabled !== false &&
+      snippet.type === 'Talk' &&
+      !hasTTS &&
+      !snippet.data.voice &&
+      !hasSpeakableSpeechText(snippet.data.content) &&
+      !hasSpeakableSpeechText(snippet.data.ttsText ?? '')
+        ? SILENT_PUNCTUATION_HOLD_MS
+        : undefined
     const crossResult = crossValidate(
       pathA,
       pathB,
       snippet,
       ttsMapping,
       windowOpenMs,
-      layoutRunningMs
+      layoutRunningMs,
+      silentHoldMs
     )
 
     if (isTalk && snippet.data.closeWindowOnFinish) {
@@ -765,13 +791,20 @@ export function calculateTimeline(
       const to = getSnippetDataField(snippet, 'to')
       const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
-      layoutDurationMs = shown ? APPEAR_SHOWN_MOVE_MS : APPEAR_FADE_TOTAL_MS
+      const appearFadeTotalMs = isExport ? FRAME_MS + fadeMs : APPEAR_FADE_TOTAL_MS
+      layoutDurationMs = shown
+        ? APPEAR_SHOWN_MOVE_MS
+        : isExport
+          ? Math.max(appearFadeTotalMs, moved ? moveMs : 0)
+          : appearFadeTotalMs
       layoutDecision = shown
         ? 'LayoutAppear: character already shown, CharacterMoveTo 0.2s'
-        : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade'
+        : isExport
+          ? 'LayoutAppear: export synchronized fade + slide'
+          : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade'
       const slideMs = shown
         ? APPEAR_SHOWN_MOVE_MS
-        : Math.max(APPEAR_FADE_TOTAL_MS, moved ? moveMs : 0)
+        : Math.max(appearFadeTotalMs, moved ? moveMs : 0)
       activeLayoutEndMs = Math.max(
         activeLayoutEndMs,
         startTimeMs + (slideMs >= 30 ? quantizeMsToFrame(slideMs) : slideMs)
@@ -780,14 +813,21 @@ export function calculateTimeline(
     } else if (snippet.type === 'LayoutClear') {
       const modelId = Number(getSnippetDataField(snippet, 'modelId'))
       const shown = visibleModels.has(modelId)
-      layoutDurationMs = shown ? null : 0
+      const speed = getSnippetDataField(snippet, 'moveSpeed')
+      const from = getSnippetDataField(snippet, 'from')
+      const to = getSnippetDataField(snippet, 'to')
+      const moved = layoutPositionMoved(from, to)
+      const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
+      const clearMs = isExport
+        ? moved
+          ? Math.max(fadeMs, moveMs)
+          : HIDE_DELAY_IN_PLACE_MS + fadeMs
+        : crossResult.finalDurationMs
+      layoutDurationMs = shown ? (isExport ? clearMs : null) : 0
       layoutDecision = shown ? '' : 'LayoutClear: character not shown, OnFinished immediately'
       if (shown) {
-        const clearMs =
-          crossResult.finalDurationMs >= 30
-            ? quantizeMsToFrame(crossResult.finalDurationMs)
-            : crossResult.finalDurationMs
-        activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + clearMs)
+        const quantizedClearMs = clearMs >= 30 ? quantizeMsToFrame(clearMs) : clearMs
+        activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + quantizedClearMs)
       }
       visibleModels.delete(modelId)
     } else if (snippet.type === 'Move') {
@@ -864,8 +904,11 @@ export function calculateTimeline(
   }
 }
 
-export function calculateTimelineWithoutTTS(snippets: SnippetData[]): TimelineCalculationResult {
-  return calculateTimeline(snippets, new Map())
+export function calculateTimelineWithoutTTS(
+  snippets: SnippetData[],
+  options: TimelineOptions = {}
+): TimelineCalculationResult {
+  return calculateTimeline(snippets, new Map(), options)
 }
 
 export function estimateSnippetDuration(snippet: SnippetData): number {

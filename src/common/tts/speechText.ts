@@ -1,3 +1,8 @@
+/** 是否包含可朗读的语言字符（字母/汉字/假名/数字）；纯标点（如「……」「——」）返回 false。 */
+export function hasSpeakableSpeechText(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(String(text ?? ''))
+}
+
 /**
  * IrodoriTTS 的文本约束：它只会读日文。宿主必须为每条 Talk 提供日文 ttsText，
  * 缺失时不能退回中文 content。

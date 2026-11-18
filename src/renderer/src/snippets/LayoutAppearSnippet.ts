@@ -7,7 +7,8 @@ import {
   APPEAR_SHOWN_MOVE_MS,
   CHARACTER_FADE_MS,
   FRAME_MS,
-  framesForSeconds
+  framesForSeconds,
+  resolveCharacterFadeMs
 } from '../../../common/official/timing'
 import { nowMs, recordLayoutRunningEnd, recordMotionSettledAt } from './stageTiming'
 
@@ -90,25 +91,37 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     // 新 view：AppearCharacter(SideFrom) 先落到 from，CharacterMoveTo(SideTo) 与淡入并发。
     model.setPositionRel(this.app.stage_size, is_moved ? from : to)
 
+    const isExporting = Boolean(AnimationManager.isExporting?.())
+    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS)
     const moveMs = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
-    recordLayoutRunningEnd(
-      this.app,
-      nowMs() + Math.max(APPEAR_FADE_TOTAL_FRAMES * FRAME_MS, moveMs)
-    )
-
-    const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null
-    if (moveTask) {
-      // 官方 Appear 片段只等淡入（7 帧），滑入继续在后台播放；不能 await 完整 move。
-      void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))
-    }
-
-    // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后 0.1s 淡入。
     const holdFrames = Math.max(
       0,
       APPEAR_FADE_TOTAL_FRAMES - framesForSeconds(CHARACTER_FADE_MS / 1000)
     )
+    const fadeTotalMs = holdFrames * FRAME_MS + fadeMs
+    recordLayoutRunningEnd(
+      this.app,
+      nowMs() + Math.max(fadeTotalMs, moveMs)
+    )
+
+    const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null
+    if (moveTask && !isExporting) {
+      // 官方交互模式 Appear 只等淡入（7 帧），滑入继续在后台播放。
+      void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))
+    }
+
+    // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后淡入（30fps 导出为 200ms）。
     if (holdFrames > 0) await AnimationManager.delay(holdFrames * FRAME_MS)
-    await model.show(CHARACTER_FADE_MS, this.data.data.hologram, visibilityToken)
+    await model.show(fadeMs, this.data.data.hologram, visibilityToken)
+
+    // 导出模式下等滑入动作完全落地后再放行后续 Talk，避免共演出现在屏幕边缘说话。
+    if (moveTask && isExporting) {
+      try {
+        await moveTask
+      } catch (error) {
+        this.logger.warn('LayoutAppear move failed', error)
+      }
+    }
 
     // 入场动作继续播放；body 通道交给 idle 续演逻辑，台词间隙不站桩。
     model.startBodyIdleLoop()

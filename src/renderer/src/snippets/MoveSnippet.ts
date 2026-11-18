@@ -38,7 +38,11 @@ export default class MoveSnippet extends BaseSnippet {
         this.data.data.motion,
         this.data.data.facial,
         this.data.data.facialFirst ?? true,
-        { facialForce: true, traceSnippetIndex: this.snippetIndex }
+        {
+          facialForce: true,
+          traceSnippetIndex: this.snippetIndex,
+          preserveActiveShortBodyMotion: true
+        }
       )
       if (this.data.data.motion && !model.isMotionLooping?.(this.data.data.motion)) {
         const clipMs = model.getMotionDurationMs?.(this.data.data.motion) ?? 0

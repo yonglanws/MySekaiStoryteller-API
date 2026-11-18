@@ -966,15 +966,29 @@ test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade colli
 
   const SpecialEffectLayer = f.load('layers/SpecialEffectLayer.ts').default
   const layer = new SpecialEffectLayer({ stage: new Container(), screen: { width: 1920, height: 1080 } })
+  // Case 1: fadeOut called immediately over an already opaque opening cover must NOT snap alpha back to 0 (no bright flash)
   const coverPromise = layer.setOpeningCover(500)
   const blackOutPromise = layer.fadeOut(500, 'black')
   await f.clock.tickAsync(250)
-  const midAlpha = layer.seBlackSprite.filters[0].alpha
+  const coveredMidAlpha = layer.seBlackSprite.filters[0].alpha
   await f.clock.tickAsync(300)
   await Promise.all([coverPromise, blackOutPromise])
-  assert.ok(midAlpha > 0.35 && midAlpha < 0.65, `Expected smooth fadeOut midpoint ~0.5 without cover fight, got ${midAlpha}`)
+  assert.equal(coveredMidAlpha, 1, `Expected already-opaque curtain to stay at alpha=1 without flashing bright, got ${coveredMidAlpha}`)
   assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'BlackOut must end fully opaque without stale fadeIn reset')
   assert.equal(layer.seBlackSprite.visible, true)
+
+  // Case 2: fadeOut after partial fade-in continues monotonically upward from current alpha without cover fight
+  const partialCoverPromise = layer.setOpeningCover(500)
+  await f.clock.tickAsync(250)
+  const preBlackOutAlpha = layer.seBlackSprite.filters[0].alpha
+  assert.ok(preBlackOutAlpha > 0.35 && preBlackOutAlpha < 0.65, `Expected half-faded opening cover ~0.5, got ${preBlackOutAlpha}`)
+  const smoothBlackOutPromise = layer.fadeOut(500, 'black')
+  await f.clock.tickAsync(250)
+  const smoothMidAlpha = layer.seBlackSprite.filters[0].alpha
+  await f.clock.tickAsync(300)
+  await Promise.all([partialCoverPromise, smoothBlackOutPromise])
+  assert.ok(smoothMidAlpha > preBlackOutAlpha + 0.1 && smoothMidAlpha < 0.95, `Expected monotonic fadeOut upward from ~0.5 without cover fight, got ${smoothMidAlpha}`)
+  assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'Second BlackOut must end fully opaque')
 })
 
 test('AdvancedModel channel 0 skips duplicate active body cues without false interrupted or motion-refused errors', async (t) => {

@@ -14,8 +14,10 @@ import type { SnippetData } from '../../../common/types/Story'
 import {
   calculateTimeline as calcTimelineFull,
   validateTimelineIntegrity,
+  type TimelineOptions,
   type TTSMapping as CalcTTSMapping
 } from '../utils/TimelineCalculator'
+import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
 
 export interface SnippetTimelineEntry {
   snippetIndex: number
@@ -288,6 +290,9 @@ export class TTSManager {
     let failed = 0
 
     for (const talk of talkSnippets) {
+      if (!hasSpeakableSpeechText(talk.content)) {
+        continue
+      }
       const cacheKey = talk.content
       if (this.prefetchCache.has(cacheKey)) {
         continue
@@ -379,7 +384,12 @@ export class TTSManager {
   ): Promise<SynthesizeResult> {
     try {
       this.currentTimeMs = this.calculateCurrentTimeMsFromIndex(talk.index)
-      if (talk.ttsText) {
+      const hasSpeakableTts = hasSpeakableSpeechText(talk.ttsText)
+      const hasSpeakableContent = hasSpeakableSpeechText(talk.content)
+      if (!hasSpeakableTts && !hasSpeakableContent) {
+        return { success: false, duration: 0, index: talk.index }
+      }
+      if (hasSpeakableTts) {
         const result = await this.synthesizeWithText(
           talk.ttsText,
           talk.speaker,
@@ -409,6 +419,9 @@ export class TTSManager {
     snippetIndex?: number,
     emotion = ''
   ): Promise<{ success: boolean; duration: number }> {
+    if (!hasSpeakableSpeechText(text)) {
+      return { success: false, duration: 0 }
+    }
     if (!this.ttsService) {
       this.initialize()
     }
@@ -455,6 +468,9 @@ export class TTSManager {
     snippetIndex?: number,
     emotion = ''
   ): Promise<{ success: boolean; duration: number }> {
+    if (!hasSpeakableSpeechText(text)) {
+      return { success: false, duration: 0 }
+    }
     // 使用纯文本内容作为缓存键，与预取时保持一致
     const cacheKey = text
     const prefetched = this.prefetchCache.get(cacheKey)
@@ -524,8 +540,11 @@ export class TTSManager {
     return result.entries.map((e) => this.toSnippetTimelineEntry(e))
   }
 
-  buildTimelineWithoutTTS(snippets: SnippetData[]): SnippetTimelineEntry[] {
-    const result = calcTimelineFull(snippets, new Map())
+  buildTimelineWithoutTTS(
+    snippets: SnippetData[],
+    options: TimelineOptions = {}
+  ): SnippetTimelineEntry[] {
+    const result = calcTimelineFull(snippets, new Map(), options)
     this.logTimelineValidation(result)
     return result.entries.map((e) => this.toSnippetTimelineEntry(e))
   }

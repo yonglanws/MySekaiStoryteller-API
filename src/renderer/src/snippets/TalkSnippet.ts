@@ -17,6 +17,7 @@ import {
   TALK_DISPLAY_MS_PER_CHAR,
   visibleTextLength
 } from '../utils/TalkTiming'
+import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
 import {
   areTrackedMotionsSettled,
   getLayoutRunningEndMs,
@@ -187,7 +188,8 @@ export default class TalkSnippet extends BaseSnippet {
             action,
             actionSignal,
             () => this.app.layerModel.isModelVisible(action.modelId),
-            this.snippetIndex
+            this.snippetIndex,
+            { talkDurationMs: targetDurationMs }
           )
           if (action.motion && !model.isMotionLooping?.(action.motion)) {
             const clipMs = model.getMotionDurationMs?.(action.motion) ?? 0
@@ -223,9 +225,13 @@ export default class TalkSnippet extends BaseSnippet {
       ui.resetTalkData?.()
       ui.setTalkData?.(talkData.data.speaker, talkData.data.content)
       if (hasModel) {
+        const mouthChars =
+          this.capturedLipSync || hasSpeakableSpeechText(talkData.data.content)
+            ? visibleTextLength(talkData.data.content)
+            : 0
         this.startMouthAnimation(
           this.app.getModelById(talkData.data.modelId),
-          visibleTextLength(talkData.data.content),
+          mouthChars,
           this.capturedLipSync
         )
       }

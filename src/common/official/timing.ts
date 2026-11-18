@@ -101,6 +101,21 @@ export const APPEAR_SHOWN_MOVE_MS = framesToMs(APPEAR_SHOWN_MOVE_FRAMES)
 export const CHARACTER_FADE_SECONDS = 0.1
 export const CHARACTER_FADE_MS = framesToMs(framesForSeconds(CHARACTER_FADE_SECONDS))
 
+/** 30fps 导出模式下角色淡入/淡出平滑时长（6 帧 @ 30fps = 200ms，避免 100ms 仅 3 帧的突兀闪现）。 */
+export const EXPORT_30FPS_CHARACTER_FADE_MS = 200
+
+export function resolveCharacterFadeMs(isExporting: boolean, encodeFps = STORY_FPS): number {
+  if (isExporting && Number.isFinite(encodeFps) && encodeFps <= 35) {
+    return EXPORT_30FPS_CHARACTER_FADE_MS
+  }
+  return CHARACTER_FADE_MS
+}
+
+/** 30fps 导出模式下纯标点静默句（如「…………」）打字结束后的短停顿（0.8s = 48 帧）。 */
+export const SILENT_PUNCTUATION_HOLD_SECONDS = 0.8
+export const SILENT_PUNCTUATION_HOLD_FRAMES = framesForSeconds(SILENT_PUNCTUATION_HOLD_SECONDS)
+export const SILENT_PUNCTUATION_HOLD_MS = framesToMs(SILENT_PUNCTUATION_HOLD_FRAMES)
+
 /** 原地 HideCharacter 的 delay = 0.15s。 */
 export const HIDE_DELAY_IN_PLACE_SECONDS = 0.15
 export const HIDE_DELAY_IN_PLACE_MS = framesToMs(framesForSeconds(HIDE_DELAY_IN_PLACE_SECONDS))

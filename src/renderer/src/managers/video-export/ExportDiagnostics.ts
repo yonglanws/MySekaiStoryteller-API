@@ -197,7 +197,9 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
   })
 
   const plan = bakeStoryPlan(input.snippets, input.timeline, {
-    motionSettleMs: input.motionSettleMs
+    motionSettleMs: input.motionSettleMs,
+    exportFps: input.exportMeta.fps,
+    ttsEnabled: input.ttsEnabled
   })
   const approximations = [
     'Pass 2 使用 PixiJS + pixi-live2d-display-advanced，不是 SSE 的原生 wgpu/Cubism Native 渲染器',

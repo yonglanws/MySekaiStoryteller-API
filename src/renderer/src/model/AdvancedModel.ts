@@ -351,11 +351,20 @@ export default class AdvancedModel extends Live2DModel {
       this.lastNaturalUpdateMs = now
       const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
       if (!this.visible || alpha <= 0.01 || this.destroyed) return
-      const opening = stepBlink(this.blinkState, dt)
-      for (const id of eyeIds) {
-        const base = core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
-        if (core.setParameterValueById) core.setParameterValueById(id, base * opening)
-        else core.setParamFloat?.(id, base * opening)
+      if (this.autoBlink && eyeIds.length > 0) {
+        const bases = eyeIds.map(
+          (id) => core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
+        )
+        const eyesOpen = bases.some((b) => b > 0.25)
+        const shouldStep = this.blinkState.status !== 'ready' || eyesOpen
+        const opening = shouldStep ? stepBlink(this.blinkState, dt) : this.blinkState.opening
+        for (let idx = 0; idx < eyeIds.length; idx++) {
+          const base = bases[idx]
+          const next = base > 0.25 ? base * opening : base
+          const id = eyeIds[idx]
+          if (core.setParameterValueById) core.setParameterValueById(id, next)
+          else core.setParamFloat?.(id, next)
+        }
       }
       if (this.breathParamId) {
         this.breathDegree = advanceBreathDegree(this.breathDegree, dt)
@@ -1240,15 +1249,33 @@ export default class AdvancedModel extends Live2DModel {
     }
   }
 
+  /**
+   * Returns remaining ms before an active non-looping body motion reaches 50% playback.
+   * Returns 0 if idle, looping, or already >= 50%.
+   */
+  public getEarlyBodyInterruptRemainingMs(now = performance.now()): number {
+    const manager = this.internalModel?.parallelMotionManager?.[0]
+    if (!manager || !manager.playing || manager.isFinished()) return 0
+    if (!this.currentBodyMotion || this.isMotionLooping(this.currentBodyMotion)) return 0
+    const clipMs = this.currentBodyClipDurationMs
+    if (!Number.isFinite(clipMs) || clipMs <= 0) return 0
+    const startedAt = this.currentBodyStartedAt > now ? now : this.currentBodyStartedAt
+    const playedMs = Math.max(0, now - startedAt)
+    const minPlayMs = clipMs * 0.5
+    return playedMs < minPlayMs ? minPlayMs - playedMs : 0
+  }
+
   /** Start independent channels, preserving any omitted channel. Never changes visibility. */
   public async applyCharacterAction(
     action: Pick<CharacterAction, 'motion' | 'facial'>,
     signal?: AbortSignal,
     canApply?: () => boolean,
-    traceSnippetIndex?: number
+    traceSnippetIndex?: number,
+    options?: { talkDurationMs?: number }
   ): Promise<void> {
     const tasks: Promise<void>[] = []
     if (action.motion) {
+      const targetMotion = action.motion
       const isolated = [
         ...new Set([
           ...this.eyeParameterIds(),
@@ -1259,10 +1286,28 @@ export default class AdvancedModel extends Live2DModel {
           })
         ])
       ]
-      tasks.push(
-        this.startCharacterChannel(
+      const runBody = async (): Promise<void> => {
+        if (targetMotion !== this.currentBodyMotion) {
+          const remainingMs = this.getEarlyBodyInterruptRemainingMs()
+          const talkMs = options?.talkDurationMs ?? 0
+          if (remainingMs > 0 && (talkMs <= 0 || remainingMs < talkMs * 0.55)) {
+            const delayMs = Math.min(800, remainingMs)
+            const genBefore = this.channelGeneration[0]
+            await AnimationManager.delay(delayMs)
+            if (
+              this.destroyed ||
+              signal?.aborted ||
+              this.actionSignal.aborted ||
+              genBefore !== this.channelGeneration[0] ||
+              (canApply && !canApply())
+            ) {
+              return
+            }
+          }
+        }
+        await this.startCharacterChannel(
           0,
-          action.motion,
+          targetMotion,
           isolated,
           signal,
           canApply,
@@ -1270,7 +1315,8 @@ export default class AdvancedModel extends Live2DModel {
           true,
           traceSnippetIndex
         )
-      )
+      }
+      tasks.push(runBody())
     }
     if (action.facial)
       tasks.push(
@@ -1320,6 +1366,9 @@ export default class AdvancedModel extends Live2DModel {
   public async show(time: number, hologram: boolean, generation?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     this.autoBlink = true
+    if (this.blinkState.status === 'sleep' && !this.currentBodyMotion) {
+      wakeBlink(this.blinkState)
+    }
 
     if (hologram) {
       this.inHologram = true
@@ -1365,13 +1414,25 @@ export default class AdvancedModel extends Live2DModel {
     motion?: string,
     facial?: string,
     facialFirst?: boolean,
-    options: { facialForce?: boolean; traceSnippetIndex?: number } = {}
+    options: {
+      facialForce?: boolean
+      traceSnippetIndex?: number
+      preserveActiveShortBodyMotion?: boolean
+    } = {}
   ): Promise<void> {
     // 确保模型已完全加载
     if (!this.internalModel) {
       this.logger.warn('Model not fully loaded, waiting...')
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
+
+    const effectiveMotion =
+      options.preserveActiveShortBodyMotion &&
+      motion &&
+      motion !== this.currentBodyMotion &&
+      this.getEarlyBodyInterruptRemainingMs() > 0
+        ? undefined
+        : motion
 
     const isolateEyes = facialFirst !== false
     const hasFacialContext = Boolean(facial || this.hasChannel1FacialActive())
@@ -1388,8 +1449,10 @@ export default class AdvancedModel extends Live2DModel {
     if (facial) {
       waits.push(this.applyFacial(facial, options.facialForce === true, options.traceSnippetIndex))
     }
-    if (motion) {
-      waits.push(this.applyMotion(motion, isolateEyes, extraIgnored, options.traceSnippetIndex))
+    if (effectiveMotion) {
+      waits.push(
+        this.applyMotion(effectiveMotion, isolateEyes, extraIgnored, options.traceSnippetIndex)
+      )
     }
 
     await Promise.all(waits)

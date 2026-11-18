@@ -2,20 +2,20 @@ import { Text, TextStyle } from 'pixi.js'
 
 const WATERMARK_LINE_1 = '本视频由 MySekaiStoryteller-API 生成'
 const WATERMARK_LINE_2 = 'Designed by GuangChen2333 & 慵懒午睡'
-/** 自定义水印最多追加行数，防止过长配置向下顶出画面 */
+/** 自定义水印最多保留条数，合并进第二行避免右上角堆叠过多行 */
 const MAX_CUSTOM_LINES = 2
 
 export default class UIWatermark extends Text {
   constructor(screen_width: number, screen_height: number) {
-    const fontSize = screen_height / 42
+    const fontSize = screen_height / 48
     const style = new TextStyle({
       align: 'right',
-      fill: '#FFFFFFF5',
+      fill: '#FFFFFFE0',
       fontFamily: "'MiSans Medium', sans-serif",
       fontSize,
-      lineHeight: fontSize * 1.35,
-      stroke: '#4A4968D9',
-      strokeThickness: Math.max(2, screen_height / 180),
+      lineHeight: fontSize * 1.3,
+      stroke: '#4A4968CC',
+      strokeThickness: Math.max(1.5, screen_height / 200),
       wordWrap: false
     })
     super(`${WATERMARK_LINE_1}\n${WATERMARK_LINE_2}`, style)
@@ -26,18 +26,27 @@ export default class UIWatermark extends Text {
   }
 
   /**
-   * 设置自定义水印：追加在自带两行水印的下一行（右对齐，样式一致）。
-   * 传空串或纯空白则只显示自带水印。
+   * 设置自定义水印：过滤与自带标题重复的文案后，精简为至多两行右对齐展示，
+   * 避免右上角堆叠 3~4 行造成遮挡。
    */
   public setCustomText(customText: string): void {
     const customLines = String(customText || '')
       .replace(/\r\n?/g, '\n')
       .split('\n')
       .map((line) => line.trim())
-      .filter(Boolean)
+      .filter((line) => {
+        if (!line) return false
+        const lower = line.toLowerCase()
+        if (line === WATERMARK_LINE_1 || line === WATERMARK_LINE_2) return false
+        if (lower.includes('mysekaistoryteller') && lower.includes('生成')) return false
+        return true
+      })
       .slice(0, MAX_CUSTOM_LINES)
 
-    const lines = [WATERMARK_LINE_1, WATERMARK_LINE_2, ...customLines]
+    const lines =
+      customLines.length > 0
+        ? [WATERMARK_LINE_1, customLines.join(' · ')]
+        : [WATERMARK_LINE_1, WATERMARK_LINE_2]
     this.text = lines.join('\n')
   }
 }

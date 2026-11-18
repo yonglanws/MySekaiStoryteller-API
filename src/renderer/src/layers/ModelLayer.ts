@@ -21,6 +21,7 @@ export default class ModelLayer extends BaseLayer {
   public layoutMode: LayoutModes = LayoutModes.Normal
   private ambientFilter: ColorMatrixFilter | null = null
   private ambientMode: 'normal' | 'evening' | 'night' = 'normal'
+  private ambientGen = 0
   /** 官方显示状态（ScenarioCharacterView 的 Appear/Hide），与 alpha 无关。 */
   private readonly shownModels = new Set<number>()
   /** 官方 `LockCharacterDepth`: Front / Back 锁定角色 ID。 */
@@ -45,6 +46,7 @@ export default class ModelLayer extends BaseLayer {
 
   /** 官方 `AmbientColor`：直接对 Live2D 顶层施加 RGB 线性倍乘，无额外去饱和失真。 */
   public setAmbientColor(mode: 'normal' | 'evening' | 'night'): void {
+    this.ambientGen++
     this.ambientMode = mode
     if (mode === 'normal') {
       this.layerContainer.filters = null
@@ -52,6 +54,13 @@ export default class ModelLayer extends BaseLayer {
     }
     const [r, g, b] = mode === 'evening' ? MODEL_COLOR_EVENING : MODEL_COLOR_NIGHT
     const filter = this.ambientFilter ?? new ColorMatrixFilter()
+    const res = this.app?.renderer?.resolution
+    if (typeof res === 'number' && res > 0) {
+      filter.resolution = res
+    }
+    if (this.app?.screen) {
+      this.layerContainer.filterArea = this.app.screen
+    }
     filter.matrix = [r, 0, 0, 0, 0, 0, g, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, 1, 0]
     this.ambientFilter = filter
     this.layerContainer.filters = [filter]
@@ -354,6 +363,7 @@ export default class ModelLayer extends BaseLayer {
       this.setAmbientColor(mode)
       return
     }
+    const gen = ++this.ambientGen
     const [r, g, b] =
       mode === 'normal' ? [1, 1, 1] : mode === 'evening' ? MODEL_COLOR_EVENING : MODEL_COLOR_NIGHT
     const prev = this.ambientFilter?.matrix ?? [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]
@@ -361,15 +371,24 @@ export default class ModelLayer extends BaseLayer {
     const fg = prev[6]
     const fb = prev[12]
     const filter = this.ambientFilter ?? new ColorMatrixFilter()
+    const res = this.app?.renderer?.resolution
+    if (typeof res === 'number' && res > 0) {
+      filter.resolution = res
+    }
+    if (this.app?.screen) {
+      this.layerContainer.filterArea = this.app.screen
+    }
     this.ambientFilter = filter
     this.layerContainer.filters = [filter]
     await AnimationManager.linear((raw) => {
+      if (gen !== this.ambientGen) return
       const p = evaluateEase('Linear', raw)
       const cr = fr + (r - fr) * p
       const cg = fg + (g - fg) * p
       const cb = fb + (b - fb) * p
       filter.matrix = [cr, 0, 0, 0, 0, 0, cg, 0, 0, 0, 0, 0, cb, 0, 0, 0, 0, 0, 1, 0]
     }, durationMs)
+    if (gen !== this.ambientGen) return
     this.setAmbientColor(mode)
   }
 

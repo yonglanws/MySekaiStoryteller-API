@@ -1,18 +1,21 @@
 import type { SnippetData } from '../types/Story'
 import { snippetBlocksTimeline } from './snippetSemantics'
 import { visibleTextLength } from '../official/text'
+import { hasSpeakableSpeechText } from '../tts/speechText'
 import {
   APPEAR_FADE_TOTAL_FRAMES,
   APPEAR_SHOWN_MOVE_FRAMES,
   CHARACTER_FADE_MS,
   HIDE_DELAY_IN_PLACE_MS,
   MOVE_SPEED_DURATION_MS,
+  SILENT_PUNCTUATION_HOLD_FRAMES,
   TALK_WINDOW_OPEN_CLOSE_MS,
   VOICE_END_LATENCY_SECONDS,
   WORD_INTERVAL_FRAMES,
   framesForSeconds,
   framesToMs,
-  msToFrames
+  msToFrames,
+  resolveCharacterFadeMs
 } from '../official/timing'
 
 /**
@@ -83,6 +86,9 @@ export interface StoryPlanOptions {
   windowOpenMs?: ReadonlyMap<number, number>
   /** Talk 内身体动作的最晚结束时间（相对 Talk 开始），用于官方 gate。 */
   motionSettleMs?: ReadonlyMap<number, number>
+  /** 导出编码帧率（传入时与 30fps 导出淡入/静默节拍时长对齐）。 */
+  exportFps?: number
+  ttsEnabled?: boolean
 }
 
 interface TalkLike {
@@ -149,6 +155,10 @@ export function bakeStoryPlan(
   timeline: StoryPlanTimelineEntry[],
   options: StoryPlanOptions = {}
 ): StoryPlan {
+  const isExport = options.exportFps !== undefined
+  const fadeMs = isExport ? resolveCharacterFadeMs(true, options.exportFps) : CHARACTER_FADE_MS
+  const fadeFrames = framesForSeconds(fadeMs / 1000)
+  const appearFadeFrames = isExport ? 1 + fadeFrames : APPEAR_FADE_TOTAL_FRAMES
   const windowOpen = options.windowOpenMs ?? deriveWindowOpen(snippets)
   const timelineByIndex = new Map(timeline.map((entry) => [entry.snippetIndex, entry]))
   const entries: StoryPlanEntry[] = []
@@ -226,12 +236,22 @@ export function bakeStoryPlan(
           ? Math.max(typingEndFrame, voiceEndFrame, layoutGateFrame, startFrame + settleFrames)
           : typingEndFrame
       const voiceFinishedBeforeTyping = voiceEndFrame !== null && voiceEndFrame < typingEndFrame
+      const ttsText = typeof talkData.ttsText === 'string' ? talkData.ttsText : ''
+      const isSilentPunctuationBeat =
+        isExport &&
+        options.ttsEnabled !== false &&
+        voiceEndFrame === null &&
+        !talkData.voice &&
+        !hasSpeakableSpeechText(content) &&
+        !hasSpeakableSpeechText(ttsText)
       const tailFrames =
         voiceEndFrame !== null
           ? voiceFinishedBeforeTyping
             ? framesForSeconds(2)
             : framesForSeconds(0.5)
-          : framesForSeconds(2)
+          : isSilentPunctuationBeat
+            ? SILENT_PUNCTUATION_HOLD_FRAMES
+            : framesForSeconds(2)
       const computedEndFrame = doneFrame + tailFrames
       talk = {
         windowOpenFrames: windowFrames,
@@ -259,13 +279,13 @@ export function bakeStoryPlan(
         layout = {
           kind: 'appear',
           fadeStartFrame: shown ? null : startFrame + 1,
-          fadeEndFrame: shown ? null : startFrame + APPEAR_FADE_TOTAL_FRAMES,
+          fadeEndFrame: shown ? null : startFrame + appearFadeFrames,
           // 已在场 Appear 是 CharacterMoveTo(side, 0.2)，与 moveSpeed 无关。
           moveEndFrame
         }
         const activeSlideEnd = shown
           ? moveEndFrame
-          : Math.max(startFrame + APPEAR_FADE_TOTAL_FRAMES, moved ? moveEndFrame : 0)
+          : Math.max(startFrame + appearFadeFrames, moved ? moveEndFrame : 0)
         activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
@@ -278,7 +298,6 @@ export function bakeStoryPlan(
             moveEndFrame: startFrame
           }
         } else if (moved) {
-          const fadeFrames = framesForSeconds(CHARACTER_FADE_MS / 1000)
           layout = {
             kind: 'clear',
             fadeStartFrame: startFrame + Math.max(0, moveFrames - fadeFrames),
@@ -287,7 +306,6 @@ export function bakeStoryPlan(
           }
           activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)
         } else {
-          const fadeFrames = framesForSeconds(CHARACTER_FADE_MS / 1000)
           const hideDelayFrames = framesForSeconds(HIDE_DELAY_IN_PLACE_MS / 1000)
           layout = {
             kind: 'clear',

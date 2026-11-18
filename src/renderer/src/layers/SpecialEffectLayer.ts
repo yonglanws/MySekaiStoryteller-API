@@ -199,6 +199,13 @@ export default class SpecialEffectLayer extends BaseLayer {
     return color === 'white' ? this.seWhiteSprite : this.seBlackSprite
   }
 
+  private getSpriteAlpha(sprite: SEBlack): number {
+    if (!sprite.visible) return 0
+    const filter = sprite.filters?.[0] as { alpha?: number } | undefined
+    if (filter && typeof filter.alpha === 'number') return filter.alpha
+    return sprite.alpha
+  }
+
   private setSpriteAlpha(sprite: SEBlack, alpha: number): void {
     const filter = sprite.filters?.[0] as { alpha?: number } | undefined
     if (filter) filter.alpha = alpha
@@ -208,35 +215,64 @@ export default class SpecialEffectLayer extends BaseLayer {
   public async fadeOut(duration: number, color: 'black' | 'white' = 'black'): Promise<void> {
     const gen = ++this.fadeGen
     const other = this.spriteFor(color === 'white' ? 'black' : 'white')
-    other.visible = false
     const sprite = this.spriteFor(color)
+    const startAlpha = Math.max(0, Math.min(1, this.getSpriteAlpha(sprite)))
+    const otherAlpha = Math.max(0, Math.min(1, this.getSpriteAlpha(other)))
     sprite.visible = true
-    if (duration <= 0) {
+
+    if (other.visible && otherAlpha > 1e-3) {
+      sprite.zIndex = 4
+      other.zIndex = 3
+    } else {
+      other.visible = false
+      this.setSpriteAlpha(other, 0)
+    }
+
+    if (duration <= 0 || startAlpha >= 1 - 1e-3) {
       this.setSpriteAlpha(sprite, 1)
+      other.visible = false
+      this.setSpriteAlpha(other, 0)
+      if (duration > 0) {
+        await AnimationManager.delay(duration)
+      }
+      if (gen === this.fadeGen) {
+        this.seBlackSprite.zIndex = 3
+        this.seWhiteSprite.zIndex = 4
+      }
       return
     }
-    this.setSpriteAlpha(sprite, 0)
+
+    this.setSpriteAlpha(sprite, startAlpha)
     await AnimationManager.linear((progress) => {
       if (gen !== this.fadeGen) return
-      this.setSpriteAlpha(sprite, progress)
+      this.setSpriteAlpha(sprite, startAlpha + (1 - startAlpha) * progress)
     }, duration)
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 1)
+    other.visible = false
+    this.setSpriteAlpha(other, 0)
+    this.seBlackSprite.zIndex = 3
+    this.seWhiteSprite.zIndex = 4
   }
 
   public async fadeIn(duration: number, color: 'black' | 'white' = 'black'): Promise<void> {
     const gen = ++this.fadeGen
+    const other = this.spriteFor(color === 'white' ? 'black' : 'white')
+    other.visible = false
+    this.setSpriteAlpha(other, 0)
     const sprite = this.spriteFor(color)
+    const currentAlpha = Math.max(0, Math.min(1, this.getSpriteAlpha(sprite)))
+    const startAlpha = currentAlpha > 1e-3 ? currentAlpha : 1
     sprite.visible = true
     if (duration <= 0) {
       this.setSpriteAlpha(sprite, 0)
       sprite.visible = false
       return
     }
-    this.setSpriteAlpha(sprite, 1)
+    this.setSpriteAlpha(sprite, startAlpha)
     await AnimationManager.linear((progress) => {
       if (gen !== this.fadeGen) return
-      this.setSpriteAlpha(sprite, 1 - progress)
+      this.setSpriteAlpha(sprite, startAlpha * (1 - progress))
     }, duration)
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 0)
@@ -523,9 +559,11 @@ export default class SpecialEffectLayer extends BaseLayer {
     this.cameraBlurFilter.spread = 0
     this.filterSyncCallback?.(null)
     this.seBlackSprite.visible = false
-    this.seBlackSprite.alpha = 0
+    this.setSpriteAlpha(this.seBlackSprite, 0)
+    this.seBlackSprite.zIndex = 3
     this.seWhiteSprite.visible = false
-    this.seWhiteSprite.alpha = 0
+    this.setSpriteAlpha(this.seWhiteSprite, 0)
+    this.seWhiteSprite.zIndex = 4
     this.wipeSprite.visible = false
     this.movieSprite.visible = false
     for (const burst of this.activeTransitions) {

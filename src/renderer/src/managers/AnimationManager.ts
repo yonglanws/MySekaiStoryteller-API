@@ -24,10 +24,14 @@ export default class AnimationManager {
 
   public static exportSpeedMultiplier: number = 1
   public static exportTargetFPS: number = 60
+  public static exportEncodeFPS: number = 60
   private static isExportMode: boolean = false
 
   public static setExportMode(enabled: boolean): void {
     this.isExportMode = enabled
+    if (!enabled) {
+      this.exportEncodeFPS = 60
+    }
   }
 
   public static isExporting(): boolean {

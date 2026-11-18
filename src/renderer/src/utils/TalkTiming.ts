@@ -40,6 +40,10 @@ export interface TalkDurationOptions {
    * `OnCompleteOpen` 才开始打字；语音和动作仍在 Talk 开始帧启动。
    */
   windowOpenMs?: number
+  /**
+   * 可选：无语音的纯标点静默句在打字结束后的停顿时长（默认使用官方 2.0s）。
+   */
+  silentHoldMs?: number
 }
 
 /** 打字机时长：官方每字 4 帧（两个 WaitForSeconds(0.03)），只数可见字符。 */
@@ -74,7 +78,11 @@ export function calculateTalkDurationMs(
         : 0
 
   if (speechMs <= 0) {
-    return framesToMs(typingFrames + AUTO_NEXT_PAGE_DELAY_FRAMES)
+    const postHoldFrames =
+      Number.isFinite(options.silentHoldMs) && (options.silentHoldMs as number) > 0
+        ? framesForSeconds((options.silentHoldMs as number) / 1000)
+        : AUTO_NEXT_PAGE_DELAY_FRAMES
+    return framesToMs(typingFrames + postHoldFrames)
   }
 
   const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
@@ -115,11 +123,15 @@ export function describeTalkTiming(
         : 0
   const typingMs = framesToMs(typingFrames)
   if (speechMs <= 0) {
+    const postHoldFrames =
+      Number.isFinite(options.silentHoldMs) && (options.silentHoldMs as number) > 0
+        ? framesForSeconds((options.silentHoldMs as number) / 1000)
+        : AUTO_NEXT_PAGE_DELAY_FRAMES
     return {
       typingMs,
       voiceEndMs: null,
       gateEndMs: typingMs,
-      totalMs: framesToMs(typingFrames + AUTO_NEXT_PAGE_DELAY_FRAMES)
+      totalMs: framesToMs(typingFrames + postHoldFrames)
     }
   }
   const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
