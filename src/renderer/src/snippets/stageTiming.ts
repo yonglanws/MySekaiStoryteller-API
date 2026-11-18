@@ -1,29 +1,74 @@
-import { App } from '../app/App'
+import type { App } from '../app/App'
 import type { LayoutModes } from '../../../common/types/Story'
 
 interface StageTimingState {
   layoutEndMs: number
   motionEndByModel: Map<number, number>
+  lastClockMs: number
 }
 
-const stageTimingByApp = new WeakMap<object, StageTimingState>()
+export type ClockBaselineResetListener = (now: number) => void
 
-function getState(app: object): StageTimingState {
+const stageTimingByApp = new WeakMap<object, StageTimingState>()
+const clockBaselineResetListeners = new Set<ClockBaselineResetListener>()
+
+export function registerClockBaselineResetListener(
+  listener: ClockBaselineResetListener
+): () => void {
+  clockBaselineResetListeners.add(listener)
+  return () => {
+    clockBaselineResetListeners.delete(listener)
+  }
+}
+
+function getState(app: object, now = nowMs()): StageTimingState {
   let state = stageTimingByApp.get(app)
   if (!state) {
-    state = { layoutEndMs: 0, motionEndByModel: new Map() }
+    state = { layoutEndMs: 0, motionEndByModel: new Map(), lastClockMs: now }
     stageTimingByApp.set(app, state)
+  } else {
+    syncClockEpoch(state, now)
   }
   return state
+}
+
+function syncClockEpoch(state: StageTimingState, now = nowMs()): void {
+  if (!Number.isFinite(now)) return
+  if (now < state.lastClockMs) {
+    state.layoutEndMs = 0
+    state.motionEndByModel.clear()
+  }
+  state.lastClockMs = now
 }
 
 export function nowMs(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now()
 }
 
+export function resetClockBaselines(app?: App | object, now = nowMs()): void {
+  if (app) {
+    stageTimingByApp.delete(app)
+    const layerModel = (
+      app as {
+        layerModel?: {
+          children?: Iterable<{ resetClockBaselines?: (now?: number) => void }>
+        }
+      }
+    ).layerModel
+    if (layerModel?.children) {
+      for (const child of layerModel.children) {
+        child?.resetClockBaselines?.(now)
+      }
+    }
+  }
+  for (const listener of clockBaselineResetListeners) {
+    listener(now)
+  }
+}
+
 export function resetStageTiming(app: App | object | undefined): void {
   if (!app) return
-  stageTimingByApp.delete(app)
+  resetClockBaselines(app)
 }
 
 export function recordLayoutRunningEnd(app: App | object, endMs: number): void {
@@ -33,7 +78,10 @@ export function recordLayoutRunningEnd(app: App | object, endMs: number): void {
 }
 
 export function getLayoutRunningEndMs(app: App | object): number {
-  return stageTimingByApp.get(app)?.layoutEndMs ?? 0
+  const state = stageTimingByApp.get(app)
+  if (!state) return 0
+  syncClockEpoch(state)
+  return state.layoutEndMs
 }
 
 export function recordMotionSettledAt(app: App | object, modelId: number, endMs: number): void {
@@ -41,15 +89,18 @@ export function recordMotionSettledAt(app: App | object, modelId: number, endMs:
   const state = getState(app)
   const prev = state.motionEndByModel.get(modelId) ?? 0
   state.motionEndByModel.set(modelId, Math.max(prev, endMs))
-  const layerModel = (app as {
-    layerModel?: { markMotionSettledAt?: (id: number, endMs: number) => void }
-  }).layerModel
+  const layerModel = (
+    app as {
+      layerModel?: { markMotionSettledAt?: (id: number, endMs: number) => void }
+    }
+  ).layerModel
   layerModel?.markMotionSettledAt?.(modelId, endMs)
 }
 
-export function getMotionSettledEndMs(app: App | object): number {
+export function getMotionSettledEndMs(app: App | object, now = nowMs()): number {
   const state = stageTimingByApp.get(app)
   if (!state) return 0
+  syncClockEpoch(state, now)
   let maxEnd = 0
   for (const endMs of state.motionEndByModel.values()) {
     if (endMs > maxEnd) maxEnd = endMs
@@ -57,14 +108,19 @@ export function getMotionSettledEndMs(app: App | object): number {
   return maxEnd
 }
 
-export function areTrackedMotionsSettled(app: App | object, nowMs: number): boolean {
-  const layerModel = (app as {
-    layerModel?: { areMotionsSettled?: (nowMs: number) => boolean }
-  }).layerModel
-  if (typeof layerModel?.areMotionsSettled === 'function' && !layerModel.areMotionsSettled(nowMs)) {
+export function areTrackedMotionsSettled(app: App | object, currentNowMs: number): boolean {
+  const layerModel = (
+    app as {
+      layerModel?: { areMotionsSettled?: (nowMs: number) => boolean }
+    }
+  ).layerModel
+  if (
+    typeof layerModel?.areMotionsSettled === 'function' &&
+    !layerModel.areMotionsSettled(currentNowMs)
+  ) {
     return false
   }
-  return nowMs >= getMotionSettledEndMs(app) - 0.5
+  return currentNowMs >= getMotionSettledEndMs(app, currentNowMs) - 0.5
 }
 
 export interface ExtendedUILayer {
@@ -91,11 +147,7 @@ export interface ExtendedBackgroundLayer {
   setBackground?: (texture: unknown) => void
   changeBackground?: (imageOrUrl: unknown, durationMs?: number) => Promise<void> | void
   setBlur?: (enabled: boolean) => void
-  setBackgroundBlur?: (
-    active: boolean,
-    level?: number,
-    durationMs?: number
-  ) => Promise<void> | void
+  setBackgroundBlur?: (active: boolean, level?: number, durationMs?: number) => Promise<void> | void
 }
 
 export interface ExtendedEnvironmentLayer {

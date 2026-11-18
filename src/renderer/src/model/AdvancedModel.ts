@@ -30,6 +30,28 @@ import {
   LIP_TARGET_VALUE_SCALE
 } from '../../../common/official/timing'
 import { evaluateEase } from '../effects/Ease'
+import { registerClockBaselineResetListener } from '../snippets/stageTiming'
+
+const MODEL_PREFIX_STANDING_RE = /(?:^|-)(?:default|stand|blushed)\d*$/i
+
+/**
+ * Normalizes a PJSK body motion name into its motion family prefix so v1 (`w-normal-nod01`),
+ * v2 (`w-normal01-nod`), `l-*` (`l-night03-sigh`), and compound char tags (`w-normal07cool02-think`)
+ * all group consistently for chain/variation selection.
+ */
+export function motionFamilyKey(name: string): string {
+  const parts = String(name ?? '')
+    .trim()
+    .split('-')
+    .filter(Boolean)
+  if (parts.length >= 2) {
+    const seg1 = parts[0]
+    const seg2 = parts[1]
+    const normalizedSeg2 = seg2.replace(/\d+.*$/, '') || seg2.replace(/\d+$/, '') || seg2
+    return `${seg1}-${normalizedSeg2}`
+  }
+  return String(name ?? '').trim()
+}
 
 /**
  * 素材库里混有两种 Cubism 参数 ID 命名：Cubism2 风格全大写下划线（PARAM_ARM_R_1）
@@ -43,8 +65,8 @@ const MOTION_ID_ALIAS_GROUPS: ReadonlyArray<readonly string[]> = [
   ['PARAM_ANGLE_Z', 'ParamAngleZ'],
   ['PARAM_EYE_L_OPEN', 'ParamEyeLOpen'],
   ['PARAM_EYE_R_OPEN', 'ParamEyeROpen'],
-  ['PARAM_EYE_BALL_X', 'ParamEyeBallX', 'ParamEyeballX'],
-  ['PARAM_EYE_BALL_Y', 'ParamEyeBallY', 'ParamEyeballY'],
+  ['PARAM_EYE_BALL_X', 'PARAM_EYEBALL_X', 'ParamEyeBallX', 'ParamEyeballX'],
+  ['PARAM_EYE_BALL_Y', 'PARAM_EYEBALL_Y', 'ParamEyeBallY', 'ParamEyeballY'],
   ['PARAM_EYE_L_SMILE', 'ParamEyeLSmile'],
   ['PARAM_EYE_R_SMILE', 'ParamEyeRSmile'],
   ['PARAM_BROW_L_X', 'ParamBrowLX'],
@@ -101,6 +123,16 @@ export default class AdvancedModel extends Live2DModel {
    */
   public static idleChainGapMs = 0
 
+  private static readonly liveInstances = new Set<AdvancedModel>()
+
+  public static resetAllClockBaselines(now = performance.now()): void {
+    for (const model of AdvancedModel.liveInstances) {
+      if (!model.destroyed) {
+        model.resetClockBaselines(now)
+      }
+    }
+  }
+
   public autoBlink: boolean = true
   public lastChangeBlinkTime: number | null = null
   public readonly visualEffectManager: VisualEffectManager = new VisualEffectManager(this)
@@ -117,6 +149,18 @@ export default class AdvancedModel extends Live2DModel {
   private lastNaturalUpdateMs = 0
   private firstBodyCue = true
   private facialForceNext = false
+  private oneShotWaitDepth = 0
+  private bodyAllowEyeOverride = false
+  private modelParamIds: Set<string> | null = null
+  private readonly channelHeldEntries: [WeakSet<object>, WeakSet<object>] = [
+    new WeakSet<object>(),
+    new WeakSet<object>()
+  ]
+  private readonly channelFinishFiredEntries: [WeakSet<object>, WeakSet<object>] = [
+    new WeakSet<object>(),
+    new WeakSet<object>()
+  ]
+  private readonly channelEntryCounts = [0, 0]
   private bodyIgnoredParamIds: string[] = []
   private restoreBodyUpdate: (() => void) | null = null
   private readonly actionController = new AbortController()
@@ -155,8 +199,13 @@ export default class AdvancedModel extends Live2DModel {
       throw new Error('Initialize model metadata more than once.')
     }
     this.visible = true
+    AdvancedModel.liveInstances.add(this)
     this.internalModel.extendParallelMotionManager(2)
+    this.modelParamIds = this.resolveCoreParameterIds()
     this.installMotionIdNormalization()
+    this.installMotionLoopHook()
+    this.installHoldLastFrameHook(0)
+    this.installHoldLastFrameHook(1)
     this.installBodyParameterIsolation()
     this.installCrossfade(0)
     this.installCrossfade(1)
@@ -295,6 +344,9 @@ export default class AdvancedModel extends Live2DModel {
     this.lastNaturalUpdateMs = performance.now()
     internal.on('beforeModelUpdate', () => {
       const now = performance.now()
+      if (now < this.lastNaturalUpdateMs) {
+        this.lastNaturalUpdateMs = now
+      }
       const dt = Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
       this.lastNaturalUpdateMs = now
       const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
@@ -312,6 +364,241 @@ export default class AdvancedModel extends Live2DModel {
         else core.setParamFloat?.(this.breathParamId, value)
       }
     })
+  }
+
+  private resolveCoreParameterIds(): Set<string> | null {
+    const core = (
+      this.internalModel as unknown as {
+        coreModel?: { _parameterIds?: string[]; parameters?: { ids?: string[] } }
+      }
+    )?.coreModel
+    const ids = core?._parameterIds ?? core?.parameters?.ids
+    return Array.isArray(ids) && ids.length > 0 ? new Set(ids) : null
+  }
+
+  /**
+   * Cubism4MotionManager.createMotion in pixi-live2d-display-advanced does not propagate
+   * Meta.Loop to CubismMotion.setIsLoop(), causing v1 looping clips to terminate after 1 pass
+   * and fade-in from default at loop boundaries. Enable native loop with loopFadeIn=false
+   * unless a one-shot wait explicitly requires completion.
+   */
+  private installMotionLoopHook(): void {
+    const motionManager = this.internalModel?.motionManager as unknown as {
+      createMotion?: (data: unknown, group: string, definition: unknown) => unknown
+    }
+    if (!motionManager || typeof motionManager.createMotion !== 'function') return
+    const originalCreate = motionManager.createMotion.bind(motionManager)
+    motionManager.createMotion = (data: unknown, group: string, definition: unknown) => {
+      const motion = originalCreate(data, group, definition)
+      this.syncMotionLoopFlag(motion)
+      return motion
+    }
+  }
+
+  private syncMotionLoopFlag(motion: unknown): void {
+    const typed = motion as {
+      _motionData?: { loop?: boolean }
+      setIsLoop?: (loop: boolean) => void
+      setIsLoopFadeIn?: (fade: boolean) => void
+    } | null
+    if (!typed) return
+    if (this.oneShotWaitDepth > 0) {
+      typed.setIsLoop?.(false)
+    } else if (typed._motionData?.loop === true) {
+      typed.setIsLoop?.(true)
+      typed.setIsLoopFadeIn?.(false)
+    }
+  }
+
+  /**
+   * Keeps the latest non-looping clip on a channel pinned at its last frame indefinitely
+   * instead of fading out and getting spliced from the motion queue after 1-2s.
+   * Crucially, manager.isFinished() reports true once end-of-clip is reached so Talk gates
+   * and finish telemetry fire cleanly while the pose/expression remains held until the next cue
+   * crossfades it out.
+   */
+  private installHoldLastFrameHook(channel: 0 | 1): void {
+    const manager = this.internalModel?.parallelMotionManager?.[channel] as unknown as {
+      isFinished?: () => boolean
+      queueManager?: {
+        _motions?: Array<{
+          _motion?: {
+            _motionData?: { duration?: number; loop?: boolean }
+            _loopDurationSeconds?: number
+            _isLoop?: boolean
+            isLoop?: () => boolean
+            getDuration?: () => number
+            _onFinishedMotion?: (motion: unknown) => void
+          }
+          isStarted?: () => boolean
+          isFinished?: () => boolean
+          isTriggeredFadeOut?: () => boolean
+          getStartTime?: () => number
+          setStartTime?: (t: number) => void
+          getFadeInStartTime?: () => number
+          setFadeInStartTime?: (t: number) => void
+          getEndTime?: () => number
+          setEndTime?: (t: number) => void
+          setLastCheckEventSeconds?: (t: number) => void
+        } | null>
+        doUpdateMotion?: (model: unknown, userTimeSeconds: number) => boolean
+        stopAllMotions?: () => void
+      }
+    }
+    const queue = manager?.queueManager
+    if (!manager || !queue || typeof queue.doUpdateMotion !== 'function') return
+
+    const heldEntries = (this.channelHeldEntries[channel] = new WeakSet<object>())
+    const finishFired = (this.channelFinishFiredEntries[channel] = new WeakSet<object>())
+
+    const origDoUpdate = queue.doUpdateMotion.bind(queue)
+    queue.doUpdateMotion = (model: unknown, userTimeSeconds: number) => {
+      const entries = queue._motions
+      if (Array.isArray(entries)) {
+        this.channelEntryCounts[channel] = entries.length
+        for (const entry of entries) {
+          if (!entry || entry.isFinished?.() || !entry.isStarted?.()) continue
+          const m = entry._motion
+          if (!m) continue
+
+          const startTime = entry.getStartTime?.() ?? userTimeSeconds
+          // Clock jumped backwards (e.g., VirtualClockController install on a pooled warm page).
+          if (startTime > userTimeSeconds + 0.25) {
+            entry.setStartTime?.(userTimeSeconds)
+            entry.setFadeInStartTime?.(userTimeSeconds)
+            entry.setLastCheckEventSeconds?.(userTimeSeconds)
+            if ((entry.getEndTime?.() ?? -1) > userTimeSeconds) {
+              entry.setEndTime?.(-1)
+            }
+          }
+
+          const isLoop =
+            typeof m.isLoop === 'function'
+              ? m.isLoop()
+              : Boolean(m._isLoop ?? (m._motionData?.loop && this.oneShotWaitDepth === 0))
+          const rawDuration =
+            m._motionData?.duration ??
+            m._loopDurationSeconds ??
+            (typeof m.getDuration === 'function' ? m.getDuration() : 0)
+          const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0
+          if (isLoop || duration <= 0) continue
+
+          const effectiveStart = entry.getStartTime?.() ?? userTimeSeconds
+          const elapsed = userTimeSeconds - effectiveStart
+          const clampStart = userTimeSeconds - Math.max(0, duration - 1e-4)
+
+          if (!entry.isTriggeredFadeOut?.()) {
+            // Suppress premature auto fadeOut over the last _fadeOutSeconds of short clips.
+            entry.setEndTime?.(-1)
+            if (elapsed >= duration - 1e-4) {
+              heldEntries.add(entry)
+              if (!finishFired.has(entry)) {
+                finishFired.add(entry)
+                try {
+                  m._onFinishedMotion?.(m)
+                } catch {
+                  /* ignore finish handler error */
+                }
+              }
+              entry.setStartTime?.(clampStart)
+            }
+          } else {
+            heldEntries.delete(entry)
+            const endTime = entry.getEndTime?.() ?? -1
+            if (elapsed >= duration - 1e-4 && (endTime < 0 || userTimeSeconds <= endTime)) {
+              entry.setStartTime?.(clampStart)
+            }
+          }
+        }
+      }
+      const result = origDoUpdate(model, userTimeSeconds)
+      if (Array.isArray(queue._motions)) {
+        for (const entry of queue._motions) {
+          if (
+            !entry ||
+            entry.isFinished?.() ||
+            !entry.isStarted?.() ||
+            entry.isTriggeredFadeOut?.()
+          ) {
+            continue
+          }
+          const m = entry._motion
+          if (!m) continue
+          const isLoop =
+            typeof m.isLoop === 'function'
+              ? m.isLoop()
+              : Boolean(m._isLoop ?? (m._motionData?.loop && this.oneShotWaitDepth === 0))
+          const rawDuration =
+            m._motionData?.duration ??
+            m._loopDurationSeconds ??
+            (typeof m.getDuration === 'function' ? m.getDuration() : 0)
+          if (!isLoop && Number.isFinite(rawDuration) && rawDuration > 0) {
+            entry.setEndTime?.(-1)
+          }
+        }
+        this.channelEntryCounts[channel] = queue._motions.length
+      }
+      return result
+    }
+
+    if (typeof queue.stopAllMotions === 'function') {
+      const origStopAll = queue.stopAllMotions.bind(queue)
+      queue.stopAllMotions = () => {
+        this.channelHeldEntries[channel] = new WeakSet<object>()
+        this.channelFinishFiredEntries[channel] = new WeakSet<object>()
+        this.channelEntryCounts[channel] = 0
+        origStopAll()
+      }
+    }
+
+    if (typeof manager.isFinished === 'function') {
+      const origIsFinished = manager.isFinished.bind(manager)
+      manager.isFinished = () => {
+        if (origIsFinished()) return true
+        const entries = queue._motions
+        if (!Array.isArray(entries) || entries.length === 0) return true
+        const currentHeld = this.channelHeldEntries[channel]
+        return entries.every((entry) => !entry || entry.isFinished?.() || currentHeld.has(entry))
+      }
+    }
+  }
+
+  public resetClockBaselines(now = performance.now()): void {
+    this.lastNaturalUpdateMs = now
+    this.currentBodyStartedAt = now
+    if (this.lastChangeBlinkTime !== null) {
+      this.lastChangeBlinkTime = now
+    }
+    const nowSeconds = now / 1000
+    for (const channel of [0, 1] as const) {
+      const entries = (
+        this.internalModel?.parallelMotionManager?.[channel] as unknown as {
+          queueManager?: {
+            _motions?: Array<{
+              getStartTime?: () => number
+              setStartTime?: (t: number) => void
+              setFadeInStartTime?: (t: number) => void
+              setEndTime?: (t: number) => void
+              setLastCheckEventSeconds?: (t: number) => void
+              isTriggeredFadeOut?: () => boolean
+            } | null>
+          }
+        }
+      )?.queueManager?._motions
+      if (!Array.isArray(entries)) continue
+      for (const entry of entries) {
+        if (!entry) continue
+        const prevStart = entry.getStartTime?.()
+        if (prevStart === undefined || prevStart > nowSeconds) {
+          entry.setStartTime?.(nowSeconds)
+          entry.setFadeInStartTime?.(nowSeconds)
+          entry.setLastCheckEventSeconds?.(nowSeconds)
+          if (!entry.isTriggeredFadeOut?.()) {
+            entry.setEndTime?.(-1)
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -362,7 +649,8 @@ export default class AdvancedModel extends Live2DModel {
     const originalUpdate = manager.update
     manager.update = (core, now): boolean => {
       const internal = this.internalModel
-      const values = this.bodyIgnoredParamIds.map((id) => ({
+      const ignoredIds = this.getEffectiveBodyIgnoredParamIds()
+      const values = ignoredIds.map((id) => ({
         id,
         value:
           internal instanceof Cubism4InternalModel
@@ -410,14 +698,16 @@ export default class AdvancedModel extends Live2DModel {
     ) {
       this.bodyFinishReported = true
       wakeBlink(this.blinkState)
+      const now = performance.now()
+      if (now < this.currentBodyStartedAt) this.currentBodyStartedAt = now
       motionTrace.record({
-        at: performance.now(),
+        at: now,
         modelId: this.metadata.id,
         snippetIndex: this.currentBodySnippetIndex,
         channel: 0,
         name: this.currentBodyMotion,
         event: 'finished',
-        playedMs: performance.now() - this.currentBodyStartedAt,
+        playedMs: Math.max(0, now - this.currentBodyStartedAt),
         clipDurationMs: this.currentBodyClipDurationMs
       })
     }
@@ -457,21 +747,40 @@ export default class AdvancedModel extends Live2DModel {
     // gap=0：不回落站立，保持动作结束时的姿势，直到下一个 cue 或退场接管
   }
 
+  private listBodyMotionDefinitions(): string[] {
+    const definitions = this.internalModel?.motionManager?.definitions as
+      | Record<string, unknown>
+      | undefined
+    return Object.keys(definitions ?? {}).filter((name) => !name.startsWith('face_'))
+  }
+
   private pickChainMotion(): string | null {
-    const internal = this.internalModel
-    if (!internal) return null
-    const definitions = internal.motionManager.definitions as Record<string, unknown> | undefined
-    const all = Object.keys(definitions ?? {}).filter((name) => !name.startsWith('face_'))
-    if (!all.length) return this.defaultMotionName
+    const allRaw = this.listBodyMotionDefinitions()
+    if (!allRaw.length) return this.defaultMotionName
+    const nonStanding = allRaw.filter((name) => !MODEL_PREFIX_STANDING_RE.test(name))
+    const all = nonStanding.length ? nonStanding : allRaw
     const last = this.recentBodyMotions[this.recentBodyMotions.length - 1]
-    // 动作名形如 w-cute-delicious01：前两段 "w-cute" 即情绪族
-    const family = last ? last.split('-').slice(0, 2).join('-') : null
-    let pool = family ? all.filter((name) => name.startsWith(`${family}-`)) : []
+    const family = last ? motionFamilyKey(last) : null
+    let pool = family ? all.filter((name) => motionFamilyKey(name) === family) : []
     if (pool.length <= 1) pool = all
     const recent = new Set(this.recentBodyMotions.slice(-2))
     const fresh = pool.filter((name) => !recent.has(name))
     const source = fresh.length ? fresh : pool
     return source[Math.floor(Math.random() * source.length)] ?? this.defaultMotionName
+  }
+
+  private pickEntryMotion(seedOffset = 0): string | null {
+    const allRaw = this.listBodyMotionDefinitions()
+    if (!allRaw.length) return this.defaultMotionName
+    const nonStanding = allRaw.filter((name) => !MODEL_PREFIX_STANDING_RE.test(name))
+    const basePool = nonStanding.length ? nonStanding : allRaw
+    const normalFamily = basePool.filter((name) => motionFamilyKey(name) === 'w-normal')
+    const pool = normalFamily.length >= 2 ? normalFamily : basePool
+    const recent = new Set(this.recentBodyMotions.slice(-2))
+    const fresh = pool.filter((name) => !recent.has(name) && name !== this.currentBodyMotion)
+    const source = (fresh.length ? fresh : pool).slice().sort()
+    const modelSalt = Math.abs(this._metadata?.id ?? 0) * 3 + Math.max(0, seedOffset)
+    return source[modelSalt % source.length] ?? this.defaultMotionName
   }
 
   /** 入场动作播完后调用：body 通道进入连续表演，台词间隙不再站桩。 */
@@ -513,23 +822,168 @@ export default class AdvancedModel extends Live2DModel {
 
   /**
    * 入场兜底动作：剧本没给 motion/facial 时也不能站桩淡入。
-   * 优先挑一个当前情绪族的 body motion；没有动作库时退回默认待机动作。
+   * 按模型 id 与片段索引轮换同款非站立待机姿态，避免多人齐刷刷复读同一姿势，
+   * 并隔离面部与眼球参数，防止覆盖表情或自然眨眼。
    */
   public async startEntryMotion(
     applyDefaultFacial = true,
     traceSnippetIndex?: number
   ): Promise<void> {
-    const motion = this.pickChainMotion()
-    if (motion) await this.applyMotion(motion, false, [], traceSnippetIndex)
     if (applyDefaultFacial && this.defaultFacialName) {
       await this.applyFacial(this.defaultFacialName, true, traceSnippetIndex)
+    }
+    const motion = this.pickEntryMotion(traceSnippetIndex ?? 0)
+    if (motion) {
+      await this.applyMotion(
+        motion,
+        true,
+        this.facialIsolationParamIds({
+          includeEyeOpen: false,
+          includeMouthOpen: true,
+          includeNonEyeOpenFacial: true
+        }),
+        traceSnippetIndex
+      )
     }
   }
 
   private eyeParameterIds(): string[] {
     return this.internalModel instanceof Cubism2InternalModel
-      ? ['PARAM_EYE_R_OPEN', 'PARAM_EYE_L_OPEN', 'PARAM_EYE_BALL_X', 'PARAM_EYE_BALL_Y']
-      : ['ParamEyeROpen', 'ParamEyeLOpen', 'ParamEyeBallX', 'ParamEyeBallY']
+      ? [
+          'PARAM_EYE_R_OPEN',
+          'PARAM_EYE_L_OPEN',
+          'PARAM_EYE_BALL_X',
+          'PARAM_EYE_BALL_Y',
+          'PARAM_EYEBALL_X',
+          'PARAM_EYEBALL_Y'
+        ]
+      : [
+          'ParamEyeROpen',
+          'ParamEyeLOpen',
+          'ParamEyeballX',
+          'ParamEyeballY',
+          'ParamEyeBallX',
+          'ParamEyeBallY'
+        ]
+  }
+
+  private filterToExistingModelParams(ids: readonly string[]): string[] {
+    const paramSet = this.modelParamIds
+    if (!paramSet) return [...ids]
+    return ids.filter((id) => paramSet.has(id))
+  }
+
+  private hasChannel1FacialActive(): boolean {
+    if (this.currentFacialName) return true
+    const mgr = this.internalModel?.parallelMotionManager?.[1] as unknown as {
+      playing?: boolean
+      queueManager?: { _motions?: unknown[] }
+    }
+    if (!mgr) return false
+    if (Array.isArray(mgr.queueManager?._motions) && mgr.queueManager._motions.length > 0) {
+      return true
+    }
+    return Boolean(mgr.playing)
+  }
+
+  private hasActiveHeldEntry(channel: 0 | 1): boolean {
+    const mgr = this.internalModel?.parallelMotionManager?.[channel] as unknown as {
+      queueManager?: { _motions?: Array<object | null> }
+    }
+    const entries = mgr?.queueManager?._motions
+    if (!Array.isArray(entries) || entries.length === 0) return false
+    const held = this.channelHeldEntries?.[channel]
+    return Boolean(held && entries.some((e) => Boolean(e && held.has(e))))
+  }
+
+  private facialIsolationParamIds(opts: {
+    includeEyeOpen: boolean
+    includeMouthOpen: boolean
+    includeNonEyeOpenFacial: boolean
+  }): string[] {
+    const out: string[] = []
+    const isC2 = this.internalModel instanceof Cubism2InternalModel
+    if (opts.includeEyeOpen) {
+      out.push(...this.eyeParameterIds().slice(0, 2))
+    }
+    if (opts.includeEyeOpen || opts.includeNonEyeOpenFacial) {
+      // Eyeballs stay after [0, 1] inside eyeParameterIds().
+      out.push(...this.eyeParameterIds().slice(2))
+    }
+    if (opts.includeMouthOpen) {
+      out.push(isC2 ? 'PARAM_MOUTH_OPEN_Y' : 'ParamMouthOpenY')
+    }
+    if (opts.includeNonEyeOpenFacial) {
+      out.push(
+        ...(isC2
+          ? [
+              'PARAM_BROW_L_X',
+              'PARAM_BROW_L_Y',
+              'PARAM_BROW_R_X',
+              'PARAM_BROW_R_Y',
+              'PARAM_BROW_L_ANGLE',
+              'PARAM_BROW_R_ANGLE',
+              'PARAM_BROW_L_FORM',
+              'PARAM_BROW_R_FORM',
+              'PARAM_EYE_L_SMILE',
+              'PARAM_EYE_R_SMILE',
+              'PARAM_MOUTH_FORM',
+              'PARAM_CHEEK',
+              'PARAM_BREATH'
+            ]
+          : [
+              'ParamBrowLX',
+              'ParamBrowLY',
+              'ParamBrowRX',
+              'ParamBrowRY',
+              'ParamBrowLAngle',
+              'ParamBrowRAngle',
+              'ParamBrowLForm',
+              'ParamBrowRForm',
+              'ParamEyeLSmile',
+              'ParamEyeRSmile',
+              'ParamEyeLForm',
+              'ParamEyeRForm',
+              'ParamEyeSize',
+              'ParamEyeTeary',
+              'ParamMouthForm',
+              'ParamMouthForm01',
+              'ParamMouthForm02',
+              'ParamMouthScaleX',
+              'ParamMouthScaleY',
+              'ParamCheek',
+              'ParamTear',
+              'ParamSweat',
+              'ParamFaceShadow',
+              'ParamTeeth',
+              'ParamBreath'
+            ])
+      )
+    }
+    return [...new Set(this.filterToExistingModelParams(out))]
+  }
+
+  private getEffectiveBodyIgnoredParamIds(): string[] {
+    const base = this.bodyIgnoredParamIds ?? []
+    if (!this.currentFacialName) return base
+    const motion = this.loadedMotion(this.currentFacialName) as {
+      _motionData?: { curves?: Array<{ id?: string }> }
+    } | null
+    const curves = motion?._motionData?.curves
+    if (!Array.isArray(curves) || curves.length === 0) return base
+    const baseSet = new Set(base)
+    const eyeOpenSet = new Set(this.eyeParameterIds().slice(0, 2))
+    let extra: string[] | null = null
+    for (const curve of curves) {
+      const id = curve?.id
+      if (!id || baseSet.has(id)) continue
+      if (this.bodyAllowEyeOverride && eyeOpenSet.has(id)) continue
+      if (this.modelParamIds && !this.modelParamIds.has(id)) continue
+      baseSet.add(id)
+      if (!extra) extra = [...base]
+      extra.push(id)
+    }
+    return extra ?? base
   }
 
   private async startCharacterChannel(
@@ -548,8 +1002,6 @@ export default class AdvancedModel extends Live2DModel {
       this.bodyChainArmed = chainAfter
       if (chainAfter) {
         this.bodyChainGeneration = generation
-        this.recentBodyMotions.push(name)
-        if (this.recentBodyMotions.length > 4) this.recentBodyMotions.shift()
       }
     }
     const internal = this.internalModel
@@ -581,7 +1033,12 @@ export default class AdvancedModel extends Live2DModel {
     // 重新 startMotion 还会触发误报 interrupted 或与 MotionState 的 reservation 打架。直接视为已应用。
     const isSameActiveCue =
       channel === 1 ? name === this.currentFacialName : name === this.currentBodyMotion
-    if (isSameActiveCue && manager.playing && !manager.isFinished()) {
+    const channelIsActivelyVisible =
+      (manager.playing && !manager.isFinished()) || (channel === 1 && this.hasActiveHeldEntry(1))
+    if (isSameActiveCue && channelIsActivelyVisible) {
+      if (this.oneShotWaitDepth > 0) {
+        this.syncMotionLoopFlag(this.loadedMotion(name))
+      }
       motionTrace.record({
         at: requestedAt,
         modelId: this.metadata.id,
@@ -596,6 +1053,7 @@ export default class AdvancedModel extends Live2DModel {
     // Invalidate older asynchronous reservations without stopping the currently playing clip.
     manager.state.setReserved(undefined, undefined, 0)
     const motion = await internal.motionManager.loadMotion(name, 0)
+    if (motion) this.syncMotionLoopFlag(motion)
     const loadedAt = performance.now()
     if (
       !motion ||
@@ -612,7 +1070,7 @@ export default class AdvancedModel extends Live2DModel {
         channel,
         name,
         event: 'skipped',
-        loadMs: loadedAt - requestedAt,
+        loadMs: Math.max(0, loadedAt - requestedAt),
         reason: !motion
           ? 'motion not found'
           : generation !== this.channelGeneration[channel]
@@ -629,17 +1087,21 @@ export default class AdvancedModel extends Live2DModel {
       channel,
       name,
       event: 'loaded',
-      loadMs: loadedAt - requestedAt,
+      loadMs: Math.max(0, loadedAt - requestedAt),
       clipDurationMs
     })
     if (channel === 0) {
-      this.bodyIgnoredParamIds = ignoredParamIds
+      this.bodyIgnoredParamIds = [...ignoredParamIds]
+      const eyeOpenIds = this.eyeParameterIds().slice(0, 2)
+      const ignoresEyeOpen = eyeOpenIds.some((id) => ignoredParamIds.includes(id))
+      this.bodyAllowEyeOverride = !ignoresEyeOpen
       if (
         this.currentBodyMotion &&
         this.currentBodyMotion !== name &&
         manager.playing &&
         !manager.isFinished()
       ) {
+        if (loadedAt < this.currentBodyStartedAt) this.currentBodyStartedAt = loadedAt
         motionTrace.record({
           at: loadedAt,
           modelId: this.metadata.id,
@@ -647,10 +1109,17 @@ export default class AdvancedModel extends Live2DModel {
           channel: 0,
           name: this.currentBodyMotion,
           event: 'interrupted',
-          playedMs: loadedAt - this.currentBodyStartedAt,
+          playedMs: Math.max(0, loadedAt - this.currentBodyStartedAt),
           clipDurationMs: this.currentBodyClipDurationMs,
           previous: name
         })
+      }
+      // 仅当身体动作直接驱动眼睛（未隔离 ParamEye*Open）时才 Sleep 眨眼；
+      // 若身体动作隔离了眼睛（如 Talk、facialFirst、循环动作），必须保持自动眨眼开启。
+      if (ignoresEyeOpen) {
+        wakeBlink(this.blinkState)
+      } else {
+        sleepBlink(this.blinkState)
       }
     }
     // 官方 PlayableAnimator 是交叉淡化，不是先 stopAll 清空旧姿势。
@@ -663,10 +1132,6 @@ export default class AdvancedModel extends Live2DModel {
           ? facialBlendSeconds(true)
           : facialBlendSeconds(false)
     this.channelFadeSeconds[channel] = fadeSeconds
-    if (channel === 0) {
-      // ChangeMotionCore 结束时 Sleep()：动作播放期间不自动眨眼，动作结束再 Wake。
-      sleepBlink(this.blinkState)
-    }
     const invalidateReservation = (): void => {
       if (generation === this.channelGeneration[channel] && !this.destroyed) {
         manager.state.setReserved(undefined, undefined, 0)
@@ -683,7 +1148,7 @@ export default class AdvancedModel extends Live2DModel {
         channel,
         name,
         event: started ? 'started' : 'skipped',
-        loadMs: startedAt - requestedAt,
+        loadMs: Math.max(0, startedAt - requestedAt),
         clipDurationMs,
         fadeMs: Math.round(fadeSeconds * 1000),
         // 同一个表情或动作已经播完但仍是 current group/index 时，manager 也会拒绝
@@ -703,6 +1168,10 @@ export default class AdvancedModel extends Live2DModel {
         this.currentBodyClipDurationMs = clipDurationMs
         this.bodyFinishReported = false
         this.firstBodyCue = false
+        if (name !== this.defaultMotionName && this.recentBodyMotions.at(-1) !== name) {
+          this.recentBodyMotions.push(name)
+          if (this.recentBodyMotions.length > 6) this.recentBodyMotions.shift()
+        }
       }
       if (started && channel === 1) {
         this.facialForceNext = false
@@ -736,10 +1205,13 @@ export default class AdvancedModel extends Live2DModel {
     extraIgnoreParamIds: string[] = [],
     traceSnippetIndex?: number
   ): Promise<void> {
+    const ignored = [
+      ...new Set([...(ignoreParams ? this.eyeParameterIds() : []), ...extraIgnoreParamIds])
+    ]
     await this.startCharacterChannel(
       0,
       motion,
-      [...(ignoreParams ? this.eyeParameterIds() : []), ...extraIgnoreParamIds],
+      ignored,
       undefined,
       undefined,
       false,
@@ -777,16 +1249,21 @@ export default class AdvancedModel extends Live2DModel {
   ): Promise<void> {
     const tasks: Promise<void>[] = []
     if (action.motion) {
+      const isolated = [
+        ...new Set([
+          ...this.eyeParameterIds(),
+          ...this.facialIsolationParamIds({
+            includeEyeOpen: false,
+            includeMouthOpen: true,
+            includeNonEyeOpenFacial: true
+          })
+        ])
+      ]
       tasks.push(
         this.startCharacterChannel(
           0,
           action.motion,
-          [
-            ...this.eyeParameterIds(),
-            this.internalModel instanceof Cubism2InternalModel
-              ? 'PARAM_MOUTH_OPEN_Y'
-              : 'ParamMouthOpenY'
-          ],
+          isolated,
           signal,
           canApply,
           // 该手势播完后接着演下一个（同情绪族），台词期间连续表演不站桩。
@@ -805,6 +1282,10 @@ export default class AdvancedModel extends Live2DModel {
   /** Cancel only queued loads/reservations, retaining the current visible pose. */
   public cancelPendingActions(): void {
     this.bodyChainArmed = false
+    if (this.bodyChainTimer) {
+      clearTimeout(this.bodyChainTimer)
+      this.bodyChainTimer = null
+    }
     for (const channel of [0, 1] as const) {
       this.channelGeneration[channel]++
       this.internalModel?.parallelMotionManager[channel]?.state.setReserved(undefined, undefined, 0)
@@ -853,7 +1334,7 @@ export default class AdvancedModel extends Live2DModel {
     }, time)
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
-    this.lastChangeBlinkTime = Date.now()
+    this.lastChangeBlinkTime = performance.now()
   }
 
   public async hide(time: number, generation?: number): Promise<void> {
@@ -870,7 +1351,7 @@ export default class AdvancedModel extends Live2DModel {
       this.visualEffectManager.disableAll()
     }
 
-    this.lastChangeBlinkTime = Date.now()
+    this.lastChangeBlinkTime = performance.now()
     this.autoBlink = false
     sleepBlink(this.blinkState)
     this.cancelPendingActions()
@@ -892,12 +1373,23 @@ export default class AdvancedModel extends Live2DModel {
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
 
+    const isolateEyes = facialFirst !== false
+    const hasFacialContext = Boolean(facial || this.hasChannel1FacialActive())
+    const extraIgnored =
+      isolateEyes || hasFacialContext
+        ? this.facialIsolationParamIds({
+            includeEyeOpen: false,
+            includeMouthOpen: true,
+            includeNonEyeOpenFacial: true
+          })
+        : []
+
     const waits: Promise<void>[] = []
-    if (motion) {
-      waits.push(this.applyMotion(motion, facialFirst, [], options.traceSnippetIndex))
-    }
     if (facial) {
       waits.push(this.applyFacial(facial, options.facialForce === true, options.traceSnippetIndex))
+    }
+    if (motion) {
+      waits.push(this.applyMotion(motion, isolateEyes, extraIgnored, options.traceSnippetIndex))
     }
 
     await Promise.all(waits)
@@ -912,13 +1404,15 @@ export default class AdvancedModel extends Live2DModel {
     const timeoutMs = isExport ? 15000 : 0
 
     if (isExport && timeoutMs > 0) {
-      const startTime = performance.now()
+      let startTime = performance.now()
       let timedOut = false
       await AnimationManager.in_ticker(
         () => {},
         () => {
           if (timedOut) return true
-          if (performance.now() - startTime > timeoutMs) {
+          const now = performance.now()
+          if (now < startTime) startTime = now
+          if (now - startTime > timeoutMs) {
             this.logger.warn('waitForMotionsFinished timed out, forcing continue')
             timedOut = true
             try {
@@ -939,7 +1433,7 @@ export default class AdvancedModel extends Live2DModel {
       )
     }
 
-    this.lastChangeBlinkTime = Date.now()
+    this.lastChangeBlinkTime = performance.now()
   }
 
   public async applyAndWait(
@@ -948,8 +1442,13 @@ export default class AdvancedModel extends Live2DModel {
     facialFirst?: boolean,
     traceSnippetIndex?: number
   ): Promise<void> {
-    await this.startMotions(motion, facial, facialFirst, { traceSnippetIndex })
-    await this.waitForMotionsFinished()
+    this.oneShotWaitDepth++
+    try {
+      await this.startMotions(motion, facial, facialFirst, { traceSnippetIndex })
+      await this.waitForMotionsFinished()
+    } finally {
+      this.oneShotWaitDepth = Math.max(0, this.oneShotWaitDepth - 1)
+    }
   }
 
   private alphaFilter: AlphaFilter | null = null
@@ -1078,53 +1577,66 @@ export default class AdvancedModel extends Live2DModel {
     const motion_manager = this.internalModel.parallelMotionManager[0]
     const facial_manager = this.internalModel.parallelMotionManager[1]
 
-    const waits: Promise<unknown>[] = []
-
-    if (motion) {
-      waits.push(motion_manager.playMotionLastFrame(motion, 0))
-    }
-
-    if (facial) {
-      waits.push(facial_manager.playMotionLastFrame(facial, 0))
-    }
-
-    const results = (await Promise.all(waits)) as boolean[]
-
-    if (results.includes(false)) {
-      await this.applyAndWait(motion, facial)
-    } else {
-      const isExport = AnimationManager.isExporting()
-      const timeoutMs = isExport ? 15000 : 0
-
-      if (isExport && timeoutMs > 0) {
-        const startTime = performance.now()
-        let timedOut = false
-        await AnimationManager.in_ticker(
-          () => {},
-          () => {
-            if (timedOut) return true
-            if (performance.now() - startTime > timeoutMs) {
-              this.logger.warn(
-                `playMotionLastFrame timed out after ${timeoutMs}ms, forcing continue`
-              )
-              timedOut = true
-              try {
-                motion_manager.stopAllMotions()
-                facial_manager.stopAllMotions()
-              } catch (e) {
-                this.logger.warn('Failed to stop motions after timeout', e)
-              }
-              return true
-            }
-            return motion_manager.isFinished() && facial_manager.isFinished()
-          }
-        )
-      } else {
-        await AnimationManager.in_ticker(
-          () => {},
-          () => motion_manager.isFinished() && facial_manager.isFinished()
-        )
+    this.oneShotWaitDepth++
+    try {
+      for (const name of [motion, facial]) {
+        if (!name) continue
+        const loaded = this.loadedMotion(name) as { setIsLoop?: (loop: boolean) => void } | null
+        loaded?.setIsLoop?.(false)
       }
+
+      const waits: Promise<unknown>[] = []
+
+      if (motion) {
+        waits.push(motion_manager.playMotionLastFrame(motion, 0))
+      }
+
+      if (facial) {
+        waits.push(facial_manager.playMotionLastFrame(facial, 0))
+      }
+
+      const results = (await Promise.all(waits)) as boolean[]
+
+      if (results.includes(false)) {
+        await this.applyAndWait(motion, facial)
+      } else {
+        const isExport = AnimationManager.isExporting()
+        const timeoutMs = isExport ? 15000 : 0
+
+        if (isExport && timeoutMs > 0) {
+          let startTime = performance.now()
+          let timedOut = false
+          await AnimationManager.in_ticker(
+            () => {},
+            () => {
+              if (timedOut) return true
+              const now = performance.now()
+              if (now < startTime) startTime = now
+              if (now - startTime > timeoutMs) {
+                this.logger.warn(
+                  `playMotionLastFrame timed out after ${timeoutMs}ms, forcing continue`
+                )
+                timedOut = true
+                try {
+                  motion_manager.stopAllMotions()
+                  facial_manager.stopAllMotions()
+                } catch (e) {
+                  this.logger.warn('Failed to stop motions after timeout', e)
+                }
+                return true
+              }
+              return motion_manager.isFinished() && facial_manager.isFinished()
+            }
+          )
+        } else {
+          await AnimationManager.in_ticker(
+            () => {},
+            () => motion_manager.isFinished() && facial_manager.isFinished()
+          )
+        }
+      }
+    } finally {
+      this.oneShotWaitDepth = Math.max(0, this.oneShotWaitDepth - 1)
     }
   }
 
@@ -1156,6 +1668,7 @@ export default class AdvancedModel extends Live2DModel {
 
   public override destroy(options?: Parameters<Live2DModel['destroy']>[0]): void {
     if (this.destroyed) return
+    AdvancedModel.liveInstances.delete(this)
     this.actionController.abort()
     this.cancelPendingActions()
     this.autoBlink = false
@@ -1169,4 +1682,12 @@ export default class AdvancedModel extends Live2DModel {
     this.ambientColorFilter = null
     super.destroy(options)
   }
+}
+
+registerClockBaselineResetListener((now) => {
+  AdvancedModel.resetAllClockBaselines(now)
+})
+
+export function resetClockBaselines(now = performance.now()): void {
+  AdvancedModel.resetAllClockBaselines(now)
 }

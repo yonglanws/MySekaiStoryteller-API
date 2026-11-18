@@ -9,11 +9,7 @@ import {
   FRAME_MS,
   framesForSeconds
 } from '../../../common/official/timing'
-import {
-  nowMs,
-  recordLayoutRunningEnd,
-  recordMotionSettledAt
-} from './stageTiming'
+import { nowMs, recordLayoutRunningEnd, recordMotionSettledAt } from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutAppearSnippet extends BaseSnippet {
@@ -56,10 +52,15 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     const entryMotion =
       this.data.data.motion && model.hasMotion(this.data.data.motion) ? this.data.data.motion : ''
     if (entryMotion || this.data.data.facial) {
-      await model.startMotions(entryMotion, this.data.data.facial, this.data.data.facialFirst, {
-        facialForce: true,
-        traceSnippetIndex: this.snippetIndex
-      })
+      await model.startMotions(
+        entryMotion,
+        this.data.data.facial,
+        this.data.data.facialFirst ?? true,
+        {
+          facialForce: true,
+          traceSnippetIndex: this.snippetIndex
+        }
+      )
       if (entryMotion && !model.isMotionLooping?.(entryMotion)) {
         const clipMs = model.getMotionDurationMs?.(entryMotion) ?? 0
         if (clipMs > 0) {

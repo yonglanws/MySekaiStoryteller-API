@@ -176,23 +176,36 @@ export function bakeStoryPlan(
     const endFrame = startFrame + durationFrames
     const actions: StoryPlanActionCue[] = []
 
-    if (typeof data.motion === 'string' || typeof data.facial === 'string') {
+    const topMotion = typeof data.motion === 'string' ? data.motion.trim() : ''
+    const topFacial = typeof data.facial === 'string' ? data.facial.trim() : ''
+    const resolveActionModelId = (raw: unknown): number => {
+      if (typeof raw === 'number' && Number.isFinite(raw)) return raw
+      if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+        const parsed = Number(raw)
+        if (Number.isFinite(parsed)) return parsed
+      }
+      return -1
+    }
+    if (topMotion || topFacial) {
       actions.push({
         frame: startFrame,
         at: 0,
-        modelId: Number(data.modelId) || -1,
-        ...(typeof data.motion === 'string' ? { motion: data.motion } : {}),
-        ...(typeof data.facial === 'string' ? { facial: data.facial } : {})
+        modelId: resolveActionModelId(data.modelId),
+        ...(topMotion ? { motion: topMotion } : {}),
+        ...(topFacial ? { facial: topFacial } : {})
       })
     }
     for (const action of (data.actions as TalkLike['actions']) ?? []) {
+      const actionMotion = typeof action.motion === 'string' ? action.motion.trim() : ''
+      const actionFacial = typeof action.facial === 'string' ? action.facial.trim() : ''
+      if (!actionMotion && !actionFacial) continue
       const at = Math.max(0, Math.min(1, Number(action.at) || 0))
       actions.push({
         frame: startFrame + Math.round(at * durationFrames),
         at,
-        modelId: Number(action.modelId) || -1,
-        ...(action.motion ? { motion: action.motion } : {}),
-        ...(action.facial ? { facial: action.facial } : {})
+        modelId: resolveActionModelId(action.modelId),
+        ...(actionMotion ? { motion: actionMotion } : {}),
+        ...(actionFacial ? { facial: actionFacial } : {})
       })
     }
 

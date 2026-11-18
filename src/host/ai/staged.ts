@@ -165,6 +165,8 @@ export interface StagedMoveCue {
   toSide?: 'Left' | 'Center' | 'Right'
   offset?: number
   moveSpeed?: 'Fast' | 'Normal' | 'Slow'
+  motion?: string
+  facial?: string
 }
 
 export interface StagedCameraCue {
@@ -268,21 +270,76 @@ const cleanText = (value: unknown): string => {
   return merged.trim()
 }
 
-function pickFollowupMotion(view: CatalogView, modelId: number, currentMotion?: string): string {
+function pickFollowupMotion(
+  view: CatalogView,
+  modelId: number,
+  currentMotion?: string,
+  recentlyUsed?: ReadonlySet<string>
+): string {
   const model = view.modelById(modelId)
   if (!model) return ''
   const curated = view.promptMotions(model)
-  const preferred = curated.find(
-    (name) =>
-      name !== currentMotion &&
-      !isStandingMotion(name) &&
-      /nod|tilthead|relief|think|lookaway|forward|shy|sigh/i.test(name)
-  )
+  const nonStanding = curated.filter((name) => !isStandingMotion(name))
+  const calmRe = /nod|tilthead|relief|think|lookaway|forward|shy|sigh|greeting/i
+  const isFresh = (name: string): boolean => name !== currentMotion && !recentlyUsed?.has(name)
   return (
-    preferred ??
-    curated.find((name) => name !== currentMotion && !isStandingMotion(name)) ??
+    nonStanding.find((name) => isFresh(name) && calmRe.test(name)) ??
+    nonStanding.find((name) => isFresh(name)) ??
+    nonStanding.find((name) => name !== currentMotion && calmRe.test(name)) ??
+    nonStanding.find((name) => name !== currentMotion) ??
     ''
   )
+}
+
+function pickAppearFallbackMotion(
+  view: CatalogView,
+  modelId: number,
+  usedInEntry?: ReadonlySet<string>,
+  avoidMotion?: string
+): string {
+  const model = view.modelById(modelId)
+  if (!model) return view.exampleMotion(modelId) || view.defaultMotion(modelId)
+  const curated = view.promptMotions(model)
+  const nonStanding = curated.filter((name) => !isStandingMotion(name))
+  const entryRe = /tilthead|lookaway|greeting|nod|forward|relief|think|shy/i
+  const distinctAndAvoided = (name: string): boolean =>
+    !usedInEntry?.has(name) && name !== avoidMotion
+  const pick =
+    nonStanding.find((name) => distinctAndAvoided(name) && entryRe.test(name)) ??
+    nonStanding.find((name) => distinctAndAvoided(name)) ??
+    nonStanding.find((name) => name !== avoidMotion && entryRe.test(name)) ??
+    nonStanding.find((name) => name !== avoidMotion) ??
+    nonStanding[0]
+  return pick || view.exampleMotion(modelId) || view.defaultMotion(modelId)
+}
+
+function pickMoveMotion(
+  view: CatalogView,
+  modelId: number,
+  avoidMotion?: string,
+  recentlyUsed?: ReadonlySet<string>
+): string {
+  const model = view.modelById(modelId)
+  if (!model) return view.exampleMotion(modelId) || view.defaultMotion(modelId)
+  const curated = view.promptMotions(model)
+  const nonStanding = curated.filter((name) => !isStandingMotion(name))
+  const moveRe = /forward|nod|tilthead|relief|lookaway|greeting|think|shy/i
+  return (
+    nonStanding.find(
+      (name) => name !== avoidMotion && !recentlyUsed?.has(name) && moveRe.test(name)
+    ) ??
+    nonStanding.find((name) => name !== avoidMotion && !recentlyUsed?.has(name)) ??
+    nonStanding.find((name) => name !== avoidMotion) ??
+    nonStanding[0] ??
+    view.exampleMotion(modelId) ??
+    view.defaultMotion(modelId) ??
+    ''
+  )
+}
+
+function pickMoveFacial(view: CatalogView, modelId: number, fallbackFacial?: string): string {
+  if (fallbackFacial) return fallbackFacial
+  return view.exampleFacial(modelId) || view.defaultFacial(modelId) || ''
 }
 
 function pickCalmOrMatchingFacial(
@@ -330,11 +387,7 @@ function resolveModel(
   const exactCloudOrPath = view.models.find((model) => {
     const p = model.path.toLowerCase()
     const base = p.split('/').pop() ?? p
-    return (
-      (model.cloudId ?? '').toLowerCase() === lower ||
-      p === lower ||
-      base === lower
-    )
+    return (model.cloudId ?? '').toLowerCase() === lower || p === lower || base === lower
   })
   if (exactCloudOrPath) return exactCloudOrPath
 
@@ -342,8 +395,7 @@ function resolveModel(
   const directByName = view.models
     .filter(
       (model) =>
-        model.name.toLowerCase() === lower ||
-        (model.shortName ?? '').toLowerCase() === lower
+        model.name.toLowerCase() === lower || (model.shortName ?? '').toLowerCase() === lower
     )
     .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
   if (directByName.length > 0) return directByName[0]
@@ -351,14 +403,8 @@ function resolveModel(
   // 支持「角色名 服装」（如「星乃一歌 校服」「瑞希 私服」）
   for (const primary of view.primaryModels()) {
     const shortName = view.shortName(primary)
-    if (
-      (primary.name && text.includes(primary.name)) ||
-      (shortName && text.includes(shortName))
-    ) {
-      const rest = text
-        .replace(primary.name, '')
-        .replace(shortName, '')
-        .trim()
+    if ((primary.name && text.includes(primary.name)) || (shortName && text.includes(shortName))) {
+      const rest = text.replace(primary.name, '').replace(shortName, '').trim()
       if (rest) {
         const outfitHit = view.resolveOutfitVariant(primary, rest)
         if (outfitHit) return outfitHit
@@ -471,7 +517,8 @@ function normalizeTransitionKind(value: unknown): StagedTransitionKind {
   const raw = str(value).trim().toLowerCase()
   if (raw.includes('flashback')) return 'flashback'
   if (raw.includes('sekaiout') || raw === 'sekai_out') return 'sekaiOut'
-  if (raw.includes('sekaiin') || raw === 'sekai_in' || raw === 'sekai' || raw.includes('世界')) return 'sekaiIn'
+  if (raw.includes('sekaiin') || raw === 'sekai_in' || raw === 'sekai' || raw.includes('世界'))
+    return 'sekaiIn'
   if (raw.includes('side') || raw.includes('wipe')) return 'sideFade'
   if (raw.includes('white')) return 'white'
   return 'black'
@@ -554,7 +601,9 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   )
   const subShown = [
     ...subMentioned,
-    ...subRosterAll.filter((m) => !subMentioned.includes(m)).slice(0, Math.max(0, 12 - subMentioned.length))
+    ...subRosterAll
+      .filter((m) => !subMentioned.includes(m))
+      .slice(0, Math.max(0, 12 - subMentioned.length))
   ]
 
   const groupStyle = isGroupPrompt(options.scene, view)
@@ -573,7 +622,10 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   const subModelsBlock =
     subShown.length > 0
       ? `\n\n## 可选配角 / 特别角色（按需选用）\n${subShown
-          .map((m) => `- modelId=${m.id} ${view.shortName(m)}${m.outfitLabel ? `（${m.outfitLabel}）` : ''}`)
+          .map(
+            (m) =>
+              `- modelId=${m.id} ${view.shortName(m)}${m.outfitLabel ? `（${m.outfitLabel}）` : ''}`
+          )
           .join('\n')}`
       : ''
 
@@ -596,9 +648,7 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
       name: first ? view.shortName(first) : '角色A',
       role: '发起话题'
     },
-    ...(second
-      ? [{ modelId: second.id, name: view.shortName(second), role: '回应与吐槽' }]
-      : []),
+    ...(second ? [{ modelId: second.id, name: view.shortName(second), role: '回应与吐槽' }] : []),
     ...(groupStyle && third
       ? [{ modelId: third.id, name: view.shortName(third), role: '中段加入/调和' }]
       : [])
@@ -694,7 +744,12 @@ export interface QuickCastOptions {
 export function buildQuickCastPrompt(view: CatalogView, options: QuickCastOptions): StagedMessages {
   const primary = view.primaryModels()
   const roster = primary
-    .filter((m) => !m.isSubCharacter || (m.name && options.scene.includes(m.name)) || (m.shortName && options.scene.includes(m.shortName)))
+    .filter(
+      (m) =>
+        !m.isSubCharacter ||
+        (m.name && options.scene.includes(m.name)) ||
+        (m.shortName && options.scene.includes(m.shortName))
+    )
     .map((model) => {
       const persona = personaFor(options.personas, model)
       const summary = personaSummary(persona)
@@ -801,7 +856,9 @@ export function normalizeCastPlan(
       options.personas
     ).slice(0, 2)
     const fallbackActive =
-      cast.length === 2 ? cast.map((c) => c.name) : cast.slice(0, Math.min(2, cast.length)).map((c) => c.name)
+      cast.length === 2
+        ? cast.map((c) => c.name)
+        : cast.slice(0, Math.min(2, cast.length)).map((c) => c.name)
     const isFlashback = toBool(item.isFlashback ?? item.flashback)
     const isSekai = toBool(item.isSekai ?? item.sekai)
     let transitionIn = normalizeTransitionKind(item.transitionIn ?? item.transition)
@@ -828,7 +885,8 @@ export function normalizeCastPlan(
       ...(isFlashback ? { isFlashback: true } : {}),
       ...(isSekai ? { isSekai: true } : {}),
       // 双人戏保持两人全片同场
-      activeCast: cast.length === 2 ? cast.map((c) => c.name) : active.length > 0 ? active : fallbackActive,
+      activeCast:
+        cast.length === 2 ? cast.map((c) => c.name) : active.length > 0 ? active : fallbackActive,
       ...(bgm ? { bgm } : {}),
       ...(effect ? { scenarioEffect: effect } : {})
     })
@@ -867,7 +925,9 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
       (model.shortName && model.shortName.length >= 2 && options.scene.includes(model.shortName))
   )
   const models =
-    mentioned.length >= 2 ? mentioned.slice(0, 5) : view.models.slice(0, Math.min(2, view.models.length))
+    mentioned.length >= 2
+      ? mentioned.slice(0, 5)
+      : view.models.slice(0, Math.min(2, view.models.length))
   const cast = models.map((model) => castMemberFor(view, model))
   const bg = view.defaultImage()
   return {
@@ -935,8 +995,12 @@ export function buildDialoguePrompt(
     : '（自由发挥，但仍要围绕这个小事件）'
 
   const fewShotExcerpts = selectUnitFewShotExcerpts(plan.cast, options.scene)
-  const hasWxs = plan.cast.some((c) => /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`))
-  const termHint = hasWxs ? '\n- 术语固定：笑梦口号必须写 **Wonderhoy**，宁宁的机器人必须写 **宁宁号**。' : ''
+  const hasWxs = plan.cast.some((c) =>
+    /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`)
+  )
+  const termHint = hasWxs
+    ? '\n- 术语固定：笑梦口号必须写 **Wonderhoy**，宁宁的机器人必须写 **宁宁号**。'
+    : ''
 
   const a = plan.cast[0]
   const b = plan.cast[1] ?? plan.cast[0]
@@ -1074,8 +1138,7 @@ export function normalizeDialogue(
     const emotion =
       labels.length > 0 ? (labels.includes(emotionValue) ? emotionValue : '') : emotionValue
     const pauseRaw = num(meta.pauseBefore, 0)
-    const pauseBefore =
-      pauseRaw >= 1.25 ? 1.5 : pauseRaw >= 0.75 ? 1.0 : pauseRaw >= 0.4 ? 0.5 : 0
+    const pauseBefore = pauseRaw >= 1.25 ? 1.5 : pauseRaw >= 0.75 ? 1.0 : pauseRaw >= 0.4 ? 0.5 : 0
     const sceneId = str(meta.sceneId).trim()
     const closeWindowAfter = toBool(meta.closeWindowAfter)
     lines.push({
@@ -1111,12 +1174,10 @@ export function normalizeDialogue(
           str(content),
           isRecord(rawLine) ? (rawLine.emotion ?? turnEmotion) : turnEmotion,
           {
-            sceneId: isRecord(rawLine) ? (rawLine.scene ?? rawLine.sceneId ?? turnScene) : turnScene,
-            pauseBefore: isRecord(rawLine)
-              ? rawLine.pauseBefore
-              : i === 0
-                ? turn.pauseBefore
-                : 0,
+            sceneId: isRecord(rawLine)
+              ? (rawLine.scene ?? rawLine.sceneId ?? turnScene)
+              : turnScene,
+            pauseBefore: isRecord(rawLine) ? rawLine.pauseBefore : i === 0 ? turn.pauseBefore : 0,
             closeWindowAfter: isRecord(rawLine)
               ? rawLine.closeWindowAfter
               : i === rawLines.length - 1
@@ -1655,7 +1716,10 @@ export function buildStagingPrompt(
     )
     .join('\n')
 
-  const stagingQuery = `${options.scene} ${plan.event} ${plan.cast.map((c) => c.name).join(' ')} ${dialogue.lines.slice(0, 12).map((l) => l.content).join(' ')}`
+  const stagingQuery = `${options.scene} ${plan.event} ${plan.cast.map((c) => c.name).join(' ')} ${dialogue.lines
+    .slice(0, 12)
+    .map((l) => l.content)
+    .join(' ')}`
   const backgrounds = view
     .imagePromptChoices(64, stagingQuery)
     .map((detail) => formatImagePromptLine(detail))
@@ -1702,7 +1766,12 @@ export function buildStagingPrompt(
       {
         lineId: midLine,
         pauseBefore: 1.0,
-        move: { modelId: plan.cast[0]?.modelId, kind: 'stepCloser', offset: 90, moveSpeed: 'Normal' },
+        move: {
+          modelId: plan.cast[0]?.modelId,
+          kind: 'stepCloser',
+          offset: 90,
+          moveSpeed: 'Normal'
+        },
         ...(secondBgm ? { bgmCut: { action: 'play', file: secondBgm, fadeMs: 900 } } : {})
       },
       {
@@ -1776,11 +1845,7 @@ function resolveLineIndex(value: unknown, lines: StagedDialogueLine[]): number {
   return -1
 }
 
-function resolveCastIds(
-  rawList: unknown,
-  plan: StagedCastPlan,
-  view: CatalogView
-): number[] {
+function resolveCastIds(rawList: unknown, plan: StagedCastPlan, view: CatalogView): number[] {
   const arr = Array.isArray(rawList) ? rawList : []
   const ids: number[] = []
   for (const item of arr) {
@@ -1829,21 +1894,29 @@ export function fallbackStaging(
   const lines = dialogue.lines
   const scenes: StagedStagingScene[] = []
   const starts = inferSceneStartsFromDialogue(plan, dialogue)
-  const plannedScenes = plan.scenes && plan.scenes.length > 0 ? plan.scenes : [
-    {
-      id: 's1',
-      summary: plan.event,
-      background: plan.background || view.defaultImage(),
-      ambient: 'normal' as const,
-      transitionIn: 'black' as const,
-      activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name)
-    }
-  ]
+  const plannedScenes =
+    plan.scenes && plan.scenes.length > 0
+      ? plan.scenes
+      : [
+          {
+            id: 's1',
+            summary: plan.event,
+            background: plan.background || view.defaultImage(),
+            ambient: 'normal' as const,
+            transitionIn: 'black' as const,
+            activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name)
+          }
+        ]
 
   for (let idx = 0; idx < plannedScenes.length; idx++) {
     const ps = plannedScenes[idx]
-    const fromIndex = idx === 0 ? 0 : (starts.get(ps.id) ?? Math.min(lines.length - 1, Math.floor((lines.length * idx) / plannedScenes.length)))
-    if (idx > 0 && (fromIndex <= scenes[scenes.length - 1].fromIndex || fromIndex >= lines.length)) continue
+    const fromIndex =
+      idx === 0
+        ? 0
+        : (starts.get(ps.id) ??
+          Math.min(lines.length - 1, Math.floor((lines.length * idx) / plannedScenes.length)))
+    if (idx > 0 && (fromIndex <= scenes[scenes.length - 1].fromIndex || fromIndex >= lines.length))
+      continue
     let activeCast =
       plan.cast.length === 2
         ? plan.cast.map((c) => c.modelId)
@@ -2079,9 +2152,15 @@ export function normalizeStaging(
     if (isRecord(item.silentReaction)) {
       const m = resolveModel(view, [], item.silentReaction.modelId ?? item.silentReaction.speaker)
       if (m && plan.cast.some((c) => c.modelId === m.id)) {
-        const motion = view.canonicalAnimation(m.id, 'motion', item.silentReaction.motion) ?? undefined
-        const facial = view.canonicalAnimation(m.id, 'facial', item.silentReaction.facial) ?? undefined
-        ev.silentReaction = { modelId: m.id, ...(motion ? { motion } : {}), ...(facial ? { facial } : {}) }
+        const motion =
+          view.canonicalAnimation(m.id, 'motion', item.silentReaction.motion) ?? undefined
+        const facial =
+          view.canonicalAnimation(m.id, 'facial', item.silentReaction.facial) ?? undefined
+        ev.silentReaction = {
+          modelId: m.id,
+          ...(motion ? { motion } : {}),
+          ...(facial ? { facial } : {})
+        }
         ev.closeWindowAfter = true
       }
     }
@@ -2094,11 +2173,26 @@ export function normalizeStaging(
           rawKind === 'stepBack' ? 'stepBack' : rawKind === 'shiftSlot' ? 'shiftSlot' : 'stepCloser'
         const rawSpeed = str(item.move.moveSpeed, 'Normal')
         const moveSpeed = rawSpeed === 'Fast' ? 'Fast' : rawSpeed === 'Slow' ? 'Slow' : 'Normal'
-        const offset = Math.max(-200, Math.min(200, num(item.move.offset, kind === 'stepBack' ? 0 : 90)))
+        const offset = Math.max(
+          -200,
+          Math.min(200, num(item.move.offset, kind === 'stepBack' ? 0 : 90))
+        )
         const toSideRaw = str(item.move.toSide)
         const toSide =
-          toSideRaw === 'Left' || toSideRaw === 'Center' || toSideRaw === 'Right' ? toSideRaw : undefined
-        ev.move = { modelId: m.id, kind, offset, moveSpeed, ...(toSide ? { toSide } : {}) }
+          toSideRaw === 'Left' || toSideRaw === 'Center' || toSideRaw === 'Right'
+            ? toSideRaw
+            : undefined
+        const moveMotion = view.canonicalAnimation(m.id, 'motion', item.move.motion) ?? undefined
+        const moveFacial = view.canonicalAnimation(m.id, 'facial', item.move.facial) ?? undefined
+        ev.move = {
+          modelId: m.id,
+          kind,
+          offset,
+          moveSpeed,
+          ...(toSide ? { toSide } : {}),
+          ...(moveMotion ? { motion: moveMotion } : {}),
+          ...(moveFacial ? { facial: moveFacial } : {})
+        }
       }
     }
 
@@ -2144,7 +2238,9 @@ export function normalizeStaging(
           file,
           volume: isRecord(item.se) ? Math.min(2, Math.max(0.2, num(item.se.volume, 0.9))) : 0.9,
           timing: isRecord(item.se) && item.se.timing === 'during' ? 'during' : 'before',
-          ...(isRecord(item.se) && item.se.delay !== undefined ? { delay: Math.max(0, num(item.se.delay, 0)) } : {})
+          ...(isRecord(item.se) && item.se.delay !== undefined
+            ? { delay: Math.max(0, num(item.se.delay, 0)) }
+            : {})
         }
       }
     }
@@ -2152,7 +2248,10 @@ export function normalizeStaging(
     if (isRecord(item.bgmCut)) {
       const action = str(item.bgmCut.action).toLowerCase() === 'stop' ? 'stop' : 'play'
       if (action === 'stop') {
-        ev.bgmCut = { action: 'stop', fadeMs: Math.min(3000, Math.max(100, num(item.bgmCut.fadeMs, 600))) }
+        ev.bgmCut = {
+          action: 'stop',
+          fadeMs: Math.min(3000, Math.max(100, num(item.bgmCut.fadeMs, 600)))
+        }
       } else {
         const bgmFile = matchBgm(view, item.bgmCut.file)
         if (bgmFile && bgmFile !== 'silence') {
@@ -2166,7 +2265,11 @@ export function normalizeStaging(
     }
 
     if (plan.cast.length >= 3 && isRecord(item.stageGroup)) {
-      const activeCast = resolveCastIds(item.stageGroup.activeCast ?? item.stageGroup.cast, plan, view)
+      const activeCast = resolveCastIds(
+        item.stageGroup.activeCast ?? item.stageGroup.cast,
+        plan,
+        view
+      )
       if (activeCast.length > 0) {
         const walkIn = resolveCastIds(item.stageGroup.walkIn, plan, view)
         const walkOut = resolveCastIds(item.stageGroup.walkOut, plan, view)
@@ -2232,7 +2335,9 @@ export function buildDirectionPrompt(
       appearedBefore.add(line.speaker)
       const ctxTags = [
         line.emotion ? `〔${line.emotion}〕` : '',
-        scene ? `[${scene.id}${scene.isFlashback ? '/回忆' : ''}${scene.ambient !== 'normal' ? `/${scene.ambient}` : ''}]` : '',
+        scene
+          ? `[${scene.id}${scene.isFlashback ? '/回忆' : ''}${scene.ambient !== 'normal' ? `/${scene.ambient}` : ''}]`
+          : '',
         isEntry ? '[刚入场首句]' : ''
       ]
         .filter(Boolean)
@@ -2300,10 +2405,7 @@ export function buildDirectionPrompt(
             {
               id: dialogue.lines[1].id,
               ...(firstMotion ? { motion: firstMotion } : {}),
-              ...(firstFacial ? { facial: firstFacial } : {}),
-              at2: 0.55,
-              ...(firstMotion ? { motion2: firstMotion } : {}),
-              ...(firstFacial ? { facial2: firstFacial } : {})
+              ...(firstFacial ? { facial: firstFacial } : {})
             }
           ]
         : [])
@@ -2313,7 +2415,7 @@ export function buildDirectionPrompt(
   return {
     system: [
       '你是 Project SEKAI 风格视觉小说的精细演技导演（directActing）。',
-      '台词、幕次与情绪段已确定；你负责为每句台词设计说话者动作/表情、约 20% 句子的句中 2 拍微转折（at2/motion2/facial2）以及听者反应。',
+      '台词、幕次与情绪段已确定；你负责为每句台词设计说话者句首（at=0）动作与表情、听者反应以及静默反应（silentMotion）。',
       '不要改写任何台词，不要增删台词。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
@@ -2345,13 +2447,13 @@ ${
 }
 
 ## 表演要求
-- **动作密度与两拍微表演**：
-  - 约 60% 句子在句首（at=0）给 1 个自然小动作 + 表情；
-  - 约 **20%** 较长或带语气转折的句子（如带 \`……\` / \`——\` / \`，\` / \`\\n\`）额外写 \`at2\`（0.45~0.75）+ \`motion2\` / \`facial2\`，形成官方 2 拍表演；
-  - 约 15%~20% 承接句或刚入场首句可只给 id 保持静止（或只换表情）。
+- **官方单拍节奏（at=0）与动作密度**：
+  - 官方 PJSK 剧本中约 80% 台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
+  - 只有极少数真正平稳承接且刚演过动作的过渡句可只换表情，避免角色连续多句静止像木桩。
 - **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
-- **短促反应必须留表情**：像「……嗯？」「啊。」「真的吗？」等短反应句**绝不能剥夺表情**，至少保留合适的 \`facial\`！
-- **听者反应**：约 15%~20% 的句子给同台另一位角色 1 个 \`listener\`（以表情为主，偶带轻微动作），优先放在换人或被戳痛处。
+- **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
+- **静默反应**：需要留白感叹或沉默回应时，可加 \`silentMotion: true\`。
+- **听者反应**：约 15%~20% 的句子给同台另一位角色 1 个 \`listener\`（表情或轻微动作），优先放在长独白中段或话题转折处，防止在场听者长时间静止。
 - **表情一致性**：${
       hasEmotionTags
         ? '严格跟随每句标注的〔情绪〕：平静用 normal / smallmouth / closeeye；开心用 smile；伤心用 sad / cry / worry；生气用 angry / serious；惊讶用 surprise / shock；害羞用 shy / blush。'
@@ -2465,7 +2567,11 @@ function readDirectionFields(
       const second = speakerActions.find((a) => a.at - first.at >= 0.2)
       if (second) {
         fields.beats = [
-          { at: 0, ...(first.motion ? { motion: first.motion } : {}), ...(first.facial ? { facial: first.facial } : {}) },
+          {
+            at: 0,
+            ...(first.motion ? { motion: first.motion } : {}),
+            ...(first.facial ? { facial: first.facial } : {})
+          },
           {
             at: Math.min(0.85, Math.max(0.35, second.at)),
             ...(second.motion ? { motion: second.motion } : {}),
@@ -2554,21 +2660,25 @@ export function normalizeDirection(
     previousSpeakerForListener = line.speaker
   }
 
-  // 动作预算与短促反应保护：
-  // 绝不从 <= 7 字的短反应句上剥掉 facial！只在需要压回 ~82% 时，
-  // 优先把中长平稳承接句设为静止句；仍超标时对短句仅摘掉 body motion、保留 facial。
-  const maxSpeakerActions = Math.ceil(dialogue.lines.length * 0.82)
+  // 动作预算控制：
+  // 遵循官方 PJSK ~80% 单拍动作密度；不因台词短（<=7字）剥夺 body motion，
+  // 也不在平稳段落砍出连续静态站桩空窗，同时取消人工 at=0.55 双拍注入。
+  const maxSpeakerActions = Math.ceil(dialogue.lines.length * 0.9)
   const speakerLinesWithAct = dialogue.lines.filter((line) => {
     const d = result.get(line.id)
     return Boolean(d?.motion || d?.facial || (d?.beats && d.beats.length > 0))
   }).length
   if (speakerLinesWithAct > maxSpeakerActions) {
-    const charCount = (text: string): number => Array.from(text.replace(/\s+/g, '')).length
+    const lineIdxById = new Map(dialogue.lines.map((l, idx) => [l.id, idx]))
+    const hasMotionOnIndex = (idx: number): boolean => {
+      if (idx < 0 || idx >= dialogue.lines.length) return false
+      const d = result.get(dialogue.lines[idx].id)
+      return Boolean(d?.motion || (d?.beats && d.beats.some((b) => Boolean(b.motion))))
+    }
     const candidates = dialogue.lines
       .map((line, index) => ({
         line,
         index,
-        chars: charCount(line.content),
         directed: result.get(line.id)
       }))
       .filter(
@@ -2577,9 +2687,6 @@ export function normalizeDirection(
           (item.directed.motion || item.directed.facial || (item.directed.beats?.length ?? 0) > 0)
       )
       .sort((a, b) => {
-        const aShort = a.chars <= 7 ? 1 : 0
-        const bShort = b.chars <= 7 ? 1 : 0
-        if (aShort !== bShort) return aShort - bShort
         const aCalm = !a.line.emotion || a.line.emotion === '平静' ? 0 : 1
         const bCalm = !b.line.emotion || b.line.emotion === '平静' ? 0 : 1
         if (aCalm !== bCalm) return aCalm - bCalm
@@ -2588,53 +2695,15 @@ export function normalizeDirection(
     let remaining = speakerLinesWithAct
     for (const candidate of candidates) {
       if (remaining <= maxSpeakerActions) break
+      const idx = lineIdxById.get(candidate.line.id) ?? candidate.index
+      // 不连续两句静态站桩：只有前后两句都有动作时才允许省去中间这句
+      if (!hasMotionOnIndex(idx - 1) || !hasMotionOnIndex(idx + 1)) continue
       const directed = result.get(candidate.line.id)
       if (!directed) continue
-      if (candidate.chars <= 7 && directed.facial) {
-        // 短反应句只去多余动作/第2拍，保留 facial 表情
-        const { motion: _m, beats: _b, ...rest } = directed
-        result.set(candidate.line.id, rest)
-        continue
-      }
       const { motion: _motion, facial: _facial, beats: _beats, ...rest } = directed
-      if (rest.listener) result.set(candidate.line.id, rest)
+      if (rest.listener || rest.silentMotion) result.set(candidate.line.id, rest)
       else result.delete(candidate.line.id)
       remaining -= 1
-    }
-  }
-
-  // 2-beat Talk.actions 达标补强（约 20% 长句带转折的台词配第 2 拍微转折；短测试 <12 句不动）
-  if (dialogue.lines.length >= 12) {
-    const targetMulti = Math.round(dialogue.lines.length * 0.2)
-    let multiCount = [...result.values()].filter((d) => (d.beats?.length ?? 0) >= 2).length
-    if (multiCount < targetMulti) {
-      const clauseSplit = /[，,……—\n！？!?]/
-      for (const line of dialogue.lines) {
-        if (multiCount >= targetMulti) break
-        const directed = result.get(line.id)
-        if (!directed || (directed.beats?.length ?? 0) >= 2) continue
-        if (!directed.motion && !directed.facial) continue
-        const chars = Array.from(line.content.replace(/\s+/g, '')).length
-        if (chars < 15 || !clauseSplit.test(line.content.slice(2, -2))) continue
-        const speaker = plan.cast.find((c) => c.name === line.speaker)
-        if (!speaker) continue
-        const nextFacial = pickCalmOrMatchingFacial(view, speaker.modelId, line.emotion, directed.facial)
-        const nextMotion = pickFollowupMotion(view, speaker.modelId, directed.motion)
-        if (!nextFacial && !nextMotion) continue
-        directed.beats = [
-          {
-            at: 0,
-            ...(directed.motion ? { motion: directed.motion } : {}),
-            ...(directed.facial ? { facial: directed.facial } : {})
-          },
-          {
-            at: 0.55,
-            ...(nextMotion ? { motion: nextMotion } : {}),
-            ...(nextFacial ? { facial: nextFacial } : {})
-          }
-        ]
-        multiCount += 1
-      }
     }
   }
 
@@ -2733,7 +2802,15 @@ export function planPresence(
   if (dialogue.lines.length === 0) return []
   const last = dialogue.lines.length - 1
   if (plan.cast.length === 1) {
-    return [{ from: 0, to: last, mode: 'solo', speaker: dialogue.lines[0].speaker, castIds: [plan.cast[0].modelId] }]
+    return [
+      {
+        from: 0,
+        to: last,
+        mode: 'solo',
+        speaker: dialogue.lines[0].speaker,
+        castIds: [plan.cast[0].modelId]
+      }
+    ]
   }
   if (plan.cast.length === 2) {
     return [{ from: 0, to: last, mode: 'duo', castIds: plan.cast.map((c) => c.modelId) }]
@@ -2741,7 +2818,10 @@ export function planPresence(
   const scenes = staging?.scenes ?? []
   if (scenes.length > 0) {
     return scenes.map((scene, index) => {
-      const to = index + 1 < scenes.length ? Math.max(scene.fromIndex, scenes[index + 1].fromIndex - 1) : last
+      const to =
+        index + 1 < scenes.length
+          ? Math.max(scene.fromIndex, scenes[index + 1].fromIndex - 1)
+          : last
       const castIds = scene.activeCast.slice(0, 2)
       const count = castIds.length
       return {
@@ -2754,7 +2834,9 @@ export function planPresence(
     })
   }
   const initialIds = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
-  return [{ from: 0, to: last, mode: initialIds.length === 2 ? 'duo' : 'solo', castIds: initialIds }]
+  return [
+    { from: 0, to: last, mode: initialIds.length === 2 ? 'duo' : 'solo', castIds: initialIds }
+  ]
 }
 
 /**
@@ -2836,10 +2918,24 @@ export function composeStory(
     hologram: boolean
     appearedAtLine: number
     appearedWithMotion: boolean
+    lastAppearMotion: string
     appearFacial: string
+    lastBodyMotion: string
+    lastFacial: string
+    recentBodyMotions: string[]
     speakingCountSinceAppear: number
+    linesSinceLastBodyMotion: number
   }
   const onStage = new Map<number, StageActorState>()
+  const trackActorBodyMotion = (st: StageActorState | undefined, motionName: string): void => {
+    if (!st || !motionName) return
+    st.lastBodyMotion = motionName
+    st.linesSinceLastBodyMotion = 0
+    if (st.recentBodyMotions.at(-1) !== motionName) {
+      st.recentBodyMotions.push(motionName)
+      if (st.recentBodyMotions.length > 4) st.recentBodyMotions.shift()
+    }
+  }
   let layoutMode: 'Normal' | null = null
   let windowOpen = false
   let flashbackActive = false
@@ -2848,6 +2944,8 @@ export function composeStory(
   let cameraDirty = false
   let shakeScreenActive = false
   let lastSpeakerId: number | null = null
+  let lastSilentReactionLine = -10
+  let silentReactionsEmitted = 0
   const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
   const closeWindowBeforeBreak = (): void => {
@@ -2889,7 +2987,13 @@ export function composeStory(
 
   const stopShakeScreenIfNeeded = (): void => {
     if (!shakeScreenActive) return
-    snippets.push({ type: 'StopShakeScreen', wait: false, progressBehavior: 'Now', delay: 0, data: {} })
+    snippets.push({
+      type: 'StopShakeScreen',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {}
+    })
     shakeScreenActive = false
   }
 
@@ -2923,11 +3027,7 @@ export function composeStory(
     toClear.forEach((id, idx) => {
       const state = onStage.get(id)!
       const isWalk = walkOutSet.has(id)
-      const toSide = isWalk
-        ? state.side === 'Left'
-          ? 'LeftOver'
-          : 'RightOver'
-        : state.side
+      const toSide = isWalk ? (state.side === 'Left' ? 'LeftOver' : 'RightOver') : state.side
       snippets.push({
         type: 'LayoutClear',
         wait: idx === 0,
@@ -3005,6 +3105,14 @@ export function composeStory(
       const st = onStage.get(id)
       const targetSide = desiredSlotFor.get(id)!
       if (st && st.side !== targetSide) {
+        closeWindowBeforeBreak()
+        const moveMotion = pickMoveMotion(
+          view,
+          id,
+          st.lastBodyMotion,
+          new Set(st.recentBodyMotions)
+        )
+        const moveFacial = pickMoveFacial(view, id, st.lastFacial || st.appearFacial)
         snippets.push({
           type: 'Move',
           wait: clearedCount === 0 && !movedExisting,
@@ -3015,20 +3123,24 @@ export function composeStory(
             from: { side: st.side, offset: st.offset },
             to: { side: targetSide, offset: 0 },
             moveSpeed: 'Fast',
-            motion: '',
-            facial: ''
+            motion: moveMotion,
+            facial: moveFacial
           }
         })
+        trackActorBodyMotion(st, moveMotion)
+        if (moveFacial) st.lastFacial = moveFacial
         st.side = targetSide
         st.offset = 0
         movedExisting = true
       }
     }
 
-    const overlapsPreceding = Boolean(options.hadPrecedingClear) || clearedCount > 0 || movedExisting
+    const overlapsPreceding =
+      Boolean(options.hadPrecedingClear) || clearedCount > 0 || movedExisting
     const lineAtEntry = dialogue.lines[lineIndex]
     const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
+    const usedEntryMotions = new Set<string>()
     incoming.forEach((id, idx) => {
       const slot = desiredSlotFor.get(id)!
       const isWalk = walkInSet.has(id)
@@ -3039,16 +3151,25 @@ export function composeStory(
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
       const directedMotion =
         isEntrySpeaker && directedAtEntry
-          ? directedAtEntry.beats?.[0]?.motion ?? directedAtEntry.motion
+          ? (directedAtEntry.beats?.[0]?.motion ?? directedAtEntry.motion)
           : undefined
       const directedFacial =
         isEntrySpeaker && directedAtEntry
-          ? directedAtEntry.beats?.[0]?.facial ?? directedAtEntry.facial
+          ? (directedAtEntry.beats?.[0]?.facial ?? directedAtEntry.facial)
           : undefined
+      let firstFutureTalkMotion = ''
+      if (!isEntrySpeaker && memberName) {
+        const nextLineForMember = dialogue.lines
+          .slice(lineIndex + 1, Math.min(dialogue.lines.length, lineIndex + 8))
+          .find((l) => l.speaker === memberName)
+        const nextDir = nextLineForMember ? directionById.get(nextLineForMember.id) : undefined
+        firstFutureTalkMotion = nextDir?.beats?.[0]?.motion ?? nextDir?.motion ?? ''
+      }
       const entryMotion =
         directedMotion && !isStandingMotion(directedMotion)
           ? directedMotion
-          : view.exampleMotion(id) || view.defaultMotion(id)
+          : pickAppearFallbackMotion(view, id, usedEntryMotions, firstFutureTalkMotion)
+      if (entryMotion) usedEntryMotions.add(entryMotion)
       const entryFacial = directedFacial || view.exampleFacial(id) || view.defaultFacial(id)
       const isHolo = hologramSet.has(id)
       const waitFirst = !overlapsPreceding && idx === 0
@@ -3083,8 +3204,13 @@ export function composeStory(
         hologram: isHolo,
         appearedAtLine: lineIndex,
         appearedWithMotion: Boolean(entryMotion),
+        lastAppearMotion: entryMotion,
         appearFacial: entryFacial,
-        speakingCountSinceAppear: 0
+        lastBodyMotion: entryMotion,
+        lastFacial: entryFacial,
+        recentBodyMotions: entryMotion ? [entryMotion] : [],
+        speakingCountSinceAppear: 0,
+        linesSinceLastBodyMotion: 0
       })
     })
   }
@@ -3458,7 +3584,10 @@ export function composeStory(
           currentIds.length < 2 ? [...currentIds, member.modelId] : [keepId, member.modelId]
         appearActors(nextIds, index)
       } else {
-        appearActors(cast.map((c) => c.modelId), index)
+        appearActors(
+          cast.map((c) => c.modelId),
+          index
+        )
       }
     }
 
@@ -3504,10 +3633,16 @@ export function composeStory(
       const nextOffset =
         ev.move.kind === 'stepBack'
           ? 0
-          : ev.move.offset ??
-            (st.side === 'Left' ? 90 : st.side === 'Right' ? -90 : 0)
+          : (ev.move.offset ?? (st.side === 'Left' ? 90 : st.side === 'Right' ? -90 : 0))
       if (targetSide !== st.side || nextOffset !== st.offset) {
-        if ((ev.pauseBefore ?? 0) >= 0.8) closeWindowBeforeBreak()
+        closeWindowBeforeBreak()
+        const lineDir = directionById.get(line.id)
+        const avoidTalkMotion = lineDir?.beats?.[0]?.motion ?? lineDir?.motion
+        const moveMotion =
+          ev.move.motion ||
+          pickMoveMotion(view, ev.move.modelId, avoidTalkMotion, new Set(st.recentBodyMotions))
+        const moveFacial =
+          ev.move.facial || pickMoveFacial(view, ev.move.modelId, st.lastFacial || st.appearFacial)
         snippets.push({
           type: 'Move',
           wait: true,
@@ -3518,10 +3653,12 @@ export function composeStory(
             from: { side: st.side, offset: st.offset },
             to: { side: targetSide, offset: nextOffset },
             moveSpeed: ev.move.moveSpeed ?? 'Normal',
-            motion: '',
-            facial: ''
+            motion: moveMotion,
+            facial: moveFacial
           }
         })
+        trackActorBodyMotion(st, moveMotion)
+        if (moveFacial) st.lastFacial = moveFacial
         st.side = targetSide
         st.offset = nextOffset
       }
@@ -3589,11 +3726,30 @@ export function composeStory(
       (ev?.pauseBefore ?? 0) === 0 &&
       index === actorState!.appearedAtLine
 
+    const dedupeFirstSpeakMotion = (rawMotion: string | undefined): string | undefined => {
+      if (!rawMotion) return undefined
+      if (
+        actorState &&
+        actorState.speakingCountSinceAppear === 0 &&
+        actorState.lastAppearMotion &&
+        rawMotion === actorState.lastAppearMotion
+      ) {
+        const swapped = pickFollowupMotion(
+          view,
+          member.modelId,
+          actorState.lastAppearMotion,
+          new Set(actorState.recentBodyMotions)
+        )
+        return swapped || rawMotion
+      }
+      return rawMotion
+    }
+
     const actions: JsonRecord[] = []
     if (directed?.beats && directed.beats.length > 0) {
       for (const beat of directed.beats) {
         const skipMotion = justAppeared && beat.at < 0.35
-        const motion = skipMotion ? undefined : beat.motion
+        const motion = skipMotion ? undefined : dedupeFirstSpeakMotion(beat.motion)
         const facial = beat.facial
         if (!motion && !facial) continue
         actions.push({
@@ -3604,7 +3760,7 @@ export function composeStory(
         })
       }
     } else if (directed?.motion || directed?.facial) {
-      const motion = justAppeared ? undefined : directed.motion
+      const motion = justAppeared ? undefined : dedupeFirstSpeakMotion(directed.motion)
       const facial = directed.facial
       if (motion || facial) {
         actions.push({
@@ -3613,6 +3769,47 @@ export function composeStory(
           ...(motion ? { motion } : {}),
           ...(facial ? { facial } : {})
         })
+      }
+    }
+
+    // 防止说话人连续多句没有 body motion 导致站桩；仅在完整对话（>=12句且已有导演结果）启用。
+    const hasSpeakerMotionInLine = actions.some(
+      (a) => a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.length > 0
+    )
+    if (
+      dialogue.lines.length >= 12 &&
+      direction.lines.length > 0 &&
+      !justAppeared &&
+      !hasSpeakerMotionInLine &&
+      actorState &&
+      actorState.linesSinceLastBodyMotion >= 2
+    ) {
+      const rescueMotion = pickFollowupMotion(
+        view,
+        member.modelId,
+        actorState.lastBodyMotion,
+        new Set(actorState.recentBodyMotions)
+      )
+      if (rescueMotion) {
+        const existingSpeakerAction = actions.find(
+          (a) => a.modelId === member.modelId && a.at === 0
+        )
+        if (existingSpeakerAction) {
+          existingSpeakerAction.motion = rescueMotion
+        } else {
+          const fallbackFacial = pickCalmOrMatchingFacial(
+            view,
+            member.modelId,
+            line.emotion,
+            actorState.lastFacial
+          )
+          actions.unshift({
+            at: 0,
+            modelId: member.modelId,
+            motion: rescueMotion,
+            ...(fallbackFacial ? { facial: fallbackFacial } : {})
+          })
+        }
       }
     }
 
@@ -3638,12 +3835,72 @@ export function composeStory(
       }
     }
 
+    // 防止同台听者长时间（>=3句）一动不动站桩。
+    if (dialogue.lines.length >= 12 && direction.lines.length > 0) {
+      for (const [partnerId, partnerState] of onStage) {
+        if (partnerId === member.modelId) continue
+        if (index <= partnerState.appearedAtLine) continue
+        if (partnerState.linesSinceLastBodyMotion < 3) continue
+        const alreadyHasPartner = actions.some((a) => a.modelId === partnerId)
+        if (alreadyHasPartner) continue
+        const partnerMotion = pickFollowupMotion(
+          view,
+          partnerId,
+          partnerState.lastBodyMotion,
+          new Set(partnerState.recentBodyMotions)
+        )
+        const partnerFacial = pickCalmOrMatchingFacial(
+          view,
+          partnerId,
+          line.emotion,
+          partnerState.lastFacial
+        )
+        if (partnerMotion || partnerFacial) {
+          actions.push({
+            at: 0,
+            modelId: partnerId,
+            ...(partnerMotion ? { motion: partnerMotion } : {}),
+            ...(partnerFacial ? { facial: partnerFacial } : {})
+          })
+        }
+      }
+    }
+
     if (actorState) {
       actorState.speakingCountSinceAppear += 1
       actorState.appearedWithMotion = false
     }
 
-    const hasSilentAfter = Boolean(ev?.silentReaction || directed?.silentMotion)
+    const explicitSilentReaction = Boolean(ev?.silentReaction || directed?.silentMotion)
+    let autoSilentTargetId: number | null = null
+    if (
+      !explicitSilentReaction &&
+      dialogue.lines.length >= 16 &&
+      direction.lines.length > 0 &&
+      index >= 1 &&
+      index < dialogue.lines.length - 1 &&
+      !ev?.move &&
+      index - lastSilentReactionLine >= 4 &&
+      silentReactionsEmitted < Math.max(3, Math.round(dialogue.lines.length * 0.2))
+    ) {
+      const nextLine = dialogue.lines[index + 1]
+      const turnBoundary = nextLine && nextLine.speaker !== line.speaker
+      const pauseOrEllipsis =
+        /……|——/.test(line.content) || Boolean(ev?.closeWindowAfter || line.closeWindowAfter)
+      const idlePartner = [...onStage.entries()].find(
+        ([pid, pst]) =>
+          pid !== member.modelId && index > pst.appearedAtLine && pst.linesSinceLastBodyMotion >= 2
+      )
+      if (pauseOrEllipsis || idlePartner || (turnBoundary && index % 5 === 3)) {
+        const candidateId = idlePartner ? idlePartner[0] : member.modelId
+        const candState = onStage.get(candidateId)
+        if (candState && index > candState.appearedAtLine) {
+          autoSilentTargetId = candidateId
+        }
+      }
+    }
+
+    const hasSilentAfter = explicitSilentReaction || autoSilentTargetId !== null
     const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter || hasSilentAfter)
     const talkDelay = ev?.pauseBefore ?? line.pauseBefore ?? 0
 
@@ -3665,6 +3922,25 @@ export function composeStory(
     windowOpen = !closeAfter
     lastSpeakerId = member.modelId
 
+    const actedBodyThisLine = new Set<number>()
+    for (const act of actions) {
+      const aid = typeof act.modelId === 'number' ? act.modelId : member.modelId
+      const ast = onStage.get(aid)
+      if (!ast) continue
+      if (typeof act.motion === 'string' && act.motion.length > 0) {
+        trackActorBodyMotion(ast, act.motion)
+        actedBodyThisLine.add(aid)
+      }
+      if (typeof act.facial === 'string' && act.facial.length > 0) {
+        ast.lastFacial = act.facial
+      }
+    }
+    for (const [aid, ast] of onStage) {
+      if (!actedBodyThisLine.has(aid)) {
+        ast.linesSinceLastBodyMotion += 1
+      }
+    }
+
     if (ev?.se && ev.se.timing === 'during') {
       snippets.push({
         type: 'PlaySe',
@@ -3675,23 +3951,54 @@ export function composeStory(
       })
     }
 
-    if (ev?.silentReaction && onStage.has(ev.silentReaction.modelId)) {
-      const targetId = ev.silentReaction.modelId
-      const motion = ev.silentReaction.motion || pickFollowupMotion(view, targetId)
-      const facial = ev.silentReaction.facial || ''
-      if (motion || facial) {
-        snippets.push({
-          type: 'Motion',
-          wait: false,
-          progressBehavior: 'Now',
-          delay: 0.25,
-          data: {
-            modelId: targetId,
-            motion: motion || '',
-            facial: facial || '',
-            facialFirst: true
-          }
-        })
+    if (hasSilentAfter) {
+      const partnerId = [...onStage.keys()].find((id) => id !== member.modelId)
+      const targetId =
+        ev?.silentReaction && onStage.has(ev.silentReaction.modelId)
+          ? ev.silentReaction.modelId
+          : autoSilentTargetId !== null && onStage.has(autoSilentTargetId)
+            ? autoSilentTargetId
+            : directed?.silentMotion &&
+                partnerId !== undefined &&
+                index > (onStage.get(partnerId)?.appearedAtLine ?? -1)
+              ? partnerId
+              : onStage.has(member.modelId)
+                ? member.modelId
+                : -1
+      if (targetId !== -1 && onStage.has(targetId)) {
+        const targetState = onStage.get(targetId)!
+        const motion =
+          ev?.silentReaction?.motion ||
+          pickFollowupMotion(
+            view,
+            targetId,
+            targetState.lastBodyMotion,
+            new Set(targetState.recentBodyMotions)
+          )
+        const facial =
+          ev?.silentReaction?.facial ||
+          (directed?.silentMotion || autoSilentTargetId !== null
+            ? pickCalmOrMatchingFacial(view, targetId, line.emotion, targetState.lastFacial)
+            : '') ||
+          ''
+        if (motion || facial) {
+          snippets.push({
+            type: 'Motion',
+            wait: true,
+            progressBehavior: 'WaitFinished',
+            delay: 0.25,
+            data: {
+              modelId: targetId,
+              motion: motion || '',
+              facial: facial || '',
+              facialFirst: true
+            }
+          })
+          trackActorBodyMotion(targetState, motion)
+          if (facial) targetState.lastFacial = facial
+          lastSilentReactionLine = index
+          silentReactionsEmitted += 1
+        }
       }
     }
   }

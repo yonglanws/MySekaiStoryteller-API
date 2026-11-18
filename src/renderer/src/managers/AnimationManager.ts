@@ -51,13 +51,15 @@ export default class AnimationManager {
   ): Promise<void> {
     const interval = Math.max(Math.round(1000 / AnimationManager.exportTargetFPS), 8)
     let lastTime = performance.now()
-    const startTime = performance.now()
+    let startTime = lastTime
     const maxDuration = 60_000
 
     await new Promise<void>((resolve) => {
       const step = (): void => {
         const now = performance.now()
-        const delta = now - lastTime
+        if (now < lastTime) lastTime = now
+        if (now < startTime) startTime = now
+        const delta = Math.max(0, now - lastTime)
         lastTime = now
 
         const fakeTicker = {
@@ -96,7 +98,7 @@ export default class AnimationManager {
 
       ticker.maxFPS = AnimationManager.exportSpeedMultiplier > 1 ? 0 : 60
 
-      const startTime = performance.now()
+      let startTime = performance.now()
       const maxDuration = 60_000
       let timeoutId: ReturnType<typeof setTimeout> | null = null
 
@@ -109,7 +111,9 @@ export default class AnimationManager {
           if (timeoutId) clearTimeout(timeoutId)
           return
         }
-        if (performance.now() - startTime > maxDuration) {
+        const now = performance.now()
+        if (now < startTime) startTime = now
+        if (now - startTime > maxDuration) {
           this.logger.warn(`in_ticker_raf exceeded ${maxDuration}ms, forcing completion`)
           resolve()
           ticker.stop()

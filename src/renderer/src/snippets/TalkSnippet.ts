@@ -87,10 +87,12 @@ export default class TalkSnippet extends BaseSnippet {
       (envelope?.durationMs ?? 0) > 0
     // 无语音时官方用 LipLevels 文本口型；每半字推进一次，结束前两个字归零。
     const textLip = hasVoice ? null : textLipSequence(contentLength * 2)
-    const startTime = this.app.currentTalkStartedAtMs
+    let startTime = this.app.currentTalkStartedAtMs
     const update = (): void => {
       if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
-      const elapsed = nowMs() - startTime
+      const current = nowMs()
+      if (current < startTime) startTime = current
+      const elapsed = Math.max(0, current - startTime)
       if (hasVoice) {
         this.setMouthParam(model, sampleLipSync(envelope!, elapsed))
         return
@@ -150,7 +152,7 @@ export default class TalkSnippet extends BaseSnippet {
     const signal = this.app.videoExportManager?.signal
     if (signal?.aborted) return
 
-    const snippetStartTime = nowMs()
+    let snippetStartTime = nowMs()
     this.app.currentTalkStartedAtMs = snippetStartTime
     const ui = this.app.layerUI as unknown as ExtendedUILayer
     const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
@@ -201,12 +203,7 @@ export default class TalkSnippet extends BaseSnippet {
 
     let voiceEndedAtMs: number | null = null
     let voicePromise: Promise<void> | null = null
-    if (
-      hasModel &&
-      talkData.data.voice &&
-      !isExporting &&
-      !this.app.ttsManager?.isTTSEnabled()
-    ) {
+    if (hasModel && talkData.data.voice && !isExporting && !this.app.ttsManager?.isTTSEnabled()) {
       const model = this.app.getModelById(talkData.data.modelId)
       voicePromise = new Promise<void>((resolve) => {
         model.speak(this.app.getVoiceByName(talkData.data.voice), {
@@ -238,8 +235,12 @@ export default class TalkSnippet extends BaseSnippet {
 
       if (voicePromise) {
         await voicePromise
-        const voiceDoneMs = (voiceEndedAtMs ?? nowMs()) + VOICE_END_LATENCY_MS
-        const remainingLatencyMs = Math.max(0, voiceDoneMs - nowMs())
+        const currentVoiceNow = nowMs()
+        const rawVoiceEndedAt = voiceEndedAtMs ?? currentVoiceNow
+        const clampedVoiceEndedAt =
+          rawVoiceEndedAt <= currentVoiceNow ? rawVoiceEndedAt : currentVoiceNow
+        const voiceDoneMs = clampedVoiceEndedAt + VOICE_END_LATENCY_MS
+        const remainingLatencyMs = Math.max(0, voiceDoneMs - currentVoiceNow)
         if (remainingLatencyMs > 0 && !signal?.aborted) {
           await AnimationManager.delay(remainingLatencyMs)
         }
@@ -268,7 +269,9 @@ export default class TalkSnippet extends BaseSnippet {
             await AnimationManager.delay(FRAME_MS)
           }
         }
-        const elapsedMs = nowMs() - snippetStartTime
+        const currentElapsedNow = nowMs()
+        if (currentElapsedNow < snippetStartTime) snippetStartTime = currentElapsedNow
+        const elapsedMs = Math.max(0, currentElapsedNow - snippetStartTime)
         const remainingTargetMs = Math.max(0, targetDurationMs - elapsedMs)
         if (remainingTargetMs > 0 && !signal?.aborted) {
           await AnimationManager.delay(remainingTargetMs)

@@ -37,7 +37,7 @@ export default class MoveSnippet extends BaseSnippet {
       await model.startMotions(
         this.data.data.motion,
         this.data.data.facial,
-        this.data.data.facialFirst,
+        this.data.data.facialFirst ?? true,
         { facialForce: true, traceSnippetIndex: this.snippetIndex }
       )
       if (this.data.data.motion && !model.isMotionLooping?.(this.data.data.motion)) {
