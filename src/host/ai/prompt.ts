@@ -171,6 +171,89 @@ export interface CatalogSe {
   name: string
   category?: string
   description: string
+  tags?: string[]
+}
+
+const OUTFIT_QUERY_KEYWORDS: Array<[RegExp, string[]]> = [
+  [/校服|制服|学园|学校|上课|教室|放学/, ['校服']],
+  [/私服|便服|逛街|约会|出门|周末/, ['私服']],
+  [/队服|演出服|舞台|Live|演唱会/, ['队服', '演出服']],
+  [/运动服|体操服|社团|练习|排练/, ['运动服']],
+  [/泳装|海边|沙滩|游泳/, ['泳装']],
+  [/睡衣|熬夜|睡前|卧室/, ['私服', '睡衣']],
+  [/浴衣|和服|夏日祭|花火|新年|神社/, ['和服']],
+  [/文化祭|女仆|执事|活动/, ['活动']],
+  [/打工|咖啡店|店员/, ['打工服']],
+  [/礼服|婚礼|正式/, ['礼服']]
+]
+
+const UNIT_QUERY_KEYWORDS: Array<[RegExp, string]> = [
+  [/一歌|咲希|穗波|志步|leo\/need|l\/n|神山|天台/i, 'Leo/need'],
+  [/实乃理|遥|爱莉|雫|mmj|more more|偶像/i, 'MORE MORE JUMP!'],
+  [/心羽|杏|彰人|冬弥|vbs|vivid|街头|咖啡/i, 'Vivid BAD SQUAD'],
+  [/司|笑梦|宁宁|类|wxs|wonderlands|奇幻|乐园|剧团/i, 'Wonderlands×Showtime'],
+  [/奏|真冬|绘名|瑞希|25时|nightcord|无人|深夜/i, '25时，Nightcord de.']
+]
+
+function extractQueryTimeHint(query: string): string | null {
+  if (/深夜|25点|凌晨|半夜|熬夜/.test(query)) return '深夜'
+  if (/黄昏|傍晚|夕阳|晚霞|放学后/.test(query)) return '黄昏'
+  if (/夜晚|晚上|今晚|夜里|夜景|夜空/.test(query)) return '夜晚'
+  if (/白天|上午|清晨|早上|中午|午休/.test(query)) return '白天'
+  return null
+}
+
+function extractQueryIndoorHint(query: string): string | null {
+  if (/教室|房间|卧室|客厅|厨房|医院|病房|排练室|休息室|咖啡厅|餐厅|室内|家里|家中|语音|通话|电脑/.test(query)) {
+    return '室内'
+  }
+  if (/天台|屋顶|屋上|街头|十字路口|街道|中庭|校门|公园|游乐园|乐园|海边|沙滩|广场|室外|户外|山上/.test(query)) {
+    return '室外'
+  }
+  return null
+}
+
+function extractQueryKeywords(query: string): string[] {
+  const tokens = new Set<string>()
+  const stopWords = new Set(['一个', '一起', '之后', '时候', '大家', '他们', '她们', '我们', '自己', '什么', '怎么', '因为', '所以'])
+  for (const part of query.split(/[\s,，。！？!?、：:；;（）()「」""'']+/).filter(Boolean)) {
+    const clean = part.trim().toLowerCase()
+    if (clean.length >= 2 && !stopWords.has(clean)) tokens.add(clean)
+  }
+  return [...tokens]
+}
+
+function stripImageTimeHint(text: string): string {
+  return text
+    .replace(/[·\s（(【\[]*(白天|黄昏|傍晚|夜晚|夜间|深夜|通用|室内|室外)[）)】\]]*$/g, '')
+    .trim()
+}
+
+export function formatImagePromptLine(detail: CatalogImage): string {
+  const name = detail.name || detail.file
+  const ref = detail.id ?? detail.file
+  const metaBits = [detail.category, detail.timeOfDay, detail.indoor].filter(Boolean)
+  const metaTag = metaBits.length > 0 ? `[${metaBits.join('/')}]` : ''
+  const aliasNote =
+    detail.aliases?.length && detail.aliases.length > 0
+      ? ` 别名:${detail.aliases.slice(0, 2).join('/')}`
+      : ''
+  if (metaTag) {
+    return `- ${name}（${ref}）${metaTag}${aliasNote}`
+  }
+  return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
+}
+
+export function formatBgmPromptLine(detail: CatalogBgm): string {
+  const name = detail.name || detail.file
+  const ref = detail.id ?? detail.file
+  const moodTag = [detail.mood, detail.tempo].filter(Boolean).join('·')
+  if (moodTag) {
+    return detail.description
+      ? `- ${name}（${ref}）[${moodTag}]：${detail.description}`
+      : `- ${name}（${ref}）[${moodTag}]`
+  }
+  return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
 }
 
 /** 判断动作名是否为默认站姿（入场/后续连招会优先避开这类静态名）。 */
@@ -207,7 +290,84 @@ export class CatalogView {
   }
 
   defaultModel(): CatalogModel | null {
-    return this.models[0] ?? null
+    return this.models.find((model) => model.isDefault !== false) ?? this.models[0] ?? null
+  }
+
+  /**
+   * 按角色去重的代表模型清单（26 主角 + 可选配角）：
+   * 提示词展示台词人设、动作/表情清单时使用，避免同一角色 18 套服装把提示词刷屏。
+   */
+  primaryModels(): CatalogModel[] {
+    const byChar = new Map<string, CatalogModel>()
+    for (const model of this.models) {
+      const key =
+        typeof model.characterId === 'number'
+          ? `char:${model.characterId}`
+          : `name:${model.name.toLowerCase()}`
+      const existing = byChar.get(key)
+      if (!existing) {
+        byChar.set(key, model)
+        continue
+      }
+      const existingRank = (existing.source === 'local' ? 0 : 1) * 10 + (existing.isDefault !== false ? 0 : 1)
+      const currentRank = (model.source === 'local' ? 0 : 1) * 10 + (model.isDefault !== false ? 0 : 1)
+      if (currentRank < existingRank) {
+        byChar.set(key, model)
+      }
+    }
+    return [...byChar.values()]
+  }
+
+  /** 查找同角色的全部服装变体（按默认服装优先排序）。 */
+  outfitsFor(target: CatalogModel | string | number): CatalogModel[] {
+    const refModel =
+      typeof target === 'number'
+        ? this.modelById(target)
+        : typeof target === 'string'
+          ? this.models.find(
+              (m) =>
+                m.name.toLowerCase() === target.toLowerCase() ||
+                (m.shortName ?? '').toLowerCase() === target.toLowerCase() ||
+                (m.cloudId ?? '').toLowerCase() === target.toLowerCase()
+            ) ?? null
+          : target
+    if (!refModel) return []
+    return this.models
+      .filter((m) =>
+        typeof refModel.characterId === 'number' && typeof m.characterId === 'number'
+          ? m.characterId === refModel.characterId
+          : m.name === refModel.name
+      )
+      .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+  }
+
+  /** 按服装关键词（如「校服」「私服」「队服」「泳装」）或云端 id 解析同角色服装。 */
+  resolveOutfitVariant(baseModel: CatalogModel, query: string): CatalogModel | null {
+    const q = query.trim().toLowerCase()
+    if (!q) return null
+    const variants = this.outfitsFor(baseModel)
+    if (variants.length === 0) return null
+    const exact = variants.find(
+      (m) =>
+        String(m.id) === q ||
+        (m.cloudId ?? '').toLowerCase() === q ||
+        m.path.toLowerCase() === q ||
+        (m.outfitLabel ?? '').toLowerCase() === q
+    )
+    if (exact) return exact
+    const byCat = variants.find(
+      (m) =>
+        (m.outfitCategory ?? '').toLowerCase() === q ||
+        (m.outfitLabel ?? '').toLowerCase().includes(q) ||
+        (m.cloudId ?? '').toLowerCase().includes(q)
+    )
+    if (byCat) return byCat
+    for (const [pattern, cats] of OUTFIT_QUERY_KEYWORDS) {
+      if (!pattern.test(query)) continue
+      const hit = variants.find((m) => cats.includes(m.outfitCategory ?? ''))
+      if (hit) return hit
+    }
+    return null
   }
 
   defaultModelPath(): string {
@@ -238,27 +398,157 @@ export class CatalogView {
   }
 
   /**
-   * 提示词里列出的背景：本地登记的全部保留，云端条目只列有可读名字的
-   * （未覆盖到的背景仍可用 id 引用，但不占据提示词）。云端背景有几百个，
-   * 全量塞进提示词既贵又稀释重点，默认最多 120 条。
+   * 语义分桶筛选提示词背景候选：
+   * - 保留全部本地背景 + 语义覆盖的云端背景（不含纯色幕布与剧情插画，除非查询明确要求）；
+   * - 根据场景里的时段（白天/黄昏/夜晚/深夜）、室内外与地点/组合关键词精准打分，
+   *   再按场景分类均衡分桶，确保 AI 一次选出准确时段与地点的背景（~1,400 张全量仍可在校验时精确解析）。
    */
-  imagePromptChoices(limit = 120): CatalogImage[] {
-    const details = this.imageDetailsList().filter(
+  imagePromptChoices(limit = 120, query = ''): CatalogImage[] {
+    const named = this.imageDetailsList().filter(
       (detail) => detail.source !== 'cloud' || (detail.name && detail.name !== detail.id)
     )
-    return limit > 0 ? details.slice(0, limit) : details
+    if (limit <= 0 || named.length <= limit) return named
+
+    const wantSpecial = /纯色|黑屏|幕布|插画|cg|回忆画面/i.test(query)
+    const pool = wantSpecial
+      ? named
+      : named.filter((d) => d.category !== '特效与纯色' && d.category !== '剧情插画')
+    const effectivePool = pool.length > 0 ? pool : named
+
+    const timeHint = extractQueryTimeHint(query)
+    const indoorHint = extractQueryIndoorHint(query)
+    const keywords = extractQueryKeywords(query)
+    const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
+
+    const scoreOf = (detail: CatalogImage): number => {
+      let score = detail.source === 'local' ? 6 : 0
+      const hay = `${detail.name} ${(detail.aliases ?? []).join(' ')} ${(detail.tags ?? []).join(' ')} ${detail.category ?? ''}`.toLowerCase()
+      for (const kw of keywords) {
+        if (detail.name.toLowerCase().includes(kw)) score += 12
+        else if (hay.includes(kw)) score += 6
+      }
+      if (timeHint && detail.timeOfDay) {
+        if (detail.timeOfDay === timeHint) score += 6
+        else if ((timeHint === '夜晚' && detail.timeOfDay === '深夜') || (timeHint === '深夜' && detail.timeOfDay === '夜晚')) {
+          score += 3
+        } else if (detail.timeOfDay !== '通用') {
+          score -= 3
+        }
+      }
+      if (indoorHint && detail.indoor) {
+        if (detail.indoor === indoorHint) score += 4
+        else score -= 2
+      }
+      for (const u of unitHints) {
+        if ((detail.tags ?? []).some((t) => t.includes(u)) || hay.includes(u.toLowerCase())) score += 4
+      }
+      if (detail.id && /^bg_[a-f]00\d{2}0[1-4]$/.test(detail.id)) score += 2
+      if (!detail.name.includes('#') && !detail.name.includes('衍生场景')) score += 3
+      return score
+    }
+
+    const scored = effectivePool
+      .map((detail) => ({ detail, score: scoreOf(detail) }))
+      .sort((a, b) => b.score - a.score || (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file))
+
+    // 先拿高匹配度前 40%，再按 category 轮转补齐，兼顾贴题与多样性
+    const picked: CatalogImage[] = []
+    const pickedKeys = new Set<string>()
+    const directQuota = Math.min(limit, Math.max(12, Math.floor(limit * 0.45)))
+    for (const item of scored) {
+      if (picked.length >= directQuota) break
+      const key = item.detail.file.toLowerCase()
+      if (!pickedKeys.has(key)) {
+        pickedKeys.add(key)
+        picked.push(item.detail)
+      }
+    }
+
+    const buckets = new Map<string, CatalogImage[]>()
+    for (const item of scored) {
+      if (pickedKeys.has(item.detail.file.toLowerCase())) continue
+      const cat = item.detail.category || '其他'
+      if (!buckets.has(cat)) buckets.set(cat, [])
+      buckets.get(cat)!.push(item.detail)
+    }
+
+    const bucketIterators = [...buckets.values()]
+    let progressed = true
+    while (picked.length < limit && progressed) {
+      progressed = false
+      for (const list of bucketIterators) {
+        if (picked.length >= limit) break
+        const next = list.shift()
+        if (!next) continue
+        progressed = true
+        const key = next.file.toLowerCase()
+        if (!pickedKeys.has(key)) {
+          pickedKeys.add(key)
+          picked.push(next)
+        }
+      }
+    }
+
+    return picked
   }
 
   /**
-   * 所有 description 非空的 BGM 登记项。描述可以来自人工填写，也可以来自
-   * fetch:media 缓存的官方曲名索引（bgm00003 → Slapstick!! / 剧情 BGM）。
-   *
-   * 提示词渲染方传 `limit: 40`：云端剧情 BGM 有几百个文件，全量塞进提示词
-   * 既贵又会稀释重点；校验用的 canonicalBgm 仍接受全部登记项，不受上限影响。
+   * 语义分桶筛选 BGM 候选：
+   * 覆盖「轻松日常 / 温暖治愈 / 感伤忧郁 / 紧张悬疑 / 热血激昂 / 元气欢快 / 奇幻活泼 / 律动街头 / 宁静深夜 / 神秘空灵」
+   * 全部情绪族，优先贴合当前场景关键词与核心经典曲目；校验用的 canonicalBgm 仍接受全部 ~421 首。
    */
-  bgmPromptChoices(limit = 0): CatalogBgm[] {
+  bgmPromptChoices(limit = 0, query = ''): CatalogBgm[] {
     const choices = this.bgmDetailsList().filter((detail) => detail.description.trim().length > 0)
-    return limit > 0 ? choices.slice(0, limit) : choices
+    if (limit <= 0 || choices.length <= limit) return choices
+
+    const keywords = extractQueryKeywords(query)
+    const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
+    const scoreOf = (detail: CatalogBgm): number => {
+      let score = detail.source === 'local' ? 6 : 0
+      const hay = `${detail.name} ${detail.mood ?? ''} ${detail.category ?? ''} ${detail.unit ?? ''} ${detail.description} ${(detail.tags ?? []).join(' ')}`.toLowerCase()
+      for (const kw of keywords) {
+        if (hay.includes(kw)) score += 8
+      }
+      for (const u of unitHints) {
+        if (detail.unit === u) score += 6
+      }
+      if (/经典|日常|温暖|泪|紧绷|暗涌|普通|平凡|宁静|slapstick|into deep/i.test(detail.name + detail.description)) {
+        score += 3
+      }
+      if (!/\(bgm\d+\)$/.test(detail.name)) score += 4
+      return score
+    }
+
+    const scored = choices
+      .map((detail) => ({ detail, score: scoreOf(detail) }))
+      .sort((a, b) => b.score - a.score || (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file))
+
+    const buckets = new Map<string, CatalogBgm[]>()
+    for (const item of scored) {
+      const mood = item.detail.mood || item.detail.category || '其他'
+      if (!buckets.has(mood)) buckets.set(mood, [])
+      buckets.get(mood)!.push(item.detail)
+    }
+
+    const picked: CatalogBgm[] = []
+    const seen = new Set<string>()
+    const bucketLists = [...buckets.values()]
+    let progressed = true
+    while (picked.length < limit && progressed) {
+      progressed = false
+      for (const list of bucketLists) {
+        if (picked.length >= limit) break
+        const next = list.shift()
+        if (!next) continue
+        progressed = true
+        const key = next.file.toLowerCase()
+        if (!seen.has(key)) {
+          seen.add(key)
+          picked.push(next)
+        }
+      }
+    }
+    return picked
   }
 
   /**
@@ -301,7 +591,7 @@ export class CatalogView {
   }
 
   /**
-   * 背景选择：本地文件、云端 id（bg_a000301）与可读名（教室）都接受。
+   * 背景选择：本地文件、云端 id（bg_a000301）与可读名（教室）及带时段变体（如「神山高校 天台·黄昏」）都接受。
    * 返回登记项本身，调用方可拿到 file 与展示名。
    */
   canonicalImageEntry(value: unknown): CatalogImage | null {
@@ -313,23 +603,66 @@ export class CatalogView {
     const lower = raw.toLowerCase()
     const base = lower.split('/').pop() ?? lower
     const stem = base.replace(/\.[^.]+$/, '')
-    const exact = details.find(
+    const exactId = details.find(
       (detail) =>
         detail.file.toLowerCase() === lower ||
         detail.id?.toLowerCase() === lower ||
         detail.id?.toLowerCase() === stem ||
         (detail.file.toLowerCase().split('/').pop() ?? '').replace(/\.[^.]+$/, '') === stem
     )
-    if (exact) return exact
+    if (exactId) return exactId
 
-    const byName = details.filter(
-      (detail) =>
-        detail.name.toLowerCase() === lower ||
-        detail.name.toLowerCase().includes(lower) ||
-        (detail.aliases ?? []).some((alias) => alias.toLowerCase() === lower)
-    )
-    if (byName.length === 1) return byName[0]
-    if (byName.length > 1) return byName[0]
+    const timeHint = extractQueryTimeHint(raw)
+    const stripped = stripImageTimeHint(raw).toLowerCase()
+    const timeRank = (entry: CatalogImage): number => {
+      if (timeHint) {
+        if (entry.timeOfDay === timeHint) return 0
+        if ((timeHint === '夜晚' && entry.timeOfDay === '深夜') || (timeHint === '深夜' && entry.timeOfDay === '夜晚')) return 1
+        if (entry.timeOfDay === '通用') return 2
+        return 3
+      }
+      if (!entry.timeOfDay || entry.timeOfDay === '白天') return 0
+      if (entry.timeOfDay === '通用') return 1
+      if (entry.timeOfDay === '黄昏') return 2
+      return 3
+    }
+
+    const exactNames = details.filter((detail) => {
+      const candidates = [
+        detail.name.toLowerCase(),
+        detail.timeOfDay ? `${detail.name}·${detail.timeOfDay}`.toLowerCase() : '',
+        detail.timeOfDay ? `${detail.name}（${detail.timeOfDay}）`.toLowerCase() : '',
+        detail.timeOfDay ? `${detail.name} ${detail.timeOfDay}`.toLowerCase() : '',
+        ...(detail.aliases ?? []).map((a) => a.toLowerCase())
+      ].filter(Boolean)
+      return (
+        candidates.includes(lower) ||
+        (stripped.length > 0 &&
+          (detail.name.toLowerCase() === stripped ||
+            (detail.aliases ?? []).some((a) => a.toLowerCase() === stripped)))
+      )
+    })
+    if (exactNames.length > 0) {
+      return exactNames.sort(
+        (a, b) => timeRank(a) - timeRank(b) || (a.id ?? a.file).localeCompare(b.id ?? b.file)
+      )[0]
+    }
+
+    const fuzzyQuery = stripped || lower
+    const byName = details
+      .filter(
+        (detail) =>
+          detail.name.toLowerCase().includes(fuzzyQuery) ||
+          (detail.aliases ?? []).some((alias) => alias.toLowerCase().includes(fuzzyQuery)) ||
+          (detail.tags ?? []).some((tag) => tag.toLowerCase() === fuzzyQuery)
+      )
+      .sort(
+        (a, b) =>
+          timeRank(a) - timeRank(b) ||
+          a.name.length - b.name.length ||
+          (a.id ?? a.file).localeCompare(b.id ?? b.file)
+      )
+    if (byName.length > 0) return byName[0]
 
     const byFile = details.filter(
       (detail) =>
@@ -418,14 +751,23 @@ export class CatalogView {
     return null
   }
 
+  private promptScopeModels(): CatalogModel[] {
+    return this.models.length > 35 ? this.primaryModels() : this.models
+  }
+
   modelTable(): string {
-    return this.models
-      .map((model) => `- ${this.shortName(model)} → modelId=${model.id}, model路径=${model.path}`)
+    return this.promptScopeModels()
+      .map((model) => {
+        const outfitNote = model.outfitLabel ? ` [${model.outfitLabel}]` : ''
+        return `- ${this.shortName(model)}${outfitNote} → modelId=${model.id}, model路径=${model.path}`
+      })
       .join('\n')
   }
 
   idMapping(): string {
-    return this.models.map((model) => `${this.shortName(model)}=${model.id}`).join(', ')
+    return this.promptScopeModels()
+      .map((model) => `${this.shortName(model)}=${model.id}`)
+      .join(', ')
   }
 
   promptMotions(model: CatalogModel): string[] {
@@ -477,7 +819,7 @@ export class CatalogView {
   }
 
   motionList(): string {
-    return this.models
+    return this.promptScopeModels()
       .map((model) => {
         const names = this.promptMotions(model)
         return `${this.shortName(model)}(${model.id})：${names.length ? names.join('，') : '（目录暂未提供）'}`
@@ -486,7 +828,7 @@ export class CatalogView {
   }
 
   facialList(): string {
-    return this.models
+    return this.promptScopeModels()
       .map((model) => {
         const names = this.promptFacials(model)
         return `${this.shortName(model)}(${model.id})：${names.length ? names.join('，') : '（目录暂未提供）'}`
@@ -494,32 +836,16 @@ export class CatalogView {
       .join('\n')
   }
 
-  imageList(): string {
-    const details = this.imagePromptChoices(120)
+  imageList(limit = 80, query = ''): string {
+    const details = this.imagePromptChoices(limit, query)
     if (details.length === 0) return '（目录暂未提供背景）'
-    return details
-      .map((detail) => {
-        const name = detail.name || detail.file
-        const ref = detail.id ?? detail.file
-        return detail.description
-          ? `- ${name}（${ref}）：${detail.description}`
-          : `- ${name}（${ref}）`
-      })
-      .join('\n')
+    return details.map((detail) => formatImagePromptLine(detail)).join('\n')
   }
 
-  bgmList(): string {
-    const details = this.bgmPromptChoices(40)
+  bgmList(limit = 40, query = ''): string {
+    const details = this.bgmPromptChoices(limit, query)
     if (details.length === 0) return '（目录暂未提供带描述或官方曲名的 BGM）'
-    return details
-      .map((detail) => {
-        const name = detail.name || detail.file
-        const ref = detail.id ?? detail.file
-        return detail.description
-          ? `- ${name}（${ref}）：${detail.description}`
-          : `- ${name}（${ref}）`
-      })
-      .join('\n')
+    return details.map((detail) => formatBgmPromptLine(detail)).join('\n')
   }
 
   seDetailsList(): CatalogSe[] {
@@ -552,14 +878,47 @@ export class CatalogView {
     return curated ? curated.file : null
   }
 
-  seList(): string {
-    if (this.seDetails.length > 0) {
-      return this.seDetails
-        .slice(0, 30)
-        .map((detail) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
-        .join('\n')
+  seList(query = '', limit = 30): string {
+    const curatedList = CURATED_SCENARIO_SES.map((cue) => ({
+      file: cue.file,
+      id: cue.id,
+      name: cue.id,
+      category: cue.category,
+      description: cue.description,
+      tags: [...cue.tags]
+    }))
+    if (this.seDetails.length === 0) {
+      return sePromptList()
     }
-    return sePromptList()
+    const keywords = extractQueryKeywords(query)
+    const merged: CatalogSe[] = []
+    const seen = new Set<string>()
+    for (const item of curatedList) {
+      const key = item.id.toLowerCase()
+      if (!seen.has(key)) {
+        seen.add(key)
+        merged.push(item)
+      }
+    }
+    if (keywords.length > 0) {
+      const extra = this.seDetails
+        .filter((d) => {
+          const hay = `${d.id ?? ''} ${d.category ?? ''} ${d.description} ${(d.tags ?? []).join(' ')}`.toLowerCase()
+          return keywords.some((kw) => hay.includes(kw))
+        })
+        .slice(0, Math.max(0, limit - merged.length))
+      for (const item of extra) {
+        const key = (item.id ?? item.file).toLowerCase()
+        if (!seen.has(key)) {
+          seen.add(key)
+          merged.push(item)
+        }
+      }
+    }
+    return merged
+      .slice(0, limit)
+      .map((detail) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
+      .join('\n')
   }
 
   /**
@@ -567,12 +926,19 @@ export class CatalogView {
    * 但调用方已先做快速选角，池子里通常只有 1~2 人。
    */
   characterPool(personas: PersonaEntry[], compact = true): string {
-    if (this.models.length === 0) return '（资源目录为空，请检查渲染宿主）'
-    return this.models
+    const scope = this.promptScopeModels()
+    if (scope.length === 0) return '（资源目录为空，请检查渲染宿主）'
+    return scope
       .map((model) => {
         const persona = personaFor(personas, model)
         const prompt = compact ? dialoguePersonaPrompt(persona) : (persona?.prompt?.trim() ?? '')
-        return `**${this.shortName(model)}** — modelId:${model.id}, model:${model.path}\n${
+        const outfitSummary = this.outfitsFor(model)
+          .slice(0, 8)
+          .map((m) => `${m.outfitLabel || m.outfitCategory || m.cloudId || m.id}=${m.id}`)
+          .join('、')
+        const outfitLine =
+          this.outfitsFor(model).length > 1 ? `\n可选服装（直接写对应 modelId）：${outfitSummary}` : ''
+        return `**${this.shortName(model)}** — modelId:${model.id}, model:${model.path}${outfitLine}\n${
           prompt || GENERIC_PROFILE
         }`
       })
@@ -979,9 +1345,9 @@ export function buildStoryPrompt(
     '{acting_example}': buildActingExample(view),
     '{motion_list}': view.motionList(),
     '{facial_list}': view.facialList(),
-    '{image_list}': view.imageList(),
-    '{bgm_list}': view.bgmList(),
-    '{se_list}': view.seList(),
+    '{image_list}': view.imageList(80, options.scene),
+    '{bgm_list}': view.bgmList(36, options.scene),
+    '{se_list}': view.seList(options.scene),
     '{scene}': options.scene
   })
   return {
@@ -1010,8 +1376,8 @@ export function buildChatPrompt(
     '{acting_example}': buildActingExample(view),
     '{motion_list}': view.motionList(),
     '{facial_list}': view.facialList(),
-    '{image_list}': view.imageList(),
-    '{bgm_list}': view.bgmList(),
+    '{image_list}': view.imageList(60, options.scene),
+    '{bgm_list}': view.bgmList(30, options.scene),
     '{chat_history}': history || '（首次对话）',
     '{scene}': options.scene
   })

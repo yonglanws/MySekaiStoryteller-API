@@ -19,23 +19,21 @@
 
 ## 项目简介
 
-接收 `*.sekai-story.json` 剧本，通过 HTTP API 渲染并导出 Project SEKAI 风格的 Live2D MP4 视频。
+接收 `*.sekai-story.json` 剧本或一句场景描述，通过 HTTP API 渲染并导出 Project SEKAI 风格的 Live2D MP4 视频。
 
 不依赖 Electron 或桌面环境，支持 Windows / Linux / macOS；配合官方 AstrBot 插件，可自动生成剧本并向 QQ / Telegram 发送视频。
 
-- **无头渲染**：PixiJS + Live2D，运行于 Playwright 管理的 Chrome / Edge 渲染池，`render.workers` 控制并发导出数。
-- **两种导出模式**：默认 `record` 实时录制，也支持 `fast` 虚拟时钟逐帧渲染；硬件编码失败自动回退 CPU。
-- **可选音频**：GPT-SoVITS / IrodoriTTS 配音与 BGM 混音；Irodori 支持 LoRA、参考音频、caption 与情绪标签，支持模拟说话口型；没有 TTS 也可导出。
-- **任务管理**：排队、并发导出、取消、IP 限流和过期文件清理。
-- **云端资源**：从 Moesekai（pjsk.moe）拉取 Live2D 模型与动作、剧情背景和 BGM；`sse-motion` 无损转 `motion3`，自动登记 `models.yaml` / `images.yaml` / `bgm.yaml`，BGM 用官方曲名索引补全，AI 可按曲名和分类选曲。
-- **宿主内置 AI**：配置任意 OpenAI 兼容 LLM，一句场景描述完成四段式生成——选角 → 台词 → 情绪/表演/日文 `ttsText` 翻译（三段并行）→ 合成与舞台校验，再交给同一条导出队列。
+- **云端优先、零本地资源开箱即用**：默认开启 `assets.cloudCatalog`，无需预先下载模型、背景、BGM、SE 或手写 YAML 清单（空 `resources/` 目录即可启动、生成与导出）。全局默认 BGM 在本地缺失 `bgm.yaml` 与 `resources/audio/bgm/bg1.mp3` 时自动回落至云端日常曲 `bgm00003`；若在 `resources/` 下显式放置本地文件或 YAML 清单，本地资源依然优先。
+- **全量官方语义云端目录**：接入 Moesekai / exmeaning / Sekai-World / 官方剧情语料，覆盖 **511** 套 Live2D 模型（26 位主要角色多服装变体 + 48 位配角/特别角色）、**1,401** 张含中文地点/时段/室内外标签的背景、**421** 首剧情与区域 BGM（400 首剧情 BGM + 21 首 `area_bgm`）以及 **1,942** 条场景音效（SE），导出前按需物化至 `resources/*/cloud/`。
+- **五阶段宿主内置 AI 导演**：配置任意 OpenAI 兼容 LLM 后，由一句场景描述自动完成「选角与分幕 (`cast`) → 逐字对白 (`dialogue`) → 三路并行（TTS 情绪分段 `emotion` / 舞台调度与运镜音效 `directStaging` / 日文 `ttsText` 批量翻译）→ 精细演技与两拍微表演 (`direction`) → 官方时间线合成与七项硬指标校验 (`composeStory` + `OfficialLinter`)」。
+- **无头渲染与双导出管线**：PixiJS + Live2D 运行于 Playwright 管理的 Chrome / Edge 渲染池（`render.workers` 控制常驻渲染页数）；默认 `record` 实时录制，也支持 `fast` 虚拟时钟逐帧渲染，硬件编码失败自动回退 CPU `libx264`。
+- **可选配音与混音**：支持 GPT-SoVITS 与 IrodoriTTS（LoRA、参考音频、caption 与情绪标签）以及按公式对齐官方的 RMS 口型驱动；无 TTS 也可导出纯画面或纯 BGM 视频。
+- **任务管理**：排队、并发上限控制、取消、IP 限流、诊断日志（`.log` / `.log.json` / `.report.txt`）与过期文件自动清理。
 
 ## 快速开始
 
-由于无法做到开箱即用，且文档内容较多，部署及配置较为麻烦，本项目推荐使用 Agent 进行部署及资源配置。
-
-需要 **Node.js ≥ 20** 和 Chrome / Edge / Chromium。ffmpeg 由 `ffmpeg-static` 随依赖安装。
-以下命令在仓库根目录执行（Windows 可使用 Git Bash）：
+需要 **Node.js ≥ 20** 和 Chrome / Edge / Chromium（`ffmpeg` 由 `ffmpeg-static` 随依赖安装）。
+以下命令在仓库根目录执行（Windows 可使用 Git Bash 或 PowerShell）：
 
 ```bash
 git clone https://github.com/yonglanws/MySekaiStoryteller-API.git
@@ -46,90 +44,97 @@ npx playwright install chromium
 cp config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，并按 [资源与音频配置](doc/resources.md) 放置模型、背景等资源及清单。
-**仓库不附带渲染资源或示例剧本**；资源根默认为 `resources/`，可通过 `paths.resources` 或 `MSS_RESOURCE_DIR` 修改。
+> [!TIP]
+> **零本地资源即可运行**：默认开启 `assets.cloudCatalog: true`，即使 `resources/` 为空目录，宿主也会自动拉取云端目录、在导出前按需下载模型/背景/BGM/SE，并在无 `bgm.yaml` / `bg1.mp3` 时自动使用云端日常曲 `bgm00003` 作为全局 BGM。
+> 如需使用自己的模型、背景或曲目，按 [资源与音频配置](doc/resources.md) 放入 `resources/` 即可覆盖云端同名项；如需离线预拉取资源，见 [云端资源获取](doc/cloud-assets.md)。
 
-没有现成模型、背景或 BGM 时，可以直接从 Moesekai 拉取（详见 [云端资源获取](doc/cloud-assets.md)）：
-
-```bash
-npm run fetch:models -- --characters mizuki,ena
-# 背景 / BGM 可选，按需拉取
-npm run fetch:media -- --kind backgrounds --limit 20
-npm run fetch:media -- --kind bgm --names bgm00003,bgm00006
-```
-
-要在宿主里用 AI 写剧本，设置 LLM 密钥并启用 `llm`（详见 [宿主内置 AI 剧本生成](doc/ai-script.md)）：
+要在宿主里启用 AI 一句话写剧本 / 生成视频，设置 LLM 密钥并配置 `config.yaml` 中的 `llm`（详见 [宿主内置 AI 剧本生成](doc/ai-script.md)）：
 
 ```bash
 export MSS_LLM_API_KEY=sk-...
-# config.yaml: llm.enabled=true, llm.baseUrl/model 按服务填写
+# config.yaml 中设置 llm.baseUrl 与 llm.model（默认 pipeline: staged）
 ```
+
+构建并启动宿主：
 
 ```bash
 npm run build
 npm start
 ```
 
-另开终端检查服务：
+另开终端检查服务状态与云端目录：
 
 ```bash
 curl http://127.0.0.1:9881/api/v1/health
+curl http://127.0.0.1:9881/api/v1/resources
 ```
 
 `renderPool.webglRenderers` 应显示真实 GPU 名称；若出现 `SwiftShader` / `llvmpipe`，见 [故障排除](doc/troubleshooting.md)。
-
 常驻运行、平台差异与环境变量见 [部署指南](doc/host-deployment.md)。
 
 ## API 接口
 
-默认地址为 `http://127.0.0.1:9881`。准备好符合 [故事文件格式](doc/story-format.md) 的剧本后提交导出；
-下面的文件名仅为示例，请替换为自己的剧本路径：
+默认监听 `http://127.0.0.1:9881`。启用 `llm` 后，零本地资源即可一句话生成剧本或完整 MP4 视频：
 
 ```bash
-node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({story: JSON.parse(fs.readFileSync(process.argv[1], "utf8")), timeout: 600000}))' \
-  ./resources/stories/demo.sekai-story.json |
-  curl -X POST http://127.0.0.1:9881/api/v1/export \
-    -H "Content-Type: application/json" --data-binary @-
-```
-
-请求会等待导出结果，成功后返回 `downloadUrl`。`timeout` 包含排队时间，客户端断连或超时会取消任务。
-
-启用 `llm` 后还可以一句话生成剧本或完整视频：
-
-```bash
-# 只生成剧本
+# 仅生成剧本（返回 StoryData、阶段耗时 meta 与 scriptPath）
 curl -sS -X POST http://127.0.0.1:9881/api/v1/script/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt": "放学后的教室里，瑞希和绘名聊起下次 Live"}'
 
-# 生成并直接导出视频
+# 生成剧本并直接导出 MP4 视频
 curl -sS -X POST http://127.0.0.1:9881/api/v1/generate \
   -H "Content-Type: application/json" \
   -d '{"prompt": "深夜的无人 SEKAI，奏和真冬聊起写不出来的歌"}'
 ```
 
-完整端点、参数与任务行为见 [API 参考](doc/api.md)。
+也可以直接提交符合 [故事文件格式](doc/story-format.md) 的 `*.sekai-story.json`（支持写本地路径，也支持直接写云端背景名/id、曲名/id 或 `cloud/` 模型路径）：
+
+```bash
+node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({story: JSON.parse(fs.readFileSync(process.argv[1], "utf8")), timeout: 600000}))' \
+  ./your-story.sekai-story.json |
+  curl -X POST http://127.0.0.1:9881/api/v1/export \
+    -H "Content-Type: application/json" --data-binary @-
+```
+
+请求同步等待导出完成，成功后返回 `downloadUrl`、`logPath`、`logJsonPath` 与 `reportPath`。`timeout` 包含排队时间，客户端断连或超时会取消任务。完整端点与参数见 [API 参考](doc/api.md)。
 
 > [!WARNING]
 > API 默认监听 `0.0.0.0` 且无鉴权。不要直接暴露到公网；安全部署要求见 [部署指南](doc/host-deployment.md#安全提示)。
+
+## 常用脚本
+
+来自 [package.json](package.json) 的常用命令：
+
+| 命令 | 用途 |
+| --- | --- |
+| `npm run build` | 类型检查（`typecheck`）+ 前端渲染器构建（`build:web`）+ 宿主编译（`build:host`） |
+| `npm start` | 启动宿主（`node out-host/host/main.js`） |
+| `npm run typecheck` | 分别检查宿主与渲染器 TypeScript 类型 |
+| `npm run lint` / `npm run format:check` | ESLint 与 Prettier 格式检查 |
+| `npm test` / `npm run test:all` | 运行核心回归测试 / 全量回归测试（含零本地全云端测试） |
+| `npm run test:pool` / `test:config` / `test:record` / `test:renderer` / `test:tts` | 按模块运行专项测试 |
+| `npm run fetch:models` / `npm run fetch:media` | 可选 CLI：离线拉取 Moesekai 模型或背景/BGM 到本地 `resources/` |
+| `npm run e2e` | 运行端到端导出验证脚本（需先启动宿主） |
 
 ## 文档导航
 
 | 文档 | 内容 |
 | --- | --- |
-| [API 参考](doc/api.md) | 导出、生成、资源拉取、状态查询、取消、下载与清理接口 |
-| [故事文件格式](doc/story-format.md) | 完整 JSON 示例、登场退场、台词动作与时长规则 |
-| [资源与音频配置](doc/resources.md) | 资源目录、模型与背景清单、TTS、BGM |
-| [云端资源获取](doc/cloud-assets.md) | Moesekai 模型/动作/背景/BGM 下载、sse-motion 转 motion3、缓存续传 |
-| [宿主内置 AI 剧本生成](doc/ai-script.md) | LLM 配置、staged/single 流水线、剧本/视频端点、校验修复、人格与人设 |
-| [导出模式](doc/export-modes.md) | record / fast、画质与体积、旧配置迁移 |
-| [部署指南](doc/host-deployment.md) | 平台依赖、配置与环境变量、常驻运行、GPU 与安全 |
-| [故障排除](doc/troubleshooting.md) | 浏览器启动、软件渲染、导出失败与性能问题 |
-| [开发与验证](doc/development.md) | 项目结构、构建、回归测试与端到端验证 |
+| [文档总览](doc/README.md) | 按首次部署、AI 编剧、接入机器人、排查与开发划分的阅读路径 |
+| [API 参考](doc/api.md) | 导出、AI 生成、云端目录与资源拉取、状态查询、取消、下载与清理接口 |
+| [云端资源获取](doc/cloud-assets.md) | 零本地资源云端架构、511 模型 / 1,401 背景 / 421 BGM / 1,942 SE 语义目录、按需物化与离线拉取 CLI |
+| [宿主内置 AI 剧本生成](doc/ai-script.md) | LLM 配置、5 阶段流水线、Normal 模式双人轮换、OfficialLinter 校验与人设配置 |
+| [故事文件格式](doc/story-format.md) | 完整 JSON 示例、全部片段定义、云端资源引用、60fps 官方时序与舞台坐标 |
+| [资源与音频配置](doc/resources.md) | `resources/` 目录、可选本地 YAML 覆盖、GPT-SoVITS / IrodoriTTS、情绪标签与 BGM |
+| [导出模式](doc/export-modes.md) | `record` / `fast` 管线、参数默认值、体积控制与耗时统计 |
+| [部署指南](doc/host-deployment.md) | 平台依赖、环境变量、systemd / Windows 常驻、GPU 加速与安全边界 |
+| [故障排除](doc/troubleshooting.md) | 浏览器启动、软件渲染、云端资源物化、音频与演出问题排查 |
+| [开发与验证](doc/development.md) | 目录结构、构建、自动化测试与端到端成片验证 |
 
 ## 相关内容
 
-- [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) —— 官方 AstrBot 插件：对接宿主 AI 剧本生成与视频导出，负责指令、进度与机器人视频回传。
+- [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) —— 官方 AstrBot 插件：对接宿主 AI 剧本生成与视频导出，负责指令交互、进度反馈与机器人视频回传。
 
 ## 许可证
 

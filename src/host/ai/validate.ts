@@ -678,6 +678,7 @@ export function validateAndFixStory(
       catalog =
         (path
           ? (view.models.find((model) => model.path === path) ??
+            view.models.find((model) => (model.cloudId ?? '').toLowerCase() === path.toLowerCase()) ??
             view.models.find((model) => path.endsWith(model.path) || model.path.endsWith(path)))
           : undefined) ??
         view.models.find(

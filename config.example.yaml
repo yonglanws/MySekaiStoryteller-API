@@ -148,10 +148,13 @@ tts:
 #   resources/audio/bgm/bgm.yaml（示例见同目录 bgm.example.yaml）
 #
 #   enabled: true              # 导出时混入 BGM
-#   path: audio/bgm/bg1.mp3    # 相对资源根的路径，也可用绝对路径或 http(s) URL
+#   path: audio/bgm/bg1.mp3    # 相对资源根的路径，也可用云端 id（如 bgm00003）、绝对路径或 http(s) URL
 #   volume: 0.2                # 音量 0.0 - 1.0
 #
-# 该文件不存在时，宿主回落到本文件的 bgm 节（enabled / path / volume）。
+# 当 bgm.yaml 不存在且本地没有 resources/audio/bgm/bg1.mp3 时：
+# - 若 assets.cloudCatalog 为 true（默认），宿主自动回落到已验证的云端日常 BGM（bgm00003）
+#   并在导出前按需物化到 resources/audio/bgm/cloud/；
+# - 只有本地磁盘真实存在对应文件时，才会优先使用本地文件。
 # 剧本里的 ChangeBgm 片段可在场景内切歌/停止；出现带文件的 ChangeBgm 时，
 # path 的全局默认曲目不再混入，只加载被引用的 audio/bgm/<file>。
 # ---------------------------------------------------------------------------
@@ -217,9 +220,10 @@ assets:
   concurrency: 4                  # 并行下载数（env: MSS_ASSETS_CONCURRENCY）
   timeoutMs: 180000               # 单个文件下载超时（env: MSS_ASSETS_TIMEOUT_MS）
   retries: 3                      # 下载重试次数（env: MSS_ASSETS_RETRIES）
-  cloudCatalog: true              # 云端目录：背景/BGM/Live2D 自动发现，无需本地 YAML 登记
-                                  # 剧本可写背景名（教室）、曲名（Slapstick!!）或云端 id；
-                                  # 导出前按需下载到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_CATALOG）
+  cloudCatalog: true              # 云端优先目录：零本地资源（空 resources/ 目录）即可启动、生成与导出 MP4
+                                  # 自动暴露全 26 位角色及换装变体+知名配角、~1400 云端背景、~420 剧情/区域 BGM 与 SE；
+                                  # 剧本可写背景名（如 神山高校 天台·黄昏）、曲名（Slapstick!!）或云端 id；
+                                  # 导出前按需物化到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_CATALOG）
   cloudCatalogTtlHours: 6         # 目录缓存有效期（小时）；过期后台刷新，失败沿用旧快照
                                   # （env: MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS）
 

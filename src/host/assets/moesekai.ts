@@ -218,14 +218,32 @@ function kindOf(entry: MoesekaiIndexEntry): 'character' | 'sub' | 'mob' {
   return 'mob'
 }
 
+export interface SelectModelsOptions {
+  characters?: string[]
+  models?: string[]
+  /** true 时返回全部常规服装变体（含 v2 / 校服 / 私服 / 队服 / 演出服等），而非每角只挑 1 套 */
+  allOutfits?: boolean
+  /** true 时把带动作包的 sub 角色也纳入选择 */
+  includeSub?: boolean
+  /** 额外纳入的知名配角/mob 模型 id 集合 */
+  notableIds?: Set<string>
+  /** 是否保留 _black 剪影模型（默认跳过） */
+  includeBlack?: boolean
+}
+
+function isBlackSilhouette(id: string): boolean {
+  return /black\d*$/i.test(id)
+}
+
 /**
  * 按 `--characters` / `--models` 选模型。
- * - characters：每个角色挑一套首选服装（v1 normal → v1 casual → …）
+ * - 默认：每个角色挑一套首选服装（v1 normal → v1 casual → …）
+ * - allOutfits=true：返回角色的全部常规服装变体（首选服装排在最前）
  * - models：精确模型 id（含 v2_ / clb / sub / mob）
  */
 export function selectModels(
   index: MoesekaiIndex,
-  options: { characters?: string[]; models?: string[] }
+  options: SelectModelsOptions
 ): MoesekaiIndexEntry[] {
   const selected = new Map<string, MoesekaiIndexEntry>()
 
@@ -240,8 +258,10 @@ export function selectModels(
   if (options.characters?.length) {
     const ids = new Set<number>()
     const unmatched: string[] = []
+    let selectAll = false
     for (const token of options.characters) {
       if (token.toLowerCase() === 'all') {
+        selectAll = true
         for (const character of CHARACTERS) ids.add(character.characterId)
         continue
       }
@@ -268,10 +288,38 @@ export function selectModels(
     }
     for (const characterId of ids) {
       const candidates = index.models.filter(
-        (model) => kindOf(model) === 'character' && model.characterId === characterId
+        (model) =>
+          kindOf(model) === 'character' &&
+          model.characterId === characterId &&
+          (options.includeBlack || !isBlackSilhouette(model.id))
       )
       const best = preferredModel(candidates)
       if (best) selected.set(best.id, best)
+      if (options.allOutfits) {
+        const sorted = [...candidates].sort((a, b) => {
+          const collabA = /^clb\d+_/.test(a.id.replace(/^v2_/, '')) ? 1 : 0
+          const collabB = /^clb\d+_/.test(b.id.replace(/^v2_/, '')) ? 1 : 0
+          return (
+            collabA - collabB ||
+            costumeRank(a.id) - costumeRank(b.id) ||
+            generationOf(a.id) - generationOf(b.id) ||
+            a.id.localeCompare(b.id)
+          )
+        })
+        for (const entry of sorted) selected.set(entry.id, entry)
+      }
+    }
+    if (selectAll && (options.includeSub || options.notableIds?.size)) {
+      for (const model of index.models) {
+        if (!options.includeBlack && isBlackSilhouette(model.id)) continue
+        const kind = kindOf(model)
+        const hasMotions = Boolean(model.motion || model.motions?.length)
+        if (options.notableIds?.has(model.id)) {
+          selected.set(model.id, model)
+        } else if (options.includeSub && kind === 'sub' && hasMotions) {
+          selected.set(model.id, model)
+        }
+      }
     }
   }
 

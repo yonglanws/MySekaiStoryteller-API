@@ -1,5 +1,8 @@
 # 服务器优化与稳定性设计（2026-11-12）
 
+> [!NOTE]
+> **历史设计存档（2026-11-12）**：本设计文档为 2026-11-12 服务器调优的归档记录，现行部署与参数规格请以 [部署指南](../../../doc/host-deployment.md) 和 [导出模式](../../../doc/export-modes.md) 为准。
+
 > 记录日期：2026-11-12。本文是实施后补齐的设计文档，用于审计“为什么这样改、取舍是什么、如何验证”。
 > 执行方式：用户在当晚要求直接完成优化、测试与部署（明天上线），因此没有单独的审批往返；所有决策均以实测数据为依据。
 
@@ -20,30 +23,30 @@
 
 ## 2. 约束
 
-| 项 | 实测 |
-| --- | --- |
-| CPU | Intel i5-4590，4 核 4 线程 |
-| 内存 | 15.9 GB，负载下已用约 10 GB |
-| GPU | NVIDIA CMP 40HX，8 GB 显存 |
-| 磁盘 | `/` 63 GB（14 GB 可用）、`/vol2` 55 GB（17 GB 可用）、`/vol3` 111 GB（14 GB 可用） |
-| 共享服务 | Irodori-TTS `:8088`（单合成槽、单 GPU）、new-api `:5000`、AstrBot `:6185` |
-| 聊天 TTS | `astrbot_plugin_Irodori_TTS`，`auto.tts_prob=1.0`（每条回复配音） |
+| 项       | 实测                                                                               |
+| -------- | ---------------------------------------------------------------------------------- |
+| CPU      | Intel i5-4590，4 核 4 线程                                                         |
+| 内存     | 15.9 GB，负载下已用约 10 GB                                                        |
+| GPU      | NVIDIA CMP 40HX，8 GB 显存                                                         |
+| 磁盘     | `/` 63 GB（14 GB 可用）、`/vol2` 55 GB（17 GB 可用）、`/vol3` 111 GB（14 GB 可用） |
+| 共享服务 | Irodori-TTS `:8088`（单合成槽、单 GPU）、new-api `:5000`、AstrBot `:6185`          |
+| 聊天 TTS | `astrbot_plugin_Irodori_TTS`，`auto.tts_prob=1.0`（每条回复配音）                  |
 
 关键约束：Irodori 与两个渲染宿主共用同一张 8 GB 显卡；聊天 TTS 与视频 TTS 共用一个 FIFO 合成槽。
 
 ## 3. 实测基线（优化前）
 
-| 场景 | 结果 |
-| --- | --- |
-| MSST 空闲 | 一个 Chrome GPU 进程连续 9 小时 99% SM；整卡 100%、96 W、75 度，`/health` 仍显示全部 idle |
-| ournotes 12 句 / 36 秒纯渲染 | 总 207.5 s，渲染段 195.2 s（约 5.5 fps），成片 4.33 MB（libx264） |
-| ournotes 编码 | 每次渲染日志固定出现 `h264_nvenc failed → h264_amf failed → h264_qsv failed`，最终 libx264 |
-| Irodori 显存 | 常驻 5.4 GB（LoRA 缓存 8 个，每个 adapter 约 323 MB 磁盘） |
-| MSST 24 snippet 导出 | 1290.7 s（21.5 分钟），其中 TTS 约 14 分钟 |
-| TTS 排队 | 聊天高峰 5-8 请求/分钟；单句 `elapsed` 100-284 秒，`X-Irodori-Total-To-Decode` 仅 3-8 秒 |
-| MSST 桥接 TTS | `/bridge/proxy/tts-fetch` 写死 120 秒超时，与 `tts.timeoutMs=180s` 不一致；高峰每 2 分钟一条 `TimeoutError`，该句被静音跳过 |
-| MSST 临时帧 | fast 导出成功后 `/tmp/mss-hf-*` 不删除，每份 50-400 MB；1 小时积压 5 份约 1.4 GB |
-| ournotes Chrome 崩溃 | 渲染中杀 Chrome，任务不失败，占队列槽直到 `render.taskTimeoutMs`（1 小时） |
+| 场景                         | 结果                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| MSST 空闲                    | 一个 Chrome GPU 进程连续 9 小时 99% SM；整卡 100%、96 W、75 度，`/health` 仍显示全部 idle                                   |
+| ournotes 12 句 / 36 秒纯渲染 | 总 207.5 s，渲染段 195.2 s（约 5.5 fps），成片 4.33 MB（libx264）                                                           |
+| ournotes 编码                | 每次渲染日志固定出现 `h264_nvenc failed → h264_amf failed → h264_qsv failed`，最终 libx264                                  |
+| Irodori 显存                 | 常驻 5.4 GB（LoRA 缓存 8 个，每个 adapter 约 323 MB 磁盘）                                                                  |
+| MSST 24 snippet 导出         | 1290.7 s（21.5 分钟），其中 TTS 约 14 分钟                                                                                  |
+| TTS 排队                     | 聊天高峰 5-8 请求/分钟；单句 `elapsed` 100-284 秒，`X-Irodori-Total-To-Decode` 仅 3-8 秒                                    |
+| MSST 桥接 TTS                | `/bridge/proxy/tts-fetch` 写死 120 秒超时，与 `tts.timeoutMs=180s` 不一致；高峰每 2 分钟一条 `TimeoutError`，该句被静音跳过 |
+| MSST 临时帧                  | fast 导出成功后 `/tmp/mss-hf-*` 不删除，每份 50-400 MB；1 小时积压 5 份约 1.4 GB                                            |
+| ournotes Chrome 崩溃         | 渲染中杀 Chrome，任务不失败，占队列槽直到 `render.taskTimeoutMs`（1 小时）                                                  |
 
 ## 4. 方案比较
 
@@ -133,17 +136,17 @@ render():  Promise.race([job.result, browser.onClosed() -> throw])
 
 ## 6. 错误处理与降级
 
-| 故障 | 行为 |
-| --- | --- |
+| 故障                   | 行为                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
 | MSST worker 浏览器崩溃 | 该任务失败（`Render worker wX crashed during export`），其他 worker/任务不受影响；浏览器自动重启 |
-| MSST 空闲页面 | ticker 停止，GPU 0% |
-| MSST 导出超时 | API 返回 504，取消任务并释放 worker；插件侧按 `export_timeout` 提示 |
-| MSST 客户端断连 | `res.on('close')` 取消导出，避免孤儿渲染 |
-| ournotes Chrome 崩溃 | 任务秒级失败，队列释放；下一任务正常 |
-| ournotes 取消 | 排队中/运行中取消都计数并释放 Chrome |
-| TTS 排队超时 | 宿主 `tts.timeoutMs=600s` 覆盖服务端 300s 等待；不再 180s 提前掐断 |
-| 磁盘临时帧 | 成功后即时删；失败/崩溃由 6 小时 sweep + 15 分钟定时器兜底 |
-| 进程假死 | 看门狗连续 3 次健康失败后重启 |
+| MSST 空闲页面          | ticker 停止，GPU 0%                                                                              |
+| MSST 导出超时          | API 返回 504，取消任务并释放 worker；插件侧按 `export_timeout` 提示                              |
+| MSST 客户端断连        | `res.on('close')` 取消导出，避免孤儿渲染                                                         |
+| ournotes Chrome 崩溃   | 任务秒级失败，队列释放；下一任务正常                                                             |
+| ournotes 取消          | 排队中/运行中取消都计数并释放 Chrome                                                             |
+| TTS 排队超时           | 宿主 `tts.timeoutMs=600s` 覆盖服务端 300s 等待；不再 180s 提前掐断                               |
+| 磁盘临时帧             | 成功后即时删；失败/崩溃由 6 小时 sweep + 15 分钟定时器兜底                                       |
+| 进程假死               | 看门狗连续 3 次健康失败后重启                                                                    |
 
 ## 7. 测试与验收
 
@@ -176,13 +179,13 @@ render():  Promise.race([job.result, browser.onClosed() -> throw])
 
 ## 8. 风险与回滚
 
-| 风险 | 说明 | 缓解 / 回滚 |
-| --- | --- | --- |
-| 共享 TTS 饱和 | 聊天 `tts_prob=1.0` + 47-59 句剧本会超过 60 分钟，实测两次 3600s 超时 | 插件超时已提到 7200s；建议 `tts_prob` 0.4-0.5 或 `max_lines` 24-30 / `targetMinutes 2`；宿主参数无法根治 |
-| Irodori 缓存 3 导致换入换出 | 多角色聊天时 adapter 重载增加 | 若显存允许可调回 5-8；2+2 下保持 3 |
-| 4 核 CPU 上限 | 2 个 MSST fast 导出时 `avgPumpFps` 3.7-4.5（单任务约 6.4） | 保持 2 并发；不要盲目加 worker |
-| 新构建未重启 | 运行进程仍是旧代码 | 部署后 `systemctl restart`；本次已在 21:46 重启并验证帧清理 |
-| 看门狗误杀 | 健康检查短暂超时 | 连续 3 次失败才重启，2 分钟间隔 |
+| 风险                        | 说明                                                                  | 缓解 / 回滚                                                                                              |
+| --------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 共享 TTS 饱和               | 聊天 `tts_prob=1.0` + 47-59 句剧本会超过 60 分钟，实测两次 3600s 超时 | 插件超时已提到 7200s；建议 `tts_prob` 0.4-0.5 或 `max_lines` 24-30 / `targetMinutes 2`；宿主参数无法根治 |
+| Irodori 缓存 3 导致换入换出 | 多角色聊天时 adapter 重载增加                                         | 若显存允许可调回 5-8；2+2 下保持 3                                                                       |
+| 4 核 CPU 上限               | 2 个 MSST fast 导出时 `avgPumpFps` 3.7-4.5（单任务约 6.4）            | 保持 2 并发；不要盲目加 worker                                                                           |
+| 新构建未重启                | 运行进程仍是旧代码                                                    | 部署后 `systemctl restart`；本次已在 21:46 重启并验证帧清理                                              |
+| 看门狗误杀                  | 健康检查短暂超时                                                      | 连续 3 次失败才重启，2 分钟间隔                                                                          |
 
 ### 回滚
 

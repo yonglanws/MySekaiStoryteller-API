@@ -1,0 +1,8021 @@
+{
+  "format": "msst.bgm-semantics/1",
+  "generatedAt": "2026-11-17T23:52:51.318Z",
+  "source": "soundtracks+corpus:2370scenarios",
+  "tracks": {
+    "01_an_02": {
+      "name": "白石杏角色主题变奏曲",
+      "category": "角色主题",
+      "mood": "律动街头",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "角色主题",
+        "律动街头"
+      ],
+      "description": "律动街头·中快 | 白石杏相关个人剧情曲，充满热情与街头活力",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "律动街头",
+        "中快",
+        "角色主题",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "02_haruka_02": {
+      "name": "桐谷遥角色主题变奏曲",
+      "category": "角色主题",
+      "mood": "温暖治愈",
+      "tempo": "中拍",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "角色主题",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中拍 | 桐谷遥相关个人剧情曲，沉稳温柔又带有偶像的坚定",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中拍",
+        "角色主题",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00003": {
+      "name": "Slapstick!!",
+      "category": "日常喜剧",
+      "mood": "元气欢快",
+      "tempo": "快板",
+      "unit": "通用",
+      "scenes": [
+        "日常喜剧",
+        "元气欢快"
+      ],
+      "description": "元气欢快·快板 | 活泼俏皮的闹剧喜剧 BGM，适合吐槽、热闹拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "快板",
+        "日常喜剧",
+        "通用"
+      ]
+    },
+    "bgm00006": {
+      "name": "微笑的暖阳",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 柔和阳光般的日常舒缓 BGM，适合温柔谈心、解开心结与日常相处",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "通用"
+      ]
+    },
+    "bgm00015": {
+      "name": "道化師の行進",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00016": {
+      "name": "泪水顺心而下",
+      "category": "催泪抒情",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "催泪抒情",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 弦乐与钢琴交织的深情悲伤曲，适合伤心落泪、痛苦挣扎与坦白脆弱",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "催泪抒情",
+        "通用"
+      ]
+    },
+    "bgm00016_01": {
+      "name": "泪水顺心而下（变奏版）",
+      "category": "催泪抒情",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "催泪抒情",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 弦乐与钢琴交织的深情悲伤曲，适合伤心落泪、痛苦挣扎与坦白脆弱",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "催泪抒情",
+        "通用"
+      ]
+    },
+    "bgm00017": {
+      "name": "心意一定能传达…",
+      "category": "感动收束",
+      "mood": "温暖治愈",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "感动收束",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·慢板 | 柔和而满怀希望的抒情曲，适合情绪释放后的温柔和解",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "慢板",
+        "感动收束",
+        "通用"
+      ]
+    },
+    "bgm00018": {
+      "name": "此刻眼前的日常",
+      "category": "日常聊天",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "日常聊天",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 最百搭的平和平稳日常对话 BGM，不抢台词风头",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "日常聊天",
+        "通用"
+      ]
+    },
+    "bgm00020": {
+      "name": "雀跃的季节",
+      "category": "明快日常",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "明快日常",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 轻盈愉快的日常节拍，适合出游计划、期待与分享喜悦",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "明快日常",
+        "通用"
+      ]
+    },
+    "bgm00021": {
+      "name": "静谧日常絮语",
+      "category": "日常谈心",
+      "mood": "轻松日常",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "日常谈心",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中慢 | 高频剧情平缓过渡曲，安静自然，适合室内交谈与思索",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中慢",
+        "日常谈心",
+        "通用"
+      ]
+    },
+    "bgm00022": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00022)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00024": {
+      "name": "温柔星霜",
+      "category": "温情回忆",
+      "mood": "温暖治愈",
+      "tempo": "慢板",
+      "unit": "Leo/need",
+      "scenes": [
+        "温情回忆",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·慢板 | 极具代表性的温柔吉他/钢琴抒情曲，适合青春回忆、夜晚谈心与深厚羁绊",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "慢板",
+        "温情回忆",
+        "Leo/need"
+      ]
+    },
+    "bgm00025": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00025)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00026": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00026)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00027": {
+      "name": "剧情张力·紧张悬疑（25时，Nightcord de.） (bgm00027)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00028": {
+      "name": "剧情通用·轻松日常 (bgm00028)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00029": {
+      "name": "愛しい人へ",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00030": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00030)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00031": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00031)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00032": {
+      "name": "黄昏的游行",
+      "category": "黄昏剧场",
+      "mood": "奇幻活泼",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "黄昏剧场",
+        "奇幻活泼"
+      ],
+      "description": "奇幻活泼·中快 | 带一点落日余晖与梦想气息的 WxS 舞台曲，适合排练收尾与梦想对谈",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "奇幻活泼",
+        "中快",
+        "黄昏剧场",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00034": {
+      "name": "街角沉思时刻",
+      "category": "低落思索",
+      "mood": "感伤忧郁",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "低落思索",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·中慢 | 适合独自思考、自我怀疑或沉默对视时的低落氛围曲",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "中慢",
+        "低落思索",
+        "通用"
+      ]
+    },
+    "bgm00035": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00035)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00036": {
+      "name": "セカイの狭間にて",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00038": {
+      "name": "紧绷的琴弦",
+      "category": "冲突危机",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "冲突危机",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 急促紧张的冲突推进曲，适合争执、突发状况或焦急赶路",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "冲突危机",
+        "通用"
+      ]
+    },
+    "bgm00038_01": {
+      "name": "紧绷的琴弦（变奏版）",
+      "category": "冲突危机",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "冲突危机",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 急促紧张的冲突推进曲，适合争执、突发状况或焦急赶路",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "冲突危机",
+        "通用"
+      ]
+    },
+    "bgm00039": {
+      "name": "暗涌的焦虑",
+      "category": "凝重对峙",
+      "mood": "紧张悬疑",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "凝重对峙",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中慢 | 压抑沉重的低音氛围曲，适合犹豫挣扎、误解或秘密揭开前",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中慢",
+        "凝重对峙",
+        "通用"
+      ]
+    },
+    "bgm00039_01": {
+      "name": "暗涌的焦虑（变奏版）",
+      "category": "凝重对峙",
+      "mood": "紧张悬疑",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "凝重对峙",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中慢 | 压抑沉重的低音氛围曲，适合犹豫挣扎、误解或秘密揭开前",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中慢",
+        "凝重对峙",
+        "通用"
+      ]
+    },
+    "bgm00040": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00040)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00041": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00041)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00042": {
+      "name": "温情日常·温暖治愈（Leo/need） (bgm00042)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Leo/need"
+      ]
+    },
+    "bgm00043": {
+      "name": "抒情回忆·感伤忧郁（25时，Nightcord de.） (bgm00043)",
+      "category": "抒情回忆",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "抒情回忆",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "抒情回忆",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00044": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00044)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00045": {
+      "name": "Pretty Good Days",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Leo/need"
+      ]
+    },
+    "bgm00046": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00046)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00047": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00047)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00048": {
+      "name": "迈向光芒照耀的未来",
+      "category": "希望高潮",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "希望高潮",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的突破感配乐，适合跨越困难、共同约定未来",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "希望高潮",
+        "通用"
+      ]
+    },
+    "bgm00049": {
+      "name": "こわ～いおばけの舞踏会！",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00050": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00050)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00051": {
+      "name": "譲れないもの",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00052": {
+      "name": "青春フルスロットル！",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00053": {
+      "name": "青く燃やせ、その心を",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00054": {
+      "name": "Not Bad Afternoon",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00055": {
+      "name": "深邃的凝望",
+      "category": "内心独白",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "内心独白",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 沉静克制的低语氛围曲，适合严肃对话、内心独白与认真探讨",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "内心独白",
+        "通用"
+      ]
+    },
+    "bgm00056": {
+      "name": "虹色ガーランド",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00056_01": {
+      "name": "虹色ガーランド",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00057": {
+      "name": "真・愛のテーマ～True Love Song～",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00058": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00058)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00059": {
+      "name": "煌びやかな幕開け",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00060": {
+      "name": "聖なる夜の贈りもの",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00061": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00061)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00062": {
+      "name": "新たな気持ちで",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00063": {
+      "name": "剧情通用·轻松日常 (bgm00063)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00064": {
+      "name": "剧情通用·轻松日常 (bgm00064)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00065": {
+      "name": "存在する孤独",
+      "category": "深夜思索",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "深夜思索",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "深夜思索",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00066": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00066)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00067": {
+      "name": "STAND OUT!!",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00068": {
+      "name": "桜舞う季節に",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00069": {
+      "name": "新しい一歩を",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00070": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00070)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00071": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00071)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00073": {
+      "name": "温情日常·温暖治愈（虚拟歌手） (bgm00073)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00074": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00074)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00075": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00075)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00076": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00076)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00077": {
+      "name": "高原の景色を君と",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00078": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00078)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00079": {
+      "name": "貴方への誓い",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "通用"
+      ]
+    },
+    "bgm00080": {
+      "name": "Shine",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00081": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00081)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00082": {
+      "name": "lamplighter",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00083": {
+      "name": "温情日常·温暖治愈（Leo/need） (bgm00083)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Leo/need"
+      ]
+    },
+    "bgm00084": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00084)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00085": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00085)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00086": {
+      "name": "Breakthrough",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00087": {
+      "name": "祭り囃子は夏夜に響き",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "通用"
+      ]
+    },
+    "bgm00088": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00088)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00089": {
+      "name": "Not Bad ONE Day",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00090": {
+      "name": "Glitter Beach",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "通用"
+      ]
+    },
+    "bgm00091": {
+      "name": "わがままFairy",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00092": {
+      "name": "勇気を出して、その一歩を",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00093": {
+      "name": "月のうさぎは微笑んで",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "通用"
+      ]
+    },
+    "bgm00094": {
+      "name": "Protostar",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00095": {
+      "name": "剧情通用·轻松日常 (bgm00095)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00096": {
+      "name": "“We are in the springtime of life!”",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00097": {
+      "name": "Birthday Celebrations!",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00098": {
+      "name": "Now or Never",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00099": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00099)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00100": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00100)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00101": {
+      "name": "マジカルタイム♪",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00102": {
+      "name": "剧情通用·轻松日常 (bgm00102)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00103": {
+      "name": "剧情通用·轻松日常 (bgm00103)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00104": {
+      "name": "剧情通用·轻松日常 (bgm00104)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00105": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00105)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00106": {
+      "name": "深淵より覗くもの",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00107": {
+      "name": "剧情通用·轻松日常 (bgm00107)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00108": {
+      "name": "温情日常·温暖治愈（虚拟歌手） (bgm00108)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00109": {
+      "name": "雪の下、微かなぬくもり",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "通用"
+      ]
+    },
+    "bgm00110": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00110)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00111": {
+      "name": "MORE MORE Happy Xmas night♪",
+      "category": "欢快日常",
+      "mood": "元气欢快",
+      "tempo": "快板",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快日常",
+        "元气欢快"
+      ],
+      "description": "元气欢快·快板 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "快板",
+        "欢快日常",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00112": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00112)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00113": {
+      "name": "温情日常·温暖治愈（Vivid BAD SQUAD） (bgm00113)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00114": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00114)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00115": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00115)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00116": {
+      "name": "初御空の下で",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00117": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00117)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00118": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00118)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00119": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00119)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00120": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00120)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00121": {
+      "name": "抒情回忆·感伤忧郁（25时，Nightcord de.） (bgm00121)",
+      "category": "抒情回忆",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "抒情回忆",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "抒情回忆",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00122": {
+      "name": "秘密のレシピ",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00123": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00123)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00124": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00124)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00125": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00125)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00126": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00126)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00127": {
+      "name": "チョコレートファクトリーは大忙し",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00128": {
+      "name": "剧情通用·轻松日常 (bgm00128)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00129": {
+      "name": "Rejection Reaction",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00130": {
+      "name": "What if...?",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00131": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00131)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00132": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00132)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00133": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00133)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00134": {
+      "name": "剧情通用·轻松日常 (bgm00134)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00135": {
+      "name": "幸せを数えて",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00136": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00136)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00137": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00137)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00138": {
+      "name": "勝負あるところに我あり",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00139": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00139)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00140": {
+      "name": "剧情张力·紧张悬疑（Wonderlands×Showtime） (bgm00140)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00141": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00141)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00142": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00142)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00143": {
+      "name": "繋がる心、幸せの環",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00144": {
+      "name": "Emotions Whisper",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00145": {
+      "name": "未踏のジャングル探検隊",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00146": {
+      "name": "Empty Heart",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00147": {
+      "name": "剧情通用·轻松日常 (bgm00147)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00148": {
+      "name": "Enjoy Sports!",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00149": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00149)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00150": {
+      "name": "No Whereabouts",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Leo/need"
+      ]
+    },
+    "bgm00151": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00151)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00152": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00152)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00153": {
+      "name": "Kick it down, Survive.",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00154": {
+      "name": "encounter",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00155": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00155)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00156": {
+      "name": "Each Pain",
+      "category": "催泪抒情",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "催泪抒情",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "催泪抒情",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00157": {
+      "name": "Lonely Meteor",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00158": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00158)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00159": {
+      "name": "ありのままの色で",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00160": {
+      "name": "Step by Step",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00161": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00161)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00162": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00162)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00163": {
+      "name": "剧情通用·轻松日常 (bgm00163)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00164": {
+      "name": "lamplighter（ピアノアレンジ）",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00165": {
+      "name": "剧情通用·轻松日常 (bgm00165)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00166": {
+      "name": "乙女なハニーマスタード",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00167": {
+      "name": "Beckoning Forest",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00168": {
+      "name": "僕らの星座線",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00169": {
+      "name": "at 25:00",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00170": {
+      "name": "平凡时光 (Ordinary Time)",
+      "category": "日常闲聊",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "日常闲聊",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 现代清爽的日常对话配乐，适合咖啡厅、客厅与放学聊日常",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "日常闲聊",
+        "通用"
+      ]
+    },
+    "bgm00171": {
+      "name": "共享这份温暖",
+      "category": "温情治愈",
+      "mood": "温暖治愈",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "温情治愈",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·慢板 | 柔和安抚人心的日常抒情曲，适合彼此鼓励与体贴关怀",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "慢板",
+        "温情治愈",
+        "通用"
+      ]
+    },
+    "bgm00172": {
+      "name": "瞳の奥にあるもの",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00173": {
+      "name": "沉入深处 (into deep)",
+      "category": "深沉内省",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "深沉内省",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 深邃寂静的氛围音乐，适合深夜独处、创伤回忆或陷入沉思",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "深沉内省",
+        "通用"
+      ]
+    },
+    "bgm00174": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00174)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00175": {
+      "name": "昔日之影",
+      "category": "回忆往昔",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "回忆往昔",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 带着淡淡遗憾的怀旧曲，适合回忆过去、物是人非之感",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "回忆往昔",
+        "通用"
+      ]
+    },
+    "bgm00176": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00176)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00177": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00177)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00178": {
+      "name": "Engraving of my soul",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00179": {
+      "name": "雪白の射手",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00180": {
+      "name": "宁静的归途",
+      "category": "放学黄昏",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "放学黄昏",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 夕阳西下并肩回家的平和配乐，适合黄昏街道或天台谈心",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "放学黄昏",
+        "通用"
+      ]
+    },
+    "bgm00181": {
+      "name": "薄明の一刻",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00182": {
+      "name": "剧情张力·紧张悬疑（25时，Nightcord de.） (bgm00182)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00183": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00183)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00184": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00184)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00185": {
+      "name": "新春てんてこ舞い音頭",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00186": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00186)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00187": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00187)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00188": {
+      "name": "つなぐ音色、かけがえのないもの",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00189": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00189)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00190": {
+      "name": "快乐玩具进行曲",
+      "category": "喜剧玩闹",
+      "mood": "奇幻活泼",
+      "tempo": "快板",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "喜剧玩闹",
+        "奇幻活泼"
+      ],
+      "description": "奇幻活泼·快板 | 俏皮跳跃的玩具箱节奏，适合笑梦整活、奇思妙想与轻喜剧",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "喜剧玩闹",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00191": {
+      "name": "space escape",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00192": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00192)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00193": {
+      "name": "残憶",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "Leo/need",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "Leo/need"
+      ]
+    },
+    "bgm00194": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00194)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00195": {
+      "name": "淡香の追憶",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00196": {
+      "name": "Dreamy Time",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00198": {
+      "name": "剧情通用·轻松日常 (bgm00198)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00199": {
+      "name": "Cooking For You",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00200": {
+      "name": "道化師は夢うつつ",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00201": {
+      "name": "安らぎのおもてなし",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00202": {
+      "name": "温情日常·温暖治愈（Vivid BAD SQUAD） (bgm00202)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00203": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00203)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00204": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00204)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00205": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00205)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00206": {
+      "name": "Fly high!",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00207": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00207)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00208": {
+      "name": "幾千光年の不死鳥",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00209": {
+      "name": "零下の対岸",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00210": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00210)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00211": {
+      "name": "Symphony City",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00212": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00212)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00213": {
+      "name": "剧情通用·轻松日常 (bgm00213)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00214": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00214)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00215": {
+      "name": "殷切的心意",
+      "category": "真情流露",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "真情流露",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 诚挚而略带苦涩的情感配乐，适合倾诉烦恼与彼此理解",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "真情流露",
+        "通用"
+      ]
+    },
+    "bgm00216": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00216)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00217": {
+      "name": "Melting in night",
+      "category": "深夜思索",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "深夜思索",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "深夜思索",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00218": {
+      "name": "高鳴りは波のように",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00219": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00219)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00220": {
+      "name": "あなたへ捧ぐ鐘の音",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00221": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00221)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00222": {
+      "name": "Keep it real.",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00223": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00223)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00224": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00224)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00225": {
+      "name": "魑魅魍魎は冥き闇より",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00226": {
+      "name": "優々たる絶佳",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00227": {
+      "name": "絆の告白",
+      "category": "抒情回忆",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "抒情回忆",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "抒情回忆",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00228": {
+      "name": "絆の侵食",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00229": {
+      "name": "何度でも、この４人で",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00230": {
+      "name": "say cheese!!",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00231": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00231)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00232": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00232)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00233": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00233)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00234": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00234)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00235": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00235)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00236": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00236)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00237": {
+      "name": "笑顔でハッピーエンドを",
+      "category": "欢快日常",
+      "mood": "元气欢快",
+      "tempo": "快板",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快日常",
+        "元气欢快"
+      ],
+      "description": "元气欢快·快板 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "快板",
+        "欢快日常",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00238": {
+      "name": "What We Wish For",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "Leo/need"
+      ]
+    },
+    "bgm00239": {
+      "name": "Seasons Roll Around",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00240": {
+      "name": "“We run through the future!”",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00241": {
+      "name": "On this special day, thank you!",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00242": {
+      "name": "Dawn",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00243": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00243)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00244": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00244)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00245": {
+      "name": "形なき存在",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00246": {
+      "name": "剧情张力·紧张悬疑（虚拟歌手） (bgm00246)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00247": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00247)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00248": {
+      "name": "熱烈歓迎バーニンマイソウル",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00249": {
+      "name": "Grand Finale",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00250": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00250)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00251": {
+      "name": "温情日常·温暖治愈（虚拟歌手） (bgm00251)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00252": {
+      "name": "剧情通用·轻松日常 (bgm00252)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00253": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00253)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00254": {
+      "name": "あっちこっちアニマル大行進！",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00255": {
+      "name": "欢快互动·元气欢快 (bgm00255)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "通用"
+      ]
+    },
+    "bgm00256": {
+      "name": "Dear memories",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00257": {
+      "name": "『大好き』",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00258": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00258)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00259": {
+      "name": "Break It Down!",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00260": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00260)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00261": {
+      "name": "剧情通用·轻松日常 (bgm00261)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00262": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00262)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00263": {
+      "name": "southern cross",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00264": {
+      "name": "夜晚谈心·宁静深夜（虚拟歌手） (bgm00264)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00265": {
+      "name": "夢に向かってヨーソロー！",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00266": {
+      "name": "Bet all life",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00267": {
+      "name": "温情日常·温暖治愈（Vivid BAD SQUAD） (bgm00267)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00268": {
+      "name": "Thoughts of Each",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00269": {
+      "name": "剧情通用·轻松日常 (bgm00269)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00270": {
+      "name": "剧情通用·轻松日常 (bgm00270)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00271": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00271)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00272": {
+      "name": "『夜更け』",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00273": {
+      "name": "star trail",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00274": {
+      "name": "Beat yourself.",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00275": {
+      "name": "剧情通用·轻松日常 (bgm00275)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00276": {
+      "name": "剧情通用·轻松日常 (bgm00276)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00277": {
+      "name": "剧情通用·轻松日常 (bgm00277)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00278": {
+      "name": "剧情通用·轻松日常 (bgm00278)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00279": {
+      "name": "Someday flowers will bloom",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00280": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00280)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00281": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00281)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00282": {
+      "name": "世と戯れ、命と舞う",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00283": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00283)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00284": {
+      "name": "幸せの魔法をかけて",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00285": {
+      "name": "剧情通用·轻松日常 (bgm00285)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00286": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00286)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00287": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00287)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00288": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00288)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00289": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00289)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00290": {
+      "name": "きら星の旅人たち",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00291": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00291)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00292": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00292)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00293": {
+      "name": "Growing Colors",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00294": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00294)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00295": {
+      "name": "剧情通用·轻松日常 (bgm00295)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00296": {
+      "name": "夢の舞台で、想いを重ねて",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00297": {
+      "name": "Unbearable Pain",
+      "category": "催泪抒情",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "催泪抒情",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "催泪抒情",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00298": {
+      "name": "Music is Eloquent",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00299": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00299)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00300": {
+      "name": "Blue Moments",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00301": {
+      "name": "茜さす唐紅と君の頬",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00302": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00302)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00303": {
+      "name": "鈴蘭のように",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00304": {
+      "name": "fleur enchantée",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00305": {
+      "name": "銀花の贈り物",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00306": {
+      "name": "Renewed Resolve",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00307": {
+      "name": "Another Street",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00308": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00308)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00309": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00309)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00310": {
+      "name": "剧情通用·轻松日常 (bgm00310)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00311": {
+      "name": "『ありがとう』で繋がって",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00312": {
+      "name": "All For Meow!",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00313": {
+      "name": "剧情通用·轻松日常 (bgm00313)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00314": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00314)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00315": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00315)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00316": {
+      "name": "4-Way Intersection Street",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00317": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00317)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00318": {
+      "name": "Rewritten Smile",
+      "category": "欢快日常",
+      "mood": "元气欢快",
+      "tempo": "快板",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快日常",
+        "元气欢快"
+      ],
+      "description": "元气欢快·快板 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "快板",
+        "欢快日常",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00319": {
+      "name": "thump-thump",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00320": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00320)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00321": {
+      "name": "Unconnected Cord",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00322": {
+      "name": "Star Fragmentation",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00323": {
+      "name": "温情日常·温暖治愈（Leo/need） (bgm00323)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "Leo/need"
+      ]
+    },
+    "bgm00324": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00324)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00325": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00325)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00326": {
+      "name": "Dreams like jewels",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00327": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00327)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00328": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00328)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00329": {
+      "name": "100億点のきゅん♡",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00330": {
+      "name": "Dear Flower of Hope",
+      "category": "激励成长",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "激励成长",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "激励成长",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00331": {
+      "name": "剧情张力·紧张悬疑（MORE MORE JUMP!） (bgm00331)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00332": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00332)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00333": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00333)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00334": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00334)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00335": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00335)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00336": {
+      "name": "A World Linked by Wishes",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00337": {
+      "name": "きっとまた、会えるよね",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00338": {
+      "name": "鮮烈に、煌めく『今』を",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00339": {
+      "name": "剧情通用·轻松日常 (bgm00339)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00340": {
+      "name": "剧情通用·轻松日常 (bgm00340)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00341": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00341)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00342": {
+      "name": "剧情通用·轻松日常 (bgm00342)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00343": {
+      "name": "Silent Bloom",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00344": {
+      "name": "剧情通用·轻松日常 (bgm00344)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00345": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00345)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm00346": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00346)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00347": {
+      "name": "欢快互动·元气欢快（Leo/need） (bgm00347)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "bgm00348": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00348)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00349": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00349)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00350": {
+      "name": "剧情张力·紧张悬疑（MORE MORE JUMP!） (bgm00350)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00351": {
+      "name": "剧情通用·轻松日常 (bgm00351)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00352": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00352)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00353": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00353)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00354": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm00354)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm00355": {
+      "name": "温情日常·温暖治愈（虚拟歌手） (bgm00355)",
+      "category": "温情日常",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "温情日常",
+        "温暖治愈"
+      ],
+      "description": "温暖治愈·中慢 | 温柔舒缓的情感叙事配乐，适合谈心、安慰、回忆与和解时刻，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "温情日常",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00356": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00356)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00357": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00357)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00358": {
+      "name": "剧情通用·轻松日常 (bgm00358)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "bgm00359": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00359)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00360": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00360)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00361": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00361)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm00362": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00362)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00363": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm00363)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm00364": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00364)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00367": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00367)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00368": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00368)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm00369": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm00369)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm10001": {
+      "name": "特别剧情·神秘空灵 (bgm10001)",
+      "category": "特别剧情",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "特别剧情",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别剧情",
+        "通用"
+      ]
+    },
+    "bgm10002": {
+      "name": "特别剧情·神秘空灵 (bgm10002)",
+      "category": "特别剧情",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "特别剧情",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别剧情",
+        "通用"
+      ]
+    },
+    "bgm10003": {
+      "name": "特别剧情·神秘空灵 (bgm10003)",
+      "category": "特别剧情",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "特别剧情",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别剧情",
+        "通用"
+      ]
+    },
+    "bgm10004": {
+      "name": "特别剧情·神秘空灵 (bgm10004)",
+      "category": "特别剧情",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "特别剧情",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别剧情",
+        "通用"
+      ]
+    },
+    "bgm10005": {
+      "name": "特别剧情·神秘空灵 (bgm10005)",
+      "category": "特别剧情",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "通用",
+      "scenes": [
+        "特别剧情",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别剧情",
+        "通用"
+      ]
+    },
+    "bgm90001": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90001)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90002": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90002)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90003": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm90003)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm90004": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90004)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90005": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90005)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90006": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm90006)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm90007": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm90007)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm90008": {
+      "name": "欢快互动·元气欢快（虚拟歌手） (bgm90008)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm90009": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90009)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90010": {
+      "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm90010)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm90011": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90011)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm90012": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm90012)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm90013": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm90013)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm90026": {
+      "name": "演出高潮·热血激昂 (bgm90026)",
+      "category": "演出高潮",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "演出高潮",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "演出高潮",
+        "通用"
+      ]
+    },
+    "bgm90032": {
+      "name": "演出高潮·热血激昂 (bgm90032)",
+      "category": "演出高潮",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "演出高潮",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "演出高潮",
+        "通用"
+      ]
+    },
+    "bgm90037": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (bgm90037)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm90038": {
+      "name": "演出高潮·热血激昂 (bgm90038)",
+      "category": "演出高潮",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "演出高潮",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "演出高潮",
+        "通用"
+      ]
+    },
+    "bgm90039": {
+      "name": "演出高潮·热血激昂 (bgm90039)",
+      "category": "演出高潮",
+      "mood": "热血激昂",
+      "tempo": "中快",
+      "unit": "通用",
+      "scenes": [
+        "演出高潮",
+        "热血激昂"
+      ],
+      "description": "热血激昂·中快 | 明亮振奋的鼓舞向前配乐，适合立下约定、团队鼓劲与高潮突破",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "热血激昂",
+        "中快",
+        "演出高潮",
+        "通用"
+      ]
+    },
+    "bgm90040": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (bgm90040)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm_april_fool_2026": {
+      "name": "愚人节 2026 特别主题曲",
+      "mood": "奇幻活泼",
+      "tempo": "快板",
+      "category": "特别活动",
+      "unit": "通用",
+      "scenes": [
+        "愚人节",
+        "奇幻闹剧"
+      ],
+      "description": "奇幻活泼·快板 | 2026 愚人节限定主题曲，适合脑洞与喜剧场景",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "特别活动",
+        "通用"
+      ]
+    },
+    "bgm_area00001": {
+      "name": "With Gratitude / Crystal Blessing",
+      "category": "催泪抒情",
+      "mood": "感伤忧郁",
+      "tempo": "慢板",
+      "unit": "通用",
+      "scenes": [
+        "催泪抒情",
+        "感伤忧郁"
+      ],
+      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "感伤忧郁",
+        "慢板",
+        "催泪抒情",
+        "通用"
+      ]
+    },
+    "bgm_area00002": {
+      "name": "笑顔をお届け！",
+      "category": "欢快日常",
+      "mood": "元气欢快",
+      "tempo": "快板",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快日常",
+        "元气欢快"
+      ],
+      "description": "元气欢快·快板 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "快板",
+        "欢快日常",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm_area00003": {
+      "name": "Street Crews",
+      "category": "SEKAI氛围",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "SEKAI氛围",
+        "神秘空灵"
+      ],
+      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI氛围",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "bgm_area00004": {
+      "name": "音楽隊はどこまでも",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "bgm_area00005": {
+      "name": "心景",
+      "category": "深夜思索",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "深夜思索",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "深夜思索",
+        "25时，Nightcord de."
+      ]
+    },
+    "bgm_area_aprilfool_2022": {
+      "name": "愚人节特别区域主题曲",
+      "mood": "奇幻活泼",
+      "tempo": "中快",
+      "category": "特别活动",
+      "unit": "通用",
+      "scenes": [
+        "愚人节",
+        "轻松整活",
+        "跨团互动"
+      ],
+      "description": "奇幻活泼·中快 | 愚人节限定区域主题曲，适合轻松搞怪与跨团聚会",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "奇幻活泼",
+        "中快",
+        "特别活动",
+        "通用"
+      ]
+    },
+    "bgm_area_bigtree": {
+      "name": "心愿巨树主题曲",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "category": "SEKAI主题",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "心愿空间",
+        "回忆交汇"
+      ],
+      "description": "神秘空灵·中慢 | 巨树主题环境曲，适合异世界探索与静谧思索",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI主题",
+        "虚拟歌手"
+      ]
+    },
+    "bgm_area_e_collabo": {
+      "name": "特别联动区域主题曲",
+      "mood": "奇幻活泼",
+      "tempo": "中快",
+      "category": "特别活动",
+      "unit": "联动",
+      "scenes": [
+        "特别活动",
+        "联动舞台"
+      ],
+      "description": "奇幻活泼·中快 | 特别联动活动区域主题曲，节奏鲜明轻快",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "奇幻活泼",
+        "中快",
+        "特别活动",
+        "联动"
+      ]
+    },
+    "bgm_area_leoneed_untitled_2": {
+      "name": "教室「世界」主题曲（区域版）",
+      "mood": "温暖治愈",
+      "tempo": "中拍",
+      "category": "SEKAI主题",
+      "unit": "Leo/need",
+      "scenes": [
+        "教室「世界」",
+        "乐队日常"
+      ],
+      "description": "温暖治愈·中拍 | 教室「世界」区域环境曲，适合 Leo/need 校园乐队日常",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "温暖治愈",
+        "中拍",
+        "SEKAI主题",
+        "Leo/need"
+      ]
+    },
+    "bgm_area_moremore_untitled_2": {
+      "name": "舞台「世界」主题曲（区域版）",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "category": "SEKAI主题",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "舞台「世界」",
+        "偶像日常"
+      ],
+      "description": "元气欢快·中快 | 舞台「世界」区域环境曲，清新明朗",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "SEKAI主题",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "bgm_area_movie_2025": {
+      "name": "剧场版「世界」主题曲",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "category": "特别活动",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "剧场版「世界」",
+        "相遇与歌声"
+      ],
+      "description": "神秘空灵·中慢 | 2025 剧场版特别「世界」氛围曲，适合特别篇与跨越时空的对话",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "特别活动",
+        "虚拟歌手"
+      ]
+    },
+    "bgm_area_wishtree": {
+      "name": "心愿之树「世界」主题曲",
+      "mood": "神秘空灵",
+      "tempo": "中慢",
+      "category": "SEKAI主题",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "心愿之树",
+        "世界交汇",
+        "跨越成长"
+      ],
+      "description": "神秘空灵·中慢 | 心愿之树「世界」氛围曲，澄澈宏阔，适合心愿交流与重要转折",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "神秘空灵",
+        "中慢",
+        "SEKAI主题",
+        "虚拟歌手"
+      ]
+    },
+    "collaboration_akuno": {
+      "name": "恶之大罪联动「世界」主题曲",
+      "mood": "神秘空灵",
+      "tempo": "慢板",
+      "category": "特别活动",
+      "unit": "联动",
+      "scenes": [
+        "古典宫廷",
+        "命运叙事",
+        "联动剧场"
+      ],
+      "description": "神秘空灵·慢板 | 恶之大罪联动区域曲，带有古典歌剧般的宿命与庄严感",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "神秘空灵",
+        "慢板",
+        "特别活动",
+        "联动"
+      ]
+    },
+    "collaboration_sanrio": {
+      "name": "三丽鸥联动「世界」主题曲",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "category": "特别活动",
+      "unit": "联动",
+      "scenes": [
+        "可爱互动",
+        "游园聚会",
+        "轻松日常"
+      ],
+      "description": "元气欢快·中快 | 三丽鸥联动可爱主题曲，甜美轻快，适合治愈互动",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "特别活动",
+        "联动"
+      ]
+    },
+    "leoneed_untitled": {
+      "name": "教室「世界」主题曲",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "category": "SEKAI主题",
+      "unit": "Leo/need",
+      "scenes": [
+        "教室「世界」",
+        "乐队谈心",
+        "放学回忆"
+      ],
+      "description": "温暖治愈·中慢 | Leo/need 教室「世界」主题曲，带夕阳余韵与青春怀旧感",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "温暖治愈",
+        "中慢",
+        "SEKAI主题",
+        "Leo/need"
+      ]
+    },
+    "leoneed_untitled_2": {
+      "name": "教室「世界」主题曲 II",
+      "mood": "温暖治愈",
+      "tempo": "中拍",
+      "category": "SEKAI主题",
+      "unit": "Leo/need",
+      "scenes": [
+        "教室「世界」",
+        "乐队排练",
+        "希望前行"
+      ],
+      "description": "温暖治愈·中拍 | 教室「世界」新版主题曲，开朗清澈，适合团体讨论与积极推进",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "温暖治愈",
+        "中拍",
+        "SEKAI主题",
+        "Leo/need"
+      ]
+    },
+    "moremore_untitled": {
+      "name": "舞台「世界」主题曲",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "category": "SEKAI主题",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "舞台「世界」",
+        "偶像练习",
+        "元气鼓励"
+      ],
+      "description": "元气欢快·中快 | MMJ 舞台「世界」主题曲，明亮偶像流行风格，适合活力与练习场景",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "SEKAI主题",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "moremore_untitled_2": {
+      "name": "舞台「世界」主题曲 II",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "category": "SEKAI主题",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "舞台「世界」",
+        "直播策划",
+        "偶像聚会"
+      ],
+      "description": "元气欢快·中快 | 舞台「世界」新版主题曲，闪耀轻快，适合偶像日常与企划讨论",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "SEKAI主题",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "nightcode_untitled": {
+      "name": "无人「世界」主题曲",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "category": "SEKAI主题",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "无人「世界」",
+        "深夜独处",
+        "内心独白"
+      ],
+      "description": "宁静深夜·慢板 | 25时 无人「世界」主题曲，空灵清冷，适合深夜对话、内省与温柔安慰",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "SEKAI主题",
+        "25时，Nightcord de."
+      ]
+    },
+    "nightcode_untitled_2": {
+      "name": "无人「世界」主题曲 II",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "category": "SEKAI主题",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "无人「世界」",
+        "深夜心绪",
+        "坦诚倾诉"
+      ],
+      "description": "宁静深夜·慢板 | 无人「世界」新版主题曲，静谧而带微光，适合夜晚深谈与情绪余韵",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "SEKAI主题",
+        "25时，Nightcord de."
+      ]
+    },
+    "normal_area": {
+      "name": "涩谷街区日常主题曲",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "category": "区域日常",
+      "unit": "通用",
+      "scenes": [
+        "涩谷逛街",
+        "日常散步",
+        "轻松闲聊"
+      ],
+      "description": "轻松日常·中拍 | 涩谷现实街区通用主题曲，明快温和，适合逛街与日常开场",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "区域日常",
+        "通用"
+      ]
+    },
+    "song00001_off_f": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (song00001_off_f)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "song00001_on_s": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (song00001_on_s)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "song00002_minori_s": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (song00002_minori_s)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "song00002_off_f": {
+      "name": "剧情张力·紧张悬疑（MORE MORE JUMP!） (song00002_off_f)",
+      "category": "剧情张力",
+      "mood": "紧张悬疑",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "剧情张力",
+        "紧张悬疑"
+      ],
+      "description": "紧张悬疑·中快 | 紧绷压迫的转折冲突配乐，适合误会争执、危机推进与心绪焦灼，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "紧张悬疑",
+        "中快",
+        "剧情张力",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "song00002_off_sabi": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (song00002_off_sabi)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "song00002_on_s": {
+      "name": "剧情通用·轻松日常 (song00002_on_s)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "song00003_off_f": {
+      "name": "欢快互动·元气欢快（Leo/need） (song00003_off_f)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "song00004_off_f": {
+      "name": "欢快互动·元气欢快（MORE MORE JUMP!） (song00004_off_f)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "MORE MORE JUMP!",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "MORE MORE JUMP!"
+      ]
+    },
+    "song00005_off_f": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (song00005_off_f)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "song00005_off_s": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (song00005_off_s)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "song00006_off_f": {
+      "name": "夜晚谈心·宁静深夜（虚拟歌手） (song00006_off_f)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "虚拟歌手",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 虚拟歌手 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "虚拟歌手"
+      ]
+    },
+    "song00007_off_f": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (song00007_off_f)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "song00008_off_s": {
+      "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (song00008_off_s)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Vivid BAD SQUAD 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "song00009_off_s": {
+      "name": "夜晚谈心·宁静深夜（25时，Nightcord de.） (song00009_off_s)",
+      "category": "夜晚谈心",
+      "mood": "宁静深夜",
+      "tempo": "慢板",
+      "unit": "25时，Nightcord de.",
+      "scenes": [
+        "夜晚谈心",
+        "宁静深夜"
+      ],
+      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "夜晚谈心",
+        "25时，Nightcord de."
+      ]
+    },
+    "song00010_off_s": {
+      "name": "剧情通用·轻松日常 (song00010_off_s)",
+      "category": "剧情通用",
+      "mood": "轻松日常",
+      "tempo": "中拍",
+      "unit": "通用",
+      "scenes": [
+        "剧情通用",
+        "轻松日常"
+      ],
+      "description": "轻松日常·中拍 | 平稳轻快的日常对话配乐，适合课间、客厅、街头闲聊与开场铺垫",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "轻松日常",
+        "中拍",
+        "剧情通用",
+        "通用"
+      ]
+    },
+    "song00011_off_s": {
+      "name": "欢快互动·元气欢快（Leo/need） (song00011_off_s)",
+      "category": "欢快互动",
+      "mood": "元气欢快",
+      "tempo": "中快",
+      "unit": "Leo/need",
+      "scenes": [
+        "欢快互动",
+        "元气欢快"
+      ],
+      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Leo/need 剧情",
+      "bundlePrefix": "sound/scenario/bgm/",
+      "tags": [
+        "元气欢快",
+        "中快",
+        "欢快互动",
+        "Leo/need"
+      ]
+    },
+    "vividbad_untitled": {
+      "name": "街头「世界」主题曲",
+      "mood": "律动街头",
+      "tempo": "中快",
+      "category": "SEKAI主题",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "街头「世界」",
+        "Crase Cafe",
+        "音乐交流"
+      ],
+      "description": "律动街头·中快 | VBS 街头「世界」主题曲，都市节拍感强，适合咖啡厅与街头音乐话题",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "律动街头",
+        "中快",
+        "SEKAI主题",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "vividbad_untitled_2": {
+      "name": "街头「世界」主题曲 II",
+      "mood": "律动街头",
+      "tempo": "中快",
+      "category": "SEKAI主题",
+      "unit": "Vivid BAD SQUAD",
+      "scenes": [
+        "街头「世界」",
+        "挑战目标",
+        "街头排练"
+      ],
+      "description": "律动街头·中快 | 街头「世界」新版主题曲，节奏利落，适合立志与伙伴对谈",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "律动街头",
+        "中快",
+        "SEKAI主题",
+        "Vivid BAD SQUAD"
+      ]
+    },
+    "wonderlands_untitled": {
+      "name": "奇幻乐园「世界」主题曲",
+      "mood": "奇幻活泼",
+      "tempo": "快板",
+      "category": "SEKAI主题",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "奇幻乐园「世界」",
+        "剧团闹剧",
+        "创意演出"
+      ],
+      "description": "奇幻活泼·快板 | WxS 奇幻乐园「世界」主题曲，马戏团般跳脱欢快，适合热闹排戏",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "SEKAI主题",
+        "Wonderlands×Showtime"
+      ]
+    },
+    "wonderlands_untitled_2": {
+      "name": "奇幻乐园「世界」主题曲 II",
+      "mood": "奇幻活泼",
+      "tempo": "快板",
+      "category": "SEKAI主题",
+      "unit": "Wonderlands×Showtime",
+      "scenes": [
+        "奇幻乐园「世界」",
+        "Wonderhoy",
+        "盛大演出"
+      ],
+      "description": "奇幻活泼·快板 | 奇幻乐园「世界」新版主题曲，充满梦想与剧场童话氛围",
+      "bundlePrefix": "sound/area_bgm/",
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "SEKAI主题",
+        "Wonderlands×Showtime"
+      ]
+    }
+  }
+}

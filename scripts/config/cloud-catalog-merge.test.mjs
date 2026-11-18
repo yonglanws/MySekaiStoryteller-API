@@ -85,26 +85,29 @@ test('catalog builds from cloud only and resolves names for images and bgm', () 
   assert.equal(data.models[0].cloudId, '01ichika_normal')
   assert.equal(data.models[0].path, cloudCatalog.models[0].path)
 
-  assert.equal(data.imageDetails.length, 1, 'unnamed cloud backgrounds stay out of the picker')
+  assert.equal(data.imageDetails.length, 2, 'all cloud backgrounds remain addressable')
   assert.equal(data.imageDetails[0].name, '教室')
   assert.equal(data.images[0], 'cloud/bg_a000301')
+  assert.equal(data.images[1], 'cloud/bg_unknown')
 
-  assert.equal(data.bgmDetails.length, 1, 'unnamed cloud bgm stays out of the picker')
+  assert.equal(data.bgmDetails.length, 2, 'all cloud bgm remain addressable without soundtracks-only drop')
   assert.equal(data.bgmDetails[0].name, 'Slapstick!!')
   assert.ok(data.cloud)
 
   const view = new CatalogView(data)
   assert.equal(view.canonicalImage('教室'), 'cloud/bg_a000301')
   assert.equal(view.canonicalImage('bg_a000301'), 'cloud/bg_a000301')
+  assert.equal(view.canonicalImage('bg_unknown'), 'cloud/bg_unknown')
   assert.equal(view.canonicalImage('神山高校 ３年Ａ組'), 'cloud/bg_a000301')
   assert.equal(view.canonicalImage('不存在的背景'), null)
   assert.equal(view.canonicalBgm('Slapstick!!'), 'cloud/bgm00003.mp3')
   assert.equal(view.canonicalBgm('bgm00003'), 'cloud/bgm00003.mp3')
+  assert.equal(view.canonicalBgm('01_an_02'), 'cloud/01_an_02.mp3')
   assert.equal(view.canonicalBgm('cloud/bgm00003.mp3'), 'cloud/bgm00003.mp3')
-  assert.equal(view.imagePromptChoices().length, 1)
+  assert.equal(view.imagePromptChoices().length, 1, 'prompt choices still filter unnamed entries')
 })
 
-test('local entries win over cloud entries with the same name', () => {
+test('local models do not suppress alternate cloud outfits or missing characters', () => {
   const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-cloud-local-'))
   fs.mkdirSync(path.join(resourcesDir, 'models'), { recursive: true })
   fs.writeFileSync(
@@ -118,18 +121,57 @@ test('local entries win over cloud entries with the same name', () => {
       ''
     ].join('\n')
   )
+  const multiCloudCatalog = {
+    ...cloudCatalog,
+    models: [
+      { ...cloudCatalog.models[0], isDefault: true },
+      {
+        ...cloudCatalog.models[0],
+        id: '01ichika_school',
+        outfitCategory: '校服',
+        outfitLabel: '校服',
+        isDefault: false,
+        path: 'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json'
+      },
+      {
+        id: '21miku_normal',
+        characterId: 21,
+        name: '初音未来',
+        shortName: '初音',
+        bundle: 'live2d/model/21miku_normal',
+        motionBundles: ['live2d/motion/21miku_motion_base'],
+        path: 'cloud/21miku_normal/21miku_normal/21miku_normal.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_smile_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_smile_01',
+        isDefault: true
+      }
+    ]
+  }
   const catalog = new ResourceCatalog(
     logger,
     { paths: { resources: resourcesDir } },
-    () => cloudCatalog
+    () => multiCloudCatalog
   )
   const data = catalog.get()
-  assert.equal(data.models.length, 1, 'cloud duplicate character is skipped')
   assert.equal(data.models[0].source, 'local')
   assert.equal(data.models[0].path, '01ichika_local/01ichika.model3.json')
+  assert.ok(
+    data.models.some((m) => m.cloudId === '01ichika_school'),
+    'alternate cloud outfit is not suppressed by local models.yaml'
+  )
+  assert.ok(
+    data.models.some((m) => m.cloudId === '21miku_normal'),
+    'missing virtual singer is not suppressed by local models.yaml'
+  )
+  assert.ok(
+    !data.models.some((m) => m.cloudId === '01ichika_normal'),
+    'local entry still wins default slot for same character'
+  )
 })
 
-test('cloud names attach to matching local background and bgm files', () => {
+test('cloud names attach to matching local background and bgm files without dropping cloud variants', () => {
   const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-cloud-attach-'))
   fs.mkdirSync(path.join(resourcesDir, 'images'), { recursive: true })
   fs.mkdirSync(path.join(resourcesDir, 'audio', 'bgm'), { recursive: true })
@@ -142,15 +184,15 @@ test('cloud names attach to matching local background and bgm files', () => {
     () => cloudCatalog
   )
   const data = catalog.get()
-  assert.equal(data.images.length, 1, 'no cloud/ duplicate is added')
   assert.equal(data.images[0], 'bg_a000301.webp')
-  assert.equal(data.imageDetails.length, 1)
+  assert.ok(!data.images.includes('cloud/bg_a000301'), 'no cloud/ duplicate for matching local stem')
+  assert.ok(data.images.includes('cloud/bg_unknown'), 'other cloud backgrounds stay available')
   assert.equal(data.imageDetails[0].name, '教室')
   assert.equal(data.imageDetails[0].id, 'bg_a000301')
 
-  assert.equal(data.bgm.length, 1, 'no cloud/ duplicate is added')
   assert.equal(data.bgm[0], 'bgm00003.mp3')
-  assert.equal(data.bgmDetails.length, 1)
+  assert.ok(!data.bgm.includes('cloud/bgm00003.mp3'), 'no cloud/ duplicate for matching local stem')
+  assert.ok(data.bgm.includes('cloud/01_an_02.mp3'), 'other cloud bgm stay available')
   assert.equal(data.bgmDetails[0].name, 'Slapstick!!')
   assert.equal(data.bgmDetails[0].id, 'bgm00003')
 

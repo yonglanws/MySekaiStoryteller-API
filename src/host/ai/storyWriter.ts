@@ -118,21 +118,27 @@ function filterByCast(view: CatalogView, cast: string[] | undefined): CatalogVie
     tokens.some((token) => {
       const name = model.name.toLowerCase()
       const shortName = (model.shortName ?? '').toLowerCase()
+      const cloudId = (model.cloudId ?? '').toLowerCase()
       const numeric = /^\d+$/.test(token)
       return (
         String(model.id) === token ||
         name === token ||
         shortName === token ||
+        (cloudId !== '' && cloudId === token) ||
         // 数字 token 只做精确 id 匹配；否则 cast ["1"] 会把 10~19 也一起选中
         (!numeric &&
           (String(model.id).toLowerCase().includes(token) ||
-            model.path.toLowerCase().includes(token)))
+            model.path.toLowerCase().includes(token) ||
+            (cloudId !== '' && cloudId.includes(token))))
       )
     })
   )
   if (matched.length === 0) {
     throw new StoryGenerationError(`cast 无法匹配任何角色：${cast.join(', ')}`, [
-      `可用角色：${view.models.map((model) => `${model.name}(${model.id})`).join('、')}`
+      `可用角色：${view
+        .primaryModels()
+        .map((model) => `${model.name}(${model.id})`)
+        .join('、')}`
     ])
   }
   return view.withModels(matched)
@@ -197,10 +203,14 @@ export class StoryWriter {
     prompt: string,
     options: GenerateStoryOptions
   ): Promise<CatalogView> {
-    if (view.models.length <= 2) return view
+    const primary = view.primaryModels()
+    if (primary.length <= 2) {
+      const picked = primary.map((m) => view.resolveOutfitVariant(m, prompt) ?? m)
+      return view.withModels(picked)
+    }
     const maxFastCast = (options.mode ?? 'story') === 'chat' ? 2 : 4
 
-    const mentioned = view.models.filter((model) => {
+    const mentioned = primary.filter((model) => {
       const fullName = model.name
       const shortName = model.shortName ?? ''
       return (
@@ -209,29 +219,30 @@ export class StoryWriter {
       )
     })
     if (mentioned.length > 0) {
+      const picked = mentioned.slice(0, maxFastCast).map((m) => view.resolveOutfitVariant(m, prompt) ?? m)
       this.logger.info(
-        `[AI] 场景点名角色：${mentioned
-          .slice(0, maxFastCast)
+        `[AI] 场景点名角色：${picked
           .map((model) => view.shortName(model))
           .join('、')}`
       )
-      return view.withModels(mentioned.slice(0, maxFastCast))
+      return view.withModels(picked)
     }
 
     const history = options.history ?? []
     for (let index = history.length - 1; index >= 0; index--) {
       const role = history[index]?.role ?? ''
       if (!role || ['user', 'assistant', 'system', '用户', '助手'].includes(role)) continue
-      const model = view.models.find(
+      const model = primary.find(
         (item) => item.name === role || (item.shortName ?? '') === role
       )
       if (model) {
-        this.logger.info(`[AI] 沿用上一轮角色：${view.shortName(model)}`)
-        return view.withModels([model])
+        const chosen = view.resolveOutfitVariant(model, prompt) ?? model
+        this.logger.info(`[AI] 沿用上一轮角色：${view.shortName(chosen)}`)
+        return view.withModels([chosen])
       }
     }
 
-    if (!this.llm.enabled) return view
+    if (!this.llm.enabled) return view.withModels(primary)
     try {
       const messages = buildQuickCastPrompt(view, {
         scene: prompt,
@@ -258,9 +269,13 @@ export class StoryWriter {
         const text = String(item ?? '').trim()
         const model = /^\d+$/.test(text)
           ? view.modelById(Number(text))
-          : (view.models.find((entry) => entry.name === text || (entry.shortName ?? '') === text) ??
+          : (primary.find((entry) => entry.name === text || (entry.shortName ?? '') === text) ??
+            view.models.find((entry) => (entry.cloudId ?? '') === text) ??
             null)
-        if (model && !cast.includes(model)) cast.push(model)
+        if (model) {
+          const resolved = /^\d+$/.test(text) ? model : (view.resolveOutfitVariant(model, prompt) ?? model)
+          if (!cast.includes(resolved)) cast.push(resolved)
+        }
       }
       if (cast.length > 0) {
         this.logger.info(`[AI] 快速选角：${cast.slice(0, maxFastCast).map((model) => view.shortName(model)).join('、')}`)
@@ -270,7 +285,7 @@ export class StoryWriter {
       if (options.signal?.aborted) throw error
       this.logger.warn(`[AI] 快速选角失败，保留完整角色池：${errorMessage(error)}`)
     }
-    return view
+    return view.withModels(primary)
   }
 
   async generate(options: GenerateStoryOptions): Promise<GenerateStoryResult> {

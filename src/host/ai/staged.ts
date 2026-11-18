@@ -7,7 +7,12 @@ import {
   personaFor,
   type PersonaEntry
 } from './personas'
-import { isStandingMotion, type CatalogView } from './prompt'
+import {
+  formatBgmPromptLine,
+  formatImagePromptLine,
+  isStandingMotion,
+  type CatalogView
+} from './prompt'
 import {
   CURATED_SCENARIO_EFFECTS,
   isVirtualSingerModel,
@@ -308,7 +313,7 @@ function pickCalmOrMatchingFacial(
   )
 }
 
-/** 把模型写出的角色标识（modelId / 名称 / 路径 / 人设别名）收束到目录里的角色。 */
+/** 把模型写出的角色标识（modelId / cloudId / 名称 / 路径 / 服装描述 / 人设别名）收束到目录里的角色。 */
 function resolveModel(
   view: CatalogView,
   personas: PersonaEntry[],
@@ -322,25 +327,54 @@ function resolveModel(
   if (/^\d+$/.test(text)) return view.modelById(Number(text))
 
   const lower = text.toLowerCase()
-  const direct = view.models.find((model) => {
-    const path = model.path.toLowerCase()
-    const base = path.split('/').pop() ?? path
+  const exactCloudOrPath = view.models.find((model) => {
+    const p = model.path.toLowerCase()
+    const base = p.split('/').pop() ?? p
     return (
-      model.name.toLowerCase() === lower ||
-      (model.shortName ?? '').toLowerCase() === lower ||
-      path === lower ||
+      (model.cloudId ?? '').toLowerCase() === lower ||
+      p === lower ||
       base === lower
     )
   })
-  if (direct) return direct
+  if (exactCloudOrPath) return exactCloudOrPath
 
-  const aliasHits = view.models.filter((model) => {
-    const persona = personaFor(personas, model)
-    return persona
-      ? [persona.name, ...persona.aliases].some((alias) => alias.toLowerCase() === lower)
-      : false
-  })
-  if (aliasHits.length === 1) return aliasHits[0]
+  // 按默认服装优先匹配角色全名/简称
+  const directByName = view.models
+    .filter(
+      (model) =>
+        model.name.toLowerCase() === lower ||
+        (model.shortName ?? '').toLowerCase() === lower
+    )
+    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+  if (directByName.length > 0) return directByName[0]
+
+  // 支持「角色名 服装」（如「星乃一歌 校服」「瑞希 私服」）
+  for (const primary of view.primaryModels()) {
+    const shortName = view.shortName(primary)
+    if (
+      (primary.name && text.includes(primary.name)) ||
+      (shortName && text.includes(shortName))
+    ) {
+      const rest = text
+        .replace(primary.name, '')
+        .replace(shortName, '')
+        .trim()
+      if (rest) {
+        const outfitHit = view.resolveOutfitVariant(primary, rest)
+        if (outfitHit) return outfitHit
+      }
+    }
+  }
+
+  const aliasHits = view.models
+    .filter((model) => {
+      const persona = personaFor(personas, model)
+      return persona
+        ? [persona.name, ...persona.aliases].some((alias) => alias.toLowerCase() === lower)
+        : false
+    })
+    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+  if (aliasHits.length > 0) return aliasHits[0]
   return null
 }
 
@@ -485,39 +519,77 @@ function isGroupPrompt(scene: string, view: CatalogView): boolean {
 // 第一段：选角与分幕节奏表（planEpisode）
 // ---------------------------------------------------------------------------
 
+function compactOutfitOptions(view: CatalogView, model: CatalogModel, scene: string): string {
+  const variants = view.outfitsFor(model)
+  if (variants.length <= 1) return ''
+  // 每个服装大类取代表性变体，优先命中的场景服装关键词放前
+  const picked: CatalogModel[] = []
+  const seenCats = new Set<string>()
+  const sceneMatched = view.resolveOutfitVariant(model, scene)
+  if (sceneMatched && sceneMatched.id !== model.id) {
+    picked.push(sceneMatched)
+    seenCats.add(sceneMatched.outfitCategory ?? '')
+  }
+  for (const variant of variants) {
+    if (picked.length >= 6) break
+    const cat = variant.outfitCategory || variant.outfitLabel || String(variant.id)
+    if (cat === '特殊' && !/幼年|剪影|童年/.test(scene)) continue
+    if (seenCats.has(cat)) continue
+    seenCats.add(cat)
+    picked.push(variant)
+  }
+  if (picked.length <= 1) return ''
+  return ` [服装: ${picked.map((v) => `${v.outfitCategory || v.outfitLabel || '默认'}=${v.id}`).join(', ')}]`
+}
+
 export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions): StagedMessages {
   const budget = lineBudget(options.targetMinutes)
+  const primary = view.primaryModels()
+  const mainRoster = primary.filter((m) => !m.isSubCharacter)
+  const subRosterAll = primary.filter((m) => m.isSubCharacter)
+  const subMentioned = subRosterAll.filter(
+    (m) =>
+      (m.name && options.scene.includes(m.name)) ||
+      (m.shortName && m.shortName.length >= 2 && options.scene.includes(m.shortName))
+  )
+  const subShown = [
+    ...subMentioned,
+    ...subRosterAll.filter((m) => !subMentioned.includes(m)).slice(0, Math.max(0, 12 - subMentioned.length))
+  ]
+
   const groupStyle = isGroupPrompt(options.scene, view)
-  const models = view.models
+  const models = mainRoster
     .map((model) => {
       const persona = personaFor(options.personas, model)
-      const group = persona?.group ? `（${persona.group}）` : ''
+      const group = model.unit ? `（${model.unit}）` : persona?.group ? `（${persona.group}）` : ''
       const summary = personaSummary(persona)
-      return `- modelId=${model.id} ${view.shortName(model)}${group}${
-        summary ? `：${summary}` : '：'
+      const outfits = compactOutfitOptions(view, model, options.scene)
+      return `- modelId=${model.id} ${view.shortName(model)}${group}${outfits}${
+        summary ? `：${summary}` : ''
       }`
     })
     .join('\n')
 
+  const subModelsBlock =
+    subShown.length > 0
+      ? `\n\n## 可选配角 / 特别角色（按需选用）\n${subShown
+          .map((m) => `- modelId=${m.id} ${view.shortName(m)}${m.outfitLabel ? `（${m.outfitLabel}）` : ''}`)
+          .join('\n')}`
+      : ''
+
   const backgrounds = view
-    .imagePromptChoices(80)
-    .map((detail) => {
-      const name = detail.name || detail.file
-      const ref = detail.id ?? detail.file
-      return detail.description
-        ? `- ${name}（${ref}）：${detail.description}`
-        : `- ${name}（${ref}）`
-    })
+    .imagePromptChoices(72, options.scene)
+    .map((detail) => formatImagePromptLine(detail))
     .join('\n')
 
   const bgmList = view
-    .bgmPromptChoices(25)
-    .map((detail) => `- ${detail.name || detail.file}（${detail.id ?? detail.file}）：${detail.description}`)
+    .bgmPromptChoices(32, options.scene)
+    .map((detail) => formatBgmPromptLine(detail))
     .join('\n')
 
-  const first = view.models[0]
-  const second = view.models[1]
-  const third = view.models[2]
+  const first = mainRoster[0] ?? view.models[0]
+  const second = mainRoster[1] ?? view.models[1]
+  const third = mainRoster[2] ?? view.models[2]
   const exampleCast = [
     {
       modelId: first?.id ?? 1,
@@ -583,13 +655,13 @@ ${options.scene}
 - 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词
 - 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线
 
-## 可选角色（modelId — 显示名）
-${models || '（资源目录为空）'}
+## 可选角色（modelId — 显示名；若角色有 [服装: 校服=ID...]，按场景时段与场合直接选对应服装 modelId）
+${models || '（资源目录为空）'}${subModelsBlock}
 
-## 可选背景
+## 可选背景（按场景地点、时段[白天/黄昏/夜晚/深夜]与[室内/室外]精准选择）
 ${backgrounds || '（目录暂未提供背景）'}
 
-## 可选 BGM（含 silence 静音切停）
+## 可选 BGM（按[情绪·节奏]选择；含 silence 静音切停）
 ${bgmList || '（可使用 keep 或 silence）'}
 
 ## 选角与分幕要求
@@ -620,11 +692,14 @@ export interface QuickCastOptions {
  * 避免把 26 份完整人设全部塞进主提示词。
  */
 export function buildQuickCastPrompt(view: CatalogView, options: QuickCastOptions): StagedMessages {
-  const roster = view.models
+  const primary = view.primaryModels()
+  const roster = primary
+    .filter((m) => !m.isSubCharacter || (m.name && options.scene.includes(m.name)) || (m.shortName && options.scene.includes(m.shortName)))
     .map((model) => {
       const persona = personaFor(options.personas, model)
       const summary = personaSummary(persona)
-      return `- modelId=${model.id} ${view.shortName(model)}${summary ? `：${summary}` : ''}`
+      const outfits = compactOutfitOptions(view, model, options.scene)
+      return `- modelId=${model.id} ${view.shortName(model)}${outfits}${summary ? `：${summary}` : ''}`
     })
     .join('\n')
   const history = (options.history ?? [])
@@ -690,13 +765,17 @@ export function normalizeCastPlan(
     if (cast.length >= 5) break
     const item = typeof entry === 'string' ? { name: entry } : entry
     if (!isRecord(item)) continue
-    const model = resolveFirstModel(view, options.personas, [
+    let model = resolveFirstModel(view, options.personas, [
       item.model,
       item.modelId,
       item.id,
       item.name,
       item.shortName
     ])
+    const outfitHint = str(item.outfit ?? item.costume ?? item.cloth ?? '').trim()
+    if (model && outfitHint) {
+      model = view.resolveOutfitVariant(model, outfitHint) ?? model
+    }
     if (!model || seen.has(model.id)) continue
     seen.add(model.id)
     cast.push(castMemberFor(view, model, item.role))
@@ -1576,18 +1655,15 @@ export function buildStagingPrompt(
     )
     .join('\n')
 
+  const stagingQuery = `${options.scene} ${plan.event} ${plan.cast.map((c) => c.name).join(' ')} ${dialogue.lines.slice(0, 12).map((l) => l.content).join(' ')}`
   const backgrounds = view
-    .imagePromptChoices(80)
-    .map((detail) => {
-      const name = detail.name || detail.file
-      const ref = detail.id ?? detail.file
-      return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
-    })
+    .imagePromptChoices(64, stagingQuery)
+    .map((detail) => formatImagePromptLine(detail))
     .join('\n')
 
   const bgms = view
-    .bgmPromptChoices(35)
-    .map((d) => `- ${d.name || d.file}（${d.id ?? d.file}）：${d.description}`)
+    .bgmPromptChoices(36, stagingQuery)
+    .map((d) => formatBgmPromptLine(d))
     .join('\n')
 
   const firstBgm = view.bgmPromptChoices(10)[0]?.file ?? ''
@@ -1667,7 +1743,7 @@ ${backgrounds || '（无）'}
 ${bgms || '（无描述 BGM，可留空或用 silence）'}
 
 ## 可用官方音效 PlaySe（约每 40 句安排 2~4 次，按动作/环境语义选）
-${view.seList()}
+${view.seList(stagingQuery, 32)}
 
 ## 舞台与摄影规则
 ${presenceRule}
@@ -2183,22 +2259,15 @@ export function buildDirectionPrompt(
     })
     .join('\n')
 
+  const directionQuery = `${options.scene} ${plan.event} ${plan.cast.map((c) => c.name).join(' ')}`
   const backgrounds = view
-    .imagePromptChoices(60)
-    .map((detail) => {
-      const name = detail.name || detail.file
-      const ref = detail.id ?? detail.file
-      return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
-    })
+    .imagePromptChoices(50, directionQuery)
+    .map((detail) => formatImagePromptLine(detail))
     .join('\n')
 
   const bgmChoices = view
-    .bgmPromptChoices(30)
-    .map((detail) => {
-      const name = detail.name || detail.file
-      const ref = detail.id ?? detail.file
-      return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
-    })
+    .bgmPromptChoices(30, directionQuery)
+    .map((detail) => formatBgmPromptLine(detail))
     .join('\n')
 
   const first = plan.cast[0]

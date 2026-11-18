@@ -1,5 +1,9 @@
 # 按 SekaiStoryExporter 对齐的高保真重构计划
 
+> [!NOTE]
+> **历史重构记录（已完成并合入当前管线）**：本文件记录 60fps 帧基常量、Talk 自动播放节奏、布局淡化、眨眼/呼吸/口型曲线与逐帧报告的早期对齐计划，相关能力已落地至 `src/common/official/` 与 `src/renderer/`。
+> 现行使用与配置请查阅 [故事文件格式](story-format.md) 与 [导出模式](export-modes.md)。
+
 > 上下文被压缩后先读这份文件，再读 `scripts/renderer/sekai-exporter-parity.test.mjs` 顶部的
 > “PLAN SNAPSHOT”。本计划不是“再做一个播放器”，而是把
 > `https://github.com/StarMoe-org/SekaiStoryExporter` 已经核对过的官方演出语义，落到本项目的

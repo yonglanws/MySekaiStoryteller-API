@@ -1,5 +1,5 @@
 /**
- * 云端资源目录：背景、BGM、Live2D 模型全部从公开资源站/官方 master data 生成，
+ * 云端资源目录：背景、BGM、SE、Live2D 模型全部从公开资源站/官方 master data 生成，
  * 不要求本地预下载或手工登记。
  *
  * 与 ournotes-player 的 "story site" 思路一致：目录本身只是一个清单（id → 名字 →
@@ -7,10 +7,9 @@
  * 这样 AI 只需要看到可读名字，宿主负责把名字/ID 解析成真实文件。
  *
  * 数据源：
- * - 模型：assets.pjsk.moe 的 sekai-live2d 索引 + 剧情库 `_ripper.json`
- * - 背景 / BGM：storage.exmeaning.com 的 bundle 列表
- * - 背景名：官方剧情 PlaceInfo/Telop 地点文本（scripts/assets/build-background-names.mjs）
- * - BGM 名：Sekai-World master data 的 musicSoundTracks.json
+ * - 模型：assets.pjsk.moe 的 sekai-live2d 索引 + 剧情库 `_ripper.json` + 离线服装语义库
+ * - 背景 / BGM / SE：storage.exmeaning.com 的 bundle 列表（含 scenario/bgm 与 area_bgm）
+ * - 背景/BGM/SE 中文语义：scripts/assets/build-*.mjs 离线生成的简体中文语义索引
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -33,19 +32,91 @@ import {
   type SoundtrackIndex
 } from './soundtracks'
 import backgroundNameData from './background-names.json'
+import bgmSemanticsData from './bgm-semantics.json'
+import modelMetadataData from './model-metadata.json'
+import seSemanticsData from './se-semantics.json'
 
 export const CLOUD_CATALOG_FORMAT = 'msst.cloud-catalog/1'
+export const CLOUD_CATALOG_SCHEMA_VERSION = 2
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000
-const MODEL_CONCURRENCY = 6
+const MODEL_CONCURRENCY = 10
 const DEFAULT_MOTION_PREFERENCE = ['w-normal-default01', 'w-normal-greeting01', 'w-normal-nod01']
 const DEFAULT_FACIAL_PREFERENCE = ['face_smile_01']
 
+interface BackgroundNameMeta {
+  name?: string
+  aliases?: string[]
+  category?: string
+  timeOfDay?: string
+  indoor?: string
+  tags?: string[]
+}
+
 interface BackgroundNameFile {
   format?: string
-  backgrounds?: Record<string, { name?: string; aliases?: string[] }>
+  backgrounds?: Record<string, BackgroundNameMeta>
+}
+
+interface BgmSemanticMeta {
+  name?: string
+  category?: string
+  mood?: string
+  tempo?: string
+  unit?: string
+  scenes?: string[]
+  description?: string
+  bundlePrefix?: string
+  tags?: string[]
+}
+
+interface BgmSemanticsFile {
+  format?: string
+  tracks?: Record<string, BgmSemanticMeta>
+}
+
+interface ModelMetaRecord {
+  id: string
+  characterId: number | null
+  kind?: string
+  name: string
+  shortName: string
+  unit?: string
+  outfitCategory?: string
+  outfitLabel?: string
+  isDefault?: boolean
+  isSubCharacter?: boolean
+  model3Path?: string
+  cloudPath?: string
+}
+
+interface ModelMetadataFile {
+  format?: string
+  models?: Record<string, ModelMetaRecord>
+}
+
+interface SeSemanticRecord {
+  id: string
+  file?: string
+  category?: string
+  description?: string
+  tags?: string[]
+}
+
+interface SeSemanticsFile {
+  format?: string
+  cues?: Record<string, SeSemanticRecord>
 }
 
 const backgroundNames = (backgroundNameData as BackgroundNameFile).backgrounds ?? {}
+const bgmSemantics = (bgmSemanticsData as BgmSemanticsFile).tracks ?? {}
+const modelMetadata = (modelMetadataData as ModelMetadataFile).models ?? {}
+const seSemantics = (seSemanticsData as SeSemanticsFile).cues ?? {}
+
+const NOTABLE_SUB_IDS = new Set(
+  Object.values(modelMetadata)
+    .filter((entry) => entry.isSubCharacter)
+    .map((entry) => entry.id)
+)
 
 export interface CloudModelEntry {
   /** moesekai 模型 id，如 20mizuki_normal */
@@ -53,6 +124,11 @@ export interface CloudModelEntry {
   characterId: number | null
   name: string
   shortName: string
+  unit?: string
+  outfitCategory?: string
+  outfitLabel?: string
+  isDefault?: boolean
+  isSubCharacter?: boolean
   bundle: string
   motionBundles: string[]
   /** 相对 resources/models/，指向尚未物化的 model3.json */
@@ -72,15 +148,26 @@ export interface CloudBackgroundEntry {
   /** 官方剧情中同一背景出现过的其它地点名 */
   aliases: string[]
   description: string
+  category?: string
+  timeOfDay?: string
+  indoor?: string
+  tags?: string[]
 }
 
 export interface CloudBgmEntry {
-  /** 稳定 id：bgm00003 */
+  /** 稳定 id：bgm00003 / normal_area */
   id: string
   /** 相对 resources/audio/bgm/ 的路径 */
   file: string
   name: string
   description: string
+  mood?: string
+  tempo?: string
+  category?: string
+  unit?: string
+  tags?: string[]
+  /** 远端 bundle 路径（如 sound/scenario/bgm/bgm00003 或 sound/area_bgm/normal_area） */
+  bundlePath?: string
   /** 若提取到 HCA/WAV 循环区间，则记录毫秒边界 */
   loopStartMs?: number
   loopEndMs?: number
@@ -100,6 +187,7 @@ export interface CloudSeEntry {
 
 export interface CloudCatalogData {
   format: typeof CLOUD_CATALOG_FORMAT
+  schemaVersion?: number
   generatedAt: string
   region: AssetsSettings['region']
   sources: {
@@ -160,26 +248,55 @@ function motionNames(
   return [...names].sort()
 }
 
+type RipperCache = Map<string, Promise<Awaited<ReturnType<typeof ripperManifest>>>>
+
+function cachedRipperManifest(
+  cache: RipperCache,
+  libraryRoot: string,
+  bundle: string,
+  options: RequestOptions
+): ReturnType<typeof ripperManifest> {
+  const key = `${libraryRoot}::${bundle}`
+  let promise = cache.get(key)
+  if (!promise) {
+    promise = ripperManifest(libraryRoot, bundle, options).catch((error) => {
+      cache.delete(key)
+      throw error
+    })
+    cache.set(key, promise)
+  }
+  return promise
+}
+
 async function cloudModelActions(
   entry: MoesekaiIndexEntry,
   libraryRoot: string,
   options: RequestOptions,
+  ripperCache: RipperCache,
+  useStaticModelPath: boolean,
   onProgress: (message: string) => void
 ): Promise<{ path: string; motions: string[]; facials: string[] } | null> {
-  let modelManifest
-  try {
-    modelManifest = await ripperManifest(libraryRoot, entry.bundle, options)
-  } catch (error) {
-    onProgress(`云端模型 ${entry.id} 读取包清单失败：${String(error)}`)
-    return null
+  const staticMeta = useStaticModelPath ? modelMetadata[entry.id] : undefined
+  let cloudPath = staticMeta?.cloudPath ?? ''
+
+  if (!cloudPath) {
+    let modelManifest
+    try {
+      modelManifest = await cachedRipperManifest(ripperCache, libraryRoot, entry.bundle, options)
+    } catch (error) {
+      onProgress(`云端模型 ${entry.id} 读取包清单失败：${String(error)}`)
+      return null
+    }
+    const model3File = modelManifest.files.find((file) => file.path.endsWith('.model3.json'))
+    if (!model3File) {
+      onProgress(`云端模型 ${entry.id} 没有 model3.json，已跳过`)
+      return null
+    }
+    const variant = path.basename(model3File.path, '.model3.json')
+    const model3Name = path.basename(model3File.path)
+    cloudPath = `cloud/${entry.id}/${variant}/${model3Name}`
   }
-  const model3File = modelManifest.files.find((file) => file.path.endsWith('.model3.json'))
-  if (!model3File) {
-    onProgress(`云端模型 ${entry.id} 没有 model3.json，已跳过`)
-    return null
-  }
-  const variant = path.basename(model3File.path, '.model3.json')
-  const model3Name = path.basename(model3File.path)
+
   const motions = new Set<string>()
   const facials = new Set<string>()
   const bundles = (
@@ -188,7 +305,7 @@ async function cloudModelActions(
 
   for (const bundle of [...new Set(bundles)]) {
     try {
-      const manifest = await ripperManifest(libraryRoot, bundle, options)
+      const manifest = await cachedRipperManifest(ripperCache, libraryRoot, bundle, options)
       for (const name of motionNames(manifest, 'motion')) motions.add(name)
       for (const name of motionNames(manifest, 'facial')) facials.add(name)
     } catch (error) {
@@ -197,29 +314,87 @@ async function cloudModelActions(
   }
 
   return {
-    path: `cloud/${entry.id}/${variant}/${model3Name}`,
+    path: cloudPath,
     motions: [...motions].sort(),
     facials: [...facials].sort()
   }
 }
 
-function backgroundNameOf(id: string): { name: string; aliases: string[] } {
+function backgroundMetaOf(id: string): {
+  name: string
+  aliases: string[]
+  description: string
+  category?: string
+  timeOfDay?: string
+  indoor?: string
+  tags?: string[]
+} {
   const entry = backgroundNames[id]
-  const name = typeof entry?.name === 'string' ? entry.name.trim() : ''
+  const rawName = typeof entry?.name === 'string' ? entry.name.trim() : ''
+  const name = rawName && !/^[?？]+$/.test(rawName) ? rawName : id
   const aliases = Array.isArray(entry?.aliases)
     ? entry.aliases.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
     : []
-  return { name: name && !/^[?？]+$/.test(name) ? name : id, aliases }
+  const category = typeof entry?.category === 'string' ? entry.category : undefined
+  const timeOfDay = typeof entry?.timeOfDay === 'string' ? entry.timeOfDay : undefined
+  const indoor = typeof entry?.indoor === 'string' ? entry.indoor : undefined
+  const tags = Array.isArray(entry?.tags) ? entry.tags : undefined
+
+  const metaBits = [category, timeOfDay, indoor].filter(Boolean).join('·')
+  const aliasBit = aliases.length > 0 ? `别名：${aliases.join(' / ')}` : ''
+  const description = [metaBits, aliasBit].filter(Boolean).join(' | ')
+  return { name, aliases, description, category, timeOfDay, indoor, tags }
 }
 
 function bgmLabelOf(
   id: string,
   soundtracks: SoundtrackIndex | null
-): { name: string; description: string } {
+): {
+  name: string
+  description: string
+  mood?: string
+  tempo?: string
+  category?: string
+  unit?: string
+  tags?: string[]
+} {
   const info = soundtracks?.tracks.get(soundtrackKey(id))
-  if (!info) return { name: id, description: '' }
-  const label = soundtrackLabel(info)
+  const label = info ? soundtrackLabel(info) : null
+  const sem = bgmSemantics[id] ?? bgmSemantics[id.replace(/_\d+$/, '')]
+  if (sem) {
+    const name = label?.name && label.name !== id ? label.name : sem.name || id
+    const baseDesc = sem.description || ''
+    const hasCat = label?.description && !baseDesc.includes(label.description.replace(/\s*BGM$/, ''))
+    const description =
+      hasCat && label?.description ? `${baseDesc}（${label.description}）` : baseDesc
+    return {
+      name,
+      description,
+      mood: sem.mood,
+      tempo: sem.tempo,
+      category: sem.category,
+      unit: sem.unit,
+      tags: sem.tags
+    }
+  }
+  if (!label) return { name: id, description: '' }
   return { name: label.name || id, description: label.description }
+}
+
+function inferDefaultOutfitMeta(id: string, isDefault: boolean): {
+  outfitCategory: string
+  outfitLabel: string
+} {
+  const clean = id.replace(/^v2_/, '')
+  const suffix = clean.replace(/^\d{2}[a-z]+_/, '')
+  if (suffix === 'normal') return { outfitCategory: '常服', outfitLabel: id.startsWith('v2_') ? '日常常服(新版)' : '日常常服' }
+  if (suffix.startsWith('casual')) return { outfitCategory: '私服', outfitLabel: '私服' }
+  if (suffix.startsWith('school')) return { outfitCategory: '校服', outfitLabel: '校服' }
+  if (suffix.startsWith('unit')) return { outfitCategory: '队服', outfitLabel: '团体队服' }
+  if (suffix.startsWith('sports')) return { outfitCategory: '运动服', outfitLabel: '运动服' }
+  if (suffix.startsWith('swim')) return { outfitCategory: '泳装', outfitLabel: '泳装' }
+  if (suffix.startsWith('cloth')) return { outfitCategory: '演出服', outfitLabel: `演出服(${suffix})` }
+  return { outfitCategory: isDefault ? '常服' : '活动', outfitLabel: isDefault ? '默认服装' : suffix }
 }
 
 /**
@@ -240,24 +415,54 @@ export async function buildCloudCatalog(
   progress('读取云端 Live2D 模型索引 …')
   const { index, indexUrl } = await loadMoesekaiIndex(settings, settings.region, requestOptions)
   const libraryRoot = libraryRootFor(index, settings, settings.region)
-  // 26 位角色各取一套首选服装；子角色/杂鱼不进入 AI 候选，避免目录膨胀。
-  const selected = selectModels(index, { characters: ['all'] })
-  progress(`云端模型索引：${index.models.length} 个模型，选角候选 ${selected.length} 个`)
+
+  // 选出各角色的默认首选服装 id，用于标记 isDefault，同时保留全量服装与知名配角。
+  const primaryModels = selectModels(index, { characters: ['all'] })
+  const primaryIds = new Set(primaryModels.map((entry) => entry.id))
+  const selected = selectModels(index, {
+    characters: ['all'],
+    allOutfits: true,
+    includeSub: true,
+    notableIds: NOTABLE_SUB_IDS
+  })
+  progress(`云端模型索引：${index.models.length} 个模型，全量选角/换装候选 ${selected.length} 个`)
+
+  // 本地 mock 测试或极小索引直接拉 _ripper.json；真实远端全量索引优先复用离线 model-metadata.json 的 model3Path
+  const isMockOrSmallIndex =
+    index.models.length <= 50 || /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(settings.indexBase)
+  const ripperCache: RipperCache = new Map()
 
   const models = (
     await mapPool(selected, MODEL_CONCURRENCY, async (entry) => {
       const character = characterById(entry.characterId ?? null)
-      const actions = await cloudModelActions(entry, libraryRoot, requestOptions, progress)
+      const staticMeta = modelMetadata[entry.id]
+      const actions = await cloudModelActions(
+        entry,
+        libraryRoot,
+        requestOptions,
+        ripperCache,
+        !isMockOrSmallIndex,
+        progress
+      )
       if (!actions) return null
+      const isDefault = primaryIds.has(entry.id) || Boolean(staticMeta?.isDefault)
+      const fallbackOutfit = inferDefaultOutfitMeta(entry.id, isDefault)
       const display = {
-        name: character?.name ?? entry.id,
-        shortName: character?.shortName ?? entry.id
+        name: character?.name ?? staticMeta?.name ?? entry.id,
+        shortName: character?.shortName ?? staticMeta?.shortName ?? entry.id
       }
       const result: CloudModelEntry = {
         id: entry.id,
         characterId: entry.characterId ?? null,
         name: display.name,
         shortName: display.shortName,
+        ...(staticMeta?.unit ? { unit: staticMeta.unit } : {}),
+        outfitCategory: staticMeta?.outfitCategory ?? fallbackOutfit.outfitCategory,
+        outfitLabel: staticMeta?.outfitLabel ?? fallbackOutfit.outfitLabel,
+        isDefault,
+        ...(staticMeta?.isSubCharacter || (!character && entry.kind !== 'character')
+          ? { isSubCharacter: true }
+          : {}),
         bundle: entry.bundle,
         motionBundles: [
           ...new Set(
@@ -286,23 +491,28 @@ export async function buildCloudCatalog(
   })
   const backgrounds: CloudBackgroundEntry[] = media.bundles
     .map((bundle) => {
-      const named = backgroundNameOf(bundle.name)
+      const meta = backgroundMetaOf(bundle.name)
       return {
         id: bundle.name,
         file: `cloud/${bundle.name}`,
-        name: named.name,
-        aliases: named.aliases,
-        description: named.aliases.length > 0 ? `同类场景：${named.aliases.join(' / ')}` : ''
+        name: meta.name,
+        aliases: meta.aliases,
+        description: meta.description,
+        ...(meta.category ? { category: meta.category } : {}),
+        ...(meta.timeOfDay ? { timeOfDay: meta.timeOfDay } : {}),
+        ...(meta.indoor ? { indoor: meta.indoor } : {}),
+        ...(meta.tags?.length ? { tags: meta.tags } : {})
       }
     })
     .sort((a, b) => a.id.localeCompare(b.id))
   progress(`云端背景：${backgrounds.length} 个`)
 
-  progress('读取云端 BGM / SE 列表 …')
+  progress('读取云端 BGM（含区域 BGM）与 SE 列表 …')
   const [bgmMedia, soundtracks, scenarioSe] = await Promise.all([
     listMedia({
       region: settings.region,
       kinds: ['bgm'],
+      includeAreaBgm: true,
       assetBase: settings.assetBase || undefined,
       timeoutMs: requestOptions.timeoutMs,
       retries: requestOptions.retries
@@ -327,30 +537,45 @@ export async function buildCloudCatalog(
       return []
     })
   ])
-  const bgm: CloudBgmEntry[] = bgmMedia.bundles
-    .map((bundle) => {
-      const label = bgmLabelOf(bundle.name, soundtracks)
-      return {
-        id: bundle.name,
-        file: `cloud/${bundle.name}.mp3`,
-        name: label.name,
-        description: label.description
-      }
+
+  const seenBgmIds = new Set<string>()
+  const bgm: CloudBgmEntry[] = []
+  for (const bundle of bgmMedia.bundles) {
+    if (seenBgmIds.has(bundle.name)) continue
+    seenBgmIds.add(bundle.name)
+    const label = bgmLabelOf(bundle.name, soundtracks)
+    bgm.push({
+      id: bundle.name,
+      file: `cloud/${bundle.name}.mp3`,
+      name: label.name,
+      description: label.description,
+      bundlePath: bundle.path,
+      ...(label.mood ? { mood: label.mood } : {}),
+      ...(label.tempo ? { tempo: label.tempo } : {}),
+      ...(label.category ? { category: label.category } : {}),
+      ...(label.unit ? { unit: label.unit } : {}),
+      ...(label.tags?.length ? { tags: label.tags } : {})
     })
-    .sort((a, b) => a.id.localeCompare(b.id))
-  const se: CloudSeEntry[] = scenarioSe.map((entry) => ({
-    id: entry.id,
-    file: `cloud/${entry.file}`,
-    name: entry.id,
-    bundle: entry.bundle,
-    category: entry.category,
-    description: entry.description,
-    tags: entry.tags
-  }))
-  progress(`云端 BGM：${bgm.length} 首，SE：${se.length} 个`)
+  }
+  bgm.sort((a, b) => a.id.localeCompare(b.id))
+
+  const se: CloudSeEntry[] = scenarioSe.map((entry) => {
+    const sem = seSemantics[entry.id] ?? seSemantics[entry.id.replace(/_b$/, '')]
+    return {
+      id: entry.id,
+      file: `cloud/${entry.file}`,
+      name: entry.id,
+      bundle: entry.bundle,
+      category: sem?.category || entry.category,
+      description: sem?.description || entry.description,
+      tags: sem?.tags?.length ? sem.tags : entry.tags
+    }
+  })
+  progress(`云端 BGM：${bgm.length} 首（含区域 BGM），SE：${se.length} 个`)
 
   return {
     format: CLOUD_CATALOG_FORMAT,
+    schemaVersion: CLOUD_CATALOG_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     region: settings.region,
     sources: {
@@ -371,6 +596,7 @@ function readCachedCatalog(file: string): CloudCatalogData | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as CloudCatalogData
     if (parsed?.format !== CLOUD_CATALOG_FORMAT) return null
+    if (parsed.schemaVersion !== CLOUD_CATALOG_SCHEMA_VERSION) return null
     if (
       !Array.isArray(parsed.models) ||
       !Array.isArray(parsed.backgrounds) ||
@@ -452,7 +678,7 @@ export class CloudCatalogService {
           this.logger.warn(`[Cloud] failed to write catalog cache: ${String(error)}`)
         }
         this.logger.info(
-          `[Cloud] catalog ready: ${catalog.models.length} models, ${catalog.backgrounds.length} backgrounds, ${catalog.bgm.length} bgm`
+          `[Cloud] catalog ready: ${catalog.models.length} models, ${catalog.backgrounds.length} backgrounds, ${catalog.bgm.length} bgm, ${catalog.se?.length ?? 0} se`
         )
         return catalog
       })
@@ -470,22 +696,52 @@ export class CloudCatalogService {
    * 保证目录可用：有新鲜快照直接返回；否则等待刷新，最多等 timeoutMs；
    * 超时/失败返回已有快照（可能为 null），调用方回落本地资源。
    */
-  async ensure(timeoutMs = 0): Promise<CloudCatalogData | null> {
+  async ensure(timeoutMs = 0, signal?: AbortSignal): Promise<CloudCatalogData | null> {
     if (this.snapshot && !this.isStale()) return this.snapshot
+    if (signal?.aborted) return this.snapshot
     const refresh = this.refresh()
-    if (timeoutMs <= 0) {
+    if (timeoutMs <= 0 && !signal) {
       await refresh
       return this.snapshot
     }
     let timer: ReturnType<typeof setTimeout> | null = null
-    const timeout = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs)
-    })
+    let onAbort: (() => void) | null = null
+    const racers: Array<Promise<void>> = [refresh.then(() => undefined)]
+    if (timeoutMs > 0) {
+      racers.push(
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs)
+        })
+      )
+    }
+    if (signal) {
+      racers.push(
+        new Promise<void>((resolve) => {
+          onAbort = () => resolve()
+          signal.addEventListener('abort', onAbort, { once: true })
+        })
+      )
+    }
     try {
-      await Promise.race([refresh.then(() => undefined), timeout])
+      await Promise.race(racers)
     } finally {
       if (timer) clearTimeout(timer)
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort)
     }
     return this.snapshot
+  }
+
+  /**
+   * 按当前是否存在快照选择等待窗口：
+   * - 已有缓存（仅过期刷新）：只等 `staleTimeoutMs`（默认 2s），不阻塞日常请求
+   * - 冷启动尚无任何快照（零本地缓存）：最多等 `coldTimeoutMs`（默认 60s），避免早期请求撞上空目录
+   */
+  async waitReady(
+    options: { coldTimeoutMs?: number; staleTimeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<CloudCatalogData | null> {
+    const staleTimeoutMs = options.staleTimeoutMs ?? 2_000
+    const coldTimeoutMs = options.coldTimeoutMs ?? 60_000
+    const waitMs = this.snapshot ? staleTimeoutMs : coldTimeoutMs
+    return this.ensure(waitMs, options.signal)
   }
 }

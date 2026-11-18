@@ -51,11 +51,11 @@ fast 每帧都需要读取 WebGL 画布，这可能比实时录制开销更大�
 - 检查 `renderScale` 是否低于 `1`：低分辨率渲染后放大造成的模糊不能靠提高码率恢复。
 - 旧的 `recordTargetSizeMb`、`recordBitrate` 等设置不再生效，见 [旧配置迁移](export-modes.md#旧配置迁移)。
 
-## 资源没有出现在清单中
+## 资源没有出现在清单中或云端下载失败
 
-核对资源根、文件名和清单中的路径是否一致，以及宿主日志是否提示缺失条目。
-模型与背景登记方式见 [资源与音频配置](resources.md)。
-BGM 设置修改后需要重启宿主；格式错误会导致启动失败，不会静默跳过。
+- **零本地云端模式**：默认开启 `assets.cloudCatalog: true`，空 `resources/` 即可直接运行。如果 `/api/v1/resources` 缺失 `cloud` 字段或条目偏少，先检查日志中 `[Cloud]` 报错，并用 `POST /api/v1/cloud/refresh` 强制刷新；网络不稳时可降低 `assets.concurrency`（如设为 `1`~`2`）或增大 `assets.retries`。
+- **全局默认 BGM 未生效**：当 `resources/audio/bgm/bgm.yaml` 和 `resources/audio/bgm/bg1.mp3` 都不存在时，宿主会自动回落到云端 `bgm00003`；若手动写了 `bgm.yaml`，则完整覆盖主配置与自动回落逻辑。
+- **本地文件覆盖**：需要强制使用本地模型或背景时，按 [资源与音频配置](resources.md) 核对资源根、文件名和 YAML 路径；修改 `bgm.yaml` 或 `config.yaml` 后需重启宿主。
 
 ## 按现象快速定位
 

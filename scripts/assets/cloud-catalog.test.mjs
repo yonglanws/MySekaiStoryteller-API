@@ -38,6 +38,14 @@ function startServer() {
             characterId: 1
           },
           {
+            id: '01ichika_school',
+            bundle: 'live2d/model/01ichika_school',
+            motion: 'live2d/motion/01ichika_motion_base',
+            motions: ['live2d/motion/01ichika_motion_base'],
+            kind: 'character',
+            characterId: 1
+          },
+          {
             id: '02saki_normal',
             bundle: 'live2d/model/02saki_normal',
             motion: 'live2d/motion/02saki_motion_base',
@@ -46,9 +54,11 @@ function startServer() {
             characterId: 2
           },
           {
-            id: 'sub_character',
-            bundle: 'live2d/model/sub_character',
-            kind: 'sub'
+            id: 'sub_nenedayo',
+            bundle: 'live2d/model/sub_nenedayo',
+            motion: 'live2d/motion/02saki_motion_base',
+            motions: ['live2d/motion/02saki_motion_base'],
+            kind: 'mob'
           }
         ]
       })
@@ -58,8 +68,16 @@ function startServer() {
       json({ files: [{ path: '01ichika_normal.model3.json' }] })
       return
     }
+    if (url.pathname === '/jp/library/live2d/model/01ichika_school/_ripper.json') {
+      json({ files: [{ path: '01ichika_school.model3.json' }] })
+      return
+    }
     if (url.pathname === '/jp/library/live2d/model/02saki_normal/_ripper.json') {
       json({ files: [{ path: '02saki_normal.model3.json' }] })
+      return
+    }
+    if (url.pathname === '/jp/library/live2d/model/sub_nenedayo/_ripper.json') {
+      json({ files: [{ path: 'sub_nenedayo.model3.json' }] })
       return
     }
     if (url.pathname === '/jp/library/live2d/motion/01ichika_motion_base/_ripper.json') {
@@ -113,6 +131,20 @@ function startServer() {
         })
         return
       }
+      if (prefix === 'sound/area_bgm/') {
+        json({
+          items: [
+            {
+              type: 'bundle',
+              name: 'normal_area',
+              path: 'sound/area_bgm/normal_area',
+              fileCount: 2,
+              totalSize: 10
+            }
+          ]
+        })
+        return
+      }
       json({ items: [] })
       return
     }
@@ -159,24 +191,39 @@ test('cloud catalog lists models, named backgrounds and bgm from remote indexes'
   try {
     const catalog = await buildCloudCatalog(settings, { timeoutMs: 5_000, retries: 0 })
     assert.equal(catalog.format, 'msst.cloud-catalog/1')
-    assert.equal(catalog.models.length, 2, 'only main characters are catalogued')
+    assert.equal(catalog.models.length, 4, 'exposes main characters, alternate outfits, and notable sub characters')
     const ichika = catalog.models.find((model) => model.id === '01ichika_normal')
     assert.ok(ichika)
     assert.equal(ichika.name, '星乃一歌')
+    assert.equal(ichika.isDefault, true)
     assert.equal(ichika.path, 'cloud/01ichika_normal/01ichika_normal/01ichika_normal.model3.json')
     assert.deepEqual(ichika.motions, ['w-normal-nod01'])
     assert.deepEqual(ichika.facials, ['face_smile_01'])
     assert.equal(ichika.defaultMotion, 'w-normal-nod01')
     assert.equal(ichika.defaultFacial, 'face_smile_01')
 
+    const ichikaSchool = catalog.models.find((model) => model.id === '01ichika_school')
+    assert.ok(ichikaSchool)
+    assert.equal(ichikaSchool.outfitCategory, '校服')
+    assert.equal(ichikaSchool.isDefault, false)
+
+    const neneRobo = catalog.models.find((model) => model.id === 'sub_nenedayo')
+    assert.ok(neneRobo)
+    assert.equal(neneRobo.name, '宁宁号')
+    assert.equal(neneRobo.isSubCharacter, true)
+
     const named = catalog.backgrounds.find((entry) => entry.id === 'bg_a000301')
-    assert.equal(named.name, '神山高校 ３年Ａ組')
+    assert.equal(named.name, '神山高校 三年一班')
+    assert.equal(named.category, '校园')
     const unknown = catalog.backgrounds.find((entry) => entry.id === 'bg_unknown')
     assert.equal(unknown.name, 'bg_unknown')
 
     const bgm = catalog.bgm.find((entry) => entry.id === 'bgm00003')
     assert.equal(bgm.name, 'Slapstick!!')
     assert.match(bgm.description, /剧情/)
+    const areaBgm = catalog.bgm.find((entry) => entry.id === 'normal_area')
+    assert.ok(areaBgm)
+    assert.equal(areaBgm.bundlePath, 'sound/area_bgm/normal_area')
     assert.ok(requests.some((request) => request.startsWith('/api/assets/bundles')))
   } finally {
     server.close()

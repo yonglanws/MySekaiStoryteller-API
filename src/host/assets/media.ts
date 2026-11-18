@@ -370,8 +370,12 @@ async function fetchFiles(
 
 export interface DownloadMediaFileOptions {
   kind: MediaKind
-  /** bundle 名，如 bg_a000301 / bgm00003 */
+  /** bundle 名，如 bg_a000301 / bgm00003 / normal_area */
   name: string
+  /** 显式远端 bundle 路径（例如 sound/area_bgm/normal_area）；省略时按 kind 推导 */
+  bundlePath?: string
+  /** 保存到本地时的文件基名（不含扩展名）；area_bgm 时与 bundle 名对齐便于缓存命中 */
+  saveAsName?: string
   outDir: string
   region: AssetRegion
   assetBase?: string
@@ -400,22 +404,41 @@ export async function downloadMediaFile(
   const assetBase = normalizeAssetBase(options.assetBase)
   const origin = apiOrigin(assetBase)
   const requestOpts = requestOptions(options)
-  const prefix = prefixFor(options.kind, false)
-  const bundle: MediaBundle = {
-    kind: options.kind,
-    name: options.name,
-    path: `${prefix}${options.name}`,
-    bytes: 0,
-    files: 0,
-    prefix
-  }
+  const defaultPrefix = prefixFor(options.kind, false)
+  const candidatePaths = options.bundlePath
+    ? [options.bundlePath.replace(/^\/+|\/+$/g, '')]
+    : options.kind === 'bgm'
+      ? [`${defaultPrefix}${options.name}`, `${prefixFor('bgm', true)}${options.name}`]
+      : [`${defaultPrefix}${options.name}`]
+
   const dir = path.join(targetDir(options.outDir, options.kind), options.subdir ?? '')
   const extensions = options.kind === 'background' ? BACKGROUND_EXTS : BGM_EXTS
-  const files = await bundleFiles(origin, options.region, bundle, requestOpts)
-  const picked = pickFile(files, extensions)
+  let files: MediaFile[] = []
+  let picked: MediaFile | null = null
+  for (const candidatePath of candidatePaths) {
+    const bundle: MediaBundle = {
+      kind: options.kind,
+      name: options.name,
+      path: candidatePath,
+      bytes: 0,
+      files: 0,
+      prefix: `${path.posix.dirname(candidatePath)}/`
+    }
+    try {
+      files = await bundleFiles(origin, options.region, bundle, requestOpts)
+      picked = pickFile(files, extensions)
+      if (picked) break
+    } catch {
+      // try next prefix (e.g. sound/area_bgm/)
+    }
+  }
   if (!picked) return null
 
-  const target = path.join(dir, path.basename(picked.name))
+  const pickedBase = path.basename(picked.name)
+  const fileName = options.saveAsName
+    ? `${options.saveAsName}${path.extname(pickedBase)}`
+    : pickedBase
+  const target = path.join(dir, fileName)
   if (fs.existsSync(target) && !options.force) {
     const existingLoop = options.kind === 'bgm' ? extractAudioLoopMetadata(target) : null
     return {

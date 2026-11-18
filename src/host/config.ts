@@ -148,13 +148,16 @@ const TtsSchema = z.object({
   characters: z.array(TtsCharacterSchema).default([])
 })
 
+export const DEFAULT_LOCAL_BGM_PATH = 'audio/bgm/bg1.mp3'
+export const DEFAULT_CLOUD_BGM_ID = 'bgm00003'
+
 /**
  * BGM 播放设置：以资源根下的 audio/bgm/bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
  * 该文件不存在时回落到 config.yaml 的 bgm 节，旧配置照常可用。
  */
 const BgmSchema = z.object({
   enabled: z.boolean().default(true),
-  path: z.string().default('audio/bgm/bg1.mp3'),
+  path: z.string().default(DEFAULT_LOCAL_BGM_PATH),
   volume: z.number().default(0.2)
 })
 
@@ -569,6 +572,17 @@ export function loadHostConfig(): HostConfig {
   const bgmFromManifest = readBgmManifest(paths.resources)
   if (bgmFromManifest) {
     config.bgm = bgmFromManifest
+  }
+
+  // 零本地资源云端优先兜底：当 bgm.yaml 不存在、默认 audio/bgm/bg1.mp3 也不在磁盘上、
+  // 且启用了 cloudCatalog 时，回落到已校验的云端日常 BGM（bgm00003），避免去云端查不存在的 bg1。
+  if (
+    !bgmFromManifest &&
+    config.bgm.path === DEFAULT_LOCAL_BGM_PATH &&
+    !fs.existsSync(path.join(paths.resources, 'audio', 'bgm', 'bg1.mp3')) &&
+    config.assets.cloudCatalog
+  ) {
+    config.bgm.path = DEFAULT_CLOUD_BGM_ID
   }
 
   return {

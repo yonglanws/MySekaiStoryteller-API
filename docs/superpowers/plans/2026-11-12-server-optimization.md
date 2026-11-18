@@ -1,5 +1,8 @@
 # Server Optimization Implementation Plan
 
+> [!NOTE]
+> **历史实施存档（2026-11-12）**：本计划已于 2026-11-12 执行完成并归档，仅作变更追溯使用；当前部署与配置规格请以 [部署指南](../../../doc/host-deployment.md) 和 [导出模式](../../../doc/export-modes.md) 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 MSST 与 ournotes 在 8 GB 显存、4 核 CPU、共享 Irodori TTS 的服务器上按各 2 并发稳定运行，降低渲染耗时与空闲占用，并用故障注入验证崩溃/超时/清理路径。
@@ -43,23 +46,24 @@ ournotes（`D:/Users/桌面/StarMoe/ournotes-player`）：
 ### Task 1: 建立可复现的基线与压测脚本
 
 **Files:**
+
 - Create (server `/tmp`): `zops-bench-msst.mjs`、`zops-bench-ournotes.mjs`、`zops-soak-monitor.sh`
 
 - [x] **Step 1: 写 MSST 压测脚本（长超时 http，避免 undici 5 分钟 headers timeout）**
 
 ```js
-import http from 'node:http';
-const [apiBase, storyFile, jobsArg, label] = process.argv.slice(2);
-const jobs = Number(jobsArg || 1);
-const story = JSON.parse(fs.readFileSync(storyFile, 'utf8'));
-const TIMEOUT = Number(process.env.BENCH_TIMEOUT_MS || 3600000);
+import http from 'node:http'
+const [apiBase, storyFile, jobsArg, label] = process.argv.slice(2)
+const jobs = Number(jobsArg || 1)
+const story = JSON.parse(fs.readFileSync(storyFile, 'utf8'))
+const TIMEOUT = Number(process.env.BENCH_TIMEOUT_MS || 3600000)
 // POST /api/v1/export, body { story, timeout: TIMEOUT }
 ```
 
 - [x] **Step 2: 写 ournotes 压测脚本**
 
 ```js
-const body = { script: script.script || script, tts, title: `${label}-${i}`, timeout: 1800000 };
+const body = { script: script.script || script, tts, title: `${label}-${i}`, timeout: 1800000 }
 // POST /api/v1/generate, Authorization: Bearer $OURNOTES_API_KEY
 ```
 
@@ -83,6 +87,7 @@ Expected：每 30 s 一行 `msst=a/q ournotes=r/w gpu=... mains=3 msst_rss=...`�
 ### Task 2: ournotes 改用 NVENC 并校准码率
 
 **Files:**
+
 - Modify: `/vol2/1000/ournotes-player/config.yaml`
 
 - [x] **Step 1: 确认 ffmpeg-static 不含 nvenc**
@@ -118,13 +123,14 @@ Expected（实测）：`wallMs 108596`，`renderMs 97100`，crf28 成片 `586508
 ### Task 3: ournotes 队列 2 并发 + TTS 超时
 
 **Files:**
+
 - Modify: `/vol2/1000/ournotes-player/config.yaml`
 
 - [x] **Step 1: 改配置**
 
 ```yaml
 tts:
-  timeoutMs: 600000   # Irodori 高峰排队可达 300 秒
+  timeoutMs: 600000 # Irodori 高峰排队可达 300 秒
 queue:
   concurrency: 2
 render:
@@ -146,14 +152,15 @@ Expected（实测）：两个任务各约 163 s，`renderMs` 约 143 s；显存�
 ### Task 4: MSST 空闲停止渲染 ticker
 
 **Files:**
+
 - Modify: `src/renderer/src/app/App.ts:377-430`
 
 - [x] **Step 1: 在 `api:start-export` 入口启动 ticker**
 
 ```ts
-this.apiExportInProgress = true;
+this.apiExportInProgress = true
 try {
-  this.pixiApplication.ticker.start();
+  this.pixiApplication.ticker.start()
 } catch {
   /* pixi may not be ready yet; export path starts its own ticker */
 }
@@ -188,6 +195,7 @@ Expected（实测）：导出结束后 `nvidia-smi pmon` 中 Chrome SM 为 `-`�
 ### Task 5: MSST 导出并发与 worker 数解耦
 
 **Files:**
+
 - Modify: `src/host/config.ts:90-99、397-407`
 - Modify: `src/host/main.ts:134`
 - Modify: `config.example.yaml:66-72`
@@ -198,17 +206,17 @@ Expected（实测）：导出结束后 `nvidia-smi pmon` 中 Chrome SM 为 `-`�
 const RenderSchema = z.object({
   workers: z.number().default(2),
   maxConcurrentExports: z.number().default(0),
-  workerRecycleExports: z.number().default(5),
+  workerRecycleExports: z.number().default(5)
   // ...
-});
+})
 ```
 
 - [x] **Step 2: env 覆盖**
 
 ```ts
 if (env.MSS_MAX_CONCURRENT_EXPORTS) {
-  const v = parseInt(env.MSS_MAX_CONCURRENT_EXPORTS, 10);
-  if (Number.isFinite(v)) config.render.maxConcurrentExports = Math.max(0, v);
+  const v = parseInt(env.MSS_MAX_CONCURRENT_EXPORTS, 10)
+  if (Number.isFinite(v)) config.render.maxConcurrentExports = Math.max(0, v)
 }
 ```
 
@@ -242,6 +250,7 @@ Expected：`"maxConcurrent": 2`，`readyWorkers: 3`。
 ### Task 6: MSST 桥接 TTS 超时对齐
 
 **Files:**
+
 - Modify: `src/host/bridge/bridgeRoutes.ts:37、541-542`
 
 - [x] **Step 1: 改超时**
@@ -265,21 +274,22 @@ Expected（实测）：`0`（修复前 10 分钟 5 次）。
 ### Task 7: MSST 帧目录即时清理 + 定时兜底
 
 **Files:**
+
 - Modify: `src/host/bridge/bridgeRoutes.ts:330-402`
 - Create (server): `/usr/local/bin/mss-temp-clean.sh` + timer
 
 - [x] **Step 1: 编码成功后删帧目录**
 
 ```ts
-let encoded = false;
+let encoded = false
 // ...
-encoded = true;
-return { success: true, outputPath: payload.outputPath, fileSize: outputSize };
+encoded = true
+return { success: true, outputPath: payload.outputPath, fileSize: outputSize }
 // finally:
 if (encoded) {
-  await fs.promises.rm(payload.framesDir, { recursive: true, force: true });
-  const parent = path.dirname(payload.framesDir);
-  if (path.basename(parent).startsWith('mss-hf-')) await fs.promises.rmdir(parent);
+  await fs.promises.rm(payload.framesDir, { recursive: true, force: true })
+  const parent = path.dirname(payload.framesDir)
+  if (path.basename(parent).startsWith('mss-hf-')) await fs.promises.rmdir(parent)
 }
 ```
 
@@ -307,6 +317,7 @@ Expected（实测）：`wallMs 158756`，结束后 `ls -d /tmp/mss-hf-* | wc -l`
 ### Task 8: ournotes 浏览器崩溃快速失败
 
 **Files:**
+
 - Modify: `scripts/lib/story-author/chrome.js:54-62、74、125-128`
 - Modify: `host/render/renderer.js:73-82`
 
@@ -328,10 +339,13 @@ report = await withTimeout(
   Promise.race([
     job.result,
     browser.onClosed().then(() => {
-      throw new Error("the browser closed before the render page reported a result");
-    }),
+      throw new Error('the browser closed before the render page reported a result')
+    })
   ]),
-  cfg.render.taskTimeoutMs, signal, "the render page");
+  cfg.render.taskTimeoutMs,
+  signal,
+  'the render page'
+)
 ```
 
 - [x] **Step 3: 部署并做 kill 测试**
@@ -349,6 +363,7 @@ Expected（实测）：`ok:true`，`wallMs 53987`。
 ### Task 9: 服务器显存、看门狗与插件超时
 
 **Files:**
+
 - Modify: `/etc/systemd/system/irodori-tts.service.d/lora-cache.conf`
 - Create: `render-healthcheck.{sh,service,timer}`
 - Modify: AstrBot 插件配置（不入库）
@@ -399,10 +414,12 @@ Expected：MSST `readyWorkers=3`、`maxConcurrent=2`；ournotes `queue.concurren
 - [x] **Step 2: 2+2 混合压测**
 
 Run:
+
 ```bash
 node /tmp/zops-bench-msst.mjs http://127.0.0.1:9881 /tmp/zops-msst10.json 2 stress-msst-2
 node /tmp/zops-bench-ournotes.mjs http://127.0.0.1:9882 /tmp/zops-script2.json 2 0 stress-ournotes-2
 ```
+
 Expected（实测）：4/4 成功；MSST 各 133.5 s（14 秒成片，3.7-3.8 fps），ournotes 各 71.6 s（9 秒成片）；显存峰值 6.29 GB；结束后 `/tmp/mss-hf-*` 为 0。
 
 - [x] **Step 3: 故障注入**
@@ -414,10 +431,12 @@ Expected（实测）：4/4 成功；MSST 各 133.5 s（14 秒成片，3.7-3.8 fp
 - [x] **Step 4: 成片功能校验**
 
 Run:
+
 ```bash
 ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,sample_rate,channels -of json <mp4>
 ffmpeg -i <mp4> -af volumedetect -f null -
 ```
+
 Expected（实测）：MSST 1440x810/30fps/AAC 双声道/7.9 MB；ournotes 1300x600/30fps/AAC；mean 约 -22 dB，max 约 -6～-7 dB。
 
 - [x] **Step 5: 30 分钟 soak**
@@ -429,6 +448,7 @@ Expected（实测）：MSST RSS 116-141 MB 稳定；无孤儿 Chrome；无临时
 ### Task 11: 文档、提交与推送
 
 **Files:**
+
 - Create: `doc/server-optimization-2026-11-12.md`
 - Create: `docs/superpowers/specs/2026-11-12-server-optimization-design.md`
 - Create: `docs/superpowers/plans/2026-11-12-server-optimization.md`

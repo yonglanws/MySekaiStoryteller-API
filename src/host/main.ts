@@ -136,7 +136,7 @@ async function bootstrap(): Promise<void> {
     // resources/cloud/ 下的真实文件；本地已有文件优先，不覆盖用户资源。
     prepareStory: async (story) => {
       if (config.assets.cloudCatalog) {
-        await cloudCatalog.ensure(5_000)
+        await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 5_000 })
         const cloudContext = {
           settings: config.assets,
           resourcesDir: config.paths.resources,
@@ -158,10 +158,10 @@ async function bootstrap(): Promise<void> {
     registerExtraRoutes: (app) => {
       app.use('/bridge', createBridgeRouter({ logger, config }))
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
-      // 云端目录第一次刷新可能还在进行，这里最多等 2 秒（有缓存时立即返回）。
+      // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 60 秒）。
       app.get('/api/v1/resources', async (_req, res) => {
         if (config.assets.cloudCatalog) {
-          await cloudCatalog.ensure(2_000)
+          await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000 })
         }
         res.json({ success: true, ...resourceCatalog.get() })
       })
@@ -182,7 +182,8 @@ async function bootstrap(): Promise<void> {
           generatedAt: catalog.generatedAt,
           models: catalog.models.length,
           backgrounds: catalog.backgrounds.length,
-          bgm: catalog.bgm.length
+          bgm: catalog.bgm.length,
+          se: catalog.se?.length ?? 0
         })
       })
 
@@ -430,6 +431,9 @@ async function bootstrap(): Promise<void> {
       ): Promise<GenerateStoryResult> => {
         if (!llmClient.enabled) {
           throw new StoryGenerationError('宿主未启用 LLM（llm.enabled=false）', [])
+        }
+        if (config.assets.cloudCatalog && !cloudCatalog.get()) {
+          await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000, signal })
         }
         if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
           throw new StoryGenerationError('prompt 必须是非空字符串', [])

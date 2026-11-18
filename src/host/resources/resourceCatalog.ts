@@ -28,6 +28,18 @@ export interface CatalogModel {
   source?: 'local' | 'cloud'
   /** 云端模型 id（source=cloud 时） */
   cloudId?: string
+  /** PJSK 角色编号（1~26） */
+  characterId?: number | null
+  /** 所属组合（Leo/need、25时，Nightcord de. 等） */
+  unit?: string
+  /** 服装大类（常服/校服/私服/队服/运动服/泳装/和服/演出服/活动/特殊） */
+  outfitCategory?: string
+  /** 服装中文说明 */
+  outfitLabel?: string
+  /** 是否为该角色的首选默认服装 */
+  isDefault?: boolean
+  /** 是否为配角/联动角色 */
+  isSubCharacter?: boolean
 }
 
 export interface CatalogImage {
@@ -38,6 +50,10 @@ export interface CatalogImage {
   id?: string
   /** 官方剧情中同一背景出现过的其它地点名 */
   aliases?: string[]
+  category?: string
+  timeOfDay?: string
+  indoor?: string
+  tags?: string[]
   source?: 'local' | 'cloud'
 }
 
@@ -47,7 +63,21 @@ export interface CatalogBgm {
   description: string
   /** 云端 BGM 的稳定 id（source=cloud 时） */
   id?: string
+  mood?: string
+  tempo?: string
+  category?: string
+  unit?: string
+  tags?: string[]
   source?: 'local' | 'cloud'
+}
+
+export interface CatalogSeItem {
+  file: string
+  id?: string
+  name: string
+  category?: string
+  description: string
+  tags?: string[]
 }
 
 export interface ResourceCatalogData {
@@ -57,14 +87,17 @@ export interface ResourceCatalogData {
   imageDetails: CatalogImage[]
   voices: string[]
   bgm: string[]
-  /** 带描述的 BGM 清单（audio/bgm/bgm.yaml 登记时供 AI 了解可选项；未登记时为空） */
+  /** 带描述的 BGM 清单（audio/bgm/bgm.yaml 或云端目录；未登记时为空） */
   bgmDetails: CatalogBgm[]
+  /** 云端 SE 语义清单 */
+  seDetails?: CatalogSeItem[]
   /** 云端目录状态；云端不可用时省略 */
   cloud?: {
     generatedAt: string
     models: number
     backgrounds: number
     bgm: number
+    se?: number
   }
 }
 
@@ -125,6 +158,7 @@ export class ResourceCatalog {
   private readonly cloud: (() => CloudCatalogData | null) | null
   private cache: ResourceCatalogData | null = null
   private cacheTime = 0
+  private cacheCloudGeneratedAt: string | null = null
 
   constructor(
     logger: Logger<ILogObj>,
@@ -138,7 +172,12 @@ export class ResourceCatalog {
 
   get(): ResourceCatalogData {
     const now = Date.now()
-    if (this.cache && now - this.cacheTime < CACHE_TTL_MS) {
+    const cloudGeneratedAt = this.cloud?.()?.generatedAt ?? null
+    if (
+      this.cache &&
+      now - this.cacheTime < CACHE_TTL_MS &&
+      this.cacheCloudGeneratedAt === cloudGeneratedAt
+    ) {
       return this.cache
     }
 
@@ -146,6 +185,7 @@ export class ResourceCatalog {
       const data = this.build()
       this.cache = data
       this.cacheTime = now
+      this.cacheCloudGeneratedAt = data.cloud?.generatedAt ?? cloudGeneratedAt
       return data
     } catch (err) {
       this.logger.error('[Catalog] Failed to build resource catalog', err)
@@ -233,10 +273,21 @@ export class ResourceCatalog {
     const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
 
     const cloud = this.cloud?.() ?? null
+    const seDetails: CatalogSeItem[] = []
     if (cloud) {
       this.mergeCloudModels(models, cloud)
       this.mergeCloudBackgrounds(imageFiles, imageDetails, cloud)
       this.mergeCloudBgm(bgmFiles, bgmDetails, cloud)
+      for (const entry of cloud.se ?? []) {
+        seDetails.push({
+          file: entry.file,
+          id: entry.id,
+          name: entry.name,
+          category: entry.category,
+          description: entry.description,
+          tags: entry.tags
+        })
+      }
     }
 
     return {
@@ -246,13 +297,15 @@ export class ResourceCatalog {
       voices: listFiles('voices', AUDIO_EXTENSIONS),
       bgm: bgmFiles,
       bgmDetails,
+      ...(seDetails.length > 0 ? { seDetails } : {}),
       ...(cloud
         ? {
             cloud: {
               generatedAt: cloud.generatedAt,
               models: cloud.models.length,
               backgrounds: cloud.backgrounds.length,
-              bgm: cloud.bgm.length
+              bgm: cloud.bgm.length,
+              se: cloud.se?.length ?? 0
             }
           }
         : {})
@@ -260,19 +313,39 @@ export class ResourceCatalog {
   }
 
   /**
-   * 云端模型补进目录：本地已有同名角色时本地优先（用户明确下载过的模型
-   * 不应被云端首选服装替换）；数值 id 用 1000+characterId，避免和本地
-   * models.yaml 的 1..N 冲突。
+   * 云端模型补进目录：
+   * - 本地 models.yaml 已登记的角色只占该角色的默认首选位（用户自定义本地模型优先），
+   *   绝不压制同一角色的其它云端换装变体，也不压制缺失的虚拟歌手/其他角色/配角；
+   * - 若本地模型路径本身就是某套服装 id（例如 01ichika_normal/...），仅去重该套服装本身；
+   * - 首选默认服装用 1000+characterId，换装变体与配角用 >=2000 确定性递增 id。
    */
   private mergeCloudModels(models: CatalogModel[], cloud: CloudCatalogData): void {
-    const localNames = new Set(models.map((model) => model.name.toLowerCase()))
+    const localDefaultNames = new Set(models.map((model) => model.name.toLowerCase()))
+    const localPaths = new Set(models.map((model) => model.path.toLowerCase()))
+    const localModelRoots = new Set(
+      models.map((model) => model.path.replace(/\\/g, '/').split('/')[0]?.toLowerCase() ?? '')
+    )
     const usedIds = new Set(models.map((model) => model.id))
+    const usedCloudIds = new Set<string>()
+    let nextAltId = 2000
+
     for (const entry of cloud.models) {
-      if (localNames.has(entry.name.toLowerCase())) continue
-      const numericId = entry.characterId ? 1000 + entry.characterId : 2000 + models.length
-      if (usedIds.has(numericId)) continue
+      const cloudIdLower = entry.id.toLowerCase()
+      if (usedCloudIds.has(cloudIdLower)) continue
+      if (localPaths.has(entry.path.toLowerCase()) || localModelRoots.has(cloudIdLower)) continue
+      if (entry.isDefault !== false && localDefaultNames.has(entry.name.toLowerCase())) continue
+
+      let numericId: number
+      const preferredId = entry.characterId ? 1000 + entry.characterId : -1
+      if (entry.isDefault !== false && preferredId > 0 && !usedIds.has(preferredId)) {
+        numericId = preferredId
+      } else {
+        while (usedIds.has(nextAltId)) nextAltId++
+        numericId = nextAltId++
+      }
+
       usedIds.add(numericId)
-      localNames.add(entry.name.toLowerCase())
+      usedCloudIds.add(cloudIdLower)
       models.push({
         id: numericId,
         name: entry.name,
@@ -283,7 +356,13 @@ export class ResourceCatalog {
         defaultMotion: entry.defaultMotion,
         defaultFacial: entry.defaultFacial,
         source: 'cloud',
-        cloudId: entry.id
+        cloudId: entry.id,
+        characterId: entry.characterId ?? null,
+        ...(entry.unit ? { unit: entry.unit } : {}),
+        ...(entry.outfitCategory ? { outfitCategory: entry.outfitCategory } : {}),
+        ...(entry.outfitLabel ? { outfitLabel: entry.outfitLabel } : {}),
+        isDefault: entry.isDefault !== false,
+        ...(entry.isSubCharacter ? { isSubCharacter: true } : {})
       })
     }
   }
@@ -296,22 +375,21 @@ export class ResourceCatalog {
     const files = new Set(imageFiles.map((file) => file.toLowerCase()))
     const localByStem = new Map(imageFiles.map((file) => [fileStem(file).toLowerCase(), file]))
     const detailsByFile = new Map(imageDetails.map((detail) => [detail.file.toLowerCase(), detail]))
-    const names = new Set(imageDetails.map((detail) => detail.name.toLowerCase()))
     for (const entry of cloud.backgrounds) {
-      // 没有官方地点名的背景只保留在云端目录里，可用 id 直接引用；
-      // 不放进 AI 候选/插件资源列表，避免 1300+ 条无语义条目刷屏。
-      if (entry.name === entry.id) continue
-
       const localFile = localByStem.get(entry.id.toLowerCase())
       if (localFile) {
         // 本地已有同一背景（常见于 fetch:media 下载的 bg_xxx.webp）：
-        // 不新增 cloud/ 副本，而是把官方地点名贴到本地条目上。
+        // 不新增 cloud/ 副本，而是把官方地点名与语义标签贴到本地条目上。
         const detail = detailsByFile.get(localFile.toLowerCase())
         if (detail) {
           if (!detail.name || detail.name === detail.file) detail.name = entry.name
           if (!detail.id) detail.id = entry.id
           if (!detail.aliases?.length) detail.aliases = entry.aliases
           if (!detail.description) detail.description = entry.description
+          if (!detail.category && entry.category) detail.category = entry.category
+          if (!detail.timeOfDay && entry.timeOfDay) detail.timeOfDay = entry.timeOfDay
+          if (!detail.indoor && entry.indoor) detail.indoor = entry.indoor
+          if (!detail.tags?.length && entry.tags?.length) detail.tags = entry.tags
         } else {
           const created: CatalogImage = {
             file: localFile,
@@ -319,20 +397,22 @@ export class ResourceCatalog {
             description: entry.description,
             id: entry.id,
             aliases: entry.aliases,
+            ...(entry.category ? { category: entry.category } : {}),
+            ...(entry.timeOfDay ? { timeOfDay: entry.timeOfDay } : {}),
+            ...(entry.indoor ? { indoor: entry.indoor } : {}),
+            ...(entry.tags?.length ? { tags: entry.tags } : {}),
             source: 'cloud'
           }
           imageDetails.push(created)
           detailsByFile.set(localFile.toLowerCase(), created)
         }
-        names.add(entry.name.toLowerCase())
         continue
       }
 
+      // 全量保留所有云端背景（含多时段变体与未命名条目），仅按 file 去重，绝不因重名丢弃。
       const fileKey = entry.file.toLowerCase()
-      const nameKey = entry.name.toLowerCase()
-      if (files.has(fileKey) || names.has(nameKey)) continue
+      if (files.has(fileKey)) continue
       files.add(fileKey)
-      names.add(nameKey)
       imageFiles.push(entry.file)
       const created: CatalogImage = {
         file: entry.file,
@@ -340,6 +420,10 @@ export class ResourceCatalog {
         description: entry.description,
         id: entry.id,
         aliases: entry.aliases,
+        ...(entry.category ? { category: entry.category } : {}),
+        ...(entry.timeOfDay ? { timeOfDay: entry.timeOfDay } : {}),
+        ...(entry.indoor ? { indoor: entry.indoor } : {}),
+        ...(entry.tags?.length ? { tags: entry.tags } : {}),
         source: 'cloud'
       }
       imageDetails.push(created)
@@ -355,48 +439,54 @@ export class ResourceCatalog {
     const files = new Set(bgmFiles.map((file) => file.toLowerCase()))
     const localByStem = new Map(bgmFiles.map((file) => [fileStem(file).toLowerCase(), file]))
     const detailsByFile = new Map(bgmDetails.map((detail) => [detail.file.toLowerCase(), detail]))
-    const names = new Set(bgmDetails.map((detail) => detail.name.toLowerCase()))
-    let cloudCount = 0
     for (const entry of cloud.bgm) {
-      if (cloudCount >= 80) break
-      // 官方曲名索引没覆盖的曲目只保留 id 能力，不进入候选。
-      if (entry.name === entry.id && !entry.description) continue
-
       const localFile = localByStem.get(entry.id.toLowerCase())
       if (localFile) {
-        // 本地已有同一首曲子：只补曲名/分类，不新增 cloud/ 副本。
+        // 本地已有同一首曲子：只补曲名/分类/语义标签，不新增 cloud/ 副本。
         const detail = detailsByFile.get(localFile.toLowerCase())
         if (detail) {
           if (!detail.name || detail.name === detail.file) detail.name = entry.name
           if (!detail.id) detail.id = entry.id
           if (!detail.description) detail.description = entry.description
+          if (!detail.mood && entry.mood) detail.mood = entry.mood
+          if (!detail.tempo && entry.tempo) detail.tempo = entry.tempo
+          if (!detail.category && entry.category) detail.category = entry.category
+          if (!detail.unit && entry.unit) detail.unit = entry.unit
+          if (!detail.tags?.length && entry.tags?.length) detail.tags = entry.tags
         } else {
           const created: CatalogBgm = {
             file: localFile,
             name: entry.name,
             description: entry.description,
             id: entry.id,
+            ...(entry.mood ? { mood: entry.mood } : {}),
+            ...(entry.tempo ? { tempo: entry.tempo } : {}),
+            ...(entry.category ? { category: entry.category } : {}),
+            ...(entry.unit ? { unit: entry.unit } : {}),
+            ...(entry.tags?.length ? { tags: entry.tags } : {}),
             source: 'cloud'
           }
           bgmDetails.push(created)
           detailsByFile.set(localFile.toLowerCase(), created)
         }
-        names.add(entry.name.toLowerCase())
         continue
       }
 
+      // 全量纳入云端剧情 BGM + 区域 BGM，不设 80 首截断，也不因未入 soundtracks.json 或重名丢弃。
       const fileKey = entry.file.toLowerCase()
-      const nameKey = entry.name.toLowerCase()
-      if (files.has(fileKey) || names.has(nameKey)) continue
+      if (files.has(fileKey)) continue
       files.add(fileKey)
-      names.add(nameKey)
-      cloudCount++
       bgmFiles.push(entry.file)
       const created: CatalogBgm = {
         file: entry.file,
         name: entry.name,
         description: entry.description,
         id: entry.id,
+        ...(entry.mood ? { mood: entry.mood } : {}),
+        ...(entry.tempo ? { tempo: entry.tempo } : {}),
+        ...(entry.category ? { category: entry.category } : {}),
+        ...(entry.unit ? { unit: entry.unit } : {}),
+        ...(entry.tags?.length ? { tags: entry.tags } : {}),
         source: 'cloud'
       }
       bgmDetails.push(created)

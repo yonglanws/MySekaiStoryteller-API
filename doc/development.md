@@ -9,20 +9,20 @@
 ```text
 config.example.yaml   配置样例（复制为 config.yaml，正式配置不入库）
 src/host/             Node 宿主：API / 静态托管 / 桥接层 / 渲染池 / ffmpeg 编码
-src/host/ai/          宿主内置 AI：LLM 客户端、提示词、剧本校验与 TTS 翻译
-src/host/assets/      Moesekai 模型索引、下载、sse-motion 转 motion3、清单更新
-src/host/tools/       宿主命令行工具（fetchAssets）
+src/host/ai/          宿主内置 AI：5 阶段流水线（staged.ts / prompt.ts / officialLinter.ts / validate.ts）
+src/host/assets/      云端目录、按需物化、Moesekai/exmeaning 拉取、sse-motion 转 motion3 与离线语义 JSON
+src/host/tools/       宿主命令行工具（fetchAssets / fetchMedia）
 src/webrender/        无头浏览器加载的渲染工作页面
 src/renderer/         渲染引擎：PixiJS / Live2D / 导出管线
-src/common/           宿主与渲染侧共享的故事类型定义
+src/common/           宿主与渲染侧共享的故事类型、官方 60fps 时序常量与导出语义
 src/shared/           宿主与渲染侧共享的 ffmpeg 模块
-resources/            模型、背景、语音、BGM 与剧本；渲染资源不入库
+resources/            模型、背景、语音、BGM、SE 与剧本（默认空目录即可跑云端资源）
 out/webrenderer/      网页渲染端构建产物
 out-host/             宿主编译产物
 doc/                  使用与开发文档
-documents/assets/     README 使用的图片
+documents/assets/     文档资源
 deploy/               systemd 单元
-scripts/              测试与工具脚本
+scripts/              测试、语义索引构建与评测脚本
 ```
 
 ## 构建与类型检查
@@ -48,14 +48,15 @@ npm run test:all
 
 需要缩小验证范围时：
 
-| 命令                    | 验证内容                                                                                                   |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `npm test`              | API 导出超时、AI 剧本、Irodori 请求、日文 TTS 预检、导出诊断、动作转换、背景/BGM 拉取                      |
-| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复                                                                         |
-| `npm run test:config`   | BGM 配置                                                                                                   |
-| `npm run test:record`   | record 录制与编码管线                                                                                      |
-| `npm run test:renderer` | 官方 60fps 时序、Talk 自动播放、布局矩阵、交叉淡化参数、非阻塞调度、剩余特效、自然动作、逐帧计划、导出日志 |
-| `npm run test:stories`  | 官方基线、AI 质量门、官方动作语义、328 集 scenario 批量审计（语料存在时）                                  |
+| 命令                    | 验证内容                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `npm test`              | API 导出超时、AI 剧本、Irodori 请求、日文 TTS 预检、导出诊断、动作转换、云端目录/按需物化与零本地全云端集成测试 |
+| `npm run test:pool`     | 取消、超时、并发隔离和 worker 恢复                                                                              |
+| `npm run test:config`   | BGM 配置与云端目录合并测试                                                                                      |
+| `npm run test:tts`      | TTS 权重租约管理测试                                                                                            |
+| `npm run test:record`   | record 录制与编码管线                                                                                           |
+| `npm run test:renderer` | 官方 60fps 时序、Talk 自动播放、布局矩阵、交叉淡化参数、非阻塞调度、特效、自然动作、逐帧计划、导出日志          |
+| `npm run test:stories`  | 官方基线、AI 质量门、官方动作语义、批量 scenario 审计（语料存在时）                                             |
 
 测试数量会随回归用例变化，以当前运行结果为准。纯逻辑测试不能代替实际视频验收。
 

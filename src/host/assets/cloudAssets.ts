@@ -11,7 +11,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
-import type { AssetsSettings } from '../config'
+import { DEFAULT_CLOUD_BGM_ID, DEFAULT_LOCAL_BGM_PATH, type AssetsSettings } from '../config'
 import type { StoryData } from '../../common/types/Story'
 import { atomicWrite, request } from './http'
 import type {
@@ -79,7 +79,35 @@ function existsWithExtensions(dir: string, base: string, extensions: string[]): 
   return null
 }
 
-/** 背景：支持 id（bg_a000301）、文件名、cloud/ 路径、可读名与别名。 */
+function extractTimeHint(text: string): string | null {
+  if (/深夜|25点|凌晨|半夜/.test(text)) return '深夜'
+  if (/黄昏|傍晚|夕阳|放学/.test(text)) return '黄昏'
+  if (/夜晚|夜间|晚上|夜景|\bnight\b/i.test(text)) return '夜晚'
+  if (/白天|清晨|上午|中午|午休|早上|\bday\b/i.test(text)) return '白天'
+  return null
+}
+
+function stripTimeHint(text: string): string {
+  return text
+    .replace(/[·\s（(【\[]*(白天|黄昏|傍晚|夜晚|夜间|深夜|通用|室内|室外)[）)】\]]*$/g, '')
+    .trim()
+}
+
+function timeRank(entryTime: string | undefined, hint: string | null): number {
+  if (hint) {
+    if (entryTime === hint) return 0
+    if (hint === '夜晚' && entryTime === '深夜') return 1
+    if (hint === '深夜' && entryTime === '夜晚') return 1
+    if (entryTime === '通用') return 2
+    return 3
+  }
+  if (!entryTime || entryTime === '白天') return 0
+  if (entryTime === '通用') return 1
+  if (entryTime === '黄昏') return 2
+  return 3
+}
+
+/** 背景：支持 id（bg_a000301）、文件名、cloud/ 路径、可读名、别名与时段限定变体。 */
 export function findCloudBackground(
   catalog: CloudCatalogData | null,
   value: unknown
@@ -88,29 +116,50 @@ export function findCloudBackground(
   const raw = normalizeRef(value)
   if (!raw) return null
   const lower = raw.toLowerCase()
-  const exact = catalog.backgrounds.find((entry) =>
-    keysOf([entry.id, entry.file, stem(entry.file), entry.name, ...entry.aliases]).includes(lower)
-  )
-  if (exact) return exact
 
-  // 同名背景在官方剧情里很常见（例如多个「屋上」），按 id 排序取第一个，
-  // 保证同一份剧本每次导出的结果一致。
-  const exactName = catalog.backgrounds.find((entry) =>
-    keysOf([entry.name, ...entry.aliases]).includes(lower)
+  // 1. 精确 id / 文件名 / stem 命中
+  const byId = catalog.backgrounds.find((entry) =>
+    keysOf([entry.id, entry.file, stem(entry.file)]).includes(lower)
   )
-  if (exactName) return exactName
+  if (byId) return byId
 
-  const byName = catalog.backgrounds
+  // 2. 可读名 + 可选时段消歧（例如「神山高校 天台·黄昏」/「神山高校 天台（夜晚）」）
+  const timeHint = extractTimeHint(raw)
+  const baseQuery = stripTimeHint(raw).toLowerCase()
+  const exactNameMatches = catalog.backgrounds.filter((entry) => {
+    const names = keysOf([
+      entry.name,
+      entry.timeOfDay ? `${entry.name}·${entry.timeOfDay}` : undefined,
+      entry.timeOfDay ? `${entry.name}（${entry.timeOfDay}）` : undefined,
+      entry.timeOfDay ? `${entry.name} ${entry.timeOfDay}` : undefined,
+      ...entry.aliases
+    ])
+    return names.includes(lower) || (Boolean(baseQuery) && keysOf([entry.name, ...entry.aliases]).includes(baseQuery))
+  })
+  if (exactNameMatches.length > 0) {
+    return exactNameMatches.sort(
+      (a, b) => timeRank(a.timeOfDay, timeHint) - timeRank(b.timeOfDay, timeHint) || a.id.localeCompare(b.id)
+    )[0]
+  }
+
+  // 3. 子串 / 标签模糊命中，优先匹配时段、名称更短更贴切的条目
+  const fuzzyTarget = baseQuery || lower
+  const byFuzzy = catalog.backgrounds
     .filter((entry) =>
-      keysOf([entry.name, ...entry.aliases]).some(
-        (key) => key.includes(lower) || lower.includes(key)
+      keysOf([entry.name, ...entry.aliases, ...(entry.tags ?? [])]).some(
+        (key) => key.includes(fuzzyTarget) || fuzzyTarget.includes(key)
       )
     )
-    .sort((a, b) => a.id.localeCompare(b.id))
-  return byName[0] ?? null
+    .sort(
+      (a, b) =>
+        timeRank(a.timeOfDay, timeHint) - timeRank(b.timeOfDay, timeHint) ||
+        a.name.length - b.name.length ||
+        a.id.localeCompare(b.id)
+    )
+  return byFuzzy[0] ?? null
 }
 
-/** BGM：支持 id（bgm00003）、文件名、cloud/ 路径、曲名。 */
+/** BGM：支持 id（bgm00003 / normal_area）、文件名、cloud/ 路径、曲名。 */
 export function findCloudBgm(
   catalog: CloudCatalogData | null,
   value: unknown
@@ -119,8 +168,10 @@ export function findCloudBgm(
   const raw = normalizeRef(value)
   if (!raw) return null
   const lower = raw.toLowerCase()
+  const lowerStem = stem(lower).toLowerCase()
   const exact = catalog.bgm.find((entry) =>
-    keysOf([entry.id, entry.file, stem(entry.file), entry.name]).includes(lower)
+    keysOf([entry.id, entry.file, stem(entry.file), entry.name]).includes(lower) ||
+    keysOf([entry.id, stem(entry.file)]).includes(lowerStem)
   )
   if (exact) return exact
 
@@ -130,7 +181,7 @@ export function findCloudBgm(
   return byName.length === 1 ? byName[0] : null
 }
 
-/** 模型：支持云端 id、角色名/简称、cloud/ 路径。 */
+/** 模型：支持云端 id、服装标签（如「星乃一歌 校服」）、角色名/简称、cloud/ 路径。 */
 export function findCloudModel(
   catalog: CloudCatalogData | null,
   value: unknown
@@ -139,18 +190,35 @@ export function findCloudModel(
   const raw = normalizeRef(value)
   if (!raw) return null
   const lower = raw.toLowerCase()
-  const exact = catalog.models.find((entry) =>
-    keysOf([entry.id, entry.name, entry.shortName, entry.path, stem(entry.path)]).includes(lower)
-  )
-  if (exact) return exact
 
-  const byName = catalog.models.filter(
-    (entry) =>
-      entry.name.toLowerCase() === lower ||
-      entry.shortName.toLowerCase() === lower ||
-      entry.id.toLowerCase().includes(lower)
+  const exactId = catalog.models.find((entry) =>
+    keysOf([entry.id, entry.path, stem(entry.path)]).includes(lower)
   )
-  return byName.length === 1 ? byName[0] : null
+  if (exactId) return exactId
+
+  const byCharAndOutfit = catalog.models.filter((entry) => {
+    const variants = keysOf([
+      entry.outfitLabel ? `${entry.name} ${entry.outfitLabel}` : undefined,
+      entry.outfitLabel ? `${entry.shortName} ${entry.outfitLabel}` : undefined,
+      entry.outfitLabel ? `${entry.name}·${entry.outfitLabel}` : undefined,
+      entry.outfitCategory ? `${entry.name} ${entry.outfitCategory}` : undefined,
+      entry.outfitCategory ? `${entry.shortName} ${entry.outfitCategory}` : undefined
+    ])
+    return variants.includes(lower)
+  })
+  if (byCharAndOutfit.length > 0) {
+    return byCharAndOutfit[0]
+  }
+
+  const byChar = catalog.models
+    .filter((entry) =>
+      keysOf([entry.name, entry.shortName]).includes(lower)
+    )
+    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id.localeCompare(b.id))
+  if (byChar.length > 0) return byChar[0]
+
+  const bySubstring = catalog.models.filter((entry) => entry.id.toLowerCase().includes(lower))
+  return bySubstring.length === 1 ? bySubstring[0] : null
 }
 
 async function ensureBackground(
@@ -329,6 +397,8 @@ async function ensureBgm(entry: CloudBgmEntry, ctx: CloudAssetContext): Promise<
   const downloaded = await downloadMediaFile({
     kind: 'bgm',
     name: entry.id,
+    bundlePath: entry.bundlePath,
+    saveAsName: entry.id,
     outDir: ctx.resourcesDir,
     region: ctx.settings.region,
     assetBase: ctx.settings.assetBase || undefined,
@@ -395,10 +465,19 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
   return `cloud/${path.basename(downloaded.file)}`
 }
 
+function isLegacyDefaultBgmRef(ref: string): boolean {
+  const lower = ref.trim().replace(/^\/+/, '').toLowerCase()
+  return (
+    lower === DEFAULT_LOCAL_BGM_PATH.toLowerCase() ||
+    lower === 'bg1.mp3' ||
+    lower === 'bg1'
+  )
+}
+
 /**
  * 全局默认 BGM（config.yaml / bgm.yaml 的 `bgm.path`）也允许指向云端曲目：
- * 本地文件不存在时按曲名/id 解析并下载，成功后把 path 改成资源根相对路径。
- * 已经是 http(s) URL、站内绝对路径或本地文件时原样保留。
+ * 本地文件真实存在时永远优先保留；本地不存在时按曲名/id 解析并下载，
+ * 若仍为旧默认占位 `audio/bgm/bg1.mp3` 且磁盘无该文件，则回落到已验证的云端日常 BGM（如 bgm00003）。
  */
 export async function resolveGlobalBgm(
   bgm: { enabled: boolean; path: string },
@@ -410,7 +489,14 @@ export async function resolveGlobalBgm(
   const ref = raw.replace(/^resources\//i, '')
   if (fs.existsSync(path.join(ctx.resourcesDir, ...ref.split('/')))) return false
 
-  const entry = findCloudBgm(ctx.catalog, ref) ?? findCloudBgm(ctx.catalog, path.basename(ref))
+  let entry = findCloudBgm(ctx.catalog, ref) ?? findCloudBgm(ctx.catalog, path.basename(ref))
+  if (!entry && isLegacyDefaultBgmRef(ref)) {
+    entry =
+      findCloudBgm(ctx.catalog, DEFAULT_CLOUD_BGM_ID) ??
+      ctx.catalog.bgm.find((item) => item.id !== 'bgm00000' && Boolean(item.description)) ??
+      ctx.catalog.bgm.find((item) => item.id !== 'bgm00000') ??
+      null
+  }
   if (!entry) return false
   try {
     const file = await ensureBgm(entry, ctx)

@@ -2,11 +2,9 @@
 
 [返回文档索引](README.md) · [API 参考](api.md) · [云端资源获取](cloud-assets.md)
 
-宿主可以直接接收一句场景描述，完成 **资源目录读取 → 选角 → 台词 → 情绪/表演/翻译（并行）→ 校验修复**，然后返回剧本 JSON，或继续调用现有导出管线生成视频。客户端不再需要自己构建提示词、维护动作白名单或做舞台校验。
+宿主支持直接接收一句场景描述，在全云端（或混合本地）资源目录下完成 **资源目录读取 → 五阶段导演流水线 → 校验与官方不变量修正**，输出标准 `StoryData` JSON 或直接提交渲染队列导出 MP4。
 
-默认使用参照 `ournotes-player` 的四段式流水线：先选 1~2 名角色和一个小事件，再只带入选角色的**核心人设段落**写台词，然后低温标注 TTS 情绪段，同时单独设计每句的动作/表情、听者反应、背景和可选 BGM。台词一经生成就逐字进入最终剧本，表演段不能改写它。提示词只带本场演员与按语义裁剪的动作/表情，不会把 26 位角色的完整人设和全部动作塞给模型。
-
-AstrBot 插件 2.0 起直接调用宿主内置生成（`POST /api/v1/script/generate` 与 `POST /api/v1/export`），不再在自己的进程里维护提示词或调用 LLM。宿主内置生成同样适合没有 AstrBot、或希望所有机器人都共享同一套提示词与资源目录的部署。
+AstrBot 插件直接调用宿主的 `POST /api/v1/script/generate`、`POST /api/v1/generate` 与 `POST /api/v1/export`，不需要在插件进程内重复维护提示词或资源白名单（见 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst)）。
 
 ## 配置
 
@@ -26,7 +24,7 @@ llm:
   translateForTts: true
   targetMinutes: 3
   systemPrompt: ''
-  extraBody: {} # 原样并入请求体；例如 {"thinking":{"type":"disabled"}} 关闭推理模型的思考
+  extraBody: {} # 原样并入请求体，例如 {"thinking":{"type":"disabled"}}
   personaDirs: []
   personas: []
 ```
@@ -35,47 +33,26 @@ llm:
 
 ```bash
 export MSS_LLM_API_KEY=sk-...
-# 或者指向本机模型服务（Ollama 示例）
+# 如指向本地 Ollama：
 export MSS_LLM_BASE_URL=http://127.0.0.1:11434/v1
 export MSS_LLM_MODEL=qwen2.5:32b
 ```
 
-`baseUrl` 是 OpenAI Chat Completions 的服务根地址，宿主会请求 `<baseUrl>/chat/completions`。兼容官方 OpenAI、new-api、one-api、Ollama、vLLM、LM Studio 等。
+| 配置              | 说明                                                                                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | 关闭后 `/api/v1/script/generate` 与 `/api/v1/generate` 返回 HTTP 422                                                                                                                        |
+| `baseUrl`         | OpenAI Chat Completions 根地址，宿主请求 `<baseUrl>/chat/completions`（兼容 OpenAI、new-api、one-api、Ollama、vLLM 等）                                                                     |
+| `pipeline`        | `staged`（默认）：5 阶段导演流水线；`single`：先快速选角再一次生成完整剧本；`chat` 模式始终走 `single`                                                                                      |
+| `jsonMode`        | `auto` 先带 `response_format=json_object` 并在服务端拒绝时自动退回；`on` 强制携带；`off` 不发送                                                                                             |
+| `repairRounds`    | `single` 校验失败时的重写轮数；`staged` 在台词/表演/情绪分段阶段分别按需最多重写/补写                                                                                                       |
+| `translateForTts` | 为缺失或非日文的 `ttsText` 批量翻译日语（每批 20 条，最多 3 批并发；纯标点台词跳过）                                                                                                        |
+| `targetMinutes`   | 目标成片分钟数（写入提示词并换算台词数与字数下限）                                                                                                                                          |
+| `extraBody`       | 原样并入请求体。对带思考开关的推理模型可设为 `{"thinking":{"type":"disabled"}}` 降延迟；使用 Gemini `-high` 等高思考模型时，建议把 `maxTokens` 调至 `32768` 以上以免 JSON 被思考 token 截断 |
+| `personaDirs`     | 读取目录下 `*.md` / `*.txt`，以文件名或 frontmatter `name` 匹配角色（长人设自动提取核心机制/语言与风格/角色档案/核心禁忌，每人截断在 5,000 字符内）                                         |
+| `personas`        | 内联人设列表：`name`、`prompt`、`aliases`、`group`                                                                                                                                          |
+| `systemPrompt`    | `single` 覆盖内置系统提示词；`staged` 追加到各阶段系统提示词末尾                                                                                                                            |
 
-`extraBody` 会原样并入请求体。对支持 `thinking` 字段的推理模型，可用
-`{"thinking":{"type":"disabled"}}` 关闭思考：单场生成从约 2~3 分钟降到 20~30 秒，但动作预算和句长
-约束的遵循度会下降；要稳定质量时保持默认（不关闭）。
-
-Gemini 的 `-high` 这类高思考别名会把思考 token 计入 `maxTokens`。8192 在台词段会被思考占满、
-导致返回截断的 JSON；使用这类模型时建议把 `maxTokens` 调到 32768 或更高。
-
-IrodoriTTS 只接受日文。`translateForTts` 默认开启，生成阶段会把每条 Talk 的空/中文
-`ttsText` 补成日文；只有标点/符号的 Talk（如 `……`）没有可配音内容，不参与翻译，也不计入缺失。
-数量不匹配或结果不是日文时会自动缩小批量补翻一次。staged 在台词定稿后立刻启动翻译，
-与情绪、表演两段 LLM 调用并行，每批 20 条、最多 3 批同时发送，正常场次翻译不占生成尾时间。
-通过 `/api/v1/export` 直接提交的外部剧本
-也会在入队前做一次严格预检，仍有需要配音的台词补不齐时返回 400，不会把中文 `content`
-送去合成。renderer 的 `TTSService` 还会在发请求前再校验一次日文，作为最后一道闸。
-
-| 配置              | 说明                                                                                         |
-| ----------------- | -------------------------------------------------------------------------------------------- |
-| `enabled`         | 关闭后两个生成端点返回 422                                                                   |
-| `pipeline`        | `staged`（默认）四段式；`single` 先快速选角、再一次调用写完整剧本；`chat` 模式始终 `single`  |
-| `jsonMode`        | `auto` 先带 `response_format=json_object`，服务拒绝时自动去掉；`on` 必须；`off` 不发送       |
-| `repairRounds`    | `single` 的 JSON/舞台校验失败重写轮数；`staged` 的台词/表演各最多重写一次                    |
-| `translateForTts` | 为缺失 `ttsText` 的台词批量翻译日语（每批最多 3 批并发）；纯标点台词跳过，失败时保留空字符串 |
-| `targetMinutes`   | 只写进提示词，不截断模型输出                                                                 |
-| `extraBody`       | 原样并入 Chat Completions 请求体；例如关闭推理模型的思考以降低延迟                           |
-| `personaDirs`     | 读取目录下 `*.md` / `*.txt`，文件名或 frontmatter `name` 作为角色名                          |
-| `personas`        | 内联人格：`name`、`prompt`、`aliases`、`group`                                               |
-| `systemPrompt`    | `single` 覆盖内置系统提示词；`staged` 追加到四段各自的系统提示词                             |
-
-如果 `tts` 配置了情绪标签（`tts.irodori.emotionLabels` 或任一角色的 `tts.characters[].emotions[].emotion`），
-staged 会在台词定稿后单独做一次低温情绪分段，再对分段做强约束（最短 3 句、同说话人抖动贴回、
-强情绪配额、至少 1/4 句子回到平静）。不在列表里的标签会被校验器清空；IrodoriTTS 再按标签选择该角色的
-情绪参考音频。未配置情绪标签时不会输出该字段。这样不会出现逐句换情绪导致音色忽变。
-
-人格目录示例：
+人设文件示例：
 
 ```markdown
 ---
@@ -86,7 +63,67 @@ aliases: [瑞希, mizuki]
 外貌、性格、说话风格、口头禅、禁忌、表情倾向……
 ```
 
-## 生成剧本
+## 五阶段 AI 导演流水线（`staged` 默认）
+
+当前 `src/host/ai/staged.ts` 与 `storyWriter.ts` 实现为 **5 阶段** 流水线（含第 2.5 阶段三路并行）：
+
+```text
+Stage 1: cast（选角与 2~3 幕节奏表）
+   │
+Stage 2: dialogue（逐字对白定稿 + 长度补写/短句合并/标点柔化）
+   │
+   ├─── Stage 2.5a: emotion（低温 0.2 分段标注 TTS 情绪）
+   ├─── Stage 2.5b: staging（directStaging：分幕转场、Normal <=2 轮换、运镜、SE）
+   └─── Stage 2.5c: translateDialogue（并行批量翻译日文 ttsText）
+   │
+   ▼ （等待 emotion + staging 回填后）
+Stage 3: direction（directActing：逐句动作/表情、约 20% 2拍微表演、听者反应）
+   │
+   ▼ （汇合 translateDialogue）
+Stage 4/5: composeStory + validateAndFixStory + OfficialLinter（编译官方时间线并校验七项硬指标）
+```
+
+### 各阶段职责
+
+1. **Stage 1 — `cast`（选角与分幕节奏表，`planEpisode`）**
+   - 从 26 位主角色（含多服装类别标签，如 `[服装: 校服=..., 私服=...]`）及可选 48 位配角中，按场景挑选 **2~5 名**角色（双人对话选 2 人；团体/活动向选 3~5 人；仅明确独白选 1 人），并按场景关键词自动匹配对应服装变体。
+   - 使用语义打分与分类分桶（`imagePromptChoices` / `bgmPromptChoices`），从 1,401 张背景（按地点/时段/室内外打分，默认排除纯色幕布与剧情插画）与 421 首 BGM（覆盖全部情绪族）中精选最贴题的候选放入提示词。
+   - 规划 **2~3 幕（`scenes`）**：明确每幕 `background`、`ambient`（`normal`/`evening`/`night`）、`telop` / `placeInfo`、`transitionIn`（`black`/`sideFade`/`flashback`/`sekaiIn`/`sekaiOut`/`white`）、`activeCast`（1~2 人）、`bgm`（含 `silence` 留白）及 `scenarioEffect`。
+
+2. **Stage 2 — `dialogue`（逐字台词定稿，`writeDialogue`）**
+   - 仅携带本场入选角色的核心人设段落与官方团体 few-shot 台词样本（`corpusExamples.ts`），用 `turns` 结构输出 1~6 句连续对白。
+   - 台词定稿后**逐字锁定**，后续舞台/演技阶段不可改写台词正文；若句数或字数低于目标（`targetMinutes * 10` 句 / `targetMinutes * 250` 字）自动触发 `dialogue-expand` 补写；若平均句长过短则通过 `condenseDialogue` 合并同角色相邻短句；`softenPunctuation` 柔化部分句末标点以贴近官方停顿分布。
+
+3. **Stage 2.5 — 三路并行（`emotion` + `staging` + `translateDialogue`）**
+   - **`emotion`**：仅在配置了 TTS 情绪标签时启动，低温（`0.2`）按 5~10 句段落输出 `segments`，随后由 `stabilizeEmotions` 强制最短连续段、同说话人抖动贴回、强情绪配额与平静回落。
+   - **`staging`（`directStaging`）**：根据完整台词与分幕计划编排具体幕次转场（`fromLineId`）、`AmbientColor`、`Telop` / `PlaceInfo`、`PlaySe`（来自 1,942 条 SE 语义库与精选 cue）、`Move`（`stepCloser` / `stepBack` / `shiftSlot`）、`CameraZoom` / `CameraMove` / `ShakeWindow` / `ShakeScreen`、`hologram` 全息 shader、静默反应与 `bgmCut`。
+     - **2 人场景**：强制全程双人同台（`Left` / `Right`），不中途退场切换。
+     - **3~5 人团体场景**：始终保持 **`Normal` 模式（同时最多 2 人同台）**，通过 `stageGroup` 在幕次或对话轮换节点以 `LayoutClear` + `LayoutAppear` **原地交叠淡出/淡入**切换在场角色，匹配 PJSK `pjsk.moe` 官方演出表现。
+   - **`translateDialogue`**：台词定稿后立即异步启动，每批 20 条、最多 3 批并发将缺失或非日文的 `ttsText` 翻译为日语。
+
+4. **Stage 3 — `direction`（精细演技导演，`directActing`）**
+   - 携带已回填的情绪标签与分幕舞台上下文，以及按语义簇裁剪的动作/表情完整名称（防止模型编造不存在的编号）。
+   - 为约 60% 句子设计句首动作与表情，为约 20% 较长或带语气转折的句子增加 `at2`（0.45~0.75）两拍微表演（`motion2`/`facial2`），为约 15%~20% 句子分配同台听者反应（`listener`），并避开刚入场 0.4s 内的重复身体动作。
+
+5. **Stage 4/5 — `composeStory` + `validateAndFixStory` + `OfficialLinter`**
+   - 将选角、台词、情绪、舞台调度与演技导演合并为完整 `StoryData` 时间线。
+   - `validateAndFixStory` 负责路径与模型 id 对齐、云端背景/BGM/服装/SE 名收束（校验器全量覆盖 511 模型、1,401 背景、421 BGM 与 1,942 SE）、动作/表情名称自动纠偏、`sanitizeDisplayText`（30 字宽优先在标点后折行）与超 3 行 `Talk` 拆分。
+   - `enforceOfficialStoryInvariants`（`OfficialLinter`）核查并自动修复 **7 项官方演出硬不变量**：
+     1. `Talk.delay == 0` 占比 ≥ 85%（清除机械 `0.1/0.15s` 小停顿，保留 `≥0.5s` 刻意留白）。
+     2. 零 `±100px` Slow 滑入/滑出（统一转为 `from == to, offset: 0` 原地淡入/淡出）。
+     3. `LayoutAppear` 带入场动作后 `< 0.4s` 内不重复触发同角色 body motion（避免双重抽搐）。
+     4. 转场（`BlackOut` / `SideFade Out` / `SekaiOut` / `Telop`）与静默动作前自动设置 `closeWindowOnFinish`。
+     5. `FlashbackIn/Out`、`SepiaIn/Out`、`SideFade Out/In`、`SekaiOut/In`、`ShakeScreen/Stop`、Shader、Camera 必须成对闭合。
+     6. 全部动作与表情必须真实存在于实时 `CatalogView` 目录中。
+     7. `Normal` 模式同台人数 ≤ 2 且槽位（`Left`/`Right`/`Center`）无冲突。
+
+### `single` 与 `chat` 模式
+
+当设置 `pipeline: single` 或 `mode: chat` 时，宿主会先执行轻量级 `resolveFastCast`（优先级：场景点名 → 沿用对话历史角色 → 一次低温快速选角调用，将候选角色缩到 `story <= 4`、`chat <= 2` 人），再单次调用 LLM 生成完整剧本并经过同样的 `validateAndFixStory` + `OfficialLinter` + `translateForTts` 流程。
+
+## 接口调用示例
+
+### 仅生成剧本：`POST /api/v1/script/generate`
 
 ```bash
 curl -sS -X POST http://127.0.0.1:9881/api/v1/script/generate \
@@ -99,56 +136,18 @@ curl -sS -X POST http://127.0.0.1:9881/api/v1/script/generate \
   }'
 ```
 
-请求字段：
+| 请求字段          | 必填 | 说明                                                   |
+| ----------------- | ---- | ------------------------------------------------------ |
+| `prompt`          | 是   | 场景描述或用户消息                                     |
+| `mode`            | 否   | `story`（默认，约 3 分钟短剧）或 `chat`（角色对话）    |
+| `cast`            | 否   | 限定可选角色：角色名、简称、数字 id 或云端模型 id 片段 |
+| `targetMinutes`   | 否   | 覆盖 `llm.targetMinutes`                               |
+| `history`         | 否   | `chat` 模式历史消息 `[{role, content}]`                |
+| `translateForTts` | 否   | 默认 `true`；设为 `false` 跳过日语翻译                 |
+| `pipeline`        | 否   | `staged` 或 `single`；`chat` 模式固定使用 `single`     |
+| `timeout`         | 否   | 生成超时（毫秒），默认 `600000`，上限 `1800000`        |
 
-| 字段              | 必填 | 说明                                                           |
-| ----------------- | ---- | -------------------------------------------------------------- |
-| `prompt`          | 是   | 场景描述或用户消息                                             |
-| `mode`            | 否   | `story`（默认，约 3 分钟短戏）或 `chat`（角色对话）            |
-| `cast`            | 否   | 限定可选角色：角色名、简称、id 或模型 id 片段                  |
-| `targetMinutes`   | 否   | 覆盖 `llm.targetMinutes`                                       |
-| `history`         | 否   | `chat` 模式的历史消息：`[{role, content}]`                     |
-| `translateForTts` | 否   | 默认 `true`；设为 `false` 跳过日语翻译                         |
-| `pipeline`        | 否   | `staged` 或 `single`，覆盖 `llm.pipeline`；`chat` 模式忽略此项 |
-| `timeout`         | 否   | 生成阶段超时（毫秒），默认 600000，最大 1800000                |
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "story": { "models": [], "images": [], "snippets": [] },
-  "meta": {
-    "mode": "story",
-    "pipeline": "staged",
-    "title": "放学后",
-    "model": "gpt-4.1-mini",
-    "rounds": 3,
-    "warnings": [],
-    "usage": { "promptTokens": 0, "completionTokens": 0, "totalTokens": 0 },
-    "latencyMs": 0,
-    "durationMs": 0,
-    "ttsTranslated": 3,
-    "cast": ["晓山瑞希", "东云绘名"],
-    "stages": [
-      { "stage": "cast", "model": "gpt-4.1-mini", "latencyMs": 0, "usage": {}, "ok": true },
-      { "stage": "dialogue", "model": "gpt-4.1-mini", "latencyMs": 0, "usage": {}, "ok": true },
-      { "stage": "direction", "model": "gpt-4.1-mini", "latencyMs": 0, "usage": {}, "ok": true }
-    ]
-  },
-  "scriptPath": "apifile/script-1800000000000.json"
-}
-```
-
-`scriptPath` 是宿主输出目录里的剧本 JSON，便于复现和排查；清理策略与导出文件相同。
-
-导出成功后，视频同目录还会生成 `<video>.log.json`、`<video>.log` 与 `<video>.report.txt`：
-前者是完整诊断（逐句 planned/actual/drift、每条 TTS 的日文标记与时长、每个动作的
-request/loaded/started/interrupted、60 fps 逐帧计划、全部模块日志），`.log` 是可读摘要与异常，
-`.report.txt` 是成片时长、逐帧计划总量、近似项与异常清单。响应里的 `logPath` / `logJsonPath` /
-`reportPath` 指向这三个文件。
-
-## 一句话生成视频
+### 一句话生成并导出视频：`POST /api/v1/generate`
 
 ```bash
 curl -sS -X POST http://127.0.0.1:9881/api/v1/generate \
@@ -161,108 +160,42 @@ curl -sS -X POST http://127.0.0.1:9881/api/v1/generate \
   }'
 ```
 
-它先调用与 `/api/v1/script/generate` 相同的生成流程，再把剧本交给 `POST /api/v1/export` 使用的同一条队列。响应包含导出结果（`videoPath`、`fileSize`、`duration`、`frameCount`、`timings`、`downloadUrl`）以及 `story`、`meta`、`scriptPath`。
+响应同时返回导出结果（`videoPath`、`fileSize`、`duration`、`frameCount`、`timings`、`logPath`、`logJsonPath`、`reportPath`、`downloadUrl`）以及 `story`、`meta`、`scriptPath`。
+若剧本生成成功但视频导出失败，接口返回 HTTP 500 并在响应体保留 `story` 和 `meta`，调用方可直接持 `story` 重试 `/api/v1/export`，无需重复消耗 LLM。
 
-生成成功但导出失败时返回 500，并在响应里带回 `story` 和 `meta`，客户端可以拿剧本重新提交 `/api/v1/export`，不必重新消耗 LLM。
+### 观测与耗时
 
-## 提示词体积
+- 响应 `meta.stages[]` 记录每次调用的 `stage`（如 `cast`、`dialogue`、`emotion`、`staging`、`direction`）、`model`、`latencyMs`、`usage` 与 `ok`。
+- `meta.latencyMs` 为各次 LLM 调用耗时之和（Stage 2.5 并行时会大于实际墙钟）；`meta.durationMs` 才是实际端到端生成墙钟耗时。
 
-- 26 份完整人设约 22 万字符。台词与聊天提示词只提取「核心机制 / 语言与风格 / 角色档案 / 核心禁忌」，长人设每人不超过 5000 字符；其余聊天协议、注入防御、环境感知段落不进入剧本提示词。
-- `single` / `chat` 在角色多于 2 人时先做一次快速选角：场景点名或沿用上一轮角色时零额外调用，否则只发一份角色摘要清单。主提示词只带 1~2 人，实测聊天提示词从约 24.5 万字符降到约 2.0 万字符，single 剧本从约 24.6 万降到约 1.75 万。
-- 动作/表情按语义挑选精确名称（优先 normal 风格、同风格变体），每人约 26 个动作、20 个表情，并附关键词中文表。实测双人表演设计提示词从约 1.86 万字符降到约 0.98 万字符，四段合计从约 4.58 万降到约 2.90 万。
-- `single` / `chat` 不再要求模型写日文 `ttsText`，主输出更短；校验后由宿主批量翻译补齐。
+## 质量评测与回归
 
-## 耗时
-
-staged 的串行部分只有选角 → 台词；台词定稿后情绪标注、表演设计和日文翻译同时发出，
-生成墙钟约等于「选角 + 台词 + max(情绪, 表演, 翻译)」，而不是四段相加。
-每个阶段完成时日志会打印 `[AI] staged: <stage> ok in <n>ms`；响应的 `meta.stages[].latencyMs`
-是单次调用耗时，`meta.latencyMs` 是各次调用之和（并行时会大于墙钟），`meta.durationMs` 是实际墙钟。
-
-## 生成流程
-
-1. **资源目录**：读取 `resources/` 的模型、动作、表情、背景、BGM 清单（30 秒缓存），并合并云端目录（背景地点名、官方曲名、26 位角色模型）；本地条目优先。BGM 会合并 `fetch:media` 缓存的官方曲名与分类。`cast` 会把可选角色缩小到匹配项。云端目录默认开启，本地 YAML 可以完全不写。
-2. **staged（默认）**：四次 LLM 调用（选角 → 台词；台词定稿后情绪、表演与日文翻译并行），按官方剧情实测校准
-   （约 3 分钟、40 句上下、平均 17~20 字、约两成台词没有动作、双人整场同场）。
-   - **选角**：从可选角色里选 1~2 人，给每人一个本场功能，写一个小事件和 4~6 条大纲；只带人设摘要。
-   - **台词**：只带入选角色的核心人设段落（核心机制、语言与风格、角色档案、核心禁忌；长人设每人截到 5000 字符），用 `turns` 输出——一个角色一次发言 = 一个 turn，turn 里 1~6 条
-     `lines`。这一稿之后逐字保留，情绪段和表演段都不能改写；最后只把一部分句号收尾改成省略号
-     （只改标点，不动文字），把停顿密度拉近官方。宿主会把模型多写的同角色相邻短句并回
-     一条（`condenseDialogue`，只合并不改字），把平均句长拉回官方水平。每条台词的动作 cue
-     固定在句首（官方 `MotionChangeFrom=1`、`TimingSyncValue=0`），不会随 TTS 时长漂移。
-   - **情绪**：台词定稿后单独用低温（0.2）标注，与表演设计、日文翻译同时发出，模型按 5~10 句一段输出
-     `segments`，只允许配置的 6 个 TTS 标签。宿主再做强约束：段内不切、短段合并、同说话人抖动贴回、强情绪配额、至少 1/4
-     句子回到平静底色。这样音色不会在相邻句之间反复横跳。
-   - **表演**：带逐字台词（情绪标签尚未回填，按台词本身判断语气）、入选角色按语义裁剪的精确动作/表情清单（每人约 26 个动作、20 个表情）、背景清单和 BGM 清单，为每句选
-     说话者动作/表情、约 1/5 的听者反应、一张主背景（可选第二张）、环境色和一首 BGM（情绪明显
-     转折时可再指定第二首和换曲句）。宿主把说话者动作压到约 80%（至少 20% 静止句），听者反应
-     压到约 20%。情绪标签在合成前回填到台词。
-   - **合成**：双人戏整场两人同场（Left/Right），单人戏整场 Center；`planPresence` 只产出一个
-     覆盖全篇的段。开场用一次 `LayoutAppear` 让两人同时入场，两个角色都带入场动作；结尾一次
-     `LayoutClear` 原地淡出。入场动作在模型 alpha=0 时就开始加载/播放，再开始淡入和滑入，
-     并且只等 0.1s 淡入（官方 FadeOpacity 为 1 帧 alpha=0 + 6 帧淡入，片段约 116.7ms），
-     滑入继续在后台播放，所以不会出现“淡入后站桩”或每条入场停顿 2~3 秒。
-     第二张背景/环境色写进 `images`/`AmbientColor`；BGM 在开场写 `ChangeBgm`，指定了 `bgm2`
-     时在对应句前再换一次。
-   - **官方节奏**：台词 4 帧/字（66.7ms），有语音时等 `语音结束 + 0.05s` 后再停 0.5s，
-     无语音时打字结束停 2.0s；语音后还要等身体动作收尾。首次/`HideTalk` 后打开对话框的
-     0.2s 只推迟打字，不推迟语音。动作切换使用 0.5s 交叉淡化（同类别/链接动作 0.125s，
-     表情 0.25s），不再先清空旧动作。待机有 3s 呼吸与 3±2s 眨眼，口型按官方 RMS/pow 曲线。
-   - **降级**：选角失败按目录顺序取前两名；情绪标注失败整场用默认标签；表演为空时重写一次，仍失败
-     则只保留台词与 presence 走位，不阻断出片。
-3. **single**：角色多于 2 人时先做一次很短的快速选角（场景点名或沿用上一轮角色时跳过），再一次调用直接写完整剧本；`chat` 模式始终使用这条路径。主生成只写中文 `content`，`ttsText` 由宿主统一翻译。模型可在顶层写 `bgm` 数组（与 `images` 对齐），宿主把它编译成开场/换场处的 `ChangeBgm`；没有合适曲目时省略，继续使用全局 BGM。
-4. **LLM 调用**：OpenAI 兼容接口，`response_format=json_object` 可按配置回退；网络错误、429、5xx 自动重试。
-5. **校验修复**：
-   - `modelId` 必须来自目录；id 与路径不一致时按路径重映射
-   - `speaker` 与 `modelId` 对齐
-   - 背景必须在清单里：可以写文件名、云端 id（`bg_a000301`）或官方地点名（`教室`）
-   - BGM 必须在 `bgm.yaml` 或云端目录的曲目清单里；非法曲目和空文件会被丢弃，整场没有可用 `ChangeBgm` 时沿用全局默认
-   - BGM 候选按 `description` 过滤，最多列 40 首；`fetch:media` 用 PJSK 官方曲名索引补的“曲名 + 分类”也算描述
-   - `ChangeBgm.stop: true` 停止当前 BGM；同时给 `file` 时按停止处理
-   - 动作/表情名按完整名 → 忽略大小写/分隔符 → 唯一尾号 → 唯一前缀修正，修不了丢弃该处表演
-   - 单句说话者最多 5 处变化、听者最多 1 处、同角色相邻变化间隔 ≥0.2
-   - 不在场说话、重复入场、双人同侧、第三人入场会抛错并进入修复轮
-   - 超过 3 行的 Talk 拆成同角色连续多条，台词一字不丢
-   - 完全缺失 `ChangeLayoutMode`、`ChangeBackgroundImage` 或结尾 `BlackOut` 时自动补一条，避免白底/硬切结束
-6. **ttsText 翻译**：台词定稿后立刻启动，与情绪/表演并行；缺失的 `ttsText` 按每批 20 条、最多 3 批并发
-   翻译成日语，纯标点台词跳过，数量不匹配或请求失败时缩小批量补翻一次，仍失败则保留空字符串
-   （Irodori 不会朗读中文 `content`）。
-7. **返回或导出**：校验通过后返回 `StoryData`，或直接提交渲染队列。
-
-## 质量评测
-
-仓库带三套可复现的评测/回归脚本（语料和报告放在仓库外）：
+仓库在 `scripts/stories/` 下提供官方语料基线与 AI 评测脚本（语料与报告存放于仓库外）：
 
 ```bash
-# 1. 下载官方活动剧情（JP 结构 + CN 文本）
+# 1. 拉取官方活动剧情（JP 结构 + CN 文本）
 node scripts/stories/fetch-official-corpus.mjs --out D:/msst-lab/corpus
 
-# 2. 官方基线：句长、连续说话、动作密度、情绪切换、上下场次数
+# 2. 统计官方基线分布
 node scripts/stories/official-metrics.mjs \
   --corpus D:/msst-lab/corpus --out D:/msst-lab/official-baseline.json
 
-# 3. AI 评测：8 个固定场景，落盘剧本和聚合指标
+# 3. 批量运行 AI 评测场景
 MSS_LLM_API_KEY=... MSS_LLM_BASE_URL=... \
   node scripts/stories/ai-eval.mjs --runs 1 --out D:/msst-lab/runs/latest
 
-# 回归测试（语料/报告存在时执行，不存在时跳过）
+# 4. 回归门禁（语料/报告存在时执行，不存在时自动跳过）
 npm run test:stories
 ```
 
-`npm run test:stories` 会断言：官方 40 句双人窗口的句长/动作/舞台分布没有漂移，以及 AI 报告里
-句长、>26 字比例、动作密度、无动作比例、情绪切换、同场人数、单人镜头和上下场次数落在目标区间。
-指标定义与官方实测值见 [AI 剧本质量计划](ai-script-quality-plan.md)。
-
 ## 错误与排查
 
-| 状态码 | 含义                                | 处理                                              |
-| ------ | ----------------------------------- | ------------------------------------------------- |
-| 422    | 生成/校验失败，`details` 是每轮错误 | 看 `details` 最后一条；常见是不在场说话或双人同侧 |
-| 429    | 并发生成达到上限                    | 等当前生成结束；上限取 `min(4, render.workers)`   |
-| 502    | LLM 网络/HTTP 错误                  | 检查 `baseUrl`、密钥、模型名和 `jsonMode`         |
-| 504    | 生成阶段超时                        | 调大 `timeout` / `llm.timeoutMs`，或换更快的模型  |
-| 500    | 剧本成功但导出失败                  | 用响应里的 `story` 重新提交 `/api/v1/export`      |
+| 状态码 | 含义                                  | 处理                                                      |
+| ------ | ------------------------------------- | --------------------------------------------------------- |
+| 422    | 生成/校验失败，或 `llm.enabled=false` | 查看 `details`；若提示 `cast` 无法匹配，检查角色名/id     |
+| 429    | 并发生成达到上限                      | 上限为 `max(1, min(4, render.workers))`，等待当前生成完成 |
+| 502    | LLM 网络或 HTTP 错误                  | 检查 `baseUrl`、`MSS_LLM_API_KEY`、模型名与 `jsonMode`    |
+| 504    | 生成阶段超时                          | 调大 `timeout` / `scriptTimeout` 或 `llm.timeoutMs`       |
+| 500    | 剧本生成成功但导出失败                | 使用响应中的 `story` 重新提交 `/api/v1/export`            |
 
-`GET /api/v1/health` 的 `llm` 节会报告 `enabled`、`model`、`baseUrl`、`pipeline`、`apiKeyConfigured`、当前生成数和并发上限；`apiKeyConfigured=false` 时先设置 `MSS_LLM_API_KEY`。
-
-模型名写错、动作名编造、JSON 截断是本地小模型最常见的问题。`single` 可以把 `repairRounds` 调到 3~4；`staged` 的台词/表演各只重写一次，仍失败时优先换更大的模型，而不是继续加轮数。
+通过 `GET /api/v1/health` 的 `llm` 字段可检查 `enabled`、`model`、`baseUrl`、`pipeline`、`apiKeyConfigured`、`activeGenerations` 与 `maxConcurrent`。

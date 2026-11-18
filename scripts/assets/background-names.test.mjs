@@ -17,17 +17,19 @@ const scenario = (effects, first = 'bg_a000301') => ({
   Snippets: effects.map((_effect, index) => ({ Action: 6, ReferenceIndex: index }))
 })
 
-test('pairs place-info text with the background active at that point', () => {
+test('pairs place-info text with the background active at that point and filters date/telop titles', () => {
   const data = scenario([
     { EffectType: 18, StringVal: '教室' },
     { EffectType: 7, StringValSub: 'bg_a000701' },
-    { EffectType: 8, StringVal: '屋上' },
+    { EffectType: 8, StringVal: '天台' },
     { EffectType: 8, StringVal: '翌日' },
+    { EffectType: 8, StringVal: '文化祭当日' },
+    { EffectType: 8, StringVal: '第二天 放学后' },
     { EffectType: 8, StringVal: '？？？' }
   ])
   assert.deepEqual(locationsOfScenario(data), [
     ['bg_a000301', '教室'],
-    ['bg_a000701', '屋上']
+    ['bg_a000701', '天台']
   ])
 })
 
@@ -41,17 +43,24 @@ test('collects the most frequent name and keeps aliases', () => {
   assert.deepEqual(names.bg_a000301.aliases, [])
 })
 
-test('checked-in background name index is populated', () => {
+test('checked-in background name index is populated with rich Simplified Chinese metadata', () => {
   const file = path.join(root, 'src/host/assets/background-names.json')
   const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
   assert.equal(data.format, 'msst.background-names/1')
   const backgrounds = Object.values(data.backgrounds ?? {})
   assert.ok(
-    backgrounds.length >= 100,
-    `expected >=100 named backgrounds, got ${backgrounds.length}`
+    backgrounds.length >= 1300,
+    `expected >=1300 named/classified backgrounds, got ${backgrounds.length}`
   )
-  assert.equal(data.backgrounds.bg_a000301.name, '神山高校 ３年Ａ組')
+  assert.equal(data.backgrounds.bg_a000301.name, '神山高校 三年一班')
+  assert.equal(data.backgrounds.bg_a000301.category, '校园')
+  assert.equal(data.backgrounds.bg_a000301.indoor, '室内')
+  assert.ok(['白天', '黄昏', '夜晚', '深夜', '通用'].includes(data.backgrounds.bg_a000301.timeOfDay))
   for (const entry of backgrounds) {
-    assert.ok(entry.name && entry.name !== '？？？')
+    assert.ok(entry.name && entry.name !== '？？？' && entry.name !== '文化祭当日')
+    assert.ok(entry.category)
+    assert.ok(['白天', '黄昏', '夜晚', '深夜', '通用'].includes(entry.timeOfDay))
+    assert.ok(['室内', '室外'].includes(entry.indoor))
+    assert.ok(Array.isArray(entry.tags) && entry.tags.length > 0)
   }
 })

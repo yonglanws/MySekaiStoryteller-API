@@ -1,280 +1,162 @@
-# 云端资源获取（moesekai / pjsk.moe）
+# 云端资源获取与零本地资源架构
 
 [返回文档索引](README.md) · [资源与音频配置](resources.md) · [API 参考](api.md)
 
-宿主可以从 Moesekai 公开剧情库拉取 Project SEKAI 的 Live2D 模型与动作，也可以从资源站拉取剧情背景和 BGM。
-模型拉取完成后不需要手工改模型文件：`models.yaml` 会自动登记，动作会写进模型包的 `motions/`；
-背景和 BGM 会分别追加到 `images.yaml` / `bgm.yaml`。
+MySekaiStoryteller-API 默认采用**云端优先、零本地资源（Zero-Local-Asset）**架构：启用 `assets.cloudCatalog: true`（默认开启）后，即使 `resources/` 为空目录且未编写任何 `models.yaml` / `images.yaml` / `bgm.yaml`，宿主也能直接启动、运行内置 AI 剧本生成并导出完整 MP4 视频。
 
-从 2026-11 起，宿主还提供**云端目录**（`assets.cloudCatalog`，默认开启）：背景、BGM 与 Live2D
-模型不再要求先下载到本地或写 YAML 登记。宿主从公开资源站生成目录（背景 id → 官方剧情地点名、
-BGM id → 官方曲名、模型 id → 角色名/动作/表情），AI 与手写剧本都可以直接写背景名（如 `教室`）、
-曲名（如 `Slapstick!!`）或云端 id；导出前按需把真正用到的文件下载到资源根的 `cloud/` 子目录，
-之后命中缓存直接复用。目录缓存在 `assets.cacheDir/catalog.json`，默认 6 小时刷新一次，
-可用 `POST /api/v1/cloud/refresh` 手动刷新。
+> [!NOTE]
+> 资源版权归 Bushiroad / Craft Egg / SEGA 等原权利方所有。云端拉取与按需物化功能仅用于本地、非商业的渲染与测试；本仓库不附带也不再分发这些资源。部署与分享成片前请自行确认授权范围。
 
-资源版权归 Bushiroad / Craft Egg / SEGA 等原权利方所有。下载脚本只用于本地、非商业的渲染与测试；仓库不附带、也不再分发这些资源。部署与分享成片前请自行确认授权范围。
+## 零本地资源与按需物化
 
-## 云端目录与按需物化
+云端目录把“清单发现”与“文件下载”分离：
 
-云端目录解决的是“每加一个背景/曲目都要先下载、再手写 YAML”的问题。开启后：
+1. **目录阶段（轻量化、不落盘媒体）**：宿主启动时从公开资源站索引与内置离线简体中文语义库合并生成目录（缓存在 `<assets.cacheDir>/catalog.json`，`schemaVersion: 2`，默认 TTL 6 小时），AI 提示词与校验器只需要读取其中的名称、服装分类、时段/室内外标签与情绪描述。
+2. **默认 BGM 自动兜底**：当 `resources/audio/bgm/bgm.yaml` 和 `resources/audio/bgm/bg1.mp3` 均不存在于磁盘且开启 `cloudCatalog` 时，`loadHostConfig()` 与 `resolveGlobalBgm()` 自动回落到已验证的云端日常曲 **`bgm00003`**（`Slapstick!!`），避免去远端请求不存在的 `bg1`。
+3. **导出前按需物化**：无论是 `/api/v1/export` 还是 `/api/v1/generate`，进入渲染池前都会调用 `resolveStoryCloudAssets()` 扫描剧本用到的 `models`、`images`、`ChangeBgm`、`PlaySe` / `StopSe`、`CostumeChange` 及转场/UI 特效资源，**仅下载缺失的条目**到 `resources/*/cloud/`（以及 `resources/inapp/jp-7.0.0/`），并改写故事内的相对路径，渲染端继续统一通过 `/resources/*` 路由加载。
+4. **缓存复用与本地优先**：物化后的文件直接保存在 `resources/` 下，二次导出命中本地缓存不再重复下载；**若本地磁盘已存在同名文件或手动配置了 YAML 清单，本地文件始终优先**，且本地清单不会压制云端目录中的其他角色、服装变体、背景或曲目。
 
-| 资源   | 目录来源                                                                    | 剧本里可以写                                         | 物化位置                                   |
-| ------ | --------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------ |
-| 背景   | 资源站 `scenario/background/` bundle 列表 + 官方剧情 PlaceInfo/Telop 地点名 | `教室`、`司の部屋`、`bg_a000301`、`cloud/bg_a000301` | `resources/images/cloud/<id>.<ext>`        |
-| BGM    | 资源站 `sound/scenario/bgm/` + Sekai-World 官方曲名索引                     | `Slapstick!!`、`bgm00003`、`cloud/bgm00003.mp3`      | `resources/audio/bgm/cloud/<id>.mp3`       |
-| SE     | 资源站 `sound/scenario/se/`                                                 | `se_door.mp3` 等 cue 文件                            | `resources/audio/se/cloud/<file>`          |
-| Live2D | Moesekai 模型索引 + 动作包 `_ripper.json`                                   | `cloud/<模型 id>/<变体>/<model3.json>`               | `resources/models/cloud/<模型 id>/<变体>/` |
+### 全量官方语义覆盖
 
-行为约定：
+宿主内置由 `scripts/assets/build-*.mjs` 离线构建的简体中文语义索引（位于 `src/host/assets/*.json`），与远端 Moesekai / exmeaning / Sekai-World 实时清单合并后提供全量覆盖：
 
-- **本地优先**：故事引用的文件如果已经在资源根下，宿主不会用云端文件替换，也不会重新下载。
-  本地 `bg_a000301.webp` / `bgm00003.mp3` 没有 YAML 描述时，会自动带上官方地点名/曲名，
-  因此按名字选择对已下载的本地资源同样有效。
-- **全局 BGM 也可以云端**：`bgm.path` 写的曲名/id 在本地不存在时，会解析成云端曲目并改写为
-  `audio/bgm/cloud/<id>.mp3`；已经是 http(s) URL 或站内绝对路径时保持原样。
-- **只物化用到的资源**：导出前扫描 `models`、`images`、`ChangeBgm`、`PlaySe`/`StopSe`；只有缺失的才下载。
-- **缓存复用**：物化结果就在资源根，第二次导出同一剧本直接读本地文件；删除 `cloud/` 即可重新拉取。
-- **目录刷新失败不影响出片**：启动时先读 `assets.cacheDir/catalog.json`，在线刷新失败沿用旧快照；
-  完全没有目录时回落到本地资源，云端引用会保留原值并报出具体路径。
-- **模型动作**：云端模型在目录阶段只读取包清单枚举动作/表情；真正下载时会转换 SSE 动作并补
-  `model3.json` 的 `FileReferences.Motions` 索引，渲染端不需要额外处理。
-- **背景名**：来自官方剧情中背景生效期间的地点标题，同名背景按 id 排序取第一张；没有地点名的背景
-  仍可用 id 引用，但不进入 AI 候选列表。地点名索引由
-  `scripts/assets/build-background-names.mjs` 生成，仓库内的索引只是离线基线。
+| 资源类型       | 离线语义索引                                        | 覆盖规模                                                                                                                       | 支持的剧本引用形式                                                                                     | 物化落盘位置                                        |
+| -------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| Live2D 模型    | `model-metadata.json` (`msst.model-metadata/1`)     | **511** 套模型（26 位主要角色多服装变体 + **48** 位配角/特别角色）                                                             | `cloud/<模型id>/<变体>/<model3.json>`、模型 id、`角色名 服装`（如 `星乃一歌 校服`）                    | `resources/models/cloud/<id>/<变体>/`               |
+| 背景图片       | `background-names.json` (`msst.background-names/1`) | **1,401** 张背景（源自 5,466 集国服官译语料），含 12 个分类、`timeOfDay`、`indoor`、`aliases`、`tags`                          | 云端 id（`bg_a000301`）、文件名、可读地点名、别名及带时段变体（如 `神山高校 天台·黄昏`）               | `resources/images/cloud/<id>.<ext>`                 |
+| BGM 曲目       | `bgm-semantics.json` (`msst.bgm-semantics/1`)       | **421** 首曲目（**400** 首 `sound/scenario/bgm/` + **21** 首 `sound/area_bgm/`），含曲风/情绪/节奏/组合标签及 Sekai-World 曲名 | 曲名（如 `Slapstick!!`）、云端 id（`bgm00003` / `normal_area`）、`cloud/<id>.mp3`                      | `resources/audio/bgm/cloud/<id>.mp3`                |
+| 场景音效（SE） | `se-semantics.json` (`msst.se-semantics/1`)         | **1,942** 条 SE（19 个场景分类）+ 精选常用 cue                                                                                 | `se00053_b.mp3`、`se_walk_women_001_1.mp3` 或 cue id / 描述标签                                        | `resources/audio/se/cloud/<file>`                   |
+| 官方 UI / 特效 | `INAPP_UI_ASSET_PATHS`                              | **17** 项常用对话框、转场遮罩、全息纹理与菜单 SE                                                                               | `Talk` / `PlaceInfo` / `SideFade` / `SekaiIn` / `SekaiOut` / `SimpleSelectable` / 全息 shader 自动触发 | `resources/inapp/jp-7.0.0/`（离线自动回退矢量绘制） |
 
-配置项（`config.yaml` 的 `assets` 节，全部有默认值）：
+<details>
+<summary>查看离线语义分类统计详情</summary>
+
+- **Live2D 服装大类（511 套）**：`活动` (188)、`队服` (102)、`运动服` (40)、`校服` (39)、`特殊` (33)、`常服` (32)、`私服` (24)、`演出服` (20)、`联动` (10)、`礼服` (9)、`泳装` (7)、`打工服` (4)、`和服` (3)。
+- **背景分类（1,401 张）**：`剧情插画` (658)、`线上通话` (177)、`特效与纯色` (100)、`住宅与房间` (93)、`演出与排练` (81)、`校园` (74)、`SEKAI世界` (69)、`涩谷街景` (66)、`游乐园与休闲` (55)、`商业与餐饮` (12)、`医院与公共` (12)、`自然与旅行` (4)；每张均附带 `timeOfDay`（`白天`/`黄昏`/`夜晚`/`深夜`/`通用`）与 `indoor`（`室内`/`室外`）。
+- **BGM 覆盖（421 首）**：已移除早期 80 首截断与“仅收录在 `soundtracks.json`”过滤，合并 400 首剧情 BGM 与 21 首 `sound/area_bgm/` 区域 BGM，并在支持 HCA/WAV 循环区间的音频上提取 `loopStartMs` / `loopEndMs` 写入伴随元数据。
+- **SE 分类（1,942 条）**：`日常环境` (1,383)、`活动专属` (268)、`脚步` (119)、`餐饮器皿` (38)、`天气自然` (36)、`舞台演出` (20)、`手机通知` (19)、`键盘鼠标` (18)、`开关门` (10)、`乐器音乐` (8)、`语音通话` (5)、`世界观转场` (4) 等。
+
+</details>
+
+### 行为约定
+
+- **同名多时段背景消歧**：同一地点常有白天、黄昏、夜晚、深夜多张变体。`findCloudBackground` 与 `CatalogView.canonicalImageEntry` 均支持按 `神山高校 天台·黄昏` / `神山高校 天台（夜晚）` 精确选图，未写时段时优先返回白天/通用变体。
+- **多服装与亚角色暴露**：云端目录通过 `selectModels(..., { allOutfits: true, includeSub: true, notableIds })` 暴露 26 位主角色的全部可换服装及知名配角；本地 `models.yaml` 只占对应角色的默认首选位，不会屏蔽同一角色的其余云端服装或未登记角色。
+- **目录刷新与离线降级**：宿主启动时先调用 `loadFromCache()` 秒级加载磁盘快照，再最多等待 15 秒在线刷新；请求 `/api/v1/resources` 或 `/api/v1/generate` 时最多等 2 秒首轮快照。若网络不可达，有旧快照时沿用旧快照，完全无快照时自动回落纯本地模式。
+
+## 配置与数据来源
+
+`config.yaml` 的 `assets` 节（所有字段均内置默认值）：
 
 ```yaml
 assets:
-  cloudCatalog: true # 关闭后只使用本地资源与 YAML 登记
-  cloudCatalogTtlHours: 6 # 目录缓存有效期
+  source: moesekai
+  region: jp # jp | cn | tw | kr | en（env: MSS_ASSETS_REGION）
+  indexBase: https://assets.pjsk.moe/sekai-extra-assets/sekai-live2d/
+  libraryBase: https://assets.pjsk.moe/sekai-extra-assets/sekai-story/ripper/
+  assetBase: '' # 留空按 region 推导 https://storage.exmeaning.com/sekai-<region>-assets
+  soundtrackBase: https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master/
+  cacheDir: cache/moesekai # 动作包与 catalog.json 缓存目录（env: MSS_ASSETS_CACHE_DIR）
+  concurrency: 4
+  timeoutMs: 180000
+  retries: 3
+  cloudCatalog: true # 设 false 时关闭云端目录，仅使用本地资源与 YAML 清单
+  cloudCatalogTtlHours: 6 # 目录快照有效期（小时）
 ```
 
-## 数据来源
+数据源对应关系：
 
-| 内容             | 地址                                                                                         |
-| ---------------- | -------------------------------------------------------------------------------------------- |
-| 模型索引         | `https://assets.pjsk.moe/sekai-extra-assets/sekai-live2d/<区服>/models.json`                 |
-| 模型包 / 动作包  | `https://assets.pjsk.moe/sekai-extra-assets/sekai-story/ripper/<区服>/library/live2d/...`    |
-| 背景等普通资产   | `https://storage.exmeaning.com/sekai-<区服>-assets/...`                                      |
-| 背景 bundle 索引 | `https://storage.exmeaning.com/api/assets/bundles?server=<区服>&prefix=scenario/background/` |
-| 剧情 BGM         | `https://storage.exmeaning.com/sekai-<区服>-assets/sound/scenario/bgm/<name>/<name>.mp3`     |
+| 内容                 | 默认地址                                                                                                       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Live2D 模型索引      | `https://assets.pjsk.moe/sekai-extra-assets/sekai-live2d/<region>/models.json`                                 |
+| 模型包 / SSE 动作包  | `https://assets.pjsk.moe/sekai-extra-assets/sekai-story/ripper/<region>/library/...`                           |
+| 背景 / BGM / SE 资产 | `https://storage.exmeaning.com/sekai-<region>-assets/...`                                                      |
+| 官方 UI / 菜单音效   | `https://assets.pjsk.moe/sekai-extra-assets/inapp/jp-7.0.0/...`                                                |
+| BGM 官方曲名索引     | `https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master/`（自动回退 `raw.githubusercontent.com`） |
 
-区服为 `jp`、`cn`、`tw`、`kr`、`en`，默认 `jp`。模型索引里每个条目包含模型 id、模型包路径、默认动作包和动作包列表；模型包内是 `model3.json`、`moc3`、纹理和物理文件，动作包内是游戏原始的 `sse-motion.json`。
+## 可选：离线预拉取 CLI
 
-## 快速使用
+零本地资源架构下**无需**预先执行拉取命令即可正常生成与导出；但若希望把常用模型、背景或 BGM 预先固化到 `resources/` 并登记到本地 YAML（如内网/离线环境），可使用 `package.json` 提供的 CLI：
 
 ```bash
-# 拉取一个角色（按中文名/简称/罗马字/数字 id 都可以）
-npm run fetch:models -- --characters mizuki
-
-# 一次拉多个角色
-npm run fetch:models -- --characters 瑞希,绘名,25
-
-# 26 位角色各拉一套首选服装
+# 拉取指定角色（支持中文名/简称/罗马字/数字 id，all = 26 位主角色首选服装）
+npm run fetch:models -- --characters mizuki,ena
 npm run fetch:models -- --characters all
-
-# 精确指定模型 id（可写 v2_ / clb / sub 模型）
 npm run fetch:models -- --models 20mizuki_normal_3.0_t04
-
-# 只看看会选中哪些模型，不下载
 npm run fetch:models -- --dry-run --characters mizuki
-
-# 列出索引里匹配的模型
 npm run fetch:models -- --list --characters mizuki
 
-# 背景 / BGM（先列出，再按需下载）
+# 浏览或拉取背景与 BGM（--include-area 可同时拉取 area_bgm）
 npm run fetch:media -- --kind backgrounds --list --limit 20
 npm run fetch:media -- --kind backgrounds --limit 20
-npm run fetch:media -- --kind bgm --names bgm00003,bgm00006
-npm run fetch:media -- --kind all --dry-run
+npm run fetch:media -- --kind bgm --names bgm00003,bgm00006 --include-area
+npm run fetch:media -- --kind bgm --metadata-only
 ```
 
-脚本会先构建宿主（`npm run build:host`），再执行 `out-host/host/tools/fetchAssets.js` 或 `fetchMedia.js`。模型参数：
+### `fetch:models` 常用参数
 
-| 参数                  | 说明                                                     |
-| --------------------- | -------------------------------------------------------- |
-| `--characters <keys>` | 角色列表，逗号分隔；`all` = 26 位角色各一套首选服装      |
-| `--models <ids>`      | 精确模型 id，逗号分隔                                    |
-| `--region <code>`     | `jp` / `cn` / `tw` / `kr` / `en`，默认取 `assets.region` |
-| `--out <dir>`         | 资源根，默认取 `paths.resources`                         |
-| `--cache <dir>`       | 动作包缓存目录，默认取 `assets.cacheDir`                 |
-| `--concurrency <n>`   | 并行下载数，默认 4；网络不稳时调到 1~2                   |
-| `--force`             | 已登记的同名模型也重新下载                               |
-| `--dry-run`           | 只打印选择结果                                           |
-| `--list`              | 列出索引中匹配的模型                                     |
+| 参数                   | 说明                                                         |
+| ---------------------- | ------------------------------------------------------------ |
+| `--characters <keys>`  | 角色列表，逗号分隔；`all` = 26 位角色各一套首选服装          |
+| `--models <ids>`       | 精确模型 id，逗号分隔（可拉特定服装、`v2_`、联动或配角模型） |
+| `--region <code>`      | `jp` / `cn` / `tw` / `kr` / `en`，默认取 `assets.region`     |
+| `--out <dir>`          | 资源根，默认取 `paths.resources`                             |
+| `--cache <dir>`        | 动作包缓存目录，默认取 `assets.cacheDir`                     |
+| `--concurrency <n>`    | 并行下载数，默认 4；网络不稳时可调至 1~2                     |
+| `--force`              | 已登记的同名模型也重新下载                                   |
+| `--dry-run` / `--list` | 仅预览选中结果 / 列出索引匹配项，不下载                      |
 
-## 背景与 BGM
+### `fetch:media` 常用参数
 
-`fetch:media` 通过资源站的 bundle API 浏览 `scenario/background/` 与 `sound/scenario/bgm/`，
-把背景图下载到 `resources/images/`，把剧情 BGM 下载到 `resources/audio/bgm/`，并追加清单条目。
-BGM 下载时会读取 PJSK 官方曲名索引，把 `bgm00003` 这类无语义文件名补成曲名和分类。
+| 参数                                     | 说明                                        |
+| ---------------------------------------- | ------------------------------------------- |
+| `--kind <kind>`                          | `backgrounds` / `bgm` / `all`，默认 `all`   |
+| `--region <code>`                        | 区服，默认取 `assets.region`                |
+| `--out <dir>`                            | 资源根，默认取 `paths.resources`            |
+| `--asset-base <url>`                     | 覆盖资源站根地址                            |
+| `--metadata-base <url>`                  | 覆盖曲名索引目录                            |
+| `--metadata-only` / `--refresh-metadata` | 只更新曲名索引缓存 / 强制忽略 7 天缓存重拉  |
+| `--no-metadata`                          | 不读取官方曲名索引                          |
+| `--limit <n>`                            | 每种资源最多处理多少个 bundle（`0` = 全部） |
+| `--names <list>`                         | 按名称精确匹配或子串过滤 bundle，逗号分隔   |
+| `--include-area`                         | 同时拉取 `sound/area_bgm/` 区域 BGM         |
+| `--force` / `--dry-run` / `--list`       | 强制重下 / 仅预览 / 仅列出远端 bundle       |
 
-| 参数                    | 说明                                                                   |
-| ----------------------- | ---------------------------------------------------------------------- |
-| `--kind <kind>`         | `backgrounds` / `bgm` / `all`，默认 `all`                              |
-| `--region <code>`       | 区服，默认取 `assets.region`                                           |
-| `--out <dir>`           | 资源根，默认取 `paths.resources`                                       |
-| `--asset-base <url>`    | 资源站根地址，默认 `https://storage.exmeaning.com`                     |
-| `--metadata-base <url>` | 曲名索引目录，默认 `assets.soundtrackBase`（jsDelivr 的 jp master DB） |
-| `--metadata-only`       | 只更新曲名索引缓存，不下载 BGM                                         |
-| `--no-metadata`         | 不读取官方曲名索引，清单条目保持空描述                                 |
-| `--refresh-metadata`    | 忽略缓存有效期，强制更新曲名索引                                       |
-| `--limit <n>`           | 每种资源最多处理多少个 bundle，默认 `0` = 全部                         |
-| `--names <list>`        | 只处理名称精确匹配或包含片段的 bundle，逗号分隔                        |
-| `--include-area`        | 同时拉取 `sound/area_bgm/` 区域 BGM                                    |
-| `--concurrency <n>`     | 下载并发数，默认 4                                                     |
-| `--force`               | 已存在的文件也重新下载；清单不会重复追加                               |
-| `--dry-run`             | 只列 bundle 和目标文件，不写盘                                         |
-| `--list`                | 只列出资源站上匹配的 bundle                                            |
+## 动作无损转换与缓存
 
-行为说明：
-
-- 背景优先取 `.webp`，没有时回退 `.png` / `.jpg`；文件名沿用 bundle 内的文件名。
-- `bgm00000` 是游戏里的静音占位，`bgm` 是通用 bundle，两者默认跳过。
-- 已存在同名文件默认跳过，重复运行只补缺失项；清单按 `file` 去重，保留已有注释和描述。
-- 新追加的背景条目 `description` 为空。AI 选背景依赖描述，下载后建议在
-  `resources/images/images.yaml` 里补一句画面说明。
-- BGM 条目会先用官方曲名索引补上 `name` 和分类描述；索引没收录的曲目仍为 `description` 空，
-  建议在 `resources/audio/bgm/bgm.yaml` 里手工补一句曲风说明，否则不会进入 AI 候选列表。
-- 只写文件与清单，不自动修改全局默认 BGM；要换默认曲目，改 `bgm.yaml` 的 `path`。
-
-## BGM 曲名与 AI 候选
-
-ournotes-player 让 AI 选 BGM 时，依赖剧情 cue 的可读名字（例如
-`sound_bgm_adv_nows_the_time` → `Nows The Time`）。Moesekai 的剧情 BGM 文件名是
-`bgm00003` 这类 id，本身没有语义；宿主用 Sekai-World 的
-[`musicSoundTracks.json`](https://github.com/Sekai-World/sekai-master-db-diff) 补上官方曲名和分类：
-
-```text
-bgm00003.mp3 → Slapstick!! / 剧情 BGM
-bgm00006.mp3 → 微笑みの陽だまり / 剧情 BGM
-bgm_area00001.mp3 → With Gratitude / Crystal Blessing 等 4 首 / 组合综合 BGM
-```
-
-- 下载时读取 `musicSoundTracks.json` 与 `musicSoundTrackCategories.json`，把精简结果缓存到
-  `resources/audio/bgm/soundtracks.json`；缓存 7 天有效，失败时沿用旧缓存。
-- 默认走 jsDelivr；jsDelivr 不通时回退 `raw.githubusercontent.com`，也可用
-  `assets.soundtrackBase` 或 `MSS_ASSETS_SOUNDTRACK_BASE` 指向镜像。
-- 资源目录读取 `bgm.yaml` 时，`name` 为空、等于文件名或 `description` 为空，会用缓存补全；
-  人工填写的内容优先，不会被覆盖。
-- 索引覆盖约 200 个资源名（其中剧情 BGM 约 120 个），不是所有 `sound/scenario/bgm/` 文件都有曲名；
-  未收录的条目保持原样，仍可手工补描述。
-- 提示词最多列 40 首带描述的 BGM；校验器仍接受全部登记曲目。这个上限避免把几百个云端文件一次性塞给模型。
-
-## 首选服装
-
-`--characters` 会为每个角色挑一套服装，顺序是：
-
-1. 非联动、v1 模型优先，其次 v2
-2. 服装词顺序：`normal` → `casual` → `school` → `unit` → `sports` → `pajamas` → `parttime` → `lesson` → `swim` → `jc` → `culture` → `yukata` → 其他
-
-已经登记过同名角色的模型会跳过；要换服装，用 `--models` 精确指定，或先删除 `models.yaml` 里对应条目的模型目录。
-
-## 动作转换
-
-游戏资产里没有 `motion3.json`。Moesekai 剧情库保留的是 Unity `AnimationClip` 导出的 `sse-motion.json`：每条曲线是若干段三次多项式，系数顺序为 `[d, c, b, a]`，求值为
+Moesekai 剧情库保留的是 Unity `AnimationClip` 导出的 `sse-motion.json`，其曲线由三次多项式分段 `[d, c, b, a]` 描述：
 
 ```text
 value(dt) = a + b*dt + c*dt^2 + d*dt^3
 ```
 
-宿主把每段三次多项式精确转成 Cubism motion3 的 Bezier 段，端点与游戏数据一致；没有把曲线拉直，也没有按帧采样。常量段写成 stepped，线性段写成 linear。转换后：
+宿主在拉取或按需物化模型时，会将 `constant` / `streamed` 曲线无损转换为 Cubism `motion3.json` 的 stepped / linear / Bezier 段，并将 `facial/face_*.sse-motion.json` 与 `motion/w-*.sse-motion.json` 写入模型包的 `motions/`，同时自动补齐 `model3.json` 的 `FileReferences.Motions` 索引。
 
-- `facial/face_*.sse-motion.json` → `motions/face_*.motion3.json`（表情）
-- `motion/w-*.sse-motion.json` → `motions/w-*.motion3.json`（动作）
-- 模型包的 `model3.json` 增加 `FileReferences.Motions` 索引，渲染端按名字直接播放
+动作包中间文件按 bundle 缓存在 `assets.cacheDir`（默认 `cache/moesekai`），单文件原子落盘支持断点续传，同一角色的不同服装变体共享动作包时只下载一次。`cache/` 目录可随时安全清理。
 
-动作源文件只放在缓存目录，不会写进资源目录，也不会被静态托管。
-
-## 目录与清单
-
-下载一个模型后的布局：
-
-```text
-resources/models/
-└─ 20mizuki_normal/
-   └─ 20mizuki_normal_3.0_t04/
-      ├─ 20mizuki_normal_3.0_t04.model3.json   # 已补 Motions 索引
-      ├─ 20mizuki_normal_3.0_t04.moc3
-      ├─ 20mizuki_normal_3.0_t04.physics3.json
-      ├─ 20mizuki_normal_3.0_t04.2048/texture_00.png
-      └─ motions/*.motion3.json
-```
-
-`models.yaml` 会自动追加：
-
-```yaml
-- id: 21
-  name: '晓山瑞希'
-  shortName: '瑞希'
-  path: '20mizuki_normal/20mizuki_normal_3.0_t04/20mizuki_normal_3.0_t04.model3.json'
-```
-
-已有的注释、条目和 id 不会被重写；新 id 从现有最大 id + 1 开始。角色名来自内置的 26 位角色表，联动/配角模型使用模型 id。
-
-## HTTP API
+## HTTP API 端点
 
 ```bash
-# 查看索引中匹配的模型
-curl -sS 'http://127.0.0.1:9881/api/v1/assets/moesekai/models?region=jp&characters=mizuki'
-
-# 触发模型拉取（同步等待；同一时刻只允许一个）
-curl -sS -X POST http://127.0.0.1:9881/api/v1/assets/fetch \
-  -H 'Content-Type: application/json' \
-  -d '{"characters":["mizuki","ena"],"region":"jp"}'
-
-# 浏览背景 / BGM bundle
-curl -sS 'http://127.0.0.1:9881/api/v1/assets/moesekai/media?kind=backgrounds&region=jp&limit=20'
-
-# 拉取背景；kind=bgm 或 all，names/limit/includeArea 与 CLI 同名
-curl -sS -X POST http://127.0.0.1:9881/api/v1/assets/fetch \
-  -H 'Content-Type: application/json' \
-  -d '{"kind":"backgrounds","region":"jp","limit":20}'
-
-# 云端目录：查看合并后的资源目录（含 cloud 条目与 cloud 元信息）
+# 查看合并后的完整资源目录（含本地覆盖与 cloud 元信息）
 curl -sS 'http://127.0.0.1:9881/api/v1/resources'
 
-# 强制刷新云端目录（模型/背景/BGM 名称索引）
-curl -sS -X POST http://127.0.0.1:9881/api/v1/cloud/refresh
+# 强制刷新云端目录快照并写入 <cacheDir>/catalog.json
+curl -sS -X POST 'http://127.0.0.1:9881/api/v1/cloud/refresh'
+
+# 浏览远端模型或媒体 bundle 索引（不下载）
+curl -sS 'http://127.0.0.1:9881/api/v1/assets/moesekai/models?region=jp&characters=mizuki'
+curl -sS 'http://127.0.0.1:9881/api/v1/assets/moesekai/media?kind=bgm&includeArea=true&limit=20'
+
+# 手动触发拉取并写入本地 resources/ 与对应 YAML（同期只允许一个任务）
+curl -sS -X POST 'http://127.0.0.1:9881/api/v1/assets/fetch' \
+  -H 'Content-Type: application/json' \
+  -d '{"characters":["mizuki","ena"],"region":"jp"}'
 ```
 
-模型接口返回体包含 `selected`、`models`、`skipped`、`added` 与 `errors`；
-媒体接口返回 `backgrounds`、`bgm`、`skipped`、`errors`、`addedImages` 与 `addedBgm`。
-两者都同步等待，拉取过程中 `GET /api/v1/health` 的 `assets.fetching` 为 `true`。
-省略 `kind` 且只传 `characters` / `models` 时保持旧的模型拉取行为。
+## 离线语义索引构建脚本（开发维护）
 
-## 缓存与断点续传
+若上游语料更新，开发者可用以下离线脚本重新生成 `src/host/assets/*.json`：
 
-动作包按 bundle 缓存在 `assets.cacheDir`（默认 `cache/moesekai`）。每个文件下载完成后才原子落盘；网络中断后重跑只补缺失文件，已经下载的文件不会重复请求。同一个角色不同服装共用同一个动作包，也只会下载一次。
-
-`cache/` 已加入 `.gitignore`。缓存可以随时删除；删除后下次拉取会重新下载。
-
-## 常见问题
-
-**索引 404 或超时**：先确认区服是否有发布索引，再检查网络能否访问 `assets.pjsk.moe`。把 `assets.retries` 调到 5、`assets.concurrency` 调到 1~2 通常能通过不稳定的网络。
-
-**下载到一半失败**：直接重跑同一条命令。模型包已存在的文件会跳过，动作包从缓存继续。
-
-**模型没有动作**：查看日志里该模型的“跳过无法转换的动作”。目前支持 `constant` 与 `streamed` 两种曲线；未知曲线类型只会让单条动作失败，不影响整个模型。
-
-**渲染时动作名不对**：以 `GET /api/v1/resources` 返回的 `motions` / `facials` 为准；模型包的 `model3.json` 已经写入完整索引，不需要手工补。
-
-**AI 还是选不到云端 BGM**：先看 `GET /api/v1/resources` 的 `cloud` 字段是否存在，再确认
-`bgmDetails` 里有 `source: "cloud"` 且 `description` 非空的条目。目录过期时用
-`POST /api/v1/cloud/refresh` 强制刷新；`bgm00000` 是静音占位，默认不进入候选；官方曲名索引没收录的
-曲目需要本地 `bgm.yaml` 手写描述，或者等曲名索引更新。
-
-## 实现状态（2026-11-09）
-
-- 云端目录：`src/host/assets/cloudCatalog.ts`，26 位角色模型、1372 个背景 bundle、395 个 BGM bundle；
-  背景地点名索引 146 条，来自 328 集官方剧情。
-- 按需物化：`src/host/assets/cloudAssets.ts`，背景/BGM/SE/模型统一落到 `resources/*/cloud/`，
-  导出前改写故事路径。
-- 目录合并：`src/host/resources/resourceCatalog.ts`，本地 YAML 可缺省，云端条目带 `source`/`id`。
-- 名称选择：`src/host/ai/prompt.ts` 的 `canonicalImage` / `canonicalBgm` 接受云端 id、文件名与可读名；
-  AI 提示词列出 `- 名字（id）`。
-- 真实导出验收：空资源目录 + 云端模型 `01ichika_normal` + 背景名 `司の部屋` + 曲名 `Slapstick!!`，
-  产出 1920x1080 H.264/AAC 视频；第二次导出命中 `cloud/` 缓存，无重复下载。
-- 回归：`npm run test:all` 297 项、`npm run test:stories` 6 项、`npm run typecheck` 全部通过。
+- `scripts/assets/build-background-names.mjs` → `src/host/assets/background-names.json`
+- `scripts/assets/build-bgm-semantics.mjs` → `src/host/assets/bgm-semantics.json`
+- `scripts/assets/build-model-se-semantics.mjs` → `src/host/assets/model-metadata.json` & `src/host/assets/se-semantics.json`
