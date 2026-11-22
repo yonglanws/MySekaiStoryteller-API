@@ -536,6 +536,16 @@ test('hasSpeakableSpeechText, TalkTiming, TalkSnippet, and TTSManager skip punct
     destroyed: false,
     internalModel,
     actionSignal: abort.signal,
+    setMouthOpening(value) {
+      mouthWrites.push({ id: 'ParamMouthOpenY', value })
+    },
+    getMouthOpenParamIds() {
+      return ['ParamMouthOpenY']
+    },
+    getMouthFormInfo() {
+      return null
+    },
+    setMouthForm() {},
     applyCharacterAction: async () => {}
   }
   const talkApp = {

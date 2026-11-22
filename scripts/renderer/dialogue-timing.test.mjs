@@ -144,6 +144,16 @@ function fixture(t) {
       destroyed: false,
       visible: true,
       writes,
+      setMouthOpening(value) {
+        write('ParamMouthOpenY', value)
+      },
+      getMouthOpenParamIds() {
+        return ['ParamMouthOpenY']
+      },
+      getMouthFormInfo() {
+        return null
+      },
+      setMouthForm() {},
       applyCharacterAction(action, signal, isVisible) {
         if (!signal.aborted && isVisible()) actions.push({ action, signal, at: clock.now })
       },
@@ -350,8 +360,13 @@ for (const id of [1, 2]) {
     model.visible = true
     await f.clock.tickAsync(100)
     model.internalModel.emit('beforeModelUpdate')
-    assert.equal(model.writes.at(-1).value, 0, 'Real audio silence is sampled unchanged')
-    await f.clock.tickAsync(3320)
+    const afterVoice = model.writes.at(-1).value
+    assert.ok(afterVoice > 0, 'the mouth releases instead of snapping shut at the audio end')
+    assert.ok(afterVoice < 0.6, `release must decay: ${afterVoice}`)
+    await f.clock.tickAsync(300)
+    model.internalModel.emit('beforeModelUpdate')
+    assert.equal(model.writes.at(-1).value, 0, 'the release tail closes the mouth')
+    await f.clock.tickAsync(3020)
     assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
     await run
     const afterEnd = model.writes.length

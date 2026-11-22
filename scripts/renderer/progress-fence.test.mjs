@@ -546,6 +546,14 @@ test('TalkSnippet runs voice & at=0 motion on act frame, obeys Talk Gate + 2.0s/
     internalModel: { on() {}, off() {}, motionManager: { lipSyncIds: [] } },
     isMotionLooping: () => false,
     getMotionDurationMs: () => 0,
+    setMouthOpening() {},
+    getMouthOpenParamIds() {
+      return ['ParamMouthOpenY']
+    },
+    getMouthFormInfo() {
+      return null
+    },
+    setMouthForm() {},
     speak: (_url, opts) => {
       events.push({ ev: 'speakStart', atMs: clock.now })
       clock.setTimeout(() => {

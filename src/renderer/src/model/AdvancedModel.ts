@@ -145,6 +145,12 @@ export default class AdvancedModel extends Live2DModel {
   private blinkState: BlinkState = createBlinkState(1)
   private breathDegree = 0
   private breathParamId: string | null = null
+  private mouthOpenParamIds: string[] = []
+  private mouthOpenIndices = new Map<string, number>()
+  private mouthParamCount = 0
+  private mouthFormParamId: string | null = null
+  private mouthFormIndex = -1
+  private mouthFormRange: { min: number; max: number; defaultValue: number } | null = null
   private naturalMotionInstalled = false
   private lastNaturalUpdateMs = 0
   private firstBodyCue = true
@@ -202,6 +208,7 @@ export default class AdvancedModel extends Live2DModel {
     AdvancedModel.liveInstances.add(this)
     this.internalModel.extendParallelMotionManager(2)
     this.modelParamIds = this.resolveCoreParameterIds()
+    this.resolveMouthParams()
     this.installMotionIdNormalization()
     this.installMotionLoopHook()
     this.installHoldLastFrameHook(0)
@@ -383,6 +390,162 @@ export default class AdvancedModel extends Live2DModel {
     )?.coreModel
     const ids = core?._parameterIds ?? core?.parameters?.ids
     return Array.isArray(ids) && ids.length > 0 ? new Set(ids) : null
+  }
+
+  /**
+   * 口型目标参数在官方是 `LipSync` 组，但 PJSK 的 model3.json 里该组为空
+   * （`Groups: [{Name:"LipSync", Ids:[]}]`），所以按模型实际参数 ID 兜底。
+   * `ParamMouthForm` 在说话时按官方 AdvCalm 规则小幅中和，避免"咧嘴说话"。
+   */
+  private resolveMouthParams(): void {
+    const isC2 = this.internalModel instanceof Cubism2InternalModel
+    const groupIds = (this.internalModel.motionManager as unknown as { lipSyncIds?: string[] })
+      ?.lipSyncIds
+    const openCandidates = [
+      ...(Array.isArray(groupIds) ? groupIds : []),
+      isC2 ? 'PARAM_MOUTH_OPEN_Y' : 'ParamMouthOpenY'
+    ]
+    this.mouthOpenParamIds = [
+      ...new Set(this.filterToExistingModelParams(openCandidates.filter(Boolean)))
+    ]
+    const formId = isC2 ? 'PARAM_MOUTH_FORM' : 'ParamMouthForm'
+    this.mouthFormParamId = this.filterToExistingModelParams([formId])[0] ?? null
+    this.mouthFormIndex = -1
+    this.mouthFormRange = null
+    this.mouthOpenIndices.clear()
+    this.mouthParamCount = 0
+    if (!(this.internalModel instanceof Cubism4InternalModel)) return
+    const openCore = this.internalModel.coreModel as unknown as {
+      getParameterIndex?: (id: string) => number
+      getParameterCount?: () => number
+    }
+    this.mouthParamCount = openCore.getParameterCount?.() ?? 0
+    for (const id of this.mouthOpenParamIds) {
+      const index = openCore.getParameterIndex?.(id) ?? -1
+      if (index >= 0 && index < this.mouthParamCount) this.mouthOpenIndices.set(id, index)
+    }
+    if (!this.mouthFormParamId) return
+    const core = this.internalModel.coreModel as unknown as {
+      getParameterIndex?: (id: string) => number
+      getParameterCount?: () => number
+      getParameterMinimumValue?: (index: number) => number
+      getParameterMaximumValue?: (index: number) => number
+      getParameterDefaultValue?: (index: number) => number
+    }
+    const index = core.getParameterIndex?.(this.mouthFormParamId) ?? -1
+    const count = core.getParameterCount?.() ?? 0
+    if (index < 0 || index >= count) return
+    const min = core.getParameterMinimumValue?.(index)
+    const max = core.getParameterMaximumValue?.(index)
+    const defaultValue = core.getParameterDefaultValue?.(index)
+    if (
+      typeof min !== 'number' ||
+      typeof max !== 'number' ||
+      !Number.isFinite(min) ||
+      !Number.isFinite(max) ||
+      max <= min
+    ) {
+      return
+    }
+    this.mouthFormIndex = index
+    this.mouthFormRange = {
+      min,
+      max,
+      defaultValue:
+        typeof defaultValue === 'number' && Number.isFinite(defaultValue) ? defaultValue : 0
+    }
+  }
+
+  /** 说话时驱动开度的参数（通常只有 ParamMouthOpenY）。 */
+  public getMouthOpenParamIds(): string[] {
+    return [...this.mouthOpenParamIds]
+  }
+
+  /** 0..1 的口型开度写入模型参数的 min..max；Cubism2 参数本身是 0..1。 */
+  public setMouthOpening(value: number): void {
+    const open = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
+    if (this.mouthOpenParamIds.length === 0) return
+    const internal = this.internalModel
+    if (internal instanceof Cubism4InternalModel) {
+      const core = internal.coreModel as unknown as {
+        getParameterIndex?: (id: string) => number
+        getParameterCount?: () => number
+        getParameterMinimumValue?: (index: number) => number
+        getParameterMaximumValue?: (index: number) => number
+        setParameterValueById: (id: string, value: number) => void
+      }
+      for (const id of this.mouthOpenParamIds) {
+        const index = this.mouthOpenIndices.get(id) ?? core.getParameterIndex?.(id) ?? -1
+        const count = this.mouthParamCount || (core.getParameterCount?.() ?? 0)
+        if (index >= 0 && index < count) {
+          const min = core.getParameterMinimumValue?.(index)
+          const max = core.getParameterMaximumValue?.(index)
+          if (
+            typeof min === 'number' &&
+            typeof max === 'number' &&
+            Number.isFinite(min) &&
+            Number.isFinite(max) &&
+            max > min
+          ) {
+            core.setParameterValueById(id, min + (max - min) * open)
+            continue
+          }
+        }
+        core.setParameterValueById(id, open)
+      }
+      return
+    }
+    if (internal instanceof Cubism2InternalModel) {
+      for (const id of this.mouthOpenParamIds) {
+        internal.coreModel.setParamFloat(id, open)
+      }
+    }
+  }
+
+  /**
+   * 当前 `ParamMouthForm` 状态；用于说话时按开度向默认值中和。
+   * 返回 null 表示模型没有这个参数。
+   */
+  public getMouthFormInfo(): {
+    value: number
+    min: number
+    max: number
+    defaultValue: number
+  } | null {
+    if (!this.mouthFormParamId) return null
+    const internal = this.internalModel
+    if (internal instanceof Cubism4InternalModel) {
+      if (this.mouthFormIndex < 0 || !this.mouthFormRange) return null
+      const core = internal.coreModel as unknown as {
+        getParameterValueByIndex?: (index: number) => number
+        getParameterValueById?: (id: string) => number
+      }
+      const value =
+        core.getParameterValueByIndex?.(this.mouthFormIndex) ??
+        core.getParameterValueById?.(this.mouthFormParamId)
+      if (typeof value !== 'number' || !Number.isFinite(value)) return null
+      return { value, ...this.mouthFormRange }
+    }
+    if (internal instanceof Cubism2InternalModel) {
+      const value = internal.coreModel.getParamFloat(this.mouthFormParamId)
+      if (!Number.isFinite(value)) return null
+      return { value, min: -1, max: 1, defaultValue: 0 }
+    }
+    return null
+  }
+
+  public setMouthForm(value: number): void {
+    const info = this.getMouthFormInfo()
+    if (!info) return
+    const clamped = Math.min(
+      info.max,
+      Math.max(info.min, Number.isFinite(value) ? value : info.defaultValue)
+    )
+    if (this.internalModel instanceof Cubism4InternalModel) {
+      this.internalModel.coreModel.setParameterValueById(this.mouthFormParamId!, clamped)
+    } else if (this.internalModel instanceof Cubism2InternalModel) {
+      this.internalModel.coreModel.setParamFloat(this.mouthFormParamId!, clamped)
+    }
   }
 
   /**
@@ -1376,10 +1539,13 @@ export default class AdvancedModel extends Live2DModel {
       this.visualEffectManager.applyEffect('triangles')
     }
 
+    // 官方 FadeOpacityCoroutine 从当前不透明度补间到目标值；退场被新的 Appear
+    // 打断时从头算 0 会闪一帧全透明。
+    const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
     await AnimationManager.linear((progress) => {
       if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
       const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-      alpha_filter.alpha = progress
+      alpha_filter.alpha = startAlpha + (1 - startAlpha) * progress
     }, time)
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
@@ -1388,10 +1554,11 @@ export default class AdvancedModel extends Live2DModel {
 
   public async hide(time: number, generation?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+    const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 1
     await AnimationManager.linear((progress) => {
       if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
       const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-      alpha_filter.alpha = 1 - progress
+      alpha_filter.alpha = startAlpha * (1 - progress)
     }, time)
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
@@ -1598,8 +1765,11 @@ export default class AdvancedModel extends Live2DModel {
     const abs_to: [number, number] = [stage_size[0] * to.x, stage_size[1] * (to.y + 0.3)]
 
     await AnimationManager.linear((progress) => {
-      this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
-      this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
+      // 官方 CharacterMoveTo 用 DOTween 的 OutQuad（ease.rs 同款）：起步快、收尾缓，
+      // 线性匀速的滑入/滑出会显得像传送带。
+      const eased = evaluateEase('OutQuad', progress)
+      this.position.x = (abs_to[0] - abs_from[0]) * eased + abs_from[0]
+      this.position.y = (abs_to[1] - abs_from[1]) * eased + abs_from[1]
     }, time_ms)
   }
 

@@ -100,6 +100,10 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
   - 完成后才移出渲染层。
 - [x] `MoveSnippet`：同位置也等待 move 时长（官方 layout 片段按 duration 完成）；
       Immediate 为 0。
+- [x] 角色位移统一走 DOTween `OutQuad`（`evaluateEase`，与 `sse-core/src/ease.rs` 同款）：
+      入场/退场/Move 的滑入滑出不再是线性匀速。
+- [x] `show`/`hide` 从当前 AlphaFilter 值补间到目标值：退场中途重新 Appear、
+      或连续 Hide 时不会闪一帧全透明/全不透明。
 - [x] `TimelineCalculator` 的 Appear/Clear/Move 时长改为上述帧值；Appear 固定 116.667ms
       （1 帧 alpha=0 + 6 帧淡入），已在场 200ms 作为可选分支。
 
@@ -113,14 +117,25 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
     用 `queueManager.startMotion` 让旧 entry 淡出。
 - [x] 类别/链接动作判定按 SSE 正则：`[a-z]-[alnum]+-[alnum]+`，链接 `RULE_to_RULE`。
 - [x] 眨眼控制器：
-  - 状态机 Sleep/Ready/Closing/Opening；`|sin|`，速度 10；间隔 3±2s；确定性种子。
+  - 状态机 Sleep/Ready/Closing/Closed/Opening；官方 `CubismAutoEyeBlinkInput` 四段线性
+    （闭眼 0.1s / 全闭 0.05s / 睁眼 0.15s，Timescale=10），间隔 3±2s；确定性种子。
+  - 全闭相位保证至少 1 帧 EyeOpening=0；30fps 导出同样走完"闭—合—睁"。
   - 身体动作开始 `Sleep`；非循环动作结束 `Wake`；`beforeModelUpdate` 写眼参数。
   - 关闭 `internalModel.eyeBlink` 自带眨眼，避免双重驱动。
 - [x] 呼吸：`ParamBreath = (sin(degree×DEG2RAD)×0.5+0.5)×0.5`，
       `degree += dt×60×2°/frame`，3s 周期；仅模型可见时推进。
 - [x] 口型：
-  - `buildLipSyncEnvelope` 改为 60 fps 窗 RMS + 官方 `pow`/阈值/限幅/平滑。
-  - 无 TTS 时用 `LIP_LEVELS` 文本口型兜底（半字推进，闭眼/结束归零）。
+  - `buildLipSyncEnvelope` 改为 60 fps 窗 RMS + 官方 `pow`/阈值/限幅/平滑；
+    RMS 路径把下限从官方 0.2 放宽到 `LIP_RMS_MIN_VALUE = 0.08`，避免轻声与
+    正常音节被压成同一档。
+  - 再叠加 ournotes `AdvLipSyncPolicy` Fallback 预设：openScale/comp/openCap、
+    speechFloor/minSpeech 轻声保底、hold 0.06s、onset 0.12、attack/release 指数平滑；
+    预设值按本项目 RMS 量程下调，attack/release/hold 与官方一致。
+  - 每句按 95 分位目标值做一次只放大不衰减的响度归一（上限 2.4×），
+    TTS 音量不同也能保持稳定的张嘴幅度；音频结束补 300ms 释放段并线性收尾到 0。
+  - 说话时按开度向默认值中和 `ParamMouthForm`（formOpenSupp 0.16），避免"咧嘴说话"；
+    表情接管 form 时自动重新取基准。
+  - 无 TTS 时用 `LIP_LEVELS` 文本口型兜底（半字推进、跟随窗口打开延迟、结束归零）。
   - 保留现有 `sampleLipSync` API 和监听器清理语义。
 
 ### Phase E：Pass 1 故事帧计划与报告
@@ -141,7 +156,8 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
       Move 750/500/333.333、站位 350/550。
 - [x] `scripts/renderer/motion-blend.test.mjs`：交叉淡化、同类别 125ms、表情 250ms、
       不再 stopAll。
-- [x] `scripts/renderer/natural-motion.test.mjs`：眨眼 20 帧曲线/间隔、呼吸 3s、口型平滑。
+- [x] `scripts/renderer/natural-motion.test.mjs`：眨眼 18 帧四段曲线/全闭帧/30fps 采样、
+      呼吸 3s、口型平滑与策略（onset/cap/释放段）。
 - [x] `scripts/renderer/story-plan.test.mjs`：逐帧计划与 timeline 对齐。
 - [x] `scripts/api/export-report.test.mjs`：report 落盘。
 - [x] 更新 `doc/ai-script.md`、`doc/export-modes.md`、`doc/story-format.md`、

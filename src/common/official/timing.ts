@@ -162,10 +162,19 @@ export const FACIAL_FADE_SECONDS = 0.25
 /** live2d.same_category_blend = 0.125s。 */
 export const SAME_CATEGORY_BLEND_SECONDS = 0.125
 
-/** live2d.eyeblink。 */
+/**
+ * live2d.eyeblink（`CubismAutoEyeBlinkInput`）。
+ *
+ * 官方眨眼不是正弦曲线，而是四段线性相位：闭眼 1.0 / 全闭 0.5 / 睁眼 1.5（游戏单位），
+ * `Timescale = 10`，换算成秒即 0.1s / 0.05s / 0.15s，一眨共 0.3s（60fps 18 帧）。
+ * 全闭相位保证至少 1 帧完全合眼，正弦近似在 30fps 下永远闭不实。
+ */
 export const EYEBLINK_MEAN_SECONDS = 3
 export const EYEBLINK_MAX_DEVIATION_SECONDS = 2
-export const EYEBLINK_SPEED = 10
+export const EYEBLINK_TIMESCALE = 10
+export const EYEBLINK_CLOSING_SECONDS = 1.0 / EYEBLINK_TIMESCALE
+export const EYEBLINK_CLOSED_SECONDS = 0.5 / EYEBLINK_TIMESCALE
+export const EYEBLINK_OPENING_SECONDS = 1.5 / EYEBLINK_TIMESCALE
 
 /** live2d.breath：3s 周期，影响 0.5；每帧 breathVector = 360/(3×60) = 2°。 */
 export const BREATH_CYCLE_SECONDS = 3
@@ -195,17 +204,48 @@ export function smoothLipValue(target: number, previous: number): number {
   return target * kt + previous * kp
 }
 
+/**
+ * `AdvLipSyncPolicy` 的 Fallback（CRI Lips）预设，取自 ournotes-player 对游戏
+ * `Live2DAnimation.LipSyncPresets` 的逐字段移植；`minSpeech/speechFloor` 按
+ * 本项目 RMS 曲线的实际量程下调（官方预设面向 CRI openY，直接套用会把轻声
+ * 全部抬到 0.17，嘴型看起来不动）。attack/release/hold 与官方一致。
+ */
+export const MOUTH_SYNC_FALLBACK_PRESET = {
+  attack: 0.032,
+  release: 0.1,
+  hold: 0.06,
+  /** 第一道（细节）平滑时间常数，上行时再乘 0.65。 */
+  hfs: 0.022,
+  speakingThr: 0.02,
+  silenceFloor: 0.01,
+  speechFloor: 0.05,
+  minSpeech: 0.1,
+  /** 每次开口的第一个输出下限（张嘴起势）。 */
+  onset: 0.12,
+  openScale: 1.03,
+  /** 开度压缩：t = t / (comp × t + 1)，0 表示关闭。 */
+  comp: 0.07,
+  /** 张幅上限。 */
+  openCap: 0.92,
+  /** 说话时把 ParamMouthForm 按开度向默认值中和的比例。 */
+  formOpenSupp: 0.16
+} as const
+
+/** RMS 口型包络专用的最小开度：官方 0.2 对 TTS 太高一档，会把轻声与正常音节压成同一档。 */
+export const LIP_RMS_MIN_VALUE = 0.08
+
 /** 语音口型目标值：RMS → 官方 pow 曲线、阈值与限幅。 */
 export function lipTargetFromRms(
   rms: number,
   targetValueScale = LIP_TARGET_VALUE_SCALE,
-  powK = LIP_POW_K
+  powK = LIP_POW_K,
+  minValue = LIP_MIN_VALUE
 ): number {
   if (!Number.isFinite(rms) || rms <= 0) return 0
   const a = rms * targetValueScale
   const shaped = a * Math.pow(a + 1, powK)
   if (shaped < LIP_THRESHOLD) return 0
-  return Math.min(LIP_MAX_VALUE, Math.max(LIP_MIN_VALUE, shaped))
+  return Math.min(LIP_MAX_VALUE, Math.max(minValue, shaped))
 }
 
 // ---- episode -------------------------------------------------------------------------
