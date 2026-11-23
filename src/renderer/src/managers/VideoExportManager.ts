@@ -1001,9 +1001,10 @@ export default class VideoExportManager {
     const frameInterpolator = new FrameInterpolator(this.app, this.logger)
 
     virtualClock.install()
-    const virtualRenderStartMs = virtualClock.now()
-    timestampRecorder.markRenderStart()
-    concurrentPipeline.markRenderStart()
+    // 官方播放器在第一条指令前先跑 PLAYCORE_WARMUP_FRAMES 帧（first_frame=10）。
+    // 成片第 0 帧对应故事帧 10；否则前 10 帧预热会被拍进成片，片尾再被
+    // plan.totalFrames−10 截掉，整段画面相对参考提前 10 帧。
+    let virtualRenderStartMs = virtualClock.now()
 
     // 分段计时（真实墙钟；虚拟时钟下 performance.now 是虚拟时间）
     let pumpMs = 0
@@ -1085,7 +1086,8 @@ export default class VideoExportManager {
           if (!pumpDone) return false
           if (pumpTargetVirtualMs < 0) return true
           if (frameIndex === 0) return false
-          return frameIndex * frameMs >= pumpTargetVirtualMs - 1e-6
+          // pumpTargetVirtualMs 是绝对虚拟时刻；预热后 renderStartMs 不为 0。
+          return virtualRenderStartMs + frameIndex * frameMs >= pumpTargetVirtualMs - 1e-6
         }
         while (!shouldStop()) {
           this.checkAborted()
@@ -1095,9 +1097,10 @@ export default class VideoExportManager {
           }
           const frameStart = virtualClock.realTimeMs()
 
-          // 帧 n = 故事时间 n/fps：先把模拟推进到 floor(n×60/fps) 个 1/60 步。
-          const baseStoryStep = storyStepForFrame(frameIndex)
-          const storyTween = (frameIndex * STORY_FPS) / encodeFps - baseStoryStep
+          // 帧 n = 预热之后的故事时间 n/fps：模拟步要加上 first_frame 偏移。
+          const videoStoryStep = storyStepForFrame(frameIndex)
+          const baseStoryStep = PLAYCORE_WARMUP_FRAMES + videoStoryStep
+          const storyTween = (frameIndex * STORY_FPS) / encodeFps - videoStoryStep
           await advanceToStoryStep(baseStoryStep)
 
           let interpolatedTo: FrameSnapshot | null = null
@@ -1174,6 +1177,12 @@ export default class VideoExportManager {
     })()
 
     try {
+      // 预热帧只推进模拟，不采集画面；之后才把视频时间零点对齐到 first_frame。
+      await advanceToStoryStep(PLAYCORE_WARMUP_FRAMES)
+      virtualRenderStartMs = virtualClock.now()
+      timestampRecorder.markRenderStart()
+      concurrentPipeline.markRenderStart()
+
       const totalSnippets = snippets.length
       if (totalSnippets === 0) markFirstSnippetStarted()
       // 片段 runSnippet() 启动后立刻放行帧 0；不能等 handleSnippetForExport 返回，
@@ -1340,6 +1349,18 @@ export default class VideoExportManager {
               )
             : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
+        // 片段实际启动必须落在时间线的 delayStart/act 上，而不是上一片段一 resolve
+        // 就立刻启动。plan 在每个 blocking 片段后留了 1 帧栅栏；旧循环把这帧吃掉，
+        // 49 条 Talk 的实际起点因此累积早约 332ms。
+        const plannedDelayStartMs =
+          timelineEntry?.delayStartTimeMs ??
+          Math.max(0, (timelineEntry?.startTimeMs ?? 0) - Math.round((snippet.delay || 0) * 1000))
+        const waitForPlannedStartMs =
+          virtualRenderStartMs + plannedDelayStartMs - virtualClock.now()
+        if (waitForPlannedStartMs > 0.5 && !this.isAborted) {
+          await AnimationManager.delay(waitForPlannedStartMs)
+        }
+
         if (isTalk) {
           this.app.currentTalkStartedAtMs = 0
           timestampRecorder.markSnippetStart(i, snippet.type, {
@@ -1402,7 +1423,8 @@ export default class VideoExportManager {
       // 官方 WaitAllFinished + 开场黑幕收尾 + 0.25s 停留 + 0.25s BGM/黑幕淡出。
       await this.app.snippetStrategyManager?.settleBackgroundSnippets?.()
       await flushPendingTimestamps()
-      if (openingCoverTask) await openingCoverTask
+      // 开场黑幕与片尾黑幕可以并行：在这里等它会把片尾起点推迟到 0.5s，
+      // 短剧本的 ending envelope 因此被多算若干帧。让帧泵继续推进即可。
 
       // 以最终烘焙的 plan 为唯一帧数依据：plan.totalFrames 已包含 10 帧预热与
       // playedWaitTime + 1 + BGM fade 的 31 帧尾长。不能只用 timeline.endTimeMs，
@@ -1427,30 +1449,48 @@ export default class VideoExportManager {
       // plan 的帧号是 60fps 故事帧；编码帧率可能是 30fps，不能直接乘 frameMs。
       const storyFrameMs = 1000 / STORY_FPS
       const envelopeFrames = hasEndingEnvelope
-        ? Math.max(1, Math.ceil(endingEnvelopeMs / storyFrameMs))
+        ? // 250ms + 1 帧 + 250ms 都是帧量化值（15+1+15=31）；
+          // 直接用 ceil 会把 31.000000000000004 收成 32，额外多拍 1 帧。
+          Math.max(1, Math.round(endingEnvelopeMs / storyFrameMs))
         : 0
       const currentStoryFrame = Math.ceil((frameIndex * STORY_FPS) / encodeFps)
-      // 片段循环结束时帧泵可能已经越过 plan 的最后一帧（模型加载/短剧本）；
-      // 此时至少再给收尾黑幕留出其完整尾长，避免 await endingEnvelopeTask 永久挂起。
-      const targetFrames = hasEndingEnvelope
-        ? Math.max(plannedVideoFrames, currentStoryFrame + envelopeFrames)
-        : plannedVideoFrames
+      // plan 已包含 10 帧预热和完整 31 帧收尾；成片帧数必须固定为 plan−10。
+      // 若运行时最后一条片段晚 1~2 帧，收尾黑幕的 hold/fade 相应缩短，
+      // 而不是延长目标帧并在成片尾部多拍。
+      const envelopeOverrunFrames = Math.max(
+        0,
+        currentStoryFrame + envelopeFrames - plannedVideoFrames
+      )
+      const targetFrames = plannedVideoFrames
       const rawPumpTargetMs = virtualRenderStartMs + targetFrames * storyFrameMs
       pumpTargetVirtualMs = Math.round(rawPumpTargetMs / frameMs) * frameMs
+      const holdFrames = Math.max(
+        0,
+        Math.round(PLAYED_WAIT_TIME_MS / storyFrameMs) - envelopeOverrunFrames
+      )
+      const fadeFrames = Math.max(
+        0,
+        Math.round(SCENARIO_EXIT_BGM_FADE_MS / storyFrameMs) -
+          Math.max(0, envelopeOverrunFrames - Math.round(PLAYED_WAIT_TIME_MS / storyFrameMs))
+      )
+      const endingHoldMs = holdFrames * storyFrameMs
+      const endingFadeMs = fadeFrames * storyFrameMs
       this.logger.info('Fast export tail target', {
         renderStartMs: virtualRenderStartMs,
         planTotalFrames: finalPlan.totalFrames,
         plannedVideoFrames,
         currentFrame: frameIndex,
         envelopeFrames,
-        endingEnvelopeMs,
+        envelopeOverrunFrames,
+        endingHoldMs,
+        endingFadeMs,
         rawPumpTargetMs,
         pumpTargetVirtualMs,
         targetFrames: pumpTargetVirtualMs / frameMs
       })
       // 收尾黑幕从片段循环结束的当前虚拟时刻启动；目标帧已为它预留完整尾长。
       const endingEnvelopeTask = hasEndingEnvelope
-        ? extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
+        ? extendedApp.setEndingEnvelope!(endingHoldMs, endingFadeMs)
         : Promise.resolve()
       // 先解除暂停并标记片段播放完毕，帧泵看到目标帧就停；否则收尾黑幕
       // 结束时帧泵会多拍 1 帧。
@@ -1461,10 +1501,9 @@ export default class VideoExportManager {
       // 时长在片段全部落定后即可精确推出（帧数 = ceil(target/frameMs)）。
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      const finalFrameCount = Math.max(
-        1,
-        Math.ceil((pumpTargetVirtualMs - virtualRenderStartMs) / frameMs)
-      )
+      // targetFrames 是 60Hz 故事帧数；成片帧数按编码帧率换算。
+      // 用浮点 ceil 会把 835.0000004 收成 836，因此直接按帧率换算后 ceil。
+      const finalFrameCount = Math.max(1, Math.ceil((targetFrames * encodeFps) / STORY_FPS))
       const totalDurationMs = Math.max(
         actualVideoDurationMs + endingEnvelopeMs,
         Math.round((finalFrameCount / encodeFps) * 1000)
@@ -1570,6 +1609,11 @@ export default class VideoExportManager {
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
 
+      // 帧泵/收尾封包都已结束；编码冲刷和最终 MP4 定位写必须回到真实时钟。
+      // 假时钟下最后一块 muxer 数据可能一直等不到下一次 tick，长片会卡在
+      // 片尾分块写入直到客户端超时。
+      virtualClock.uninstall()
+
       let videoFilePath: string
       const encodeStart = virtualClock.realTimeMs()
       if (sinks.encoder) {
@@ -1581,8 +1625,6 @@ export default class VideoExportManager {
         }
       }
       encodeMs = virtualClock.realTimeMs() - encodeStart
-
-      virtualClock.uninstall()
 
       if (exportStatus) exportStatus.textContent = '正在合成视频…'
       onProgress({
@@ -1609,7 +1651,7 @@ export default class VideoExportManager {
             audioPath: audioFilePath,
             outputPath,
             audioBitrate,
-            frameCount: frameIndex,
+            frameCount: finalFrameCount,
             fps: encodeFps,
             ...(sinks.encoder
               ? {
@@ -1648,7 +1690,9 @@ export default class VideoExportManager {
       VideoExportManager.warmValidatedApps.add(this.app)
 
       // API 的 duration 必须描述成片本身（frameCount / fps），不是渲染墙钟耗时。
-      const videoDurationMs = (frameIndex / Math.max(1, encodeFps)) * 1000
+      // encodedFrames 是 WebCodecs 实际编码帧数；多出的一帧只用于冲刷编码器，
+      // 由宿主按 frameCount 截断，避免写成片尾多一帧。
+      const videoDurationMs = (finalFrameCount / Math.max(1, encodeFps)) * 1000
       const timings: Record<string, number> = {
         pumpMs: Math.round(pumpMs),
         tickMs: Math.round(tickMs),
@@ -1658,7 +1702,8 @@ export default class VideoExportManager {
         encodeMs: Math.round(encodeMs),
         audioMs: Math.round(audioMs),
         invokeMs: Math.round(invokeMs),
-        frames: frameIndex,
+        frames: finalFrameCount,
+        encodedFrames: frameIndex,
         videoDurationMs: Math.round(videoDurationMs),
         // 墙钟耗时保留在 timings，供性能排查；不再冒充 API 的 duration
         wallMs: Math.round(virtualClock.realTimeMs() - realStart),
@@ -1668,7 +1713,7 @@ export default class VideoExportManager {
       const result = {
         success: true,
         duration: videoDurationMs / 1000,
-        frameCount: frameIndex,
+        frameCount: finalFrameCount,
         outputSize: saveResult.fileSize,
         timings
       }

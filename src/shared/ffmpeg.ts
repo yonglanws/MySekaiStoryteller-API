@@ -719,7 +719,8 @@ export async function apiConvertVideoWithCompression(
   inputWidth: number = width,
   inputHeight: number = height,
   recordedBitrate: number = 8_000_000,
-  codec: VideoCodec = 'hevc'
+  codec: VideoCodec = 'hevc',
+  frameCount?: number
 ): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
   const estimatedDuration = Math.max(stat.size / (recordedBitrate / 8), 10)
@@ -745,6 +746,7 @@ export async function apiConvertVideoWithCompression(
     '192k',
     '-r',
     String(fps),
+    ...(frameCount && frameCount > 0 ? ['-t', frameDurationSeconds(frameCount, fps)] : []),
     '-movflags',
     '+faststart',
     '-y',
@@ -976,11 +978,28 @@ export async function apiMuxVideoAudioCopy(
 /**
  * fast 导出收尾：无音轨时仅重写容器（加 faststart），视频流 copy。
  */
-export async function apiCopyVideo(inputPath: string, outputPath: string): Promise<void> {
+export async function apiCopyVideo(
+  inputPath: string,
+  outputPath: string,
+  frameCount?: number,
+  fps?: number
+): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
   const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
 
-  const ffmpegArgs = ['-i', inputPath, '-c:v', 'copy', '-movflags', '+faststart', '-y', outputPath]
+  const ffmpegArgs = [
+    '-i',
+    inputPath,
+    '-c:v',
+    'copy',
+    ...(frameCount && frameCount > 0 && fps && fps > 0
+      ? ['-t', frameDurationSeconds(frameCount, fps)]
+      : []),
+    '-movflags',
+    '+faststart',
+    '-y',
+    outputPath
+  ]
 
   await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
 }

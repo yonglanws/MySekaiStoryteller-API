@@ -2,15 +2,8 @@ import PositionRel from '../types/PositionRel'
 import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
-import {
-  HIDE_DELAY_IN_PLACE_MS,
-  resolveCharacterFadeMs
-} from '../../../common/official/timing'
-import {
-  nowMs,
-  recordLayoutRunningEnd,
-  recordMotionSettledAt
-} from './stageTiming'
+import { HIDE_DELAY_IN_PLACE_MS, resolveCharacterFadeMs } from '../../../common/official/timing'
+import { nowMs, recordLayoutRunningEnd, recordMotionSettledAt } from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutClearSnippet extends BaseSnippet {
@@ -50,7 +43,8 @@ export default class LayoutClearSnippet extends BaseSnippet {
     const totalClearMs = is_moved
       ? Math.max(fadeMs, move_duration_ms)
       : HIDE_DELAY_IN_PLACE_MS + fadeMs
-    recordLayoutRunningEnd(this.app, nowMs() + totalClearMs)
+    const clearStartMs = nowMs()
+    recordLayoutRunningEnd(this.app, clearStartMs + totalClearMs)
 
     // 退场动作先加载并启动；淡出只在最后 0.1s 发生，角色边演边走边隐。
     const exit_motion = this.data.data.motion
@@ -71,19 +65,21 @@ export default class LayoutClearSnippet extends BaseSnippet {
     // SetTransformData(SideFrom) 先把角色放回起点，再 CharacterMoveTo(SideTo)。
     model.setPositionRel(this.app.stage_size, is_moved ? from : to)
 
-    const move_task = is_moved ? model.move(this.app.stage_size, from, to, move_duration_ms) : null
+    const move_task = is_moved
+      ? model.move(this.app.stage_size, from, to, move_duration_ms, clearStartMs)
+      : null
 
     // HideCharacter(id, delay)：
     // - 原地：delay 0.15s，然后 0.1s 淡出，共 0.25s；
     // - 滑动：delay = max(0, move_duration - 0.1s)，淡出结束时正好滑到位。
-    const delay_ms = is_moved
-      ? Math.max(0, move_duration_ms - fadeMs)
-      : HIDE_DELAY_IN_PLACE_MS
+    const delay_ms = is_moved ? Math.max(0, move_duration_ms - fadeMs) : HIDE_DELAY_IN_PLACE_MS
     if (delay_ms > 0) {
       await AnimationManager.delay(delay_ms)
       if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
     }
-    await model.hide(fadeMs, visibilityToken)
+    // 淡出的起点仍是 act+delay：即使 delay 的 setTimeout 被帧泵取整到下一帧，
+    // hide 也按绝对帧收尾，Clear 766.667ms 不会被记成 783ms。
+    await model.hide(fadeMs, visibilityToken, clearStartMs + delay_ms)
     if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return
     if (move_task) await move_task
     if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return

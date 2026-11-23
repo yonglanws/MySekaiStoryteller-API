@@ -266,12 +266,26 @@ export default class AnimationManager {
         return progress
       }
       if (evaluate() >= 1) return
-      await AnimationManager.in_ticker(
+      let cancelled = false
+      const tickerTask = AnimationManager.in_ticker(
         () => {
           evaluate()
         },
-        () => progress >= 1
+        () => cancelled || progress >= 1
       )
+      // 完成时刻由 setTimeout 精确落在 act+frames 上；in_ticker 只负责逐帧写值。
+      // 只等 in_ticker 时，片段 Promise 会晚一帧 resolve，后续 WaitFinished 片段
+      // 的起点因此每段 +17ms（500ms 特效实测 517ms）。
+      // startMs 可以晚于当前时刻（LayoutClear 的淡出从 delay 结束才开始），
+      // 此时 elapsed 为负，等待时长要加上这段未来时间。
+      const elapsedMs = (typeof performance !== 'undefined' ? performance.now() : 0) - startMs
+      await Promise.race([
+        tickerTask,
+        // 完成时刻若正好落在故事帧边界，fake timer 会把它算到下一 tick；
+        // 提前 1µs 让续体在本 tick 的微任务里跑完。
+        AnimationManager.delay(Math.max(0, frames * FRAME_MS - elapsedMs - 0.001))
+      ])
+      cancelled = true
       animation(1)
       return
     }

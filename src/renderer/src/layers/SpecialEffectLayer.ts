@@ -11,7 +11,7 @@ import {
   FRAME_MS,
   SEKAI_IN_FADE_DELAY_MS,
   SEKAI_OUT_FADE_DELAY_MS,
-  framesForSeconds
+  msToFrameCount
 } from '../../../common/official/timing'
 
 function isTextureUsable(tex: Texture | null | undefined): tex is Texture {
@@ -266,7 +266,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       false,
       {
         startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: framesForSeconds(duration / 1000)
+        frames: msToFrameCount(duration)
       }
     )
     if (gen !== this.fadeGen) return
@@ -301,7 +301,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       false,
       {
         startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: framesForSeconds(duration / 1000)
+        frames: msToFrameCount(duration)
       }
     )
     if (gen !== this.fadeGen) return

@@ -107,6 +107,57 @@ FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/S
 - `npm run test:all` 362/362；`node --test scripts/stories/*.test.mjs` 8/8；
   `npm run typecheck` 通过；Prettier 全部改动文件通过；未 commit。
 
+### 逐帧对比第 3 轮修复（2026-11-23）
+
+- 帧泵先空跑 `PLAYCORE_WARMUP_FRAMES`（10）个故事步再开始采集：成片第 0 帧
+  对应参考 `first_frame=10`。此前前 10 帧预热被拍进成片、片尾又按
+  `plan.totalFrames−10` 截掉，画面整体比参考早 10 帧。帧泵推进步数也加上
+  first_frame 偏移（`baseStoryStep = 10 + floor(n×60/fps)`）。
+- 每个片段启动前按 `timelineEntry.delayStartTimeMs`（plan 的 act）等待，
+  不再“上一片段 resolve 就启动”；49 条 Talk 的运行时起点从比 plan 早
+  −467..−17ms 收敛到 ±1ms。
+- 绝对帧补间（`AnimationManager.linear` 的 `startMs + frames` 模式）增加
+  “帧数对应时长的 setTimeout 竞速”：`in_ticker` 只负责逐帧写值，完成时刻
+  精确落在 `act+frames`；500ms 特效不再多等 1 帧（实际 499~500ms，drift 0）。
+  绝对起点可晚于当前时刻（Clear 的淡出从 delay 结束开始）。
+- 角色 `Move/show/hide` 的毫秒先经 `msToFrameCount`（46 帧 Slow 不再因
+  `framesForSeconds(766.667ms)` 二次量化成 47 帧）；`LayoutClear` 的
+  淡出按 `act+delay` 绝对起点收尾，`LayoutClear` 766.667ms 实测 766~767ms。
+- 全屏 fader/BlackOut 也改用 `msToFrameCount`：25000ms 从 1501 帧回到 1500，
+  3000ms 从 181 帧回到 180，避免 25s 片尾淡出把最后一条 Wait 推后 1 帧。
+- 片尾目标固定为 `plan.totalFrames − 10`；`ending envelope` 的 31 帧
+  （15+1+15）用 round 而不是 ceil（ceil 会得到 32）；若运行时最后一条片段
+  晚 1~2 帧，只缩短收尾 hold/fade，不再延长成片；开场黑幕不再在片段循环后
+  阻塞，避免短剧本把 0.5s 黑幕起点塞进片尾。
+- WebCodecs 结束前多编码 1 帧用于冲刷编码器，宿主按 `frameCount`
+  精确截断；`virtualClock.uninstall()` 提前到编码冲刷之前，避免长片最后
+  一个 16MB muxer 分块在假时钟下等不到 tick。
+- 验证（2026-11-23，60fps）：
+  - 特效补测 `export-1795430897419-ilssea.mp4`：plan 845 → 成片 **835**
+    （=845−10），13.9167s；500ms 的 Move/SideFade/Blur/Camera/Shake 全部
+    499~500ms、起点 drift 0；LayoutClear 767/766ms（plan 766.667）；
+    CameraMove 像素拟合残差 mean 0.099 / max 0.313px（≤0.5 通过）。
+  - 原地 Clear 最小剧本 `export-1795431550475-67xaim.mp4`：plan 64 →
+    成片 **54**（=64−10），0.9s（修复前 64 帧）。
+  - 空 motion 最小剧本 `export-1795431603090-a98i7t.mp4`：plan 94 → **84**；
+    修正后的 1.5s delay 剧本 `export-1795431608515-clu15k.mp4`：plan 186 →
+    **176**，2.933s（原始 `delay:1500` 是 1500 秒，不是渲染挂起）。
+  - 无 motion 走位 `export-1795431556054-yqu3mc.mp4`：plan 283 → **273**
+    （=283−10），4.55s；Move 500ms、位移像素 563.5 vs 550，逐帧残差
+    mean 14.65 / max 16.28px（待机呼吸混入，未能只测位移）。
+  - 主片 `export-1795431627235-n2sls7.mp4`：plan **20267** → 成片
+    **20257**（=plan−10），337.617s / 60fps；参考 end_frame 20268（−1 帧）。
+    49 条 Talk 的运行时起点 drift 中位 **+2ms**（-1..+99；+99 的唯一异常是
+    某次首次 LayoutAppear 实际 216ms vs plan 116.667），按 plan act 与 drift
+    折算对参考 act 差中位 **-3.74 帧**（-29.86..+10.00；前两轮 -24）。
+  - 3s BlackOut：像素反演起点 297.066s、时长 2.985s（180 帧），对线性
+    alpha 模型最大偏差 **0.00805**、均值 0.00162（<0.01 通过）；相对参考
+    act 296.95 仍晚约 7 帧（plan act 残差）。
+  - SideFade 仍未达到 ≤1px：Out mean 37.517 / max 67.856px；In 的探针
+    模型与 512px 羽化面板不一致，实测残差 74.707 / 133.603px，需按参考
+    纹理 alpha（`tex_transition_left/top` 的 128..512 裁剪）重做像素模型。
+  - `npm run test:all` **363/363** 通过；`npm run typecheck`、Prettier 通过。
+
 ## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
 
 本节取代下面「2026-11 口型链路按 ournotes 忠实重构」一节。参考实现回到仓库外的

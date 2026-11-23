@@ -1207,7 +1207,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
                     inputWidth,
                     inputHeight,
                     recordedBitrate,
-                    codec
+                    codec,
+                    frameCount
                   )
                 }
               } else if (hasAudio) {
@@ -1219,7 +1220,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
                   { frameCount, fps, startFrame: payload.startFrame }
                 )
               } else {
-                await apiCopyVideo(safeVideoPath, partialPath)
+                await apiCopyVideo(safeVideoPath, partialPath, frameCount, fps)
               }
             },
             () => Boolean(taskId && isTaskCancelled(taskId))

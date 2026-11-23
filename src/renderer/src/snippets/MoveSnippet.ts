@@ -15,6 +15,7 @@ export default class MoveSnippet extends BaseSnippet {
     if (this.data.type !== 'Move') return
 
     const model = this.app.getModelById(this.data.data.modelId)
+    const moveStartMs = nowMs()
     ;(this.app.layerModel as unknown as ExtendedModelLayer).setLayoutDepth?.(
       this.data.data.modelId,
       'Front'
@@ -56,7 +57,7 @@ export default class MoveSnippet extends BaseSnippet {
       this.data.data.moveSpeed === MoveSpeed.Immediate
         ? 0
         : StageUtils.move_speed_to_num(this.data.data.moveSpeed)
-    recordLayoutRunningEnd(this.app, nowMs() + moveMs)
+    recordLayoutRunningEnd(this.app, moveStartMs + moveMs)
 
     if (from.x === to.x && from.y === to.y) {
       // 官方 layout 片段按 CharacterMoveTo 的 duration 完成，即使位置没变也要等。
@@ -70,6 +71,6 @@ export default class MoveSnippet extends BaseSnippet {
       return
     }
 
-    await model.move(this.app.stage_size, from, to, moveMs)
+    await model.move(this.app.stage_size, from, to, moveMs, moveStartMs)
   }
 }

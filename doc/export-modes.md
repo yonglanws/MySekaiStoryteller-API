@@ -51,7 +51,7 @@
 WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率。浏览器硬件编码器通常把画布按 full-range 编码（`yuvj420p`、`iec61966-2-1` TRC），因此 `WebCodecsMp4Encoder` 会记录解码器实际上报的 `colorSpace`；只要不是 BT.709 limited range，收尾就不再 `-c:v copy`，而是让宿主 ffmpeg 走与其它路径相同的 `scale=out_color_matrix=bt709:out_range=tv` 滤镜链重编码并写入四个色彩标记，确保像素与元数据同时为 tv/bt709。只有上报已合规的编码器才直接 remux。
 所有 ffmpeg 出帧路径（恒等尺寸、缩放、帧序列、image2pipe 与 GPU rawvideo）都显式挂 `scale=…:out_color_matrix=bt709:out_range=tv`（无缩放 `flags=bicubic`，有缩放 `flags=lanczos`）、`setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709`，并追加 `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv` 四个输出标记。恒等尺寸也不省略 `-vf`：这条 scale 滤镜同时负责矩阵转换与有限范围。
 
-阶段 B 六色块探针见 `scripts/export/color-blocks.test.mjs`：构造一个与 WebCodecs 中间流同类的 full-range H.264（`yuvj420p/pc`、BT.709 矩阵），经正式收尾的 BT.709/tv 重编码后解码，在色块中心采样 Y/U/V，并与参考 `crates/sse-render/src/yuv.rs` 的有限范围常量按 `±1` 比较（参考 `crates/sse-export/src/lib.rs` 的 `ffmpeg_encodes_bt709_limited_range` 容差）。实测红 `[62,102,240]`（期望 `[63,102,240]`）、绿 `[172,42,26]`（`[173,42,26]`）、蓝 `[31,240,117]`（`[32,240,118]`）、白 `[235,128,128]`、黑 `[16,128,128]`、灰 `[126,128,128]`，全部在 ±1 内；CPU H.264 与本机生产配置 `auto`/HEVC（`hevc_qsv`）结果一致。参考侧 `export` 因本机缺少 `Live2DCubismCore.dll` 无法产出参考像素成片，因此该探针的期望值来自参考源码与其单元测试，而不是参考渲染帧。
+阶段 B 六色块探针见 `scripts/export/color-blocks.test.mjs`：构造一个与 WebCodecs 中间流同类的 full-range H.264（`yuvj420p/pc`、BT.709 矩阵），经正式收尾的 BT.709/tv 重编码后解码，在色块中心采样 Y/U/V，并与参考 `crates/sse-render/src/yuv.rs` 的有限范围常量按 `±1` 比较（参考 `crates/sse-export/src/lib.rs` 的 `ffmpeg_encodes_bt709_limited_range` 容差）。MSST 实测红 `[62,102,240]`、绿 `[172,42,26]`、蓝 `[31,240,117]`、白 `[235,128,128]`、黑 `[16,128,128]`、灰 `[126,128,128]`；参考 ignored 集成测试在本机以同一 ffmpeg 执行通过（`1 passed`），软件 H.264 参考像素为红 `[63,102,240]`、绿 `[173,42,26]`、蓝 `[32,240,118]`、白/黑/灰与 MSST 相同，逐项差值 ≤1。CPU H.264 与本机生产配置 `auto`/HEVC（`hevc_qsv`）结果一致。完整参考 `export` 仍因本机缺少 `Live2DCubismCore.dll` 无法产出成片，但六色块测试只经过参考的 YUV 转换与 ffmpeg 收尾，不依赖 Cubism，因此该阶段已有参考像素对照。
 
 常用环境变量映射如下；没有列出的字段不要自行推测 `MSS_*` 名称。
 
@@ -232,6 +232,8 @@ API 返回的 `duration` 单位是 **秒**，表示成片视频本身的长度�
 | `avgPumpFps`      | 31.6               | 42.5                       | +34.5%   |
 | `audioMs`（收尾） | 262ms              | 105ms                      | -60%     |
 | 文件大小          | 11.33MB            | 11.23MB                    | 基本不变 |
+
+长片对比前先核对同一日志里的 5 帧 WebCodecs 探测耗时：它只反映当前 GPU 状态，不受剧本内容影响。若探测耗时明显高于上一轮（例如 106ms vs 83ms），`renderMs` / `snapshotMs` 会随 GPU 负载或频率一起上升，不能直接归因于导出代码回退；应在探测耗时接近时再比较 `pumpMs` 与 `avgPumpFps`。实际复测中探测 83.2ms 时，官方 337.6s 片的 `wallMs` 为 368.6s、`renderMs` 38.0s、`snapshotMs` 4.55s，均优于探测 106.1ms 的那次 412.1s / 66.0s / 9.2s。
 
 诊断报告现在包含 `encoder`（如 `webcodecs-h264+ffmpeg`）、`segments`、`convert`（`browser` / `ffmpeg`）与 `color`（`bt709/tv`）；`convert: ffmpeg` 表示收尾经过 BT.709/tv 重编码，`browser` 仅在 WebCodecs 源流本身已合规时出现。`.log.json`、`.log`、`.report.txt` 三个文件异步并行写盘，不再同步阻塞宿主主线程。
 

@@ -1084,8 +1084,8 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   )
   assert.equal(
     tickDeltas.length,
-    2 * (resNoEnvelope.frameCount - 1),
-    '30fps must consume 2 story steps per frame transition (frame n = 2n steps)'
+    10 + 2 * (resNoEnvelope.timings.encodedFrames - 1),
+    'warmup + 30fps must consume 2 story steps per frame transition'
   )
   // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
   const snippetDur = Math.round(f.planned[0])
@@ -1107,7 +1107,7 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   )
 })
 
-test('frame n renders at story time n/fps; frame 0 happens before any story step', async (t) => {
+test('frame n renders at first_frame + n/fps; warmup happens before any story step', async (t) => {
   const renderTimes = []
   const f = exportFixture(t, {
     snippets: [talk('あ'.repeat(4))],
@@ -1118,13 +1118,17 @@ test('frame n renders at story time n/fps; frame 0 happens before any story step
   })
   const res = await f.export('fast')
   assert.equal(res.success, true)
-  const pumpRenders = renderTimes.slice(-res.frameCount)
-  assert.equal(pumpRenders.length, res.frameCount)
-  assert.equal(pumpRenders[0], 0, 'frame 0 must render at story time 0 (no advanced animation)')
+  const pumpRenders = renderTimes.slice(-res.timings.encodedFrames)
+  assert.equal(pumpRenders.length, res.timings.encodedFrames)
+  const warmupMs = (10 * 1000) / 60
+  assert.ok(
+    Math.abs(pumpRenders[0] - warmupMs) < 2,
+    'frame 0 must render after the official 10-frame playcore warmup'
+  )
   for (const n of [1, 15, 30]) {
     assert.ok(
-      Math.abs(pumpRenders[n] - (n * 1000) / 30) < 2,
-      `frame ${n} must render at ${(n * 1000) / 30}ms, got ${pumpRenders[n]}`
+      Math.abs(pumpRenders[n] - (warmupMs + (n * 1000) / 30)) < 2,
+      `frame ${n} must render at ${warmupMs + (n * 1000) / 30}ms, got ${pumpRenders[n]}`
     )
   }
 })
@@ -1143,9 +1147,9 @@ test('25fps consumes 2,2,3,2,3 story steps per frame (no ceil), every step exact
   const res = await f.export('fast')
   assert.equal(res.success, true)
   assert.deepEqual(
-    stepCalls.slice(0, 5),
-    [2, 2, 3, 2, 3],
-    '25fps must distribute 60 steps over 25 frames by remainder, never ceil'
+    stepCalls.slice(0, 6),
+    [10, 2, 2, 3, 2, 3],
+    'warmup then 25fps must distribute 60 steps over 25 frames by remainder, never ceil'
   )
   assert.ok(
     tickDeltas.every((ms) => Math.abs(ms - 1000 / 60) < 1e-6),
@@ -1153,8 +1157,8 @@ test('25fps consumes 2,2,3,2,3 story steps per frame (no ceil), every step exact
   )
   assert.equal(
     tickDeltas.length,
-    Math.floor(((res.frameCount - 1) * 60) / 25),
-    'frame n maps to floor(n×60/25) story steps'
+    10 + Math.floor(((res.timings.encodedFrames - 1) * 60) / 25),
+    'warmup + frame n maps to floor(n×60/25) story steps'
   )
 })
 

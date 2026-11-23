@@ -34,7 +34,8 @@ import {
   LIP_LOUD_TARGET_VALUE_SCALE,
   LIP_TARGET_VALUE_SCALE,
   STORY_FPS,
-  framesForSeconds
+  framesForSeconds,
+  msToFrameCount
 } from '../../../common/official/timing'
 import { evaluateEase } from '../effects/Ease'
 import { registerClockBaselineResetListener } from '../snippets/stageTiming'
@@ -1641,7 +1642,12 @@ export default class AdvancedModel extends Live2DModel {
     if (alphaFilter) alphaFilter.alpha = Math.max(0, Math.min(1, alpha))
   }
 
-  public async show(time: number, hologram: boolean, generation?: number): Promise<void> {
+  public async show(
+    time: number,
+    hologram: boolean,
+    generation?: number,
+    startMs?: number
+  ): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     // 官方 Appear 不唤醒眨眼：唤醒只发生在非循环身体动作越过结尾时。
     this.autoBlink = true
@@ -1655,6 +1661,9 @@ export default class AdvancedModel extends Live2DModel {
     // 官方 FadeOpacityCoroutine 从当前不透明度补间到目标值；退场被新的 Appear
     // 打断时从头算 0 会闪一帧全透明。
     const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
+    // 官方 FadeOpacityCoroutine 按故事帧推进；绝对帧模式保证 act/act+frames 的边界
+    // 不会因为累加步进多等一帧（Clear 766.667→783ms 的根因）。
+    const fadeStartMs = startMs ?? (typeof performance !== 'undefined' ? performance.now() : 0)
     await AnimationManager.linear(
       (progress) => {
         if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
@@ -1663,17 +1672,17 @@ export default class AdvancedModel extends Live2DModel {
       },
       time,
       false,
-      // 预览卡顿限幅：单帧 alpha 最多推进 0.25，100ms 渐变至少分 4 帧呈现。
-      { maxProgressPerFrame: 0.25 }
+      { startMs: fadeStartMs, frames: msToFrameCount(time) }
     )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
     this.lastChangeBlinkTime = performance.now()
   }
 
-  public async hide(time: number, generation?: number): Promise<void> {
+  public async hide(time: number, generation?: number, startMs?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 1
+    const fadeStartMs = startMs ?? (typeof performance !== 'undefined' ? performance.now() : 0)
     await AnimationManager.linear(
       (progress) => {
         if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
@@ -1682,10 +1691,10 @@ export default class AdvancedModel extends Live2DModel {
       },
       time,
       false,
-      // 预览卡顿限幅：与 show 一致，单帧 alpha 最多推进 0.25。
-      { maxProgressPerFrame: 0.25 }
+      { startMs: fadeStartMs, frames: msToFrameCount(time) }
     )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+
 
     if (this.inHologram) {
       this.inHologram = false
@@ -1886,7 +1895,8 @@ export default class AdvancedModel extends Live2DModel {
     stage_size: [number, number],
     from: PositionRel,
     to: PositionRel,
-    time_ms: number
+    time_ms: number,
+    startMs?: number
   ): Promise<void> {
     if (from.x === to.x && from.y === to.y) return
     this.shakeGeneration++
@@ -1898,7 +1908,7 @@ export default class AdvancedModel extends Live2DModel {
     // 官方 `CharacterMoveTo` 是 `DOLocalMove(...).SetEase(Linear)`：位置按进度线性插值。
     // 按故事帧求值（act 帧取 from，act+frames 取 to），避免片段先于帧泵启动时
     // 第一帧就被算成 1/frames，补间整体提前一帧。
-    const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+    const tweenStartMs = startMs ?? (typeof performance !== 'undefined' ? performance.now() : 0)
     await AnimationManager.linear(
       (progress) => {
         // 退场（尤其是原地 Clear）可以先于上一段 Appear 的滑入完成；
@@ -1909,7 +1919,7 @@ export default class AdvancedModel extends Live2DModel {
       },
       time_ms,
       false,
-      { startMs, frames: framesForSeconds(time_ms / 1000) }
+      { startMs: tweenStartMs, frames: msToFrameCount(time_ms) }
     )
   }
 

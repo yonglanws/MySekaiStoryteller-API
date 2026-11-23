@@ -127,6 +127,10 @@ export class VirtualClockController {
       ticker.lastTime = now - FRAME_MS
       ticker.update(now)
       onStep?.(now)
+      // 让本步完成的片段 Promise/时间戳续体先于下一故事步运行。
+      // handler.resolve() 之后还有 runSnippet/finally/.then 多层续体；LayoutClear
+      // 还要串 delay→hide→move，8 个微任务不够，结束时间会被记到下一帧（+17ms）。
+      for (let i = 0; i < 64; i++) await Promise.resolve()
     }
   }
 
