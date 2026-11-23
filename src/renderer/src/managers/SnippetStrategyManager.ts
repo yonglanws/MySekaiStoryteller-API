@@ -21,6 +21,7 @@ import TelopSnippet from '../snippets/TelopSnippet'
 import PlaceInfoSnippet from '../snippets/PlaceInfoSnippet'
 import FullScreenTextSnippet from '../snippets/FullScreenTextSnippet'
 import SimpleSelectableSnippet from '../snippets/SimpleSelectableSnippet'
+import WaitSnippet from '../snippets/WaitSnippet'
 import BlackOutSnippet from '../snippets/BlackOutSnippet'
 import BlackInSnippet from '../snippets/BlackInSnippet'
 import DoParamSnippet from '../snippets/DoParamSnippet'
@@ -87,6 +88,7 @@ export default class SnippetStrategyManager {
       PlaceInfo: PlaceInfoSnippet,
       FullScreenText: FullScreenTextSnippet,
       SimpleSelectable: SimpleSelectableSnippet,
+      Wait: WaitSnippet,
       BlackOut: BlackOutSnippet,
       BlackIn: BlackInSnippet,
       DoParam: DoParamSnippet,

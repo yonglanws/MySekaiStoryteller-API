@@ -199,6 +199,11 @@ export const SnippetSchema = z.discriminatedUnion('type', [
       voice: z.string().default(''),
       ttsText: z.string().default(''),
       /**
+       * 打字机计时的官方正文（UTF-16 字符数）。官方剧本的 content 是译文，
+       * 打字长度仍按日文 body 走；缺省时退回 content。
+       */
+      typingText: z.string().optional(),
+      /**
        * 情绪标签（如 平静/开心/生气/伤心/害羞/惊讶）。
        * IrodoriTTS 按角色配置的 emotion 参考音频切换音色；其他 TTS 后端忽略。
        */
@@ -282,6 +287,14 @@ export const SnippetSchema = z.discriminatedUnion('type', [
     data: z.object({
       choices: z.array(z.string()),
       pickedIndex: z.number().int().min(0).optional()
+    })
+  }),
+  z.object({
+    type: z.literal('Wait'),
+    ...baseSnippetFields,
+    data: z.object({
+      /** 纯等待时长（毫秒）。官方 Action 0 的 delay 在时间线里是独立 wait 节点。 */
+      duration: z.number().finite().min(0).max(600000)
     })
   }),
   z.object({

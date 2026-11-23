@@ -223,7 +223,9 @@ function main() {
     let zoom = null
     let blur = null
     let dist = null
-    for (const part of String(raw || '').replace(/：/g, ':').split(',')) {
+    for (const part of String(raw || '')
+      .replace(/：/g, ':')
+      .split(',')) {
       const idx = part.indexOf(':')
       if (idx < 0) continue
       const key = part.slice(0, idx).trim().toLowerCase()
@@ -307,6 +309,8 @@ function main() {
             speaker: translate(talk.WindowDisplayName) || talk.WindowDisplayName,
             content: wrapDisplayText(translate(talk.Body)),
             ttsText: talk.Body,
+            // 打字机按官方日文 body 计时；译文 content 只负责显示。
+            typingText: talk.Body,
             modelId,
             emotion: emotionOf(speakerFacial),
             ...(talk.WhenFinishCloseWindow ? { closeWindowOnFinish: true } : {}),
@@ -666,7 +670,9 @@ function main() {
             })
             break
           case 22: {
-            const rawShader = String(effect.StringVal || '').trim().toLowerCase()
+            const rawShader = String(effect.StringVal || '')
+              .trim()
+              .toLowerCase()
             if (!['hologram', 'monitor', 'blur', 'none'].includes(rawShader)) break
             const charId = Number(effect.IntVal)
             const hasChar = Number.isFinite(charId) && config.characterModels?.[String(charId)]
@@ -686,7 +692,8 @@ function main() {
                 data: { modelId: targetModel, shader: rawShader, ...levelOption }
               })
             } else if (rawShader === 'none') {
-              const fallbackIds = usedModels.size > 0 ? [...usedModels] : [...models.keys()].slice(0, 1)
+              const fallbackIds =
+                usedModels.size > 0 ? [...usedModels] : [...models.keys()].slice(0, 1)
               for (const targetModel of fallbackIds) {
                 usedModels.add(targetModel)
                 push({
@@ -886,7 +893,10 @@ function main() {
             wait,
             progressBehavior,
             delay,
-            data: { volume: Math.min(2, Math.max(0, volume)), duration: Math.min(Math.max(0, fadeMs), 30000) }
+            data: {
+              volume: Math.min(2, Math.max(0, volume)),
+              duration: Math.min(Math.max(0, fadeMs), 30000)
+            }
           })
           break
         }
@@ -947,15 +957,17 @@ function main() {
         break
       }
       case 0: {
-        // Action 0 = 播完收尾；把收尾 delay 并进最后一段淡出，避免片尾提前结束
+        // Action 0 = 播完收尾。官方时间线把它作为独立的 wait 节点，排在最后一段
+        // 淡出之后；不能把 delay 并进 BlackOut，否则 25s 淡出会被拉成 29s。
         const tailMs = Math.round((Number(snippet.Delay) || 0) * 1000)
         if (tailMs > 0) {
-          for (let i = snippets.length - 1; i >= 0; i--) {
-            if (snippets[i].type === 'BlackOut') {
-              snippets[i].data.duration += tailMs
-              break
-            }
-          }
+          push({
+            type: 'Wait',
+            wait: true,
+            progressBehavior: 'WaitFinished',
+            delay: 0,
+            data: { duration: tailMs }
+          })
         }
         break
       }

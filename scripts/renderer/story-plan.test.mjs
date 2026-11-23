@@ -186,6 +186,44 @@ test('official voiceDurationMs drives Talk timing instead of the TTS audio lengt
   assert.equal(plan.entries[0].endFrame, 10 + 274)
 })
 
+test('typingText uses the official body length while content remains the display text', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  // 译文 content 20 字，官方日文 body 40 字；无语音时停 121 帧。
+  const snippet = talk({
+    content: 'あ'.repeat(20),
+    typingText: 'い'.repeat(40),
+    motion: '',
+    facial: ''
+  })
+  const timeline = calculator.calculateTimeline([snippet], new Map())
+  // 12 帧开窗 + 160 帧打字 + 121 帧自动停留 = 293 帧。
+  assert.equal(timeline.entries[0].durationMs, 4883.333)
+  const plan = planModule.bakeStoryPlan([snippet], timeline.entries)
+  const entry = plan.entries[0]
+  assert.equal(entry.talk.typingStartFrame, 22)
+  assert.equal(entry.talk.typingEndFrame, 182)
+  assert.equal(entry.talk.gateEndFrame, 182)
+  assert.equal(entry.durationFrames, 293)
+  assert.equal(plan.totalFrames, 334)
+})
+
+test('Wait occupies its own plan frames and is a data_duration snippet', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippet = { type: 'Wait', wait: true, delay: 0, data: { duration: 4000 } }
+  const timeline = calculator.calculateTimeline([snippet], new Map())
+  assert.equal(timeline.entries[0].durationMs, 4000)
+  const plan = planModule.bakeStoryPlan([snippet], timeline.entries)
+  assert.deepEqual(
+    Array.from(plan.entries, (entry) => [entry.startFrame, entry.endFrame, entry.durationFrames]),
+    [[10, 250, 240]]
+  )
+  assert.equal(plan.totalFrames, 281)
+})
+
 test('sub-frame state cues do not consume story frames in the plan', () => {
   const { load } = fixture()
   const calculator = load('utils/TimelineCalculator.ts')

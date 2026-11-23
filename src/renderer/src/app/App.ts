@@ -24,6 +24,7 @@ import VideoExportManager, {
 import AnimationManager from '../managers/AnimationManager'
 import { TTSManager } from '../managers/TTSManager'
 import type { LipSyncEnvelope } from '../utils/LipSyncEnvelope'
+import { framesForSeconds } from '../../../common/official/timing'
 
 /** 宿主统一下发的 TTS 配置（config.yaml 的 tts 节） */
 export interface ApiExportTtsConfig {
@@ -504,7 +505,9 @@ export class App {
         }
         this.applyViewTransform()
       },
-      Math.max(1, durationMs)
+      Math.max(1, durationMs),
+      false,
+      { startMs: startWall, frames: framesForSeconds(clampedSec) }
     )
 
     if (generation === this.shakeGeneration) {

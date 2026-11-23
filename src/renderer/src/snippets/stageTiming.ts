@@ -128,7 +128,7 @@ export interface ExtendedUILayer {
   resetTalkData?: () => void
   setTalkData?: (speaker: string, content: string) => void
   showTextBackground?: () => Promise<void>
-  startDisplayContent?: () => Promise<void>
+  startDisplayContent?: (typingLength?: number) => Promise<void>
   hideTextBackground?: (durationMs?: number) => Promise<void>
   showPlaceInfo?: (text: string, durationMs?: number) => Promise<void>
   closePlaceInfo?: () => Promise<void> | void

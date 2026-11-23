@@ -142,6 +142,11 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
     round(talk.calculateTalkDurationMs(twenty, 1000, '', { voiceDurationMs: 4000 })),
     4566.667
   )
+  // 译文 content 20 字，官方日文 body 40 字：打字窗按 body 的 160 帧走。
+  assert.equal(
+    round(talk.calculateTalkDurationMs(twenty, 1000, '', { typingText: 'い'.repeat(40) })),
+    4683.333
+  )
   assert.equal(round(talk.talkTypingDurationMs(twenty)), 1333.333)
   const described = talk.describeTalkTiming(twenty, 2860)
   assert.equal(round(described.typingMs), 1333.333)

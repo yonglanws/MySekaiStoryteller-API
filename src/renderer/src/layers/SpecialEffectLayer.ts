@@ -10,7 +10,8 @@ import { ScenarioEffectOverlay, SekaiTransitionParticles } from '../effects/Tria
 import {
   FRAME_MS,
   SEKAI_IN_FADE_DELAY_MS,
-  SEKAI_OUT_FADE_DELAY_MS
+  SEKAI_OUT_FADE_DELAY_MS,
+  framesForSeconds
 } from '../../../common/official/timing'
 
 function isTextureUsable(tex: Texture | null | undefined): tex is Texture {
@@ -256,10 +257,18 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
 
     this.setSpriteAlpha(sprite, startAlpha)
-    await AnimationManager.linear((progress) => {
-      if (gen !== this.fadeGen) return
-      this.setSpriteAlpha(sprite, startAlpha + (1 - startAlpha) * progress)
-    }, duration)
+    await AnimationManager.linear(
+      (progress) => {
+        if (gen !== this.fadeGen) return
+        this.setSpriteAlpha(sprite, startAlpha + (1 - startAlpha) * progress)
+      },
+      duration,
+      false,
+      {
+        startMs: typeof performance !== 'undefined' ? performance.now() : 0,
+        frames: framesForSeconds(duration / 1000)
+      }
+    )
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 1)
     other.visible = false
@@ -283,10 +292,18 @@ export default class SpecialEffectLayer extends BaseLayer {
       return
     }
     this.setSpriteAlpha(sprite, startAlpha)
-    await AnimationManager.linear((progress) => {
-      if (gen !== this.fadeGen) return
-      this.setSpriteAlpha(sprite, startAlpha * (1 - progress))
-    }, duration)
+    await AnimationManager.linear(
+      (progress) => {
+        if (gen !== this.fadeGen) return
+        this.setSpriteAlpha(sprite, startAlpha * (1 - progress))
+      },
+      duration,
+      false,
+      {
+        startMs: typeof performance !== 'undefined' ? performance.now() : 0,
+        frames: framesForSeconds(duration / 1000)
+      }
+    )
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 0)
     sprite.visible = false
@@ -395,7 +412,12 @@ export default class SpecialEffectLayer extends BaseLayer {
 
   /**
    * 官方 `ScenarioSideFadePlayer` (`EffectType 29~36`):
-   * 使用 `OutQuad` 缓动跨越 `w+512` / `h+512` 区间移动带 512px 羽化渐变的黑幕遮罩。
+   * - 根节点是 `contentSize + 64` 的纯黑面板（四周各留 32px）；
+   * - 面板外四条边各铺 512px 的 `tex_transition_*` 渐变（靠面板全黑、向外透明）；
+   * - `Play` 把 anchoredPosition 从 from 移到 to（OutQuad），屏幕上的前沿是
+   *   `面板边 − 512`（向左右移动）或 `面板边 − 512`（向上下移动）。
+   * 旧实现用一块硬边黑布从 `w+512` 直接滑入，前沿比参考晚 544px，边缘检测拟合
+   * 残差 ~19px；这里按参考的 64px 内边距 + 512px 羽化重建。
    */
   public async playSideFade(
     mode: 'In' | 'Out' | 'in' | 'out',
@@ -405,67 +427,90 @@ export default class SpecialEffectLayer extends BaseLayer {
     const gen = ++this.sideFadeGen
     const w = this.app.screen.width
     const h = this.app.screen.height
-    // 官方 `ScenarioSideFadePlayer.Play`：位移 = 内容宽/高 + 512，硬边面板，无羽化。
-    const ox = w + 512
-    const oy = h + 512
+    const EDGE = 512
+    const PAD = 32
+    const rw = w + PAD * 2
+    const rh = h + PAD * 2
+    const ox = w + EDGE
+    const oy = h + EDGE
     const normMode = String(mode).toLowerCase() === 'in' ? 'in' : 'out'
     const dir = String(direction).toLowerCase() as 'left' | 'right' | 'top' | 'bottom'
     const horizontal = dir === 'left' || dir === 'right'
-    let from = { x: 0, y: 0 }
-    let to = { x: 0, y: 0 }
+    // root = 黑色面板左上角；leading = 运动方向上的前沿边（带 512px 羽化）。
+    let from = { x: -PAD, y: -PAD }
+    let to = { x: -PAD, y: -PAD }
     let hide = false
-    if (dir === 'left') {
+    let leading: 'start' | 'end' = 'start'
+    if (dir === 'right') {
+      // RightIn: 0 → -ox（向左退场）；RightOut: +ox → 0（向左盖住）。
+      leading = 'start'
       if (normMode === 'in') {
-        to = { x: ox, y: 0 }
+        to = { x: -PAD - ox, y: -PAD }
         hide = true
       } else {
-        from = { x: -ox, y: 0 }
+        from = { x: -PAD + ox, y: -PAD }
       }
-    } else if (dir === 'right') {
+    } else if (dir === 'left') {
+      // LeftIn: 0 → +ox（向右退场）；LeftOut: -ox → 0（向右盖住）。
+      leading = 'end'
       if (normMode === 'in') {
-        to = { x: -ox, y: 0 }
+        to = { x: -PAD + ox, y: -PAD }
         hide = true
       } else {
-        from = { x: ox, y: 0 }
+        from = { x: -PAD - ox, y: -PAD }
       }
     } else if (dir === 'top') {
+      // 画布 y 向下：TopIn 0 → +oy（向下退场）；TopOut -oy → 0（向下盖住）。
+      leading = 'end'
       if (normMode === 'in') {
-        to = { x: 0, y: -oy }
+        to = { x: -PAD, y: -PAD + oy }
         hide = true
       } else {
-        from = { x: 0, y: oy }
+        from = { x: -PAD, y: -PAD - oy }
       }
     } else {
+      // BottomIn 0 → -oy（向上退场）；BottomOut +oy → 0（向上盖住）。
+      leading = 'start'
       if (normMode === 'in') {
-        to = { x: 0, y: oy }
+        to = { x: -PAD, y: -PAD - oy }
         hide = true
       } else {
-        from = { x: 0, y: -oy }
+        from = { x: -PAD, y: -PAD + oy }
       }
     }
 
-    const raw = Texture.from(ui_se_black)
-    this.wipeSprite.texture = isTextureUsable(raw) ? raw : buildSolidColorTexture('#000000')
-    this.wipeSprite.width = horizontal ? ox : w
-    this.wipeSprite.height = horizontal ? h : oy
+    const texture = this.getSideFadeTexture(horizontal, leading, rw, rh, EDGE)
+    this.wipeSprite.texture = texture
+    this.wipeSprite.width = horizontal ? rw + EDGE : rw
+    this.wipeSprite.height = horizontal ? rh : rh + EDGE
     this.wipeSprite.visible = true
-    this.wipeSprite.x = from.x
-    this.wipeSprite.y = from.y
+    // 前沿羽化从面板边向外 512px：横向 start 把 sprite 放到 root.x−512；
+    // 纵向 start 放到 root.y−512；end 侧 sprite 从 root 开始。
+    const spriteFrom = {
+      x: from.x - (horizontal && leading === 'start' ? EDGE : 0),
+      y: from.y - (!horizontal && leading === 'start' ? EDGE : 0)
+    }
+    const spriteTo = {
+      x: to.x - (horizontal && leading === 'start' ? EDGE : 0),
+      y: to.y - (!horizontal && leading === 'start' ? EDGE : 0)
+    }
+    this.wipeSprite.x = spriteFrom.x
+    this.wipeSprite.y = spriteFrom.y
 
     await runEasedTween(
       durationMs,
       'OutQuad',
       (p) => {
         if (gen !== this.sideFadeGen) return
-        this.wipeSprite.x = from.x + (to.x - from.x) * p
-        this.wipeSprite.y = from.y + (to.y - from.y) * p
+        this.wipeSprite.x = spriteFrom.x + (spriteTo.x - spriteFrom.x) * p
+        this.wipeSprite.y = spriteFrom.y + (spriteTo.y - spriteFrom.y) * p
       },
       () => gen !== this.sideFadeGen
     )
 
     if (gen !== this.sideFadeGen) return
-    this.wipeSprite.x = to.x
-    this.wipeSprite.y = to.y
+    this.wipeSprite.x = spriteTo.x
+    this.wipeSprite.y = spriteTo.y
     // In 类型在结束时 deactivate；Out 类型保留面板盖住画面。
     this.wipeSprite.visible = !hide
   }

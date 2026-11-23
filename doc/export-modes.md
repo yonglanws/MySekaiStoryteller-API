@@ -51,6 +51,8 @@
 WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率。浏览器硬件编码器通常把画布按 full-range 编码（`yuvj420p`、`iec61966-2-1` TRC），因此 `WebCodecsMp4Encoder` 会记录解码器实际上报的 `colorSpace`；只要不是 BT.709 limited range，收尾就不再 `-c:v copy`，而是让宿主 ffmpeg 走与其它路径相同的 `scale=out_color_matrix=bt709:out_range=tv` 滤镜链重编码并写入四个色彩标记，确保像素与元数据同时为 tv/bt709。只有上报已合规的编码器才直接 remux。
 所有 ffmpeg 出帧路径（恒等尺寸、缩放、帧序列、image2pipe 与 GPU rawvideo）都显式挂 `scale=…:out_color_matrix=bt709:out_range=tv`（无缩放 `flags=bicubic`，有缩放 `flags=lanczos`）、`setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709`，并追加 `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv` 四个输出标记。恒等尺寸也不省略 `-vf`：这条 scale 滤镜同时负责矩阵转换与有限范围。
 
+阶段 B 六色块探针见 `scripts/export/color-blocks.test.mjs`：构造一个与 WebCodecs 中间流同类的 full-range H.264（`yuvj420p/pc`、BT.709 矩阵），经正式收尾的 BT.709/tv 重编码后解码，在色块中心采样 Y/U/V，并与参考 `crates/sse-render/src/yuv.rs` 的有限范围常量按 `±1` 比较（参考 `crates/sse-export/src/lib.rs` 的 `ffmpeg_encodes_bt709_limited_range` 容差）。实测红 `[62,102,240]`（期望 `[63,102,240]`）、绿 `[172,42,26]`（`[173,42,26]`）、蓝 `[31,240,117]`（`[32,240,118]`）、白 `[235,128,128]`、黑 `[16,128,128]`、灰 `[126,128,128]`，全部在 ±1 内；CPU H.264 与本机生产配置 `auto`/HEVC（`hevc_qsv`）结果一致。参考侧 `export` 因本机缺少 `Live2DCubismCore.dll` 无法产出参考像素成片，因此该探针的期望值来自参考源码与其单元测试，而不是参考渲染帧。
+
 常用环境变量映射如下；没有列出的字段不要自行推测 `MSS_*` 名称。
 
 | 字段                               | 环境变量                                                                   |

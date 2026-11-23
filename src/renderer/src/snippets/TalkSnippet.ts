@@ -37,6 +37,8 @@ interface TalkData {
     speaker: string
     content: string
     ttsText?: string
+    /** 官方正文；打字机计时按它，content 只负责显示。 */
+    typingText?: string
     modelId: number
     voice: string
     /** 官方语音时长（毫秒）；有值时按官方语音而不是 TTS 计时。 */
@@ -155,6 +157,7 @@ export default class TalkSnippet extends BaseSnippet {
     return calculateTalkDurationMs(talkData.data.content, 0, talkData.data.ttsText, {
       hasVoice: Boolean(talkData.data.voice),
       voiceDurationMs: talkData.data.voiceDurationMs,
+      typingText: talkData.data.typingText,
       windowOpenMs,
       layoutRunningMs,
       motionSettleMs: existingSettleMs
@@ -242,7 +245,7 @@ export default class TalkSnippet extends BaseSnippet {
       if (hasModel) {
         const mouthChars =
           this.capturedLipSync || hasSpeakableSpeechText(talkData.data.content)
-            ? visibleTextLength(talkData.data.content)
+            ? visibleTextLength(talkData.data.typingText || talkData.data.content)
             : 0
         this.startMouthAnimation(
           this.app.getModelById(talkData.data.modelId),
@@ -252,7 +255,9 @@ export default class TalkSnippet extends BaseSnippet {
         )
       }
       if (!ui.UITalkShowed) await ui.showTextBackground?.()
-      await ui.startDisplayContent?.()
+      await ui.startDisplayContent?.(
+        visibleTextLength(talkData.data.typingText || talkData.data.content)
+      )
       const typingEndedAtMs = nowMs()
 
       if (voicePromise) {

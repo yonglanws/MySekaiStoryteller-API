@@ -124,6 +124,7 @@ const SNIPPET_TYPE_DEFAULTS: Record<string, number> = {
   Move: MOVE_DURATION_NORMAL_MS,
   Motion: 0,
   HideTalk: 0,
+  Wait: 0,
   DoParam: 400,
   PlaySe: 0,
   StopSe: 0,
@@ -159,6 +160,7 @@ const FAST_DURATION_TYPES = new Set([
   'Move',
   'Motion',
   'HideTalk',
+  'Wait',
   'AmbientColor',
   'PlaceInfo',
   'FullScreenText',
@@ -243,16 +245,27 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
         detail: `${snippet.type}: zero-duration cue`
       }
     }
+    case 'Wait': {
+      const dataDur = getSnippetDataField(snippet, 'duration')
+      const ms = typeof dataDur === 'number' && dataDur > 0 ? dataDur : 0
+      return {
+        durationMs: ms,
+        source: 'data_duration',
+        detail: `Wait: ${ms}ms`
+      }
+    }
     case 'Talk': {
-      const { content, ttsText, voice, voiceDurationMs } = snippet.data as {
+      const { content, ttsText, typingText, voice, voiceDurationMs } = snippet.data as {
         content: string
         ttsText?: string
+        typingText?: string
         voice?: string
         voiceDurationMs?: number
       }
       const estimated = calculateTalkDurationMs(content, 0, ttsText, {
         hasVoice: Boolean(voice),
-        voiceDurationMs
+        voiceDurationMs,
+        typingText
       })
       return {
         durationMs: estimated,
@@ -576,9 +589,10 @@ function crossValidate(
   if (snippet.type === 'Talk') {
     const ttsDurationMs = ttsMapping?.durationMs ?? 0
     const hasTTS = Number.isFinite(ttsDurationMs) && ttsDurationMs > 0
-    const { content, ttsText, voice, voiceDurationMs } = snippet.data as {
+    const { content, ttsText, typingText, voice, voiceDurationMs } = snippet.data as {
       content: string
       ttsText?: string
+      typingText?: string
       voice?: string
       voiceDurationMs?: number
     }
@@ -586,6 +600,7 @@ function crossValidate(
       finalDurationMs: calculateTalkDurationMs(content, ttsDurationMs, ttsText, {
         hasVoice: Boolean(voice),
         voiceDurationMs,
+        typingText,
         windowOpenMs,
         layoutRunningMs,
         silentHoldMs
@@ -652,6 +667,7 @@ function crossValidate(
       snippet.type === 'StopShakeWindow' ||
       snippet.type === 'StopShakeScreen' ||
       snippet.type === 'BgmVolume' ||
+      snippet.type === 'Wait' ||
       snippet.type === 'Movie'
         ? Math.max(0, finalDurationMs)
         : Math.max(1, finalDurationMs)
@@ -921,7 +937,9 @@ export function estimateSnippetDuration(snippet: SnippetData): number {
   if (snippet.type === 'ChangeBgm') return 0
   if (snippet.type === 'Talk') {
     return calculateTalkDurationMs(snippet.data.content, 0, snippet.data.ttsText, {
-      hasVoice: Boolean(snippet.data.voice)
+      hasVoice: Boolean(snippet.data.voice),
+      typingText: snippet.data.typingText,
+      voiceDurationMs: snippet.data.voiceDurationMs
     })
   }
   const pathA = calculatePathA_ContentBased(snippet)

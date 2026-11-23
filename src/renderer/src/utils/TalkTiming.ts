@@ -46,6 +46,11 @@ export interface TalkDurationOptions {
    */
   voiceDurationMs?: number
   /**
+   * 可选：打字机计时的官方正文。官方剧本的 content 是译文，打字长度按日文
+   * body 计算；缺省时使用 content。
+   */
+  typingText?: string
+  /**
    * 可选：无语音的纯标点静默句在打字结束后的停顿时长（默认使用官方 2.0s）。
    */
   silentHoldMs?: number
@@ -105,7 +110,7 @@ function talkAutoTiming(
   return talkAutoFrameTiming({
     startFrame: 0,
     windowFrames: msToFrameCount(options.windowOpenMs ?? 0),
-    length: visibleTextLength(content),
+    length: visibleTextLength(options.typingText ?? content),
     voiceSeconds: resolveSpeechSeconds(
       content,
       ttsDurationMs,

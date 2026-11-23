@@ -187,7 +187,7 @@ test('SideFade positions cover from the edge and reveal toward the opposite side
     { ...sideFadePositions('left', 'out', 1920, 1080) },
     {
       horizontal: true,
-      start: -1920,
+      start: -2432,
       end: 0
     }
   )
@@ -196,14 +196,14 @@ test('SideFade positions cover from the edge and reveal toward the opposite side
     {
       horizontal: true,
       start: 0,
-      end: 1920
+      end: 2432
     }
   )
   assert.deepEqual(
     { ...sideFadePositions('right', 'out', 1920, 1080) },
     {
       horizontal: true,
-      start: 1920,
+      start: 2432,
       end: 0
     }
   )
@@ -212,14 +212,14 @@ test('SideFade positions cover from the edge and reveal toward the opposite side
     {
       horizontal: false,
       start: 0,
-      end: -1080
+      end: -1592
     }
   )
   assert.deepEqual(
     { ...sideFadePositions('bottom', 'out', 1920, 1080) },
     {
       horizontal: false,
-      start: 1080,
+      start: 1592,
       end: 0
     }
   )

@@ -16,20 +16,11 @@ export function sideFadePositions(
 ): SideFadePositions {
   const horizontal = edge === 'left' || edge === 'right'
   // out：从该侧画外滑到 0（覆盖）；in：从 0 滑向该侧画外（露出）。
-  const outside = horizontal
-    ? edge === 'left'
-      ? -width
-      : width
-    : edge === 'top'
-      ? -height
-      : height
-  const revealExit = horizontal
-    ? edge === 'left'
-      ? width
-      : -width
-    : edge === 'top'
-      ? -height
-      : height
+  // 官方 ScenarioSideFadePlayer 的位移 = contentSize + 512（`sse-bake/src/lib.rs:2842-2865`）。
+  const ox = width + 512
+  const oy = height + 512
+  const outside = horizontal ? (edge === 'left' ? -ox : ox) : edge === 'top' ? -oy : oy
+  const revealExit = horizontal ? (edge === 'left' ? ox : -ox) : edge === 'top' ? -oy : oy
   return {
     horizontal,
     start: mode === 'out' ? outside : 0,

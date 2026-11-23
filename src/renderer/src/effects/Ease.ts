@@ -1,5 +1,5 @@
 import AnimationManager from '../managers/AnimationManager'
-import { FRAME_MS } from '../../../common/official/timing'
+import { FRAME_MS, framesForSeconds } from '../../../common/official/timing'
 
 /** DOTween 的 22 个 `Ease`（`sse-core/src/ease.rs:6-107`），不含 Expo。 */
 export type EaseKind =
@@ -176,10 +176,20 @@ export async function runEasedTween(
     if (!isCancelled?.()) onProgress(1, 1)
     return
   }
-  await AnimationManager.linear((raw) => {
-    if (isCancelled?.()) return
-    onProgress(evaluateEase(ease, raw), raw)
-  }, durationMs)
+  // 官方补间按故事帧求值（`Tween::at(frame)`：act 帧取 from，act+frames 取 to）。
+  // 不能用 ticker 逐次累加：片段在帧泵推进到 act 之前启动时，第一帧就会被算成
+  // 1/frames，整条曲线比参考提前一帧（CameraMove 实测 6.5333 起跳）。
+  const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+  const frames = framesForSeconds(durationMs / 1000)
+  await AnimationManager.linear(
+    (raw) => {
+      if (isCancelled?.()) return
+      onProgress(evaluateEase(ease, raw), raw)
+    },
+    durationMs,
+    false,
+    { startMs, frames }
+  )
   if (!isCancelled?.()) {
     onProgress(1, 1)
   }

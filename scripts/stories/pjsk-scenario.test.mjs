@@ -26,15 +26,24 @@ const nodeRequire = createRequire(import.meta.url)
 function loadStorySchema() {
   const file = path.join(root, 'src/common/types/Story.ts')
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2022,
+      esModuleInterop: true
+    },
     fileName: file
   }).outputText
   const exports = {}
   const mod = { exports }
-  vm.runInNewContext(
-    `(function (exports, require, module) {\n${code}\n})`,
-    { console, Math, Number, String, Boolean, Array, Object }
-  )(exports, (spec) => nodeRequire(spec), mod)
+  vm.runInNewContext(`(function (exports, require, module) {\n${code}\n})`, {
+    console,
+    Math,
+    Number,
+    String,
+    Boolean,
+    Array,
+    Object
+  })(exports, (spec) => nodeRequire(spec), mod)
   return mod.exports.StorySchema
 }
 
@@ -138,6 +147,51 @@ test('talk-only speaker is declared in story.models', () => {
   })
 })
 
+test('Action 0 tail delay is a separate Wait after the final fade, not merged into BlackOut', () => {
+  withTempDir((dir) => {
+    const scenario = {
+      ScenarioId: 'synthetic_ending_tail',
+      FirstLayout: [],
+      FirstBgm: 'bgm00000',
+      FirstBackground: 'bg_end',
+      FirstCharacterLayoutMode: 0,
+      TalkData: [],
+      LayoutData: [],
+      SpecialEffectData: [{ EffectType: 2, Duration: 25 }],
+      SoundData: [],
+      ScenarioSnippetCharacterLayoutModes: [],
+      Snippets: [
+        { Index: 0, Action: 6, ProgressBehavior: 1, ReferenceIndex: 0, Delay: 0 },
+        { Index: 1, Action: 0, ProgressBehavior: 0, ReferenceIndex: 0, Delay: 4 }
+      ]
+    }
+    const config = { title: 'ending', models: {}, characterModels: {} }
+    const scenarioPath = path.join(dir, 'scenario.json')
+    const configPath = path.join(dir, 'models.json')
+    const outPath = path.join(dir, 'story.json')
+    writeJson(scenarioPath, scenario)
+    writeJson(configPath, config)
+    execFileSync(process.execPath, [
+      converter,
+      '--scenario',
+      scenarioPath,
+      '--config',
+      configPath,
+      '--out',
+      outPath
+    ])
+    const story = JSON.parse(fs.readFileSync(outPath, 'utf8'))
+    const fade = story.snippets.find((snippet) => snippet.type === 'BlackOut')
+    const wait = story.snippets.find((snippet) => snippet.type === 'Wait')
+    assert.equal(fade.data.duration, 25000)
+    assert.equal(wait.data.duration, 4000)
+    assert.ok(
+      story.snippets.indexOf(wait) > story.snippets.indexOf(fade),
+      'wait must follow the final fade'
+    )
+  })
+})
+
 test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/under/costume, Talk flags, and Sound modes validly', () => {
   const StorySchema = loadStorySchema()
   withTempDir((dir) => {
@@ -151,7 +205,9 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
           WindowDisplayName: '一歌',
           Body: '第一句超长中文台词测试折行宽度是否已经升级到三十个汉字单位并且带有收窗标志。',
           TalkCharacters: [{ Character2dId: 1 }],
-          Motions: [{ Character2dId: 1, MotionName: 'w-normal-nod01', FacialName: 'face_smile_01' }],
+          Motions: [
+            { Character2dId: 1, MotionName: 'w-normal-nod01', FacialName: 'face_smile_01' }
+          ],
           WhenFinishCloseWindow: 1,
           RequirePlayEffect: 1
         }
@@ -187,7 +243,15 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
         { Type: 5, Character2dId: 1, MoveSpeedType: 2 },
         // LayoutDepth Front + Clear from LeftUnder
         { Type: 6, Character2dId: 1, DepthType: 1 },
-        { Type: 3, Character2dId: 1, SideFrom: 8, SideFromOffsetX: 0, SideTo: 10, SideToOffsetX: 0, MoveSpeedType: 0 }
+        {
+          Type: 3,
+          Character2dId: 1,
+          SideFrom: 8,
+          SideFromOffsetX: 0,
+          SideTo: 10,
+          SideToOffsetX: 0,
+          MoveSpeedType: 0
+        }
       ],
       SpecialEffectData: [
         { EffectType: 0, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
@@ -205,7 +269,13 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
         { EffectType: 12, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 13, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 14, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
-        { EffectType: 15, Duration: 0.1, StringVal: 'ef_sakura', StringValSub: 'bundle_sakura', IntVal: 0 },
+        {
+          EffectType: 15,
+          Duration: 0.1,
+          StringVal: 'ef_sakura',
+          StringValSub: 'bundle_sakura',
+          IntVal: 0
+        },
         { EffectType: 16, Duration: 0.1, StringVal: 'ef_sakura', StringValSub: '', IntVal: 0 },
         { EffectType: 17, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 18, Duration: 2.0, StringVal: 'School Rooftop', StringValSub: '', IntVal: 0 },
@@ -216,7 +286,13 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
         { EffectType: 22, Duration: 0, StringVal: 'blur', StringValSub: '2.5', IntVal: 1 },
         { EffectType: 22, Duration: 0, StringVal: 'none', StringValSub: '', IntVal: 0 },
         { EffectType: 23, Duration: 0, StringVal: 'Stay/Leave', StringValSub: '', IntVal: 0 },
-        { EffectType: 24, Duration: 2.0, StringVal: 'Quiet night.', StringValSub: 'vo_01', IntVal: 0 },
+        {
+          EffectType: 24,
+          Duration: 2.0,
+          StringVal: 'Quiet night.',
+          StringValSub: 'vo_01',
+          IntVal: 0
+        },
         { EffectType: 25, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 26, Duration: 0, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 27, Duration: 0.3, StringVal: '', StringValSub: '', IntVal: 0 },
@@ -227,10 +303,22 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
         { EffectType: 39, Duration: 0.4, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 40, Duration: 0.8, StringVal: '', StringValSub: '', IntVal: 0 },
         { EffectType: 41, Duration: 0.8, StringVal: '', StringValSub: '', IntVal: 0 },
-        { EffectType: 42, Duration: 0.6, StringVal: '120, -40', StringValSub: 'OutQuad', IntVal: 0 },
+        {
+          EffectType: 42,
+          Duration: 0.6,
+          StringVal: '120, -40',
+          StringValSub: 'OutQuad',
+          IntVal: 0
+        },
         { EffectType: 43, Duration: 0.6, StringVal: '1.25', StringValSub: 'OutQuad', IntVal: 0 },
         { EffectType: 44, Duration: 0.3, StringVal: 'true', StringValSub: '', IntVal: 0 },
-        { EffectType: 45, Duration: 1.0, StringVal: 'zoom：1.8,blur:0.6,dist:2', StringValSub: 'OutQuad', IntVal: 0 }
+        {
+          EffectType: 45,
+          Duration: 1.0,
+          StringVal: 'zoom：1.8,blur:0.6,dist:2',
+          StringValSub: 'OutQuad',
+          IntVal: 0
+        }
       ],
       SoundData: [
         { PlayMode: 4, Bgm: '', Se: '', Volume: 0, Duration: 0.5 },
@@ -240,10 +328,28 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
       ],
       ScenarioSnippetCharacterLayoutModes: [],
       Snippets: [
-        ...Array.from({ length: 6 }, (_, i) => ({ Index: i, Action: 2, ProgressBehavior: 0, ReferenceIndex: i, Delay: 0 })),
+        ...Array.from({ length: 6 }, (_, i) => ({
+          Index: i,
+          Action: 2,
+          ProgressBehavior: 0,
+          ReferenceIndex: i,
+          Delay: 0
+        })),
         { Index: 6, Action: 1, ProgressBehavior: 1, ReferenceIndex: 0, Delay: 0.1 },
-        ...Array.from({ length: 41 }, (_, i) => ({ Index: 7 + i, Action: 6, ProgressBehavior: 1, ReferenceIndex: i, Delay: 0 })),
-        ...Array.from({ length: 4 }, (_, i) => ({ Index: 48 + i, Action: 7, ProgressBehavior: 0, ReferenceIndex: i, Delay: 0.1 }))
+        ...Array.from({ length: 41 }, (_, i) => ({
+          Index: 7 + i,
+          Action: 6,
+          ProgressBehavior: 1,
+          ReferenceIndex: i,
+          Delay: 0
+        })),
+        ...Array.from({ length: 4 }, (_, i) => ({
+          Index: 48 + i,
+          Action: 7,
+          ProgressBehavior: 0,
+          ReferenceIndex: i,
+          Delay: 0.1
+        }))
       ]
     }
     const config = {
@@ -257,7 +363,15 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
     writeJson(scenarioPath, scenario)
     writeJson(configPath, config)
 
-    execFileSync(process.execPath, [converter, '--scenario', scenarioPath, '--config', configPath, '--out', outPath])
+    execFileSync(process.execPath, [
+      converter,
+      '--scenario',
+      scenarioPath,
+      '--config',
+      configPath,
+      '--out',
+      outPath
+    ])
 
     const story = JSON.parse(fs.readFileSync(outPath, 'utf8'))
     const validated = StorySchema.parse(story)

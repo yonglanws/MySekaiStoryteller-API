@@ -67,10 +67,29 @@ export default class AnimationManager {
     if (this.exportStepHandlers.size === 0) return
     const now = performance.now()
     for (const handler of Array.from(this.exportStepHandlers)) {
-      handler.onStep(ticker)
-      if (handler.whenFinish(ticker)) {
+      let failure: unknown = null
+      try {
+        handler.onStep(ticker)
+      } catch (error) {
+        failure = error
+      }
+      if (failure === null) {
+        try {
+          if (handler.whenFinish(ticker)) {
+            this.exportStepHandlers.delete(handler)
+            handler.resolve()
+            continue
+          }
+        } catch (error) {
+          failure = error
+        }
+      }
+      if (failure !== null) {
+        // 一个已经失效的动画（例如角色已被移除）不能打断整条帧泵：
+        // 否则它的 Promise 永远不 resolve，片段循环会一直等下去直到导出超时。
         this.exportStepHandlers.delete(handler)
         handler.resolve()
+        this.logger.warn('in_ticker export step failed; forcing completion', failure)
         continue
       }
       // 与旧 setTimeout 实现相同的 60s 剧情时间兜底，避免任务永久挂起
@@ -220,9 +239,10 @@ export default class AnimationManager {
    * 0..1 的线性进度，只由虚拟时钟决定：同一时刻求值结果相同，暂停后不累积漂移。
    * `startMs` 是绝对开始时刻，`frames` 是官方帧数。
    */
-  public static progressAt(startMs: number, frames: number, now = performance.now()): number {
-    if (!(frames > 0) || !Number.isFinite(now)) return 1
-    return Math.max(0, Math.min(1, (now - startMs) / (frames * FRAME_MS)))
+  public static progressAt(startMs: number, frames: number, now?: number): number {
+    const current = now ?? (typeof performance !== 'undefined' ? performance.now() : 0)
+    if (!(frames > 0) || !Number.isFinite(current)) return 1
+    return Math.max(0, Math.min(1, (current - startMs) / (frames * FRAME_MS)))
   }
 
   public static async linear(

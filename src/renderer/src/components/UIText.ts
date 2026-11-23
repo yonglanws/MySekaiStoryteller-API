@@ -63,11 +63,15 @@ export default class UIText extends Text {
     }
   }
 
-  public async startDisplayContent(): Promise<void> {
+  /**
+   * `typingLength` 是官方正文的字符数（译文 content 可能更短/更长）；显示仍按
+   * content 逐字揭示，但整个打字窗与官方 4 帧/字一致。
+   */
+  public async startDisplayContent(typingLength = visibleTextLength(this.data)): Promise<void> {
     const gen = ++this.animGen
     // 排版换行不计入官方 4 帧/字；长句被 sanitizeDisplayText 折行后仍保持原速。
     const contentLength = visibleTextLength(this.data)
-    const timeMS = contentLength * TALK_DISPLAY_MS_PER_CHAR
+    const timeMS = Math.max(0, typingLength) * TALK_DISPLAY_MS_PER_CHAR
 
     if (contentLength === 0 || timeMS < 30) {
       this.text = this.data

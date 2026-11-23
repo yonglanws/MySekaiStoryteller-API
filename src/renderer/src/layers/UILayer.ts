@@ -124,8 +124,8 @@ export default class UILayer extends BaseLayer {
     ])
   }
 
-  public async startDisplayContent(): Promise<void> {
-    await this.textSprite.startDisplayContent()
+  public async startDisplayContent(typingLength?: number): Promise<void> {
+    await this.textSprite.startDisplayContent(typingLength)
   }
 
   public async hideTextBackground(durationMs = 0): Promise<void> {
@@ -185,15 +185,18 @@ export default class UILayer extends BaseLayer {
       return [Math.cos(a), Math.sin(a)] as const
     })
 
-    await AnimationManager.linear((progress) => {
-      if (gen !== this.windowShakeGen) return
-      const decay = fadeOut ? 1 - evaluateEase('OutQuad', progress) : 1
-      const segFloat = progress * vibrato
-      const seg = Math.min(vibrato - 1, Math.floor(segFloat))
-      const env = Math.sin((segFloat - seg) * Math.PI)
-      const [dx, dy] = dirs[seg]
-      this.wordsContainer.position.set(dx * amp * env * decay, dy * amp * env * decay)
-    }, Math.max(1, durationMs))
+    await AnimationManager.linear(
+      (progress) => {
+        if (gen !== this.windowShakeGen) return
+        const decay = fadeOut ? 1 - evaluateEase('OutQuad', progress) : 1
+        const segFloat = progress * vibrato
+        const seg = Math.min(vibrato - 1, Math.floor(segFloat))
+        const env = Math.sin((segFloat - seg) * Math.PI)
+        const [dx, dy] = dirs[seg]
+        this.wordsContainer.position.set(dx * amp * env * decay, dy * amp * env * decay)
+      },
+      Math.max(1, durationMs)
+    )
 
     if (gen === this.windowShakeGen) {
       this.wordsContainer.position.set(0, 0)

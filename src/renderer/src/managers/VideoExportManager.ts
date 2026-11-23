@@ -31,12 +31,14 @@ import type { VideoExportOptions } from './video-export'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
 import { snippetHasPreFence } from '../../../common/export/snippetSemantics'
+import { bakeStoryPlan } from '../../../common/export/storyPlan'
 import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import {
   FRAME_MS,
   OPENING_COVER_FADE_MS,
+  PLAYCORE_WARMUP_FRAMES,
   PLAYED_WAIT_TIME_MS,
   SCENARIO_EXIT_BGM_FADE_MS,
   SILENT_PUNCTUATION_HOLD_MS,
@@ -70,6 +72,8 @@ type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 interface TalkSnippetLike {
   content: string
   ttsText?: string
+  /** 官方正文；打字机按它的长度计时（content 是译文）。 */
+  typingText?: string
   /** 官方语音时长（毫秒）：参考实现按官方语音计时，优先于 TTS 音频。 */
   voiceDurationMs?: number
   modelId: number
@@ -338,6 +342,7 @@ export default class VideoExportManager {
     const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsDurationMs
     const base = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
       voiceDurationMs: officialVoiceMs,
+      typingText: talk.typingText,
       windowOpenMs,
       layoutRunningMs,
       motionSettleMs: existingMotionSettleMs,
@@ -380,6 +385,7 @@ export default class VideoExportManager {
       settleMs = mergedSettleMs
       duration = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
         voiceDurationMs: officialVoiceMs,
+        typingText: talk.typingText,
         motionSettleMs: settleMs,
         layoutRunningMs,
         windowOpenMs,
@@ -390,6 +396,7 @@ export default class VideoExportManager {
     return settleMs > 0 || layoutRunningMs > 0
       ? calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
           voiceDurationMs: officialVoiceMs,
+          typingText: talk.typingText,
           motionSettleMs: settleMs,
           layoutRunningMs,
           windowOpenMs,
@@ -1397,32 +1404,54 @@ export default class VideoExportManager {
       await flushPendingTimestamps()
       if (openingCoverTask) await openingCoverTask
 
+      // 以最终烘焙的 plan 为唯一帧数依据：plan.totalFrames 已包含 10 帧预热与
+      // playedWaitTime + 1 + BGM fade 的 31 帧尾长。不能只用 timeline.endTimeMs，
+      // 因为前置栅栏会让 plan 的最后一个片段排在 timeline 末尾之后（effects 实测
+      // 753 vs 814 帧），帧泵会提前停、收尾黑幕计时器再也得不到步进。
+      const finalPlan = bakeStoryPlan(snippets, timeline, {
+        motionSettleMs: this.talkSettleMsByIndex,
+        exportFps: encodeFps,
+        ttsEnabled
+      })
+      // 官方 end_frame = cleanup + playedWaitTime(15) + 1 + BGM fade(15) = +31 帧。
+      // 没有 setEndingEnvelope 的宿主不会补这段尾长，目标停在最后一个片段帧。
       const hasEndingEnvelope = typeof extendedApp.setEndingEnvelope === 'function'
-      // 官方 end_frame = cleanup + playedWaitTime(15) + 1 + BGM fade(15) = +31 帧；
-      // 计划的总帧数也按这个尾长烘焙，导出必须补上中间那 1 帧。
+      const plannedVideoFrames = Math.max(
+        1,
+        (hasEndingEnvelope ? finalPlan.totalFrames : finalPlan.entries.at(-1)!.endFrame) -
+          PLAYCORE_WARMUP_FRAMES
+      )
       const endingEnvelopeMs = hasEndingEnvelope
         ? PLAYED_WAIT_TIME_MS + FRAME_MS + SCENARIO_EXIT_BGM_FADE_MS
         : 0
-      // 收尾黑幕先启动；帧泵在下面继续推进虚拟时钟，直到计划的结束帧。
-      const endingEnvelopeTask = hasEndingEnvelope
-        ? extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
-        : Promise.resolve()
-
-      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」。
-      // 目标吸附到整故事帧：516.667ms 的舍入不应让 60fps 成片多出 1 帧。
-      const maxTimelineEndMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
-      // 计划时长是成片帧数的唯一依据；片段循环已经 await 了真实执行，
-      // 不再把 virtualClock.now() 的亚帧尾差算进成片。
-      const rawPumpTargetMs = virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
+      // plan 的帧号是 60fps 故事帧；编码帧率可能是 30fps，不能直接乘 frameMs。
+      const storyFrameMs = 1000 / STORY_FPS
+      const envelopeFrames = hasEndingEnvelope
+        ? Math.max(1, Math.ceil(endingEnvelopeMs / storyFrameMs))
+        : 0
+      const currentStoryFrame = Math.ceil((frameIndex * STORY_FPS) / encodeFps)
+      // 片段循环结束时帧泵可能已经越过 plan 的最后一帧（模型加载/短剧本）；
+      // 此时至少再给收尾黑幕留出其完整尾长，避免 await endingEnvelopeTask 永久挂起。
+      const targetFrames = hasEndingEnvelope
+        ? Math.max(plannedVideoFrames, currentStoryFrame + envelopeFrames)
+        : plannedVideoFrames
+      const rawPumpTargetMs = virtualRenderStartMs + targetFrames * storyFrameMs
       pumpTargetVirtualMs = Math.round(rawPumpTargetMs / frameMs) * frameMs
       this.logger.info('Fast export tail target', {
         renderStartMs: virtualRenderStartMs,
-        maxTimelineEndMs,
+        planTotalFrames: finalPlan.totalFrames,
+        plannedVideoFrames,
+        currentFrame: frameIndex,
+        envelopeFrames,
         endingEnvelopeMs,
         rawPumpTargetMs,
         pumpTargetVirtualMs,
         targetFrames: pumpTargetVirtualMs / frameMs
       })
+      // 收尾黑幕从片段循环结束的当前虚拟时刻启动；目标帧已为它预留完整尾长。
+      const endingEnvelopeTask = hasEndingEnvelope
+        ? extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
+        : Promise.resolve()
       // 先解除暂停并标记片段播放完毕，帧泵看到目标帧就停；否则收尾黑幕
       // 结束时帧泵会多拍 1 帧。
       setPumpPaused(false)
@@ -1432,7 +1461,10 @@ export default class VideoExportManager {
       // 时长在片段全部落定后即可精确推出（帧数 = ceil(target/frameMs)）。
       const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      const finalFrameCount = Math.max(1, Math.ceil(pumpTargetVirtualMs / frameMs))
+      const finalFrameCount = Math.max(
+        1,
+        Math.ceil((pumpTargetVirtualMs - virtualRenderStartMs) / frameMs)
+      )
       const totalDurationMs = Math.max(
         actualVideoDurationMs + endingEnvelopeMs,
         Math.round((finalFrameCount / encodeFps) * 1000)

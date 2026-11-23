@@ -29,7 +29,7 @@
   strength/n、最后一段 0、有限抖动父节点 y 从 −8 用 OutQuad 升到 0）；相机
   Move/Zoom 的 from 取上一条 tween 的目标值（Kill(complete)），DollyZoom 用
   `dist × −(zoom−1)`；黑场 FadeIn 无条件从 alpha=1 淡出；Blur spread =
-  `3 × min(t/d, 1)`；SideFade 改硬边面板 + 官方 ±(W/H+512) 偏移；Choice 时序
+  `3 × min(t/d, 1)`；SideFade 改 64px 内边距黑面板 + 512px 羽化边 + 官方 ±(W/H+512) 偏移；Choice 时序
   1.5s 作答 / 0.1s 按压 / 121 帧结束；PlaceInfo 片段 0 帧（面板后台滑入）。
 
 尚未完成（本轮未改，保持旧行为）：人物层级 DepthType、独立换装时序、
@@ -64,6 +64,48 @@ FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/S
 - 60fps 全屏 fader 逐故事帧：172 个采样，线性拟合 R²=0.999965，
   最大残差 0.00622（< 0.01）；位置 0.5px 与口型 2e-3 的逐帧像素复测
   需要单独的角色/口型探针，本轮未重跑。
+
+### 逐帧对比第 2 轮修复（2026-11-23）
+
+- Talk 新增可选 `typingText`：打字机按官方日文 body 的 UTF-16 长度计时，
+  `content` 只负责显示。`pjsk-scenario` 转译时写入 `typingText: talk.Body`；
+  `event_145_08` 49 条 Talk 已按参考正文补齐。首句 typing 由 40 帧回到参考的
+  52 帧（plan 151→203，参考 152→204）。
+- 新增 `Wait` 片段（毫秒 duration）。`pjsk-scenario` 的 Action 0 收尾 delay
+  不再并进最后一条 `BlackOut`，而是生成独立 Wait；`event_145_08` 结尾改为
+  25s 淡出（18495→19995）+ 4s Wait（19995→20235），与参考 instr 205/206 对应。
+- 快速导出的帧泵目标改由最终 `bakeStoryPlan(...).totalFrames` 决定，不再只取
+  `timeline.endTimeMs`（前置栅栏会让 plan 末尾晚于 timeline）；帧泵已越过 plan
+  末尾时至少再补收尾黑幕的 31 帧。修复三类最小剧本挂起：空 motion 首次 Appear、
+  原地最后 Clear、Appear 前置 1500ms delay。
+- `startEntryMotion` 只启动已预加载的兜底动作；`dispatchExportStep` 对单个
+  动画异常做 resolve/清理，避免帧泵中断后片段 Promise 永久悬挂。
+- 缓动/相机/角色 Move/全屏 fader 都改绝对故事帧求值（`startMs + frames`）；
+  SideFade 按参考 64px 面板 + 512px 羽化边重建，`sideFadePositions` 的位移
+  改为 ±(W/H+512)（1920×1080 为 2432/1592）。
+
+验证（2026-11-23）：
+
+- 主片 `export-1795422759872-lk8yv1.mp4`：20256 帧 / 337.6s / 60fps，
+  plan 20266；对参考 20268 仍少 2 帧。`compare-plan` matched 205，未匹配参考 2；
+  49 条 Talk act 差中位 -5（-35..+9），Talk 时长差中位 -1。
+  打字长度已对齐，剩余漂移来自 plan 现有的逐片段起止帧约定，尚未归零。
+- 结尾 plan：BlackOut 25s（1500 帧）+ Wait 4s（240 帧）；参考 25s + 4s。
+- 最小剧本：空 motion 7.2s / 88 帧；原地 Clear 5.3s / 64 帧；
+  delay 1500ms 6.8s / 177 帧（修复前分别 169.8s / 96.1s / 9min 后取消）。
+- CameraMove：视频内实测起点 6.6333s、0.5s、峰值 50px@270p（=200px@1080），
+  相对曲线为 OutQuad；plan 起点 6.55，视频整体因实际执行漂移晚约 5 帧。
+- 无 motion 静态走位：206 帧导出；渲染端 `model.x=1006.666`（1280 舞台）
+  = 1510@1920（Right+200），y=864@1080；像素模板复测未重跑。
+- 3s 静止场景 fader：180 个故事帧，端点 0→1；逐帧 luma 反演对线性模型
+  最大残差 0.0177、均值 0.0083，受 sRGB/编码近黑压缩影响，0.01 容差
+  仍无法用像素反演证实。仓库自带 `probe-fader.py` 在 296.4–299.7s 的
+  `-ss` 关键帧采样给出 2.949s（r2 为 2.927s），但逐帧 `select=n` 实测
+  fade 为 180 帧；两者差异来自采样/场景运动，不是淡变时长。
+- Shake 8 段/末段归零/父节点 y -8→0 与 Blur `3×min(t/d,1)` 已按参考源码
+  对齐；60fps 下 8 段约 3.75 帧/段，像素探针无法分辨，spread 数值不可反演。
+- `npm run test:all` 362/362；`node --test scripts/stories/*.test.mjs` 8/8；
+  `npm run typecheck` 通过；Prettier 全部改动文件通过；未 commit。
 
 ## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
 

@@ -33,7 +33,8 @@ import {
   LIP_LOUD_CHARACTERS,
   LIP_LOUD_TARGET_VALUE_SCALE,
   LIP_TARGET_VALUE_SCALE,
-  STORY_FPS
+  STORY_FPS,
+  framesForSeconds
 } from '../../../common/official/timing'
 import { evaluateEase } from '../effects/Ease'
 import { registerClockBaselineResetListener } from '../snippets/stageTiming'
@@ -1099,7 +1100,9 @@ export default class AdvancedModel extends Live2DModel {
       await this.applyFacial(this.defaultFacialName, true, traceSnippetIndex)
     }
     const motion = this.pickEntryMotion(traceSnippetIndex ?? 0)
-    if (motion) {
+    // 只启动已预加载的动作。兜底动作不在剧本 cue 里，StoryManager 不会预载；
+    // 对缺失/未缓存的动作调用 loadMotion 会卡住整次导出（最小剧本空 motion 实测）。
+    if (motion && this.hasMotion(motion)) {
       await this.applyMotion(
         motion,
         true,
@@ -1893,10 +1896,21 @@ export default class AdvancedModel extends Live2DModel {
     const abs_to: [number, number] = [stage_size[0] * to.x, stage_size[1] * (to.y + 0.3)]
 
     // 官方 `CharacterMoveTo` 是 `DOLocalMove(...).SetEase(Linear)`：位置按进度线性插值。
-    await AnimationManager.linear((progress) => {
-      this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
-      this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
-    }, time_ms)
+    // 按故事帧求值（act 帧取 from，act+frames 取 to），避免片段先于帧泵启动时
+    // 第一帧就被算成 1/frames，补间整体提前一帧。
+    const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+    await AnimationManager.linear(
+      (progress) => {
+        // 退场（尤其是原地 Clear）可以先于上一段 Appear 的滑入完成；
+        // 角色已从 layer 移除后继续写位置没有意义，也可能让帧泵 handler 抛错。
+        if (this.destroyed || this.parent === null) return
+        this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
+        this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
+      },
+      time_ms,
+      false,
+      { startMs, frames: framesForSeconds(time_ms / 1000) }
+    )
   }
 
   /**

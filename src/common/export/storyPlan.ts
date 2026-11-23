@@ -96,6 +96,7 @@ export interface StoryPlanOptions {
 interface TalkLike {
   content?: string
   ttsText?: string
+  typingText?: string
   voice?: string
   voiceDurationMs?: number
   modelId?: number
@@ -242,6 +243,7 @@ export function bakeStoryPlan(
           : 0
       const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsMs
       const ttsText = typeof talkData.ttsText === 'string' ? talkData.ttsText : ''
+      const typingText = typeof talkData.typingText === 'string' ? talkData.typingText : ''
       const isSilentPunctuationBeat =
         isExport &&
         options.ttsEnabled !== false &&
@@ -252,7 +254,7 @@ export function bakeStoryPlan(
       const timingFrames = talkAutoFrameTiming({
         startFrame,
         windowFrames: msToFrames(windowOpen.get(i) ?? 0),
-        length: visibleTextLength(content),
+        length: visibleTextLength(typingText || content),
         voiceSeconds: timingVoiceMs / 1000,
         layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
         settleFrames: framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000),
