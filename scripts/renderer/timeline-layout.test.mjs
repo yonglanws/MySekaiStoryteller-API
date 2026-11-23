@@ -7,8 +7,8 @@
  * 锁死：
  * - LayoutAppear 原地淡入 200ms，带移动时 max(200, moveSpeed)；
  * - LayoutClear 原地淡出 300ms，带移动时 max(400, moveSpeed)；
- * - ChangeLayoutMode / ChangeBackgroundImage 只改状态，1ms；
- * - HideTalk 300ms；这些片段不受 500ms 最低时长钳制。
+ * - ChangeLayoutMode / ChangeBackgroundImage / HideTalk 只改状态，0ms；
+ *   这些片段不受 500ms 最低时长钳制。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -101,10 +101,10 @@ test('state-only cues are not padded to 500ms', () => {
   ]
   assert.deepEqual(
     Array.from(calculateTimeline(snippets).entries, (entry) => entry.durationMs),
-    [1, 1, 1, 1]
+    [0, 0, 0, 0]
   )
   assert.deepEqual(
     snippets.map((item) => estimateSnippetDuration(item)),
-    [1, 1, 1, 1]
+    [0, 0, 0, 0]
   )
 })

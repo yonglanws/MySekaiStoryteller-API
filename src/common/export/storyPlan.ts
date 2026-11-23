@@ -6,6 +6,7 @@ import {
   APPEAR_FADE_TOTAL_FRAMES,
   APPEAR_SHOWN_MOVE_FRAMES,
   CHARACTER_FADE_MS,
+  FRAME_MS,
   HIDE_DELAY_IN_PLACE_MS,
   MOVE_SPEED_DURATION_MS,
   PLAYCORE_WARMUP_FRAMES,
@@ -96,6 +97,7 @@ interface TalkLike {
   content?: string
   ttsText?: string
   voice?: string
+  voiceDurationMs?: number
   modelId?: number
   motion?: string
   facial?: string
@@ -132,6 +134,12 @@ function deriveWindowOpen(snippets: SnippetData[]): Map<number, number> {
     }
   }
   return map
+}
+
+/** 片段时长（毫秒）→ 故事帧。子帧状态片段（旧时间线的 1ms 标记）不占帧。 */
+function planDurationFrames(ms: number): number {
+  if (ms > 0 && ms < FRAME_MS) return 0
+  return msToFrameCount(ms)
 }
 
 function moveFramesFor(data: LayoutLike): number {
@@ -184,7 +192,7 @@ export function bakeStoryPlan(
     const delayStartFrame = cursorFrame
     const delayFrames = framesForSeconds(snippet.delay)
     const startFrame = delayStartFrame + delayFrames
-    const durationFrames = msToFrameCount(timing?.durationMs ?? 0)
+    const durationFrames = planDurationFrames(timing?.durationMs ?? 0)
     const endFrame = startFrame + durationFrames
     const actions: StoryPlanActionCue[] = []
 
@@ -226,11 +234,18 @@ export function bakeStoryPlan(
       const talkData = data as TalkLike
       const content = typeof talkData.content === 'string' ? talkData.content : ''
       const ttsMs = timing?.ttsDurationMs && timing.ttsDurationMs > 0 ? timing.ttsDurationMs : 0
+      const officialVoiceMs =
+        typeof talkData.voiceDurationMs === 'number' &&
+        Number.isFinite(talkData.voiceDurationMs) &&
+        talkData.voiceDurationMs > 0
+          ? talkData.voiceDurationMs
+          : 0
+      const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsMs
       const ttsText = typeof talkData.ttsText === 'string' ? talkData.ttsText : ''
       const isSilentPunctuationBeat =
         isExport &&
         options.ttsEnabled !== false &&
-        ttsMs <= 0 &&
+        timingVoiceMs <= 0 &&
         !talkData.voice &&
         !hasSpeakableSpeechText(content) &&
         !hasSpeakableSpeechText(ttsText)
@@ -238,7 +253,7 @@ export function bakeStoryPlan(
         startFrame,
         windowFrames: msToFrames(windowOpen.get(i) ?? 0),
         length: visibleTextLength(content),
-        voiceSeconds: ttsMs / 1000,
+        voiceSeconds: timingVoiceMs / 1000,
         layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
         settleFrames: framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000),
         silentHoldFrames: isSilentPunctuationBeat ? SILENT_PUNCTUATION_HOLD_FRAMES : undefined

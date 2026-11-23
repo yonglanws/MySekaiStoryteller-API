@@ -129,9 +129,10 @@ test('story plan bakes the official frame timeline', () => {
       [0, 10, 18],
       [1, 18, 223],
       [2, 223, 424],
-      [3, 424, 425],
-      [4, 425, 638],
-      [5, 638, 653]
+      // HideTalk 是 1ms 状态片段，和 ChangeLayoutMode 一样不占故事帧。
+      [3, 424, 424],
+      [4, 424, 637],
+      [5, 637, 652]
     ]
   )
   assert.deepEqual(
@@ -155,16 +156,69 @@ test('story plan bakes the official frame timeline', () => {
   )
   assert.equal(plan.entries[4].talk.windowOpenFrames, 12, 'HideTalk 后重新打开窗口')
   assert.equal(plan.entries[4].talk.voiceEndFrame, null)
-  assert.equal(plan.entries[4].talk.gateEndFrame, 517)
+  assert.equal(plan.entries[4].talk.gateEndFrame, 516)
   // 带 motion 的新角色：类型分支延后一帧，fade 从 12 到 18。
   assert.equal(plan.entries[0].layout.fadeStartFrame, 12)
   assert.equal(plan.entries[0].layout.fadeEndFrame, 18)
-  assert.equal(plan.entries[5].layout.fadeStartFrame, 647)
-  assert.equal(plan.entries[5].layout.fadeEndFrame, 653)
+  assert.equal(plan.entries[5].layout.fadeStartFrame, 646)
+  assert.equal(plan.entries[5].layout.fadeEndFrame, 652)
   assert.equal(plan.entries[0].actions[0].frame, 10)
   assert.equal(plan.entries[1].actions[0].frame, 18)
   // PlayCore 10 帧暖场 + cleanup 后 31 帧尾。
-  assert.equal(plan.totalFrames, 684)
+  assert.equal(plan.totalFrames, 683)
+})
+
+test('official voiceDurationMs drives Talk timing instead of the TTS audio length', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippet = talk({ voiceDurationMs: 4000 })
+  const timeline = calculator.calculateTimeline(
+    [snippet],
+    new Map([[0, { snippetIndex: 0, durationMs: 1000 }]])
+  )
+  // 4.0s 官方语音 + 0.05s 结束延迟 = 244 帧；TTS 的 1000ms 不参与计时。
+  assert.equal(timeline.entries[0].durationMs, 4566.667)
+  const plan = planModule.bakeStoryPlan([snippet], timeline.entries)
+  assert.equal(plan.entries[0].talk.voiceEndFrame, 10 + 244)
+  assert.equal(plan.entries[0].talk.gateEndFrame, 10 + 244)
+  assert.equal(plan.entries[0].durationFrames, 274)
+  assert.equal(plan.entries[0].endFrame, 10 + 274)
+})
+
+test('sub-frame state cues do not consume story frames in the plan', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+    { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+    { type: 'AmbientColor', wait: true, delay: 0, data: { mode: 'night' } },
+    {
+      type: 'LayoutAppear',
+      wait: true,
+      delay: 0,
+      data: {
+        modelId: 1,
+        from: { side: 'Center', offset: 0 },
+        to: { side: 'Center', offset: 0 },
+        motion: '',
+        facial: '',
+        moveSpeed: 'Normal',
+        hologram: false
+      }
+    }
+  ]
+  const timeline = calculator.calculateTimeline(snippets, new Map())
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+  assert.deepEqual(
+    Array.from(plan.entries, (entry) => entry.durationFrames),
+    [0, 0, 0, 7]
+  )
+  assert.deepEqual(
+    Array.from(plan.entries, (entry) => entry.startFrame),
+    [10, 10, 10, 10]
+  )
 })
 
 test('diagnostics carries the baked plan and approximation list', () => {

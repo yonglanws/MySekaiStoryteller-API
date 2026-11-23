@@ -7,6 +7,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -34,10 +35,22 @@ test('Japanese detection uses kana and treats Chinese/empty as needing translati
   assert.equal(isJapaneseText('こんにちは、今日も練習しよう'), true)
   assert.equal(isJapaneseText('ハロー！'), true)
   assert.equal(isJapaneseText('你好，今天也一起练习吧'), false)
+  assert.equal(isJapaneseText('已经很晚了'), false)
+  assert.equal(isJapaneseText('已经这么晚了'), false)
   assert.equal(isJapaneseText(''), false)
   assert.equal(isJapaneseText('……'), false)
+  // 官方日文台词允许纯汉字 + 标点（没有假名），不能被当成漏翻
+  assert.equal(isJapaneseText('瑞希、私…………'), true)
+  assert.equal(isJapaneseText('瑞希——'), true)
+  assert.equal(isJapaneseText('——瑞希！！'), true)
+  assert.equal(isJapaneseText('了解'), true)
+  assert.equal(isJapaneseText('無言'), true)
+  assert.equal(isJapaneseText('感謝'), true)
+  assert.equal(isJapaneseText('給与'), true)
+  assert.equal(isJapaneseText('瑞希，我…………'), false)
   assert.equal(isJapaneseSpeechText('ありがとう'), true)
   assert.equal(isJapaneseSpeechText('谢谢'), false)
+  assert.equal(isJapaneseSpeechText('瑞希……！'), true)
 })
 
 test('Japanese preflight only runs for enabled Irodori TTS', () => {
@@ -60,6 +73,33 @@ test('collectTtsTargets finds empty and Chinese ttsText but keeps Japanese', () 
     collectTtsTargets(story).map((target) => target.snippetIndex),
     [0, 2]
   )
+})
+
+test('official corpus with kanji-only ttsText passes the preflight unchanged', async () => {
+  const story = JSON.parse(
+    readFileSync(
+      new URL('../../resources/stories/event_145_08.sekai-story.json', import.meta.url),
+      'utf8'
+    )
+  )
+  assert.deepEqual(
+    collectTtsTargets(story).map((target) => target.snippetIndex),
+    [],
+    'official kanji-only ttsText must not be queued for translation'
+  )
+  let translateCalls = 0
+  const result = await ensureJapaneseTtsText(
+    story,
+    async () => {
+      translateCalls += 1
+      return []
+    },
+    { info() {}, warn() {} },
+    { strict: true }
+  )
+  assert.equal(translateCalls, 0)
+  assert.equal(result.translated, 0)
+  assert.deepEqual(result.missing, [])
 })
 
 test('collectTtsTargets ignores punctuation-only Talk that needs no translation', () => {

@@ -12,11 +12,11 @@
 
 `fast` 模式下按运行环境选择以下页内编码子路径：
 
-| 子路径                  | 执行方式                                                                                | 适用场景与特点                                                                        |
-| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `fast` + WebCodecs      | 虚拟时钟逐帧推进，页内 `WebCodecsMp4Encoder` 直编 H.264/MP4 定位写盘，宿主 remux 合轨   | 浏览器具备快速硬件 `VideoEncoder`（5 帧测速 `≤ 150ms`）时优先使用，免除大量 JPEG 传输 |
-| `fast` + `image2pipe`   | 同样使用虚拟时钟，`JpegFrameSink` 双缓冲抓取并异步编码 JPEG，经管道流式喂给宿主 FFmpeg  | WebCodecs 不可用或为软件慢编（如无桌面 Linux + NVIDIA）时自动接管，零帧文件落盘       |
-| `fast` + 磁盘帧序列兜底 | 仅当 `image2pipe` 流创建不可用时，写入临时 JPEG 批次再由宿主 `encodeFramesToVideo` 合成 | 兜底路径；增加临时磁盘 I/O 与扫描成本                                                 |
+| 子路径                  | 执行方式                                                                                                          | 适用场景与特点                                                                        |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `fast` + WebCodecs      | 虚拟时钟逐帧推进，页内 `WebCodecsMp4Encoder` 直编 H.264/MP4 定位写盘；源流非 BT.709/tv 时宿主重编码修正色彩后合轨 | 浏览器具备快速硬件 `VideoEncoder`（5 帧测速 `≤ 150ms`）时优先使用，免除大量 JPEG 传输 |
+| `fast` + `image2pipe`   | 同样使用虚拟时钟，`JpegFrameSink` 双缓冲抓取并异步编码 JPEG，经管道流式喂给宿主 FFmpeg                            | WebCodecs 不可用或为软件慢编（如无桌面 Linux + NVIDIA）时自动接管，零帧文件落盘       |
+| `fast` + 磁盘帧序列兜底 | 仅当 `image2pipe` 流创建不可用时，写入临时 JPEG 批次再由宿主 `encodeFramesToVideo` 合成                           | 兜底路径；增加临时磁盘 I/O 与扫描成本                                                 |
 
 `fast` 管线以确定性虚拟时钟推进动画，渲染速度不会改变成片时长与台词节奏；开启硬件 WebGL 与合适编码路径可显著缩短端到端墙钟耗时。
 
@@ -48,7 +48,7 @@
 `width` / `height` 必须是正偶数（yuv420p 4:2:0 的硬性要求），非法尺寸会在加载模型与 TTS 之前以 400 拒绝，宿主启动时也会校验。
 `codec: hevc` 用 libx265（`-preset medium -crf … -x265-params log-level=error -tag:v hvc1`），硬件后端对应 `hevc_nvenc` / `hevc_qsv` / `hevc_amf`；`codec: h264` 用 libx264（`-threads 4`、`rc-lookahead=20`）或 `h264_*`。`encoder: libx264` 是旧版显式 CPU 选项，始终输出 H.264；`cpu` / `auto` 跟随 `codec`。
 `crf` 对 libx264 / libx265 是 CRF，对 NVIDIA 是 CQ，对 AMD 是 QP，对 Intel 是 `global_quality`；同一个数字不代表同等画质或体积。libx264 额外带 `aq-mode=3:deblock=2,2`（暗部自适应量化加偏强去块）与 `rc-lookahead=20` 合并在同一个 `-x264-params` 里，减轻片尾淡出至黑时 yuv420 近黑渐变的块状伪影，不改变 CRF 数值。WebCodecs 直编在成片最后约 0.6 秒把关键帧间隔收到每 4 帧一次，同一目的。
-WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率，并将解码器上报的 `colorSpace` 通过 `normalizeDecoderColorSpace` 统一归一化到 BT.709 区间。
+WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率。浏览器硬件编码器通常把画布按 full-range 编码（`yuvj420p`、`iec61966-2-1` TRC），因此 `WebCodecsMp4Encoder` 会记录解码器实际上报的 `colorSpace`；只要不是 BT.709 limited range，收尾就不再 `-c:v copy`，而是让宿主 ffmpeg 走与其它路径相同的 `scale=out_color_matrix=bt709:out_range=tv` 滤镜链重编码并写入四个色彩标记，确保像素与元数据同时为 tv/bt709。只有上报已合规的编码器才直接 remux。
 所有 ffmpeg 出帧路径（恒等尺寸、缩放、帧序列、image2pipe 与 GPU rawvideo）都显式挂 `scale=…:out_color_matrix=bt709:out_range=tv`（无缩放 `flags=bicubic`，有缩放 `flags=lanczos`）、`setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709`，并追加 `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv` 四个输出标记。恒等尺寸也不省略 `-vf`：这条 scale 滤镜同时负责矩阵转换与有限范围。
 
 常用环境变量映射如下；没有列出的字段不要自行推测 `MSS_*` 名称。
@@ -196,20 +196,22 @@ video:
 
 ## 如何读耗时与统计
 
-API 返回的 `duration` 单位是 **秒**，表示渲染页处理此次导出的墙钟耗时，包含页内初始化、资源加载和导出，
-不是成片播放时长，也不含宿主排队和客户端网络传输的全部时间。端到端耗时应由调用方另行计时。
+API 返回的 `duration` 单位是 **秒**，表示成片视频本身的长度（`frameCount / fps`），不含音频尾音或容器封装；
+渲染墙钟耗时不再冒充 `duration`，而是放在 `timings.wallMs`。端到端耗时应由调用方另行计时。
 `timings` 大部分是毫秒，但 `frames` 是帧数、`avgPumpFps` 是吞吐率：
 
-| 指标                    | 当前含义                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------- |
-| `pumpMs`                | 各次帧泵迭代的墙钟耗时累计，含 tick、render、抓帧及校验等，不含暂停等待 TTS 时间   |
-| `tickMs` / `renderMs`   | 帧泵内推进虚拟时钟与 PixiJS 绘制的墙钟分项                                         |
-| `snapshotMs`            | 抓帧 / 提交 WebCodecs 编码或 JPEG 队列（可含背压等待）的耗时                       |
-| `ttsWaitMs`             | 片段执行显式等待 TTS 就绪与口型解码的墙钟耗时，非后台全部 TTS 耗时之和             |
-| `encodeMs`              | 页内编码器 flush/finalize 或 JPEG 管道队列排空时间；不含宿主 ffmpeg 进程后处理     |
-| `audioMs`               | 混音与流式 WAV 写盘在帧泵结束后的剩余等待（混音已与追尾帧并行）                    |
-| `invokeMs`              | 宿主收尾调用耗时（WebCodecs / `image2pipe` 为 remux；磁盘帧批为 ffmpeg 编码+合轨） |
-| `frames` / `avgPumpFps` | 实际帧泵输出帧数，以及 `frames / (pumpMs / 1000)`；不是输出播放 fps                |
+| 指标                    | 当前含义                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `pumpMs`                | 各次帧泵迭代的墙钟耗时累计，含 tick、render、抓帧及校验等，不含暂停等待 TTS 时间                    |
+| `tickMs` / `renderMs`   | 帧泵内推进虚拟时钟与 PixiJS 绘制的墙钟分项                                                          |
+| `snapshotMs`            | 抓帧 / 提交 WebCodecs 编码或 JPEG 队列（可含背压等待）的耗时                                        |
+| `ttsWaitMs`             | 片段执行显式等待 TTS 就绪与口型解码的墙钟耗时，非后台全部 TTS 耗时之和                              |
+| `encodeMs`              | 页内编码器 flush/finalize 或 JPEG 管道队列排空时间；不含宿主 ffmpeg 进程后处理                      |
+| `audioMs`               | 混音与流式 WAV 写盘在帧泵结束后的剩余等待（混音已与追尾帧并行）                                     |
+| `invokeMs`              | 宿主收尾调用耗时（WebCodecs / `image2pipe` 为 remux 或 BT.709 重编码；磁盘帧批为 ffmpeg 编码+合轨） |
+| `frames` / `avgPumpFps` | 实际帧泵输出帧数，以及 `frames / (pumpMs / 1000)`；不是输出播放 fps                                 |
+| `videoDurationMs`       | 成片视频时长 `frames / fps × 1000`，与 API `duration` 一致                                          |
+| `wallMs`                | 页内导出墙钟耗时，仅用于性能排查                                                                    |
 
 分项存在包含关系和并发重叠，不能把全部 `timings` 相加当作总耗时。
 `frameCount` 由时间轴与帧泵统计得出；需要真实成片时长、平均帧率和文件大小时，请检查最终 MP4 元数据。
@@ -219,17 +221,17 @@ API 返回的 `duration` 单位是 **秒**，表示渲染页处理此次导出�
 测量条件：1920x1080@30fps、`fastFps: 30`、4 workers、Intel Iris Xe、WebCodecs H.264、475 帧、同一 `story.json`。
 前后各取连续两次稳定值：
 
-| 指标              | 改前（rAF 步进） | 改后（固定 1/60 步） | 变化     |
-| ----------------- | ---------------- | -------------------- | -------- |
-| 墙钟              | 20.9s            | 17.1s                | -18%     |
-| API `duration`    | 16.58s           | 12.86s               | -22%     |
-| `pumpMs`          | 15020ms          | 11188ms              | -25.5%   |
-| `tickMs`          | 13746ms          | 9557ms               | -30%     |
-| `avgPumpFps`      | 31.6             | 42.5                 | +34.5%   |
-| `audioMs`（收尾） | 262ms            | 105ms                | -60%     |
-| 文件大小          | 11.33MB          | 11.23MB              | 基本不变 |
+| 指标              | 改前（rAF 步进）   | 改后（固定 1/60 步）       | 变化     |
+| ----------------- | ------------------ | -------------------------- | -------- |
+| 墙钟              | 20.9s              | 17.1s                      | -18%     |
+| API `duration`    | 16.58s（旧：墙钟） | 15.83s（475/30，视频时长） | 语义修正 |
+| `pumpMs`          | 15020ms            | 11188ms                    | -25.5%   |
+| `tickMs`          | 13746ms            | 9557ms                     | -30%     |
+| `avgPumpFps`      | 31.6               | 42.5                       | +34.5%   |
+| `audioMs`（收尾） | 262ms              | 105ms                      | -60%     |
+| 文件大小          | 11.33MB            | 11.23MB                    | 基本不变 |
 
-诊断报告现在包含 `encoder`（如 `webcodecs-h264`）、`segments`、`convert`（`browser` / `ffmpeg`）与 `color`（`bt709/tv`）；`.log.json`、`.log`、`.report.txt` 三个文件异步并行写盘，不再同步阻塞宿主主线程。
+诊断报告现在包含 `encoder`（如 `webcodecs-h264+ffmpeg`）、`segments`、`convert`（`browser` / `ffmpeg`）与 `color`（`bt709/tv`）；`convert: ffmpeg` 表示收尾经过 BT.709/tv 重编码，`browser` 仅在 WebCodecs 源流本身已合规时出现。`.log.json`、`.log`、`.report.txt` 三个文件异步并行写盘，不再同步阻塞宿主主线程。
 
 ## 旧配置迁移
 

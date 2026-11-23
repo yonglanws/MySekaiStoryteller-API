@@ -866,14 +866,17 @@ export function auditEpisode(scenario, episodeId, runtime) {
       )
     }
     // timeline 的 durationMs 已由 framesToMs 量化；再走 f32 秒累加会多一帧。
-    if (entry.durationFrames !== timing.msToFrameCount(timelineEntry.durationMs)) {
+    // 1ms 是状态片段“同帧完成”的标记，不占故事帧。
+    const timelineFrames =
+      timelineEntry.durationMs > 0 && timelineEntry.durationMs < timing.FRAME_MS
+        ? 0
+        : timing.msToFrameCount(timelineEntry.durationMs)
+    if (entry.durationFrames !== timelineFrames) {
       frameFails(
         fails,
         episodeId,
         i,
-        `duration ${entry.durationFrames} != timeline ${timing.msToFrameCount(
-          timelineEntry.durationMs
-        )}`
+        `duration ${entry.durationFrames} != timeline ${timelineFrames}`
       )
     }
     if (entry.endFrame !== entry.startFrame + entry.durationFrames) {

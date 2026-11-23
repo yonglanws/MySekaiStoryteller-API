@@ -7,7 +7,11 @@ import { runEasedTween } from '../effects/Ease'
 import { inappUrl, loadInappTexture } from '../effects/InappTextures'
 import { CameraBlurFilter } from '../effects/OfficialFilters'
 import { ScenarioEffectOverlay, SekaiTransitionParticles } from '../effects/TriangleParticleEffect'
-import { SEKAI_IN_FADE_DELAY_MS, SEKAI_OUT_FADE_DELAY_MS } from '../../../common/official/timing'
+import {
+  FRAME_MS,
+  SEKAI_IN_FADE_DELAY_MS,
+  SEKAI_OUT_FADE_DELAY_MS
+} from '../../../common/official/timing'
 
 function isTextureUsable(tex: Texture | null | undefined): tex is Texture {
   return Boolean(tex && tex.valid && tex.baseTexture && tex.baseTexture.valid)
@@ -301,6 +305,8 @@ export default class SpecialEffectLayer extends BaseLayer {
     if (holdMs > 0) {
       await AnimationManager.delay(holdMs)
     }
+    // 官方 end_frame 在 playedWaitTime 与场景退出之间多等 1 帧。
+    await AnimationManager.delay(FRAME_MS)
     await this.fadeOut(fadeMs, 'black')
   }
 

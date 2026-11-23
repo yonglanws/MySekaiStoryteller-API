@@ -36,6 +36,35 @@
 FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/SEKAI 生命周期、
 背景 prefab 分支、Talk 内嵌动作的 PlayTime/Text 同步模式。对应路线图条目仍需后续波次。
 
+### 逐帧对比第 1 轮修复（2026-11-23）
+
+- Talk 新增可选 `voiceDurationMs`：官方语音时长优先于 TTS 音频参与打字窗口、
+  语音结束、AUTO 停留与动作/布局门控。`event_145_08` 的 49 句按参考
+  `voices[].voice.waveforms[].frames / sample_rate` 写入（合计 161748ms）。
+- `storyPlan` 把 `TimelineCalculator` 的 1ms 状态片段标记（ChangeLayoutMode、
+  ChangeBackgroundImage、AmbientColor、HideTalk）按 0 帧处理，不再让非阻塞片段
+  推进 `cursorFrame`；首条 LayoutAppear 的 act 回到参考的 131。
+- Talk Gate 预读与 Talk 同帧启动的 `ProgressBehavior=Now` Motion/动作：官方
+  `motions_settled` 会等这些延迟动作播完（如 1.75s 后启动的 relief），导出目标
+  时长与 plan 的 `settleFrames` 都包含它们。
+- `event_145_08` 的 snippets 45/48 从 Wipe 修正为参考 IR `effect_type 32/31`
+  对应的 `SideFade Right Out` / `SideFade Right In`。
+- 导出收尾补上官方 `end_frame` 的中间 1 帧（playedWaitTime + 1 + BGM fade），
+  视频帧数可按 `plan.totalFrames - 10`（60fps）精确对照计划。
+- 逐帧验证改用 `video.fps=60`、`fastFps=60`，每个输出帧对应一个故事步。
+
+验证（`event_145_08`，60fps，2026-11-23）：
+
+- plan 总帧 20266 vs 参考 20268（-2 帧）；49 条 Talk act 差中位数 -5
+  （范围 -35..+9，修复前 -350 / -1816..+39），Talk 时长差中位数 -1 帧。
+- 成片 20256 帧 = plan.totalFrames - 10，ffmpeg 显示 1920x1080 / 60fps /
+  337.6s；补测片 835 帧 = 845 - 10。
+- 参考 IR 41/44 的 side_fade 已与 MSST 45/48 的 `SideFade` 对齐
+  （act 差 +3 / 0 帧），逐句对齐 204/207。
+- 60fps 全屏 fader 逐故事帧：172 个采样，线性拟合 R²=0.999965，
+  最大残差 0.00622（< 0.01）；位置 0.5px 与口型 2e-3 的逐帧像素复测
+  需要单独的角色/口型探针，本轮未重跑。
+
 ## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
 
 本节取代下面「2026-11 口型链路按 ournotes 忠实重构」一节。参考实现回到仓库外的

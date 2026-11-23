@@ -208,6 +208,11 @@ export const SnippetSchema = z.discriminatedUnion('type', [
       /** 说话时的并发表情切换（可选，缺省保持当前表情） */
       facial: z.string().default(''),
       actions: CharacterActionsSchema,
+      /**
+       * 官方语音总时长（毫秒）。有值时 Talk 的语音窗、自动停留与门控按官方语音计时，
+       * 而不是按宿主 TTS 音频长度；TTS 只负责出声。
+       */
+      voiceDurationMs: z.number().finite().min(0).max(600000).optional(),
       /** 官方 TalkData.WhenFinishCloseWindow */
       closeWindowOnFinish: z.boolean().optional(),
       /** 官方 TalkData.RequirePlayEffect */

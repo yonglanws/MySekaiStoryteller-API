@@ -431,6 +431,12 @@ test('WebCodecsMp4Encoder rejects software GL, rejects >150ms slow probe, normal
   let fakeSupport = { supported: true, config: { hardwareAcceleration: 'prefer-hardware' } }
   let fakeElapsedMs = 10
   let nowMock = 0
+  let fakeColorSpace = {
+    primaries: null,
+    transfer: undefined,
+    matrix: 'rgb',
+    fullRange: undefined
+  }
 
   class MockVideoFrame {
     close() {}
@@ -469,12 +475,7 @@ test('WebCodecsMp4Encoder rejects software GL, rejects >150ms slow probe, normal
                 decoderConfig: {
                   codec: 'avc1.640028',
                   description: new Uint8Array([1, 2, 3]),
-                  colorSpace: {
-                    primaries: null,
-                    transfer: undefined,
-                    matrix: 'rgb',
-                    fullRange: undefined
-                  }
+                  colorSpace: fakeColorSpace
                 }
               }
             : undefined
@@ -608,6 +609,29 @@ test('WebCodecsMp4Encoder rejects software GL, rejects >150ms slow probe, normal
   assert.equal(cs?.transfer, 'bt709')
   assert.equal(cs?.matrix, 'bt709')
   assert.equal(cs?.fullRange, false)
+  assert.equal(
+    enc.requiresColorConversion,
+    true,
+    'missing/non-BT.709 limited output metadata must request host transcode'
+  )
+
+  // 已上报 BT.709 limited range 的编码器不需要重编码
+  fakeColorSpace = {
+    primaries: 'bt709',
+    transfer: 'bt709',
+    matrix: 'bt709',
+    fullRange: false
+  }
+  const encCompliant = new WebCodecsMp4Encoder({
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrate: 8_000_000,
+    encoderConfig: probe.config
+  })
+  await encCompliant.initialize('temp-compliant.mp4')
+  await encCompliant.finish()
+  assert.equal(encCompliant.requiresColorConversion, false)
 
   // Backpressure dequeue waiter wakes immediately on dispose without hanging
   const enc2 = new WebCodecsMp4Encoder({
@@ -780,11 +804,12 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
   const mocks = new Map()
   let virtualClock = null
 
+  const remuxPayloads = []
   const loader = createRendererLoader(mocks, {
     window: {
       electron: {
         ipcRenderer: {
-          invoke: async (ch) => {
+          invoke: async (ch, payload) => {
             if (ch === 'electron:get-temp-base-dir') return '/tmp/base'
             if (ch === 'electron:frames-stream-start') {
               jpegPipeStarted++
@@ -792,8 +817,10 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
             }
             if (ch === 'electron:frames-stream-chunk') return { success: true }
             if (ch === 'electron:frames-stream-finish') return { videoPath: '/tmp/pipe/video.mp4' }
-            if (ch === 'electron:api-remux-video-from-files')
+            if (ch === 'electron:api-remux-video-from-files') {
+              remuxPayloads.push(payload)
               return { success: true, fileSize: 999 }
+            }
             if (ch === 'electron:write-temp-file') return '/tmp/audio.wav'
             return { success: true }
           }
@@ -985,6 +1012,9 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
       async initialize() {
         if (encoderInitThrows) throw new Error('runtime configure boom')
       }
+      get requiresColorConversion() {
+        return true
+      }
       async encodeFrame() {}
       async finish() {
         return '/tmp/base/vid.mp4'
@@ -1120,6 +1150,13 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
     apiOutputPath: '/tmp/out2.mp4'
   })
   assert.equal(res2.success, true)
+  assert.equal(res2.duration, res2.frameCount / 30, 'API duration is video length, not wall clock')
+  assert.equal(res2.timings?.videoDurationMs, Math.round((res2.frameCount / 30) * 1000))
+  const webCodecsRemux = remuxPayloads.find((payload) => payload?.transcode === true)
+  assert.ok(webCodecsRemux, 'WebCodecs full-range output must request host BT.709 transcode')
+  assert.equal(webCodecsRemux.frameCount, res2.frameCount)
+  assert.equal(webCodecsRemux.fps, 30)
+  assert.equal(webCodecsRemux.crf, 23)
   assert.equal(validateCanvasCalls, 1, 'warm page skips validateCanvas')
   assert.equal(validateModelCalls, 1, 'warm page skips readPixels validateModelRendering')
 

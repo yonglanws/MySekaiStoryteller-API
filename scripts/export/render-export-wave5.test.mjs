@@ -527,6 +527,8 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   })
 
   assert.equal(res.success, true)
+  assert.equal(res.duration, res.frameCount / 30, 'API duration must be frameCount/fps')
+  assert.equal(res.timings?.videoDurationMs, Math.round((res.frameCount / 30) * 1000))
   assert.equal(
     events.filter((e) => e.kind === 'setOpeningCover').length,
     0,

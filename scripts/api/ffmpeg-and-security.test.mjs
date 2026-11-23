@@ -1115,6 +1115,46 @@ test('remux reuses the image2pipe frame count and fps to truncate the mix exactl
     []
   )
   assert.equal(pipeSessions.length, 1)
+
+  // WebCodecs 的 full-range 流必须走 BT.709/tv 重编码，而不是 copy
+  await writeFile(audioPath, 'RIFF')
+  let mergeArgs = null
+  const originalMergeVideoAudio = bridgeFfmpeg.apiMergeVideoAudioWithCompression
+  bridgeFfmpeg.apiMergeVideoAudioWithCompression = async (...args) => {
+    mergeArgs = args
+    await writeFile(args[2], 'transcoded-video')
+  }
+  t.after(() => {
+    bridgeFfmpeg.apiMergeVideoAudioWithCompression = originalMergeVideoAudio
+  })
+  const transcodedPath = path.join(outputDir, 'transcoded.mp4')
+  const transcoded = await invoke('electron:api-remux-video-from-files', [
+    {
+      videoPath,
+      audioPath,
+      outputPath: transcodedPath,
+      audioBitrate: '192k',
+      frameCount: 90,
+      fps: 30,
+      transcode: true,
+      inputWidth: 1920,
+      inputHeight: 1080,
+      crf: 18
+    }
+  ])
+  assert.equal(transcoded.status, 200)
+  assert.equal(transcoded.body.result.success, true, JSON.stringify(transcoded.body))
+  assert.ok(mergeArgs, 'transcode=true must call apiMergeVideoAudioWithCompression')
+  assert.equal(mergeArgs[3], 18, 'CRF is forwarded')
+  assert.equal(mergeArgs[5], 30, 'fps is forwarded')
+  assert.equal(mergeArgs[6], 'cpu', 'encoder comes from host config')
+  assert.equal(mergeArgs[7], 1280, 'output width comes from host config')
+  assert.equal(mergeArgs[8], 720, 'output height comes from host config')
+  assert.equal(mergeArgs[9], 1920, 'input width is forwarded for the scale filter')
+  assert.equal(mergeArgs[10], 1080, 'input height is forwarded for the scale filter')
+  assert.equal(mergeArgs[12], 'hevc', 'codec comes from host config')
+  assert.equal(mergeArgs[13], 90, 'frameCount truncates the final container')
+  assert.equal(await readFile(transcodedPath, 'utf8'), 'transcoded-video')
 })
 
 test('bridge rejects an empty or reversed frame range before spawning ffmpeg', async (t) => {

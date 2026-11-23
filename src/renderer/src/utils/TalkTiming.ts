@@ -41,6 +41,11 @@ export interface TalkDurationOptions {
    */
   windowOpenMs?: number
   /**
+   * 可选：官方语音时长（毫秒）。参考实现按官方音频计时；有值时优先于 TTS 时长
+   * 与 `hasVoice` 的文本估算。
+   */
+  voiceDurationMs?: number
+  /**
    * 可选：无语音的纯标点静默句在打字结束后的停顿时长（默认使用官方 2.0s）。
    */
   silentHoldMs?: number
@@ -74,8 +79,12 @@ function resolveSpeechSeconds(
   content: string,
   ttsDurationMs: number,
   ttsText: string,
-  hasVoice: boolean
+  hasVoice: boolean,
+  voiceDurationMs?: number
 ): number {
+  if (Number.isFinite(voiceDurationMs) && (voiceDurationMs as number) > 0) {
+    return (voiceDurationMs as number) / 1000
+  }
   if (Number.isFinite(ttsDurationMs) && ttsDurationMs > 0) return ttsDurationMs / 1000
   if (!hasVoice) return 0
   return (Math.max(0, (ttsText || content).length) * TALK_ESTIMATED_SPEECH_MS_PER_CHAR) / 1000
@@ -97,7 +106,13 @@ function talkAutoTiming(
     startFrame: 0,
     windowFrames: msToFrameCount(options.windowOpenMs ?? 0),
     length: visibleTextLength(content),
-    voiceSeconds: resolveSpeechSeconds(content, ttsDurationMs, ttsText, Boolean(options.hasVoice)),
+    voiceSeconds: resolveSpeechSeconds(
+      content,
+      ttsDurationMs,
+      ttsText,
+      Boolean(options.hasVoice),
+      options.voiceDurationMs
+    ),
     layoutEndFrame:
       Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
         ? msToFrameCount(options.layoutRunningMs as number)

@@ -1,14 +1,15 @@
 import type { ILogObj, Logger } from 'tslog'
 import type { StoryData } from '../../common/types/Story'
+import { isJapaneseSpeechText } from '../../common/tts/speechText'
 
 /**
  * IrodoriTTS 只接受日文。宿主在导出前必须把每条 Talk 的 ttsText 补成日文，
  * 不能像以前那样在缺失时把中文 content 直接送去合成。
+ *
+ * 与 renderer 共用同一判定：含假名，或纯汉字但不含高置信中文标记。
  */
 export function isJapaneseText(text: string): boolean {
-  // 平假名/片假名是日文最可靠的判据；中文台词不会出现这些字符。
-  // 纯汉字短句（如「無言」）无法与中文区分，统一按“需要翻译”处理，宁可多译一次。
-  return /[\u3040-\u30ff\u31f0-\u31ff]/.test(text)
+  return isJapaneseSpeechText(text)
 }
 
 /**

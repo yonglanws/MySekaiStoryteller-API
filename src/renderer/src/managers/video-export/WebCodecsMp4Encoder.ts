@@ -74,6 +74,8 @@ export class WebCodecsMp4Encoder {
   /** 串行化落盘写，保证 positioned write 顺序 */
   private writeChain: Promise<unknown> = Promise.resolve()
   private codecDescription: Uint8Array | null = null
+  /** 编码器实际上报的色彩空间（未归一化），决定收尾是否需要重编码到 BT.709/tv */
+  private observedColorSpace: VideoColorSpaceInit | null = null
   /** 画布尺寸 ≠ 编码尺寸时的 GPU 缩放中间画布 */
   private scaleCanvas: OffscreenCanvas | null = null
   private scaleCtx: OffscreenCanvasRenderingContext2D | null = null
@@ -300,6 +302,7 @@ export class WebCodecsMp4Encoder {
     this.filePath = filePath
     this.isDisposed = false
     this.encodeError = null
+    this.observedColorSpace = null
 
     const config =
       this.preProbedConfig ??
@@ -352,6 +355,9 @@ export class WebCodecsMp4Encoder {
     this.encoder = new VideoEncoder({
       output: (chunk, metadata) => {
         try {
+          if (metadata?.decoderConfig?.colorSpace && !this.observedColorSpace) {
+            this.observedColorSpace = { ...metadata.decoderConfig.colorSpace }
+          }
           if (metadata?.decoderConfig?.description && !this.codecDescription) {
             const desc = metadata.decoderConfig.description
             this.codecDescription =
@@ -489,6 +495,23 @@ export class WebCodecsMp4Encoder {
 
   get frames(): number {
     return this.frameCount
+  }
+
+  /**
+   * 硬编码器输出是否需要收尾重编码到 BT.709 limited range。
+   * Chrome 的画布帧通常以 full-range 送入硬件编码器，SPS/VUI 会写 pc + sRGB；
+   * 这种流不能用 `-c:v copy` 直接进成片，必须让宿主 ffmpeg 走
+   * `scale=out_color_matrix=bt709:out_range=tv` 才能同时修正像素与元数据。
+   */
+  get requiresColorConversion(): boolean {
+    const cs = this.observedColorSpace
+    if (!cs) return true
+    return (
+      cs.fullRange !== false ||
+      cs.primaries !== 'bt709' ||
+      cs.transfer !== 'bt709' ||
+      cs.matrix !== 'bt709'
+    )
   }
 
   dispose(): void {

@@ -137,6 +137,11 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
     3416.667
   )
   assert.equal(round(talk.calculateTalkDurationMs(twenty, 0, '', { windowOpenMs: 200 })), 3550)
+  // 官方语音时长优先于 TTS：4.0s + 0.05s = 244 帧，打字结束前已带语音 → +30 帧。
+  assert.equal(
+    round(talk.calculateTalkDurationMs(twenty, 1000, '', { voiceDurationMs: 4000 })),
+    4566.667
+  )
   assert.equal(round(talk.talkTypingDurationMs(twenty)), 1333.333)
   const described = talk.describeTalkTiming(twenty, 2860)
   assert.equal(round(described.typingMs), 1333.333)
@@ -163,7 +168,7 @@ test('timeline opens the talk window once, reopens after HideTalk or closeWindow
     talk()
   ])
   const durations = Array.from(result.entries, (entry) => entry.durationMs)
-  assert.deepEqual(durations, [3550, 3350, 3550, 1, 3550])
+  assert.deepEqual(durations, [3550, 3350, 3550, 0, 3550])
   assert.equal(round(result.entries[2].delayStartTimeMs), round(3550 + 3350))
   assert.equal(round(result.entries[2].startTimeMs), round(3550 + 3350 + 500))
   assert.equal(round(result.entries[2].endTimeMs), round(result.entries[2].startTimeMs + 3550))

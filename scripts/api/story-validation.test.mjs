@@ -346,6 +346,23 @@ test('StorySchema accepts ChangeBgm and fills fade defaults', () => {
   assert.equal(snippet.data.fadeMs, 600)
 })
 
+test('StorySchema preserves official voiceDurationMs on Talk', () => {
+  const parsed = StorySchema.parse({
+    models: [],
+    images: [],
+    snippets: [
+      {
+        type: 'Talk',
+        delay: 0,
+        data: { speaker: '瑞希', content: '……', modelId: 1, voiceDurationMs: 2415.692 }
+      }
+    ]
+  })
+  const snippet = parsed.snippets[0]
+  if (snippet.type !== 'Talk') throw new Error('expected Talk')
+  assert.equal(snippet.data.voiceDurationMs, 2415.692)
+})
+
 test('keeps registered ChangeBgm cues and drops unknown files', () => {
   const story = makeStory()
   story.snippets.splice(

@@ -1112,6 +1112,20 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           fps?: number
           /** 视频起点在故事时间轴上的帧号（断点续传）；音频按该位置起播 */
           startFrame?: number
+          /**
+           * true：输入流不是 BT.709 limited range（典型为 WebCodecs 硬编出来的
+           * yuvj420p/full-range），必须经标准滤镜重新编码，不能 `-c:v copy`。
+           */
+          transcode?: boolean
+          /** 输入视频的实际尺寸；缺省按配置分辨率，用于缩放滤镜 */
+          inputWidth?: number
+          inputHeight?: number
+          /** 重编码 CRF；仅在 transcode=true 时使用 */
+          crf?: number
+          /** 输入视频码率（bps），用于 ffmpeg 超时/进度估算 */
+          recordedBitrate?: number
+          /** 输出 codec：hevc（默认）| h264；缺省跟随 host config */
+          codec?: string
           /** true 时保留输入文件由调用方自行清理（record 会在 finally 中取消 session） */
           keepInputs?: boolean
         }
@@ -1149,11 +1163,54 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           const hasAudio = !!safeAudioPath && fs.existsSync(safeAudioPath)
           const pipeFrameInfo = pipeFrameInfoFor(safeVideoPath)
           const frameCount = payload.frameCount ?? pipeFrameInfo?.frameCount
-          const fps = payload.fps ?? pipeFrameInfo?.fps
+          const fps = payload.fps ?? pipeFrameInfo?.fps ?? config.video.fps
+          const transcode = payload.transcode === true
           await writeOutputAtomically(
             safeOutputPath,
             async (partialPath) => {
-              if (hasAudio) {
+              if (transcode) {
+                // WebCodecs 输出通常是 full-range + sRGB TRC，`-c:v copy` 会把
+                // 错误元数据和全范围像素一起带进成片。这里按参考实现的统一
+                // BT.709/tv 滤镜链重编码，音频与视频一次合成。
+                const encoder = config.video.encoder as VideoEncoderChoice
+                const codec = normalizeVideoCodec(payload.codec ?? config.video.codec)
+                const inputWidth = payload.inputWidth ?? config.video.width
+                const inputHeight = payload.inputHeight ?? config.video.height
+                const recordedBitrate = payload.recordedBitrate ?? 8_000_000
+                const crf = payload.crf ?? config.video.crf
+                if (hasAudio) {
+                  await apiMergeVideoAudioWithCompression(
+                    safeVideoPath,
+                    safeAudioPath!,
+                    partialPath,
+                    crf,
+                    payload.audioBitrate,
+                    fps,
+                    encoder,
+                    config.video.width,
+                    config.video.height,
+                    inputWidth,
+                    inputHeight,
+                    recordedBitrate,
+                    codec,
+                    frameCount
+                  )
+                } else {
+                  await apiConvertVideoWithCompression(
+                    safeVideoPath,
+                    partialPath,
+                    crf,
+                    fps,
+                    encoder,
+                    config.video.width,
+                    config.video.height,
+                    inputWidth,
+                    inputHeight,
+                    recordedBitrate,
+                    codec
+                  )
+                }
+              } else if (hasAudio) {
                 await apiMuxVideoAudioCopy(
                   safeVideoPath,
                   safeAudioPath!,

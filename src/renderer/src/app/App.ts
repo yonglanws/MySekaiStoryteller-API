@@ -696,7 +696,6 @@ export class App {
     diagnostics?: import('../managers/video-export/ExportDiagnostics').ExportDiagnostics
     error?: string
   }> {
-    const startTime = performance.now()
     this.logger.info(
       `API export: ${videoConfig.width}x${videoConfig.height}, ${videoConfig.fps}fps, scale=${videoConfig.renderScale}`
     )
@@ -769,7 +768,8 @@ export class App {
       return {
         success: true,
         videoPath: outputPath,
-        duration: (performance.now() - startTime) / 1000,
+        // 成片时长以帧泵/编码器统计为准，不使用页内墙钟耗时
+        duration: result.duration,
         frameCount: result.frameCount,
         outputSize: result.outputSize,
         timings: result.timings,

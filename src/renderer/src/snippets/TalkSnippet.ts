@@ -39,6 +39,8 @@ interface TalkData {
     ttsText?: string
     modelId: number
     voice: string
+    /** 官方语音时长（毫秒）；有值时按官方语音而不是 TTS 计时。 */
+    voiceDurationMs?: number
     motion?: string
     facial?: string
     actions?: CharacterAction[]
@@ -152,6 +154,7 @@ export default class TalkSnippet extends BaseSnippet {
     const existingSettleMs = Math.max(0, getMotionSettledEndMs(this.app) - snippetStartTime)
     return calculateTalkDurationMs(talkData.data.content, 0, talkData.data.ttsText, {
       hasVoice: Boolean(talkData.data.voice),
+      voiceDurationMs: talkData.data.voiceDurationMs,
       windowOpenMs,
       layoutRunningMs,
       motionSettleMs: existingSettleMs

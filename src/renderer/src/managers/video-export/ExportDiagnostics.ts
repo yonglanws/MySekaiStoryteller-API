@@ -87,7 +87,9 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     // 所以墙钟起点对应 delayStartTimeMs = startTimeMs - delayMs，墙钟时长包含 delayMs + durationMs。
     const rawDelayStart = (planned as { delayStartTimeMs?: number } | undefined)?.delayStartTimeMs
     const plannedStartMs =
-      rawDelayStart !== undefined ? rawDelayStart : Math.max(0, (planned?.startTimeMs ?? 0) - delayMs)
+      rawDelayStart !== undefined
+        ? rawDelayStart
+        : Math.max(0, (planned?.startTimeMs ?? 0) - delayMs)
     const plannedDuration = (planned?.durationMs ?? 0) + delayMs
     const actualStartMs = actual
       ? Math.round(Math.max(0, actual.wallStartMs - input.timestamps.getRenderStartWallMs()))
@@ -206,7 +208,7 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     `剧情时钟 60 fps，编码 ${input.exportMeta.fps} fps；导出仍是单浏览器实时录制/虚拟时钟，未实现 --jobs N 分段并行`,
     '未实现 3D MV、完整 UGUI 图集、S3 资产库与硬件编码选择',
     '动作收尾闸门按已预加载的非循环剪辑时长估算；循环动作不参与',
-    'ProgressBehavior=0 的片段与前置任务同帧并发；Talk 仍触发前置栅栏以保证 TTS/字幕对位',
+    'ProgressBehavior=0 的片段与前置任务同帧并发；Talk 与其它片段一样只看 ProgressBehavior',
     '物理摆动由依赖的 model3.json 驱动，未逐帧复刻 SSE 的确定性物理积分'
   ]
 

@@ -35,6 +35,7 @@ import type { SnippetTimelineEntry } from './TTSManager'
 import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import {
+  FRAME_MS,
   OPENING_COVER_FADE_MS,
   PLAYED_WAIT_TIME_MS,
   SCENARIO_EXIT_BGM_FADE_MS,
@@ -69,6 +70,8 @@ type InternalProgressCallback = (progress: ExtendedExportProgress) => void
 interface TalkSnippetLike {
   content: string
   ttsText?: string
+  /** 官方语音时长（毫秒）：参考实现按官方语音计时，优先于 TTS 音频。 */
+  voiceDurationMs?: number
   modelId: number
   motion?: string
   actions?: Array<{ at: number; modelId: number; motion?: string }>
@@ -98,6 +101,8 @@ export default class VideoExportManager {
   /** 最近一次导出实际使用的帧通道，用于诊断报告（encoder/convert 字段）。 */
   private lastSinkKind: 'webcodecs' | 'image2pipe' | 'frames' = 'image2pipe'
   private lastEncoderLabel = 'ffmpeg'
+  /** 收尾转换由谁完成：browser=WebCodecs 流满足 BT.709/tv 直接 remux；ffmpeg=重编码修正 */
+  private lastConvert: 'browser' | 'ffmpeg' = 'ffmpeg'
 
   /** 已在同一常驻 worker 页面上通过首次 WebGL/黑屏校验的 App 实例集合 */
   private static readonly warmValidatedApps = new WeakSet<object>()
@@ -265,6 +270,55 @@ export default class VideoExportManager {
    * 官方 AUTO 模式在语音结束后还要等身体动作播完，再停留 0.5s。
    * 动作剪辑时长来自已预加载的 motionGroups；循环动作/未加载动作不参与（返回 0）。
    */
+  /**
+   * 跟随 Talk 同帧启动的 Now 片段（例如 delay=1.75s 的 Motion）会在 Talk 的
+   * 语音结束前开始身体动作；官方 `motions_settled` 会等它播完再进入停留。
+   * 导出必须在算 Talk 目标时长时预读这些并发动作，否则计划会比参考短。
+   */
+  private concurrentMotionSettleMs(
+    snippets: readonly SnippetData[],
+    index: number,
+    talkDelayMs: number,
+    windowMs: number
+  ): number {
+    if (index < 0 || index >= snippets.length) return 0
+    let settleMs = 0
+    const consider = (modelId: number, motion: string | undefined, startMs: number): void => {
+      if (!motion) return
+      try {
+        const model = this.app.getModelById(modelId)
+        if (model.isMotionLooping?.(motion)) return
+        const clipMs = model.getMotionDurationMs?.(motion) ?? 0
+        if (clipMs > 0) settleMs = Math.max(settleMs, startMs + clipMs)
+      } catch {
+        /* model not loaded; the gate cannot be planned */
+      }
+    }
+    for (let j = index + 1; j < snippets.length; j++) {
+      const next = snippets[j]
+      // 遇到 WaitFinished 片段就说明后续动作不会在 Talk 结束前启动。
+      if (snippetHasPreFence(next)) break
+      const data = ((next as { data?: unknown }).data ?? {}) as {
+        modelId?: number
+        motion?: string
+        duration?: number
+        actions?: Array<{ at?: number; modelId?: number; motion?: string }>
+      }
+      const startMs = Math.max(0, (Number(next.delay) || 0) * 1000 - talkDelayMs)
+      if (startMs > windowMs + FRAME_MS) continue
+      consider(Number(data.modelId) || -1, data.motion, startMs)
+      const actionWindowMs = (Number(data.duration) || 2) * 1000
+      for (const action of data.actions ?? []) {
+        consider(
+          Number(action.modelId ?? data.modelId) || -1,
+          action.motion,
+          startMs + Math.max(0, Number(action.at) || 0) * actionWindowMs
+        )
+      }
+    }
+    return settleMs
+  }
+
   private talkDurationWithMotionGate(
     talk: TalkSnippetLike,
     ttsDurationMs: number,
@@ -272,15 +326,24 @@ export default class VideoExportManager {
     snippetIndex = -1,
     layoutRunningMs = 0,
     existingMotionSettleMs = 0,
-    silentHoldMs?: number
+    silentHoldMs?: number,
+    talkDelayMs = 0
   ): number {
-    const base = calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
+    const officialVoiceMs =
+      typeof talk.voiceDurationMs === 'number' &&
+      Number.isFinite(talk.voiceDurationMs) &&
+      talk.voiceDurationMs > 0
+        ? talk.voiceDurationMs
+        : 0
+    const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsDurationMs
+    const base = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
+      voiceDurationMs: officialVoiceMs,
       windowOpenMs,
       layoutRunningMs,
       motionSettleMs: existingMotionSettleMs,
       silentHoldMs
     })
-    if (!(ttsDurationMs > 0)) return base
+    if (!(timingVoiceMs > 0)) return base
     const cues: Array<{ at: number; modelId: number; motion?: string }> = []
     if (talk.motion) cues.push({ at: 0, modelId: talk.modelId, motion: talk.motion })
     for (const action of talk.actions ?? []) {
@@ -301,9 +364,32 @@ export default class VideoExportManager {
         /* model not loaded; the gate cannot be planned */
       }
     }
+    const snippets = this.app.storyManager?.snippets ?? []
+    let duration = base
+    // 最多两轮：第一轮找到语音窗内启动的并发动作，第二轮把因动作延长后
+    // 才落入窗口的后续动作也算进去。
+    for (let pass = 0; pass < 2; pass++) {
+      const concurrentMs = this.concurrentMotionSettleMs(
+        snippets,
+        snippetIndex,
+        talkDelayMs,
+        duration
+      )
+      const mergedSettleMs = Math.max(settleMs, concurrentMs)
+      if (mergedSettleMs <= settleMs + 0.5) break
+      settleMs = mergedSettleMs
+      duration = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
+        voiceDurationMs: officialVoiceMs,
+        motionSettleMs: settleMs,
+        layoutRunningMs,
+        windowOpenMs,
+        silentHoldMs
+      })
+    }
     if (settleMs > 0 && snippetIndex >= 0) this.talkSettleMsByIndex.set(snippetIndex, settleMs)
     return settleMs > 0 || layoutRunningMs > 0
-      ? calculateTalkDurationMs(talk.content, ttsDurationMs, talk.ttsText, {
+      ? calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
+          voiceDurationMs: officialVoiceMs,
           motionSettleMs: settleMs,
           layoutRunningMs,
           windowOpenMs,
@@ -381,12 +467,8 @@ export default class VideoExportManager {
         ...(result.timings ? { timings: result.timings } : {}),
         encoder: this.lastEncoderLabel,
         segments: 1,
-        convert:
-          this.lastSinkKind === 'webcodecs'
-            ? 'browser'
-            : this.lastSinkKind === 'frames'
-              ? 'ffmpeg'
-              : 'ffmpeg',
+        convert: this.lastConvert,
+        // 所有收尾路径都经过 BT.709/tv 滤镜或重编码；copy 分支只在源流本身已合规时使用
         color: 'bt709/tv'
       },
       provider: this.app.ttsManager?.getConfig().provider,
@@ -887,6 +969,7 @@ export default class VideoExportManager {
     await createSink()
     this.lastSinkKind = sinks.encoder ? 'webcodecs' : 'image2pipe'
     this.lastEncoderLabel = sinks.encoder ? 'webcodecs-h264' : 'ffmpeg'
+    this.lastConvert = 'ffmpeg'
 
     const realStart = virtualClock.realTimeMs()
 
@@ -1177,7 +1260,8 @@ export default class VideoExportManager {
               i,
               layoutRunningMs,
               existingMotionSettleMs,
-              silentHoldMs
+              silentHoldMs,
+              (snippet.delay || 0) * 1000
             )
           )
           if (ttsDurationMs > 0) {
@@ -1243,7 +1327,9 @@ export default class VideoExportManager {
                 this.talkWindowOpenMs(snippets, i),
                 i,
                 layoutRunningMs,
-                existingMotionSettleMs
+                existingMotionSettleMs,
+                undefined,
+                (snippet.delay || 0) * 1000
               )
             : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
@@ -1312,19 +1398,35 @@ export default class VideoExportManager {
       if (openingCoverTask) await openingCoverTask
 
       const hasEndingEnvelope = typeof extendedApp.setEndingEnvelope === 'function'
+      // 官方 end_frame = cleanup + playedWaitTime(15) + 1 + BGM fade(15) = +31 帧；
+      // 计划的总帧数也按这个尾长烘焙，导出必须补上中间那 1 帧。
       const endingEnvelopeMs = hasEndingEnvelope
-        ? PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS
+        ? PLAYED_WAIT_TIME_MS + FRAME_MS + SCENARIO_EXIT_BGM_FADE_MS
         : 0
-      if (hasEndingEnvelope) {
-        await extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
-      }
+      // 收尾黑幕先启动；帧泵在下面继续推进虚拟时钟，直到计划的结束帧。
+      const endingEnvelopeTask = hasEndingEnvelope
+        ? extendedApp.setEndingEnvelope!(PLAYED_WAIT_TIME_MS, SCENARIO_EXIT_BGM_FADE_MS)
+        : Promise.resolve()
 
-      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」
+      // 尾部追帧：让帧泵渲染到「最后一个片段及收尾黑幕的虚拟结束时间」。
+      // 目标吸附到整故事帧：516.667ms 的舍入不应让 60fps 成片多出 1 帧。
       const maxTimelineEndMs = timeline.reduce((max, entry) => Math.max(max, entry.endTimeMs), 0)
-      pumpTargetVirtualMs = Math.max(
-        virtualClock.now(),
-        virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
-      )
+      // 计划时长是成片帧数的唯一依据；片段循环已经 await 了真实执行，
+      // 不再把 virtualClock.now() 的亚帧尾差算进成片。
+      const rawPumpTargetMs = virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
+      pumpTargetVirtualMs = Math.round(rawPumpTargetMs / frameMs) * frameMs
+      this.logger.info('Fast export tail target', {
+        renderStartMs: virtualRenderStartMs,
+        maxTimelineEndMs,
+        endingEnvelopeMs,
+        rawPumpTargetMs,
+        pumpTargetVirtualMs,
+        targetFrames: pumpTargetVirtualMs / frameMs
+      })
+      // 先解除暂停并标记片段播放完毕，帧泵看到目标帧就停；否则收尾黑幕
+      // 结束时帧泵会多拍 1 帧。
+      setPumpPaused(false)
+      pumpDone = true
 
       // 收尾并行：帧泵还在追尾帧时就开始混音/流式写 WAV。
       // 时长在片段全部落定后即可精确推出（帧数 = ceil(target/frameMs)）。
@@ -1424,8 +1526,7 @@ export default class VideoExportManager {
         return path
       })()
 
-      setPumpPaused(false)
-      pumpDone = true
+      await endingEnvelopeTask
       await framePump
       if (pumpError) throw pumpError
 
@@ -1466,15 +1567,33 @@ export default class VideoExportManager {
       let saveResult: { success: boolean; error?: string; fileSize?: number }
       const invokeStart = virtualClock.realTimeMs()
       if (sinks.encoder || sinks.jpegSink?.isPipeMode) {
+        // WebCodecs 的硬件编码器经常输出 full-range/yuvj420p 且带 sRGB TRC；
+        // 此时必须让宿主按统一 BT.709/tv 滤镜链重编码，不能直接 copy 容器。
+        const needsColorConversion = sinks.encoder?.requiresColorConversion === true
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
             videoPath: videoFilePath,
             audioPath: audioFilePath,
             outputPath,
-            audioBitrate
+            audioBitrate,
+            frameCount: frameIndex,
+            fps: encodeFps,
+            ...(sinks.encoder
+              ? {
+                  transcode: needsColorConversion,
+                  inputWidth: outW,
+                  inputHeight: outH,
+                  crf: options.apiCrf ?? options.crf ?? 23,
+                  recordedBitrate: bitrate
+                }
+              : {})
           }
         )
+        if (sinks.encoder) {
+          this.lastEncoderLabel = needsColorConversion ? 'webcodecs-h264+ffmpeg' : 'webcodecs-h264'
+          this.lastConvert = needsColorConversion ? 'ffmpeg' : 'browser'
+        }
       } else {
         const framesDir = sinks.framesDir || videoFilePath
         if (!framesDir) throw new Error('JPEG frame sink produced no frames directory')
@@ -1496,6 +1615,8 @@ export default class VideoExportManager {
 
       VideoExportManager.warmValidatedApps.add(this.app)
 
+      // API 的 duration 必须描述成片本身（frameCount / fps），不是渲染墙钟耗时。
+      const videoDurationMs = (frameIndex / Math.max(1, encodeFps)) * 1000
       const timings: Record<string, number> = {
         pumpMs: Math.round(pumpMs),
         tickMs: Math.round(tickMs),
@@ -1506,12 +1627,15 @@ export default class VideoExportManager {
         audioMs: Math.round(audioMs),
         invokeMs: Math.round(invokeMs),
         frames: frameIndex,
+        videoDurationMs: Math.round(videoDurationMs),
+        // 墙钟耗时保留在 timings，供性能排查；不再冒充 API 的 duration
+        wallMs: Math.round(virtualClock.realTimeMs() - realStart),
         avgPumpFps: pumpMs > 0 ? Math.round((frameIndex / (pumpMs / 1000)) * 10) / 10 : 0
       }
 
       const result = {
         success: true,
-        duration: (virtualClock.realTimeMs() - realStart) / 1000,
+        duration: videoDurationMs / 1000,
         frameCount: frameIndex,
         outputSize: saveResult.fileSize,
         timings
@@ -2061,7 +2185,9 @@ export default class VideoExportManager {
                 this.talkWindowOpenMs(snippets, i),
                 i,
                 Math.max(0, getLayoutRunningEndMs(this.app) - nowMs),
-                Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
+                Math.max(0, getMotionSettledEndMs(this.app) - nowMs),
+                undefined,
+                (snippet.delay || 0) * 1000
               )
             : Math.max(Math.round((snippet.delay || 0) * 1000), estimateSnippetDuration(snippet)))
 
@@ -2263,10 +2389,16 @@ export default class VideoExportManager {
       capturerStats: capturer.stats
     })
 
+    const resultVideoDurationMs = (capturedFrames / Math.max(1, options.fps)) * 1000
     const result: ExportResult = {
       success: true,
-      duration: (performance.now() - captureStartTime) / 1000,
-      frameCount: capturedFrames
+      duration: resultVideoDurationMs / 1000,
+      frameCount: capturedFrames,
+      timings: {
+        frames: capturedFrames,
+        videoDurationMs: Math.round(resultVideoDurationMs),
+        wallMs: Math.round(performance.now() - captureStartTime)
+      }
     }
     this.lastSinkKind = 'frames'
     this.lastEncoderLabel = 'ffmpeg'

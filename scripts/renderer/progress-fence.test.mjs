@@ -775,11 +775,12 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
   const timing = load(path.join(root, 'src/common/official/timing.ts'))
   const modelMock = {
     isMotionLooping: (m) => m === 'loop',
-    getMotionDurationMs: (m) => (m === 'nod' ? 4000 : 0)
+    getMotionDurationMs: (m) => (m === 'nod' ? 4000 : m === 'relief' ? 3000 : 0)
   }
   const appMock = {
     getModelById: () => modelMock,
-    layerModel: { isModelVisible: () => true, isModelShown: () => true }
+    layerModel: { isModelVisible: () => true, isModelShown: () => true },
+    storyManager: { snippets: [] }
   }
   const VideoExportManager = exportMod.default
   const mgr = new VideoExportManager(appMock)
@@ -811,6 +812,51 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
     ),
     3350
   )
+
+  // 与 Talk 同帧启动的 Now Motion（delay=1.5s）在语音结束后仍在播：
+  // 官方 Gate 等它到 4.5s，再停 0.5s = 300 帧。
+  appMock.storyManager.snippets = [
+    { type: 'Talk', wait: true, delay: 0, data: { content: 'あ'.repeat(20), modelId: 1 } },
+    {
+      type: 'Motion',
+      wait: false,
+      delay: 1.5,
+      data: { modelId: 1, motion: 'relief' }
+    }
+  ]
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ'.repeat(20), ttsText: '', modelId: 1, voiceDurationMs: 4000 },
+        0,
+        0,
+        0,
+        0,
+        0,
+        undefined,
+        0
+      )
+    ),
+    5000
+  )
+  // 延迟晚于 Talk 自身结束的动作不会把这一句拖长。
+  appMock.storyManager.snippets[1].delay = 10
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ'.repeat(20), ttsText: '', modelId: 1, voiceDurationMs: 4000 },
+        0,
+        0,
+        0,
+        0,
+        0,
+        undefined,
+        0
+      )
+    ),
+    4566.667
+  )
+  appMock.storyManager.snippets = []
 
   // talkWindowOpenMs reopens after HideTalk or closeWindowOnFinish
   const seq = [

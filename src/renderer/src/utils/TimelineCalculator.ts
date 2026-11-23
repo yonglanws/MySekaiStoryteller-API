@@ -123,7 +123,7 @@ const SNIPPET_TYPE_DEFAULTS: Record<string, number> = {
   LayoutClear: HIDE_IN_PLACE_TOTAL_MS,
   Move: MOVE_DURATION_NORMAL_MS,
   Motion: 0,
-  HideTalk: 1,
+  HideTalk: 0,
   DoParam: 400,
   PlaySe: 0,
   StopSe: 0,
@@ -244,9 +244,15 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
       }
     }
     case 'Talk': {
-      const { content, ttsText, voice } = snippet.data
+      const { content, ttsText, voice, voiceDurationMs } = snippet.data as {
+        content: string
+        ttsText?: string
+        voice?: string
+        voiceDurationMs?: number
+      }
       const estimated = calculateTalkDurationMs(content, 0, ttsText, {
-        hasVoice: Boolean(voice)
+        hasVoice: Boolean(voice),
+        voiceDurationMs
       })
       return {
         durationMs: estimated,
@@ -394,19 +400,13 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'ChangeLayoutMode':
     case 'ChangeBackgroundImage':
     case 'StopShake':
-    case 'AmbientColor': {
-      // 只改状态/异步切换背景；实际片段不阻塞（保留 1ms 让旧时间线检查通过）。
-      return {
-        durationMs: 1,
-        source: 'data_duration',
-        detail: `${snippet.type}: state-only cue`
-      }
-    }
+    case 'AmbientColor':
     case 'HideTalk': {
+      // 只改状态/同步关闭对话框：官方在 act 帧完成，不占故事帧。
       return {
-        durationMs: SNIPPET_TYPE_DEFAULTS.HideTalk,
-        source: 'type_default',
-        detail: `HideTalk: type default=${SNIPPET_TYPE_DEFAULTS.HideTalk}ms`
+        durationMs: 0,
+        source: 'data_duration',
+        detail: `${snippet.type}: zero-duration state cue`
       }
     }
     case 'Move':
@@ -576,10 +576,16 @@ function crossValidate(
   if (snippet.type === 'Talk') {
     const ttsDurationMs = ttsMapping?.durationMs ?? 0
     const hasTTS = Number.isFinite(ttsDurationMs) && ttsDurationMs > 0
-    const { content, ttsText, voice } = snippet.data
+    const { content, ttsText, voice, voiceDurationMs } = snippet.data as {
+      content: string
+      ttsText?: string
+      voice?: string
+      voiceDurationMs?: number
+    }
     return {
       finalDurationMs: calculateTalkDurationMs(content, ttsDurationMs, ttsText, {
         hasVoice: Boolean(voice),
+        voiceDurationMs,
         windowOpenMs,
         layoutRunningMs,
         silentHoldMs
