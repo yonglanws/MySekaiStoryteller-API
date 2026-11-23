@@ -102,7 +102,10 @@ export function computeBgmVolumeTweenBuffer(
   let cursor = 0
 
   for (const tw of sorted) {
-    const start = Math.max(cursor, Math.min(totalSamples, Math.round((tw.timeMs / 1000) * sampleRate)))
+    const start = Math.max(
+      cursor,
+      Math.min(totalSamples, Math.round((tw.timeMs / 1000) * sampleRate))
+    )
     for (let i = cursor; i < start; i++) gains[i] = currentVol
 
     const durSamples = Math.max(0, Math.round((tw.durationMs / 1000) * sampleRate))
@@ -370,7 +373,12 @@ export class AudioMuxer {
   private async mixIntoStereoBuffers(
     outputDuration: number,
     bgmBuffer?: AudioBuffer
-  ): Promise<{ leftBuffer: Float32Array; rightBuffer: Float32Array; totalSamples: number; sampleRate: number }> {
+  ): Promise<{
+    leftBuffer: Float32Array
+    rightBuffer: Float32Array
+    totalSamples: number
+    sampleRate: number
+  }> {
     const sampleRate = 48000
     const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
     const leftBuffer = new Float32Array(totalSamples)
@@ -380,8 +388,16 @@ export class AudioMuxer {
     const seSpans = this.mixStorySe(leftBuffer, rightBuffer, totalSamples, sampleRate)
 
     if (this.bgmConfig?.enabled) {
-      const duckGains = computeBgmDuckGainBuffer(totalSamples, sampleRate, [...voiceSpans, ...seSpans])
-      const tweenGains = computeBgmVolumeTweenBuffer(totalSamples, sampleRate, this.bgmVolumeTweens, 1)
+      const duckGains = computeBgmDuckGainBuffer(totalSamples, sampleRate, [
+        ...voiceSpans,
+        ...seSpans
+      ])
+      const tweenGains = computeBgmVolumeTweenBuffer(
+        totalSamples,
+        sampleRate,
+        this.bgmVolumeTweens,
+        1
+      )
 
       if (this.bgmCues.length > 0) {
         this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate, duckGains, tweenGains)
@@ -424,7 +440,8 @@ export class AudioMuxer {
     const bgmChannels = bgmBuffer.numberOfChannels
     const bgmTotalSamples = bgmBuffer.getChannelData(0).length
     if (bgmTotalSamples <= 0) return
-    const volume = (this.bgmConfig?.volume ?? 1.0) * ACF_GAIN_BGM * (bgmChannels === 1 ? MONO_PAN_GAIN : 1)
+    const volume =
+      (this.bgmConfig?.volume ?? 1.0) * ACF_GAIN_BGM * (bgmChannels === 1 ? MONO_PAN_GAIN : 1)
 
     const bgmLeftData = bgmBuffer.getChannelData(0)
     const bgmRightData = bgmChannels > 1 ? bgmBuffer.getChannelData(1) : bgmLeftData
@@ -450,7 +467,8 @@ export class AudioMuxer {
       typeof cue.loopEndSample === 'number' &&
       cue.loopEndSample > cue.loopStartSample
     ) {
-      const ratio = cue.sourceSampleRate && cue.sourceSampleRate > 0 ? sampleRate / cue.sourceSampleRate : 1
+      const ratio =
+        cue.sourceSampleRate && cue.sourceSampleRate > 0 ? sampleRate / cue.sourceSampleRate : 1
       const s = Math.max(0, Math.round(cue.loopStartSample * ratio))
       const e = Math.min(sourceLength, Math.round(cue.loopEndSample * ratio))
       if (e > s) return { loopStart: s, loopEnd: e }
@@ -521,7 +539,9 @@ export class AudioMuxer {
     }
 
     const sorted = [...this.bgmCues].sort((a, b) => a.timeMs - b.timeMs)
-    const starts = sorted.map((c) => Math.max(0, Math.min(totalSamples, Math.round((c.timeMs / 1000) * sampleRate))))
+    const starts = sorted.map((c) =>
+      Math.max(0, Math.min(totalSamples, Math.round((c.timeMs / 1000) * sampleRate)))
+    )
     let segments = 0
     for (let idx = 0; idx < sorted.length; idx++) {
       const cue = sorted[idx]
@@ -533,12 +553,15 @@ export class AudioMuxer {
       const pan = isMono ? MONO_PAN_GAIN : 1
       const start = starts[idx]
       const next = sorted[idx + 1]
-      const rawFadeOut = next ? Math.min(totalSamples - start, Math.round((Math.max(0, next.fadeMs) / 1000) * sampleRate)) : 0
+      const rawFadeOut = next
+        ? Math.min(totalSamples - start, Math.round((Math.max(0, next.fadeMs) / 1000) * sampleRate))
+        : 0
       const end = Math.min(totalSamples, (next ? starts[idx + 1] : totalSamples) + rawFadeOut)
       if (end <= start) continue
 
       const duration = end - start
-      const fadeIn = cue.fadeMs > 0 ? Math.min(duration, Math.round((cue.fadeMs / 1000) * sampleRate)) : 0
+      const fadeIn =
+        cue.fadeMs > 0 ? Math.min(duration, Math.round((cue.fadeMs / 1000) * sampleRate)) : 0
       const fadeOut = Math.min(rawFadeOut, duration)
       const cueVol = (cue.volume ?? 1) * pan * masterGain
       const { loopStart, loopEnd } = this.resolveCueLoopSamples(cue, sampleRate, source0.length)
@@ -793,6 +816,65 @@ export class AudioMuxer {
 
     this.logger.info(`Int16 interleaved PCM: samples=${totalSamples}, bytes=${pcm.byteLength}`)
     return pcm
+  }
+
+  /**
+   * 流式混音：仍复用一次立体声 Float32 混音（峰值 = 2×Float32 全片），
+   * 但按块转成 Int16 交给调用方边写 WAV，避免再分配整段 Int16 + WAV 两份缓冲。
+   * 30 分钟 48kHz 立体声的峰值额外内存从约 1.0GB 降到约 0.69GB（= 2×Int16 全片）。
+   */
+  async *mixToInt16Chunks(
+    outputDuration: number,
+    bgmBuffer?: AudioBuffer,
+    chunkSamples = 240_000
+  ): AsyncGenerator<Int16Array> {
+    this.logger.info(
+      `Mixing audio (streaming int16): outputDuration=${outputDuration}ms, tracks=${this.audioTracks.length}, hasBGM=${!!bgmBuffer}`
+    )
+    const { leftBuffer, rightBuffer, totalSamples } = await this.mixIntoStereoBuffers(
+      outputDuration,
+      bgmBuffer
+    )
+    const chunk = Math.max(1, Math.floor(chunkSamples))
+    for (let start = 0; start < totalSamples; start += chunk) {
+      const end = Math.min(totalSamples, start + chunk)
+      const pcm = new Int16Array((end - start) * 2)
+      for (let i = start; i < end; i++) {
+        let left = leftBuffer[i]
+        let right = rightBuffer[i]
+        left = left < -1 ? -1 : left > 1 ? 1 : left
+        right = right < -1 ? -1 : right > 1 ? 1 : right
+        pcm[(i - start) * 2] = left < 0 ? left * 0x8000 : left * 0x7fff
+        pcm[(i - start) * 2 + 1] = right < 0 ? right * 0x8000 : right * 0x7fff
+      }
+      yield pcm
+      // 让出微任务，避免长时间同步混音阻塞渲染帧泵
+      await Promise.resolve()
+    }
+    this.logger.info(
+      `Streaming int16 PCM complete: samples=${totalSamples}, bytes=${totalSamples * 4}`
+    )
+  }
+
+  /** 44 字节 WAV 头（PCM 16bit），总样本数由时长决定，可先写头再流式追加数据。 */
+  createWavHeader(outputDuration: number, sampleRate = 48000, numChannels = 2): ArrayBuffer {
+    const bitDepth = 16
+    const bytesPerSample = bitDepth / 8
+    const blockAlign = numChannels * bytesPerSample
+    const totalSamples = Math.ceil((Math.max(0, outputDuration) / 1000) * sampleRate)
+    const dataSize = totalSamples * blockAlign
+    const totalSize = 44 + dataSize
+    const header = new ArrayBuffer(44)
+    this.writeWavHeader(
+      new DataView(header),
+      totalSize,
+      sampleRate,
+      numChannels,
+      blockAlign,
+      bitDepth,
+      dataSize
+    )
+    return header
   }
 
   /** 把 Int16 交错 PCM 包装成 16bit WAV（44 字节头 + 数据） */

@@ -26,7 +26,18 @@ export default class AnimationManager {
   public static exportSpeedMultiplier: number = 1
   public static exportTargetFPS: number = 60
   public static exportEncodeFPS: number = 60
+  /**
+   * 测试专用：非 null 时导出 in_ticker 回退到该间隔的 setTimeout 步进。
+   * 生产导出始终为 null，由帧泵的 1/60 故事步统一驱动。
+   */
+  public static testExportStepIntervalMs: number | null = null
+  /** 帧泵是否已接管导出步进；未接管时（直调片段的测试/预览）回退 setTimeout。 */
+  public static exportStepDriverActive: boolean = false
   private static isExportMode: boolean = false
+
+  public static setExportStepDriver(active: boolean): void {
+    this.exportStepDriverActive = active
+  }
 
   /**
    * 导出模式的动画步进订阅：由帧泵在每个 1/60 故事步调用一次 dispatchExportStep，
@@ -84,10 +95,64 @@ export default class AnimationManager {
     when_finish: (ticker: Ticker) => boolean
   ): Promise<void> {
     if (AnimationManager.isExportMode) {
-      await AnimationManager.in_ticker_export(on_step, when_finish)
+      if (
+        AnimationManager.testExportStepIntervalMs !== null ||
+        !AnimationManager.exportStepDriverActive
+      ) {
+        await AnimationManager.in_ticker_settimeout(on_step, when_finish)
+      } else {
+        await AnimationManager.in_ticker_export(on_step, when_finish)
+      }
     } else {
       await AnimationManager.in_ticker_raf(on_step, when_finish)
     }
+  }
+
+  /** 仅测试替身使用；生产导出不会走这里。 */
+  private static async in_ticker_settimeout(
+    on_step: (ticker: Ticker) => void,
+    when_finish: (ticker: Ticker) => boolean
+  ): Promise<void> {
+    const interval = Math.max(
+      1,
+      AnimationManager.testExportStepIntervalMs ??
+        Math.max(Math.round(1000 / AnimationManager.exportTargetFPS), 8)
+    )
+    let lastTime = performance.now()
+    let startTime = lastTime
+    const maxDuration = 60_000
+
+    await new Promise<void>((resolve) => {
+      const step = (): void => {
+        const now = performance.now()
+        if (now < lastTime) lastTime = now
+        if (now < startTime) startTime = now
+        const delta = Math.max(0, now - lastTime)
+        lastTime = now
+
+        const fakeTicker = {
+          elapsedMS: delta,
+          deltaTime: delta * 0.06,
+          lastTime: now
+        } as Ticker
+
+        on_step(fakeTicker)
+        if (when_finish(fakeTicker)) {
+          resolve()
+          return
+        }
+        if (now - startTime > maxDuration) {
+          AnimationManager.logger.warn(
+            `in_ticker test step exceeded ${maxDuration}ms, forcing completion`
+          )
+          resolve()
+          return
+        }
+        setTimeout(step, interval)
+      }
+
+      setTimeout(step, interval)
+    })
   }
 
   /** 导出模式：注册到帧泵的故事步；每次 dispatch 用同一个 Ticker.shared 步进。 */

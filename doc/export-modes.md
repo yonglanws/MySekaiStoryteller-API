@@ -103,10 +103,15 @@ WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率�
 - **异步口型预热与 PCM 复用**：每条 `Talk` 合成完成时立即触发 `onTtsReady`，并配合 `prewarmReadyLipSync` 提前 3 句通过 `OfflineAudioContext(1, 1, 48000)` 解码音频包络写入 `lipSyncCache`，同时把 48kHz 声道数据缓存在 `pcmCache`；收尾混音时 `AudioMuxer.mixToInt16Interleaved` + `encodeWavFromInt16` 直接复用已解码 PCM，消除重复解码与多余等待。
 - **`ttsMode: serial`**：先调用 `waitForTTSPipeline()` 完成全部语音合成与口型预解码后再开启渲染帧泵，适合共享单槽位 GPU TTS（如低显存单卡同时跑 Irodori 与高并发 WebGL）以避免争抢算力。
 
-### 虚拟时钟、30fps 单步推进与热池复用
+### 虚拟时钟、固定 1/60 故事步与热池复用
 
-- **虚拟时钟单步推进**：正确配置字段是 **`video.fastFps`**（默认 `30`），不是 `exportFastFps`。`VirtualClockController` 安装后会将 `Ticker.shared.maxFPS` 置为 `0` 避免与 FakeTimers 帧间隔撞车；在默认 `30fps`（`frameMs ≈ 33.33ms <= 50ms`）下每帧仅推进 **1 个虚拟 tick**（`subTicks = 1`），消除双倍 `tickAsync` 开销，Live2D Physics 仍按 `_physicsRig.fps` 子步积分，`AnimationManager` 也在区间内完成全部补间。
+- **固定 1/60 故事步**：正确配置字段是 **`video.fastFps`**（默认 `30`），不是 `exportFastFps`。`VirtualClockController` 安装后会把 `Ticker.shared.autoStart` 置为 `false` 并 `stop()`，导出期间 rAF 不再驱动模型；帧泵每个故事步显式调用一次 `Ticker.shared.update(该步虚拟时刻)`，保证 `elapsedMS` 恒为 `1000/60`、`deltaTime` 恒为 1。30fps 每输出帧 2 步、60fps 1 步、25fps 按 `2,2,3,2,3` 循环（`floor((k+1)×60/fps) − floor(k×60/fps)`，不使用 `ceil`）。
+- **帧对齐**：输出帧 n 对应故事时间 `n/fps`（帧 0 在任何故事步之前渲染）；30fps 即故事帧 `2n`。24/25fps 的余量按连续量在相邻两个 1/60 故事步之间插值（Live2D 参数与模型容器的位置/缩放/透明度），阶梯量保持前一帧；30/60fps 余量为 0，不执行任何插值。
+- **单一时钟**：`AnimationManager` 不再为导出启动独立的 17ms `setTimeout` 步进；补间与动作等待全部注册到帧泵的故事步（测试替身可用 `testExportStepIntervalMs` 复现旧节奏）。
+- **收尾并行与流式音频**：片段全部落定后、帧泵还在追尾帧时就开始混音；WAV 先写 44 字节头，再按块追加 Int16 PCM 到临时文件，不再额外分配整段 Int16 + WAV（30 分钟片峰值额外内存约为全片 16bit 立体声的 2 倍）。
 - **热池页面跳检与时钟基线重置**：
+  - 常驻 `RenderPool` 页面首次通过 WebGL 与非黑屏校验后记入 `VideoExportManager.warmValidatedApps`，后续复用且 WebGL 上下文健康时直接跳过重复的 `readPixels` / 着色器校验；5 帧 WebCodecs 探测结果也按 `App` 实例缓存在 `webCodecsProbeCache`。
+  - 虚拟时钟安装会将页面 `performance.now()` 重置到新起点，导致相邻导出间时钟向后跳变。Wave 4 通过 `resetStageTiming` / `resetClockBaselines` 与 `AdvancedModel.resetAllClockBaselines` 统一重置舞台计时、`lastNaturalUpdateMs`、`currentBodyStartedAt`、眨眼与各通道队列时间戳，并在 `AnimationManager` 与 `TalkSnippet` 中防御时钟回退。
   - 常驻 `RenderPool` 页面首次通过 WebGL 与非黑屏校验后记入 `VideoExportManager.warmValidatedApps`，后续复用且 WebGL 上下文健康时直接跳过重复的 `readPixels` / 着色器校验；5 帧 WebCodecs 探测结果也按 `App` 实例缓存在 `webCodecsProbeCache`。
   - 虚拟时钟安装会将页面 `performance.now()` 重置到新起点，导致相邻导出间时钟向后跳变。Wave 4 通过 `resetStageTiming` / `resetClockBaselines` 与 `AdvancedModel.resetAllClockBaselines` 统一重置舞台计时、`lastNaturalUpdateMs`、`currentBodyStartedAt`、眨眼与各通道队列时间戳，并在 `AnimationManager` 与 `TalkSnippet` 中防御时钟回退。
 - **Live2D 动作保持与面部参数隔离**：
@@ -202,12 +207,29 @@ API 返回的 `duration` 单位是 **秒**，表示渲染页处理此次导出�
 | `snapshotMs`            | 抓帧 / 提交 WebCodecs 编码或 JPEG 队列（可含背压等待）的耗时                       |
 | `ttsWaitMs`             | 片段执行显式等待 TTS 就绪与口型解码的墙钟耗时，非后台全部 TTS 耗时之和             |
 | `encodeMs`              | 页内编码器 flush/finalize 或 JPEG 管道队列排空时间；不含宿主 ffmpeg 进程后处理     |
-| `audioMs`               | 离线混音（复用 `pcmCache`）、WAV 编码与临时音频写盘耗时                            |
+| `audioMs`               | 混音与流式 WAV 写盘在帧泵结束后的剩余等待（混音已与追尾帧并行）                    |
 | `invokeMs`              | 宿主收尾调用耗时（WebCodecs / `image2pipe` 为 remux；磁盘帧批为 ffmpeg 编码+合轨） |
 | `frames` / `avgPumpFps` | 实际帧泵输出帧数，以及 `frames / (pumpMs / 1000)`；不是输出播放 fps                |
 
 分项存在包含关系和并发重叠，不能把全部 `timings` 相加当作总耗时。
 `frameCount` 由时间轴与帧泵统计得出；需要真实成片时长、平均帧率和文件大小时，请检查最终 MP4 元数据。
+
+### 性能实测（同机、同一 demo 短片）
+
+测量条件：1920x1080@30fps、`fastFps: 30`、4 workers、Intel Iris Xe、WebCodecs H.264、475 帧、同一 `story.json`。
+前后各取连续两次稳定值：
+
+| 指标              | 改前（rAF 步进） | 改后（固定 1/60 步） | 变化     |
+| ----------------- | ---------------- | -------------------- | -------- |
+| 墙钟              | 20.9s            | 17.1s                | -18%     |
+| API `duration`    | 16.58s           | 12.86s               | -22%     |
+| `pumpMs`          | 15020ms          | 11188ms              | -25.5%   |
+| `tickMs`          | 13746ms          | 9557ms               | -30%     |
+| `avgPumpFps`      | 31.6             | 42.5                 | +34.5%   |
+| `audioMs`（收尾） | 262ms            | 105ms                | -60%     |
+| 文件大小          | 11.33MB          | 11.23MB              | 基本不变 |
+
+诊断报告现在包含 `encoder`（如 `webcodecs-h264`）、`segments`、`convert`（`browser` / `ffmpeg`）与 `color`（`bt709/tv`）；`.log.json`、`.log`、`.report.txt` 三个文件异步并行写盘，不再同步阻塞宿主主线程。
 
 ## 旧配置迁移
 
@@ -215,4 +237,4 @@ API 返回的 `duration` 单位是 **秒**，表示渲染页处理此次导出�
 - 更早期的 `video.recordBitrate`、`recordStreamCopy`、`recordBitrateOvershoot`、`recordKeyframeIntervalSec`、`recordCaptureFps` 及对应 `MSS_RECORD_*` 环境变量已无读取入口；若旧配置写了 `exportFastFps`，请改为 `fastFps`。
 - `video.ttsMode` 默认已从 `serial` 切换为 **`concurrent`**；若共享单卡且遇到 TTS 争抢，请显式写 `ttsMode: serial`（或 `MSS_TTS_MODE=serial`）。
 
-源码依据：`src/host/config.ts`、`src/shared/ffmpeg.ts`、`src/renderer/src/app/App.ts`、`src/renderer/src/managers/VideoExportManager.ts`、`src/renderer/src/managers/video-export/{ConcurrentExportPipeline,WebCodecsMp4Encoder,JpegFrameSink,VirtualClockController}.ts`。
+源码依据：`src/host/config.ts`、`src/shared/ffmpeg.ts`、`src/host/exportDiagnostics.ts`、`src/renderer/src/app/App.ts`、`src/renderer/src/managers/{VideoExportManager,AnimationManager}.ts`、`src/renderer/src/managers/video-export/{ConcurrentExportPipeline,WebCodecsMp4Encoder,JpegFrameSink,VirtualClockController,FrameInterpolator,AudioMuxer}.ts`。

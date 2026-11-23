@@ -25,7 +25,7 @@ function talk(content = twentyChars, { delay = 0, ...data } = {}) {
 
 // Only renderer/platform boundaries are replaced. The timing, snippet lifecycle,
 // scheduler, typewriter and envelope algorithms below all execute production TS.
-function fixture(t) {
+function fixture(t, { driveExportSteps = true } = {}) {
   const context = vm.createContext({
     console,
     setTimeout,
@@ -75,7 +75,17 @@ function fixture(t) {
   }
   const modules = new Map()
   const mocks = new Map([
-    ['pixi.js', { Text, AlphaFilter, TextStyle: class {}, Ticker: { shared: {} } }],
+    [
+      'pixi.js',
+      {
+        Text,
+        AlphaFilter,
+        TextStyle: class {},
+        Ticker: {
+          shared: { elapsedMS: 1000 / 60, deltaMS: 1000 / 60, deltaTime: 1, lastTime: 0 }
+        }
+      }
+    ],
     ['pixi-live2d-display-advanced', { Cubism4InternalModel, Cubism2InternalModel }],
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new Logger() }]
   ])
@@ -121,7 +131,10 @@ function fixture(t) {
   }
   const animation = load('managers/AnimationManager.ts').default
   animation.setExportMode(true)
-  animation.exportTargetFPS = 125 // 8ms ticks exactly divide UIText's 80ms/character.
+  // 直调片段的测试沿用原有的 125fps setTimeout 步进；完整帧泵测试由
+  // advanceStorySteps 驱动，关闭测试替身避免双重步进。
+  animation.exportTargetFPS = 125
+  animation.testExportStepIntervalMs = driveExportSteps ? 8 : null
   const UIText = load('components/UIText.ts').default
   const uiText = new UIText(1920, 1080)
   const abort = new AbortController()
@@ -821,11 +834,14 @@ function exportFixture(
     fastFps,
     bgmEnabled = false,
     onClockTick,
+    onStorySteps,
+    onRender,
     onMixAudioTracks,
-    onDecodeAudioData
+    onDecodeAudioData,
+    driveExportSteps = false
   }
 ) {
-  const f = fixture(t)
+  const f = fixture(t, { driveExportSteps })
   const planned = []
   const patchCalls = []
   const { applyTalkPatch } = f.load('managers/video-export/talkPatch.ts')
@@ -874,6 +890,7 @@ function exportFixture(
       return f.clock.tickAsync(ms)
     }
     advanceStorySteps = async (steps, onStep) => {
+      onStorySteps?.(steps)
       for (let i = 0; i < steps; i++) {
         onClockTick?.(1000 / 60)
         await f.clock.tickAsync(1000 / 60)
@@ -933,7 +950,10 @@ function exportFixture(
   }
   const Manager = f.load('managers/VideoExportManager.ts').default
   const canvas = { width: 1920, height: 1080, addEventListener: noop, removeEventListener: noop }
-  f.app.pixiApplication = { ticker: { start: noop, stop: noop }, render: noop }
+  f.app.pixiApplication = {
+    ticker: { start: noop, stop: noop },
+    render: () => onRender?.(f.clock.now)
+  }
   f.app.ttsManager = {
     isTTSEnabled: () => enabled,
     checkTTSAvailability: async () => true,
@@ -1050,6 +1070,7 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
     fps: 60,
     fastFps: 30,
     bgmEnabled: true,
+    driveExportSteps: false,
     onClockTick: (ms) => tickDeltas.push(ms),
     onMixAudioTracks: (ms) => mixedDurations.push(ms)
   })
@@ -1063,8 +1084,8 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   )
   assert.equal(
     tickDeltas.length,
-    2 * resNoEnvelope.frameCount,
-    '30fps must consume exactly 2 story steps per output frame'
+    2 * (resNoEnvelope.frameCount - 1),
+    '30fps must consume 2 story steps per frame transition (frame n = 2n steps)'
   )
   // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
   const snippetDur = Math.round(f.planned[0])
@@ -1083,6 +1104,57 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   assert.ok(
     mixedDurations[0] >= snippetDur + 500,
     `Expected accurate 500ms ending envelope tail, got ${mixedDurations[0]}`
+  )
+})
+
+test('frame n renders at story time n/fps; frame 0 happens before any story step', async (t) => {
+  const renderTimes = []
+  const f = exportFixture(t, {
+    snippets: [talk('あ'.repeat(4))],
+    enabled: false,
+    fps: 30,
+    fastFps: 30,
+    onRender: (ms) => renderTimes.push(ms)
+  })
+  const res = await f.export('fast')
+  assert.equal(res.success, true)
+  const pumpRenders = renderTimes.slice(-res.frameCount)
+  assert.equal(pumpRenders.length, res.frameCount)
+  assert.equal(pumpRenders[0], 0, 'frame 0 must render at story time 0 (no advanced animation)')
+  for (const n of [1, 15, 30]) {
+    assert.ok(
+      Math.abs(pumpRenders[n] - (n * 1000) / 30) < 2,
+      `frame ${n} must render at ${(n * 1000) / 30}ms, got ${pumpRenders[n]}`
+    )
+  }
+})
+
+test('25fps consumes 2,2,3,2,3 story steps per frame (no ceil), every step exactly 1/60', async (t) => {
+  const tickDeltas = []
+  const stepCalls = []
+  const f = exportFixture(t, {
+    snippets: [talk('あ'.repeat(4))],
+    enabled: false,
+    fps: 25,
+    fastFps: 25,
+    onClockTick: (ms) => tickDeltas.push(ms),
+    onStorySteps: (steps) => stepCalls.push(steps)
+  })
+  const res = await f.export('fast')
+  assert.equal(res.success, true)
+  assert.deepEqual(
+    stepCalls.slice(0, 5),
+    [2, 2, 3, 2, 3],
+    '25fps must distribute 60 steps over 25 frames by remainder, never ceil'
+  )
+  assert.ok(
+    tickDeltas.every((ms) => Math.abs(ms - 1000 / 60) < 1e-6),
+    `every story step must be 1/60s, got ${Math.min(...tickDeltas)}..${Math.max(...tickDeltas)}`
+  )
+  assert.equal(
+    tickDeltas.length,
+    Math.floor(((res.frameCount - 1) * 60) / 25),
+    'frame n maps to floor(n×60/25) story steps'
   )
 })
 

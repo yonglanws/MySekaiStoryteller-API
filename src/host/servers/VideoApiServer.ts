@@ -7,7 +7,7 @@ import path from 'node:path'
 import { StorySchema, StoryData } from '../../common/types/Story'
 import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 import type { VideoSettings } from '../config'
-import { writeExportDiagnostics } from '../exportDiagnostics'
+import { writeExportDiagnosticsAsync } from '../exportDiagnostics'
 import { checkEncodeSize, detectAvailableGpuEncoder } from '../../shared/ffmpeg'
 
 export interface ApiExportRequest {
@@ -975,9 +975,9 @@ export class VideoApiServer {
     return { taskId, outputPath, exportPromise }
   }
 
-  private finalizeExportResult(
+  private async finalizeExportResult(
     result: ApiExportResponse
-  ): ApiExportResponse & { videoPath: string; fileSize: number; downloadUrl: string } {
+  ): Promise<ApiExportResponse & { videoPath: string; fileSize: number; downloadUrl: string }> {
     if (!result.success || !result.videoPath) {
       throw new Error(result.message || 'Export failed')
     }
@@ -994,7 +994,7 @@ export class VideoApiServer {
     let reportPath: string | undefined
     if (result.diagnostics) {
       try {
-        const written = writeExportDiagnostics(normalizedPath, result.diagnostics)
+        const written = await writeExportDiagnosticsAsync(normalizedPath, result.diagnostics)
         logPath = written.textPath
         logJsonPath = written.jsonPath
         reportPath = written.reportPath
@@ -1062,7 +1062,7 @@ export class VideoApiServer {
         })
       ])
 
-      return this.finalizeExportResult(result)
+      return await this.finalizeExportResult(result)
     } catch (error) {
       this.cancelExport(taskId)
       throw error
@@ -1158,8 +1158,8 @@ export class VideoApiServer {
       this.exportTimers.set(taskId, timer)
 
       void exportPromise
-        .then((result) => {
-          const finalized = this.finalizeExportResult(result)
+        .then(async (result) => {
+          const finalized = await this.finalizeExportResult(result)
           this.saveTaskRecord(taskId, {
             status: 'completed',
             elapsedSeconds: (Date.now() - startedAt) / 1000,
@@ -1220,7 +1220,7 @@ export class VideoApiServer {
       ])
 
       this.logger.info(`[API] Export promise resolved: taskId=${taskId}, success=${result.success}`)
-      const finalized = this.finalizeExportResult(result)
+      const finalized = await this.finalizeExportResult(result)
       this.saveTaskRecord(taskId, {
         status: 'completed',
         elapsedSeconds: (Date.now() - startedAt) / 1000,

@@ -115,7 +115,9 @@ test('ConcurrentExportPipeline skips punctuation-only Talk cleanly with 0 failur
   })
 
   const { load } = createRendererLoader(
-    new Map([[path.join(rendererRoot, 'utils/Logger.ts'), { __esModule: true, default: loggerFactory }]])
+    new Map([
+      [path.join(rendererRoot, 'utils/Logger.ts'), { __esModule: true, default: loggerFactory }]
+    ])
   )
   const { ConcurrentExportPipeline } = load('managers/video-export/ConcurrentExportPipeline.ts')
 
@@ -178,9 +180,11 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
       electron: {
         ipcRenderer: {
           invoke: async (ch) => {
-            if (ch === 'electron:frames-stream-start') return { id: 'pipe-1', videoPath: '/tmp/vid.mp4' }
+            if (ch === 'electron:frames-stream-start')
+              return { id: 'pipe-1', videoPath: '/tmp/vid.mp4' }
             if (ch === 'electron:frames-stream-finish') return { videoPath: '/tmp/vid.mp4' }
-            if (ch === 'electron:api-remux-video-from-files') return { success: true, fileSize: 999 }
+            if (ch === 'electron:api-remux-video-from-files')
+              return { success: true, fileSize: 999 }
             if (ch === 'electron:write-temp-file') return '/tmp/audio.wav'
             return { success: true }
           }
@@ -207,7 +211,9 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   let mixInt16Calls = 0
 
   const logger = { info: noop, warn: noop, error: noop, debug: noop }
-  const { SnippetTimestampRecorder } = loader.load('managers/video-export/SnippetTimestampRecorder.ts')
+  const { SnippetTimestampRecorder } = loader.load(
+    'managers/video-export/SnippetTimestampRecorder.ts'
+  )
   const { applyTalkPatch } = loader.load('managers/video-export/talkPatch.ts')
 
   mocks.set('pixi.js', {
@@ -223,17 +229,29 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   mocks.set(path.join(rendererRoot, 'utils/Logger.ts'), { __esModule: true, default: () => logger })
   mocks.set(path.join(rendererRoot, 'utils/WebGLContextValidator.ts'), {
     webGLValidator: {
-      validateCanvas: async () => ({ success: true, errors: [], contextInfo: { renderer: 'TestGPU' } }),
+      validateCanvas: async () => ({
+        success: true,
+        errors: [],
+        contextInfo: { renderer: 'TestGPU' }
+      }),
       validateModelRendering: async () => ({ success: true, averageBrightness: 80 })
     }
   })
   mocks.set(path.join(rendererRoot, 'utils/FrameContentValidator.ts'), {
-    frameValidator: { reset: noop, validateFrame: () => ({ isValid: true, isBlackScreen: false, brightness: 80 }) }
+    frameValidator: {
+      reset: noop,
+      validateFrame: () => ({ isValid: true, isBlackScreen: false, brightness: 80 })
+    }
   })
   mocks.set(path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveBgmUrl: (p) => p })
   mocks.set(path.join(rendererRoot, 'managers/AnimationManager.ts'), {
     __esModule: true,
-    default: { setExportMode: noop, exportSpeedMultiplier: 1, exportTargetFPS: 30, exportEncodeFPS: 30 }
+    default: {
+      setExportMode: noop,
+      exportSpeedMultiplier: 1,
+      exportTargetFPS: 30,
+      exportEncodeFPS: 30
+    }
   })
   mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {
     getLayoutRunningEndMs: () => 0,
@@ -241,11 +259,28 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
     resetStageTiming: noop
   })
   mocks.set('./video-export', {
-    ExportLogger: class { info = noop; warn = noop; error = noop },
-    CheckpointManager: class { clearCheckpoint = noop; hasCheckpoint = () => false },
-    ErrorRecoveryManager: class { reset = noop },
-    ProgressTracker: class { start = noop; update = noop },
-    ExportError: class extends Error { constructor(c, m) { super(m); this.code = c } },
+    ExportLogger: class {
+      info = noop
+      warn = noop
+      error = noop
+    },
+    CheckpointManager: class {
+      clearCheckpoint = noop
+      hasCheckpoint = () => false
+    },
+    ErrorRecoveryManager: class {
+      reset = noop
+    },
+    ProgressTracker: class {
+      start = noop
+      update = noop
+    },
+    ExportError: class extends Error {
+      constructor(c, m) {
+        super(m)
+        this.code = c
+      }
+    },
     ExportErrorCode: { CANCELLED: 'CANCELLED', TIMEOUT: 'TIMEOUT', UNKNOWN: 'UNKNOWN' },
     AudioMuxer: class {
       initialize = async () => {}
@@ -282,7 +317,16 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
       install() {
         virtualClock = FakeTimers.withGlobal(loader.context).install({
           now: 0,
-          toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate']
+          toFake: [
+            'Date',
+            'performance',
+            'setTimeout',
+            'clearTimeout',
+            'setInterval',
+            'clearInterval',
+            'setImmediate',
+            'clearImmediate'
+          ]
         })
       }
       uninstall() {
@@ -302,12 +346,19 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
     }
   })
   mocks.set('./video-export/BgmPlan', {
-    BgmPlan: class { hasStoryFiles = false; hasLoadedFiles = false; hasChanges = false; load = async () => {} }
+    BgmPlan: class {
+      hasStoryFiles = false
+      hasLoadedFiles = false
+      hasChanges = false
+      load = async () => {}
+    }
   })
   mocks.set('./video-export/SePlan', {
     SePlan: class {
       hasChanges = true
-      load = async () => { seLoadCalls++ }
+      load = async () => {
+        seLoadCalls++
+      }
       build = () => []
     }
   })
@@ -332,11 +383,17 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   })
   mocks.set('./video-export/JpegFrameSink', {
     JpegFrameSink: class {
-      get isPipeMode() { return true }
-      get framesDirectory() { return '' }
+      get isPipeMode() {
+        return true
+      }
+      get framesDirectory() {
+        return ''
+      }
       async initialize() {}
       async captureFrame() {}
-      async finish() { return '/tmp/pipe/video.mp4' }
+      async finish() {
+        return '/tmp/pipe/video.mp4'
+      }
       async dispose() {}
     }
   })
@@ -346,7 +403,11 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   const canvas = {
     width: 1280,
     height: 720,
-    getContext: () => ({ isContextLost: () => false, getExtension: () => null, getParameter: () => '' })
+    getContext: () => ({
+      isContextLost: () => false,
+      getExtension: () => null,
+      getParameter: () => ''
+    })
   }
   const app = {
     exporting: false,
@@ -361,22 +422,67 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
       ],
       storyData: { models: [], images: [] }
     },
-    pixiApplication: { view: canvas, ticker: { start: noop, stop: noop }, render: noop, renderer: { render: noop }, stage: {} },
+    pixiApplication: {
+      view: canvas,
+      ticker: { start: noop, stop: noop },
+      render: noop,
+      renderer: { render: noop },
+      stage: {}
+    },
     layerModel: { isModelVisible: () => true },
     layerSpecialEffect: {
-      fadeOut: async (ms, color) => { events.push({ kind: 'sfxFadeOut', ms, color }) }
+      fadeOut: async (ms, color) => {
+        events.push({ kind: 'sfxFadeOut', ms, color })
+      }
     },
-    setOpeningCover: async (ms) => { events.push({ kind: 'setOpeningCover', ms }) },
-    setEndingEnvelope: async (hold, fade) => { events.push({ kind: 'setEndingEnvelope', hold, fade }) },
+    setOpeningCover: async (ms) => {
+      events.push({ kind: 'setOpeningCover', ms })
+    },
+    setEndingEnvelope: async (hold, fade) => {
+      events.push({ kind: 'setEndingEnvelope', hold, fade })
+    },
     ttsManager: {
       isTTSEnabled: () => false,
       checkTTSAvailability: async () => true,
       getBGMConfig: () => ({ enabled: false }),
       getConfig: () => ({ timeoutMs: 90_000 }),
       buildTimelineWithoutTTS: () => [
-        { snippetIndex: 0, snippetType: 'BlackOut', delayStartTimeMs: 0, startTimeMs: 0, durationMs: 0, endTimeMs: 0, ttsDurationMs: 0, hasTTS: false, blocking: true, durationSource: 'fixed' },
-        { snippetIndex: 1, snippetType: 'PlaySe', delayStartTimeMs: 0, startTimeMs: 0, durationMs: 0, endTimeMs: 0, ttsDurationMs: 0, hasTTS: false, blocking: true, durationSource: 'fixed' },
-        { snippetIndex: 2, snippetType: 'BlackOut', delayStartTimeMs: 0, startTimeMs: 0, durationMs: 600, endTimeMs: 600, ttsDurationMs: 0, hasTTS: false, blocking: true, durationSource: 'fixed' }
+        {
+          snippetIndex: 0,
+          snippetType: 'BlackOut',
+          delayStartTimeMs: 0,
+          startTimeMs: 0,
+          durationMs: 0,
+          endTimeMs: 0,
+          ttsDurationMs: 0,
+          hasTTS: false,
+          blocking: true,
+          durationSource: 'fixed'
+        },
+        {
+          snippetIndex: 1,
+          snippetType: 'PlaySe',
+          delayStartTimeMs: 0,
+          startTimeMs: 0,
+          durationMs: 0,
+          endTimeMs: 0,
+          ttsDurationMs: 0,
+          hasTTS: false,
+          blocking: true,
+          durationSource: 'fixed'
+        },
+        {
+          snippetIndex: 2,
+          snippetType: 'BlackOut',
+          delayStartTimeMs: 0,
+          startTimeMs: 0,
+          durationMs: 600,
+          endTimeMs: 600,
+          ttsDurationMs: 0,
+          hasTTS: false,
+          blocking: true,
+          durationSource: 'fixed'
+        }
       ],
       setTimeline: noop,
       clearAudioTracks: noop
@@ -393,8 +499,19 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   }
 
   const mgr = new VideoExportManager(app)
-  assert.equal(mgr.getOpeningCurtainColor([{ type: 'BlackOut', delay: 0, wait: true, data: { color: 'white', duration: 0 } }]), 'white')
-  assert.equal(mgr.getOpeningCurtainColor([{ type: 'Talk', delay: 0, wait: true, data: {} }, { type: 'BlackOut', delay: 0, wait: true, data: {} }]), null)
+  assert.equal(
+    mgr.getOpeningCurtainColor([
+      { type: 'BlackOut', delay: 0, wait: true, data: { color: 'white', duration: 0 } }
+    ]),
+    'white'
+  )
+  assert.equal(
+    mgr.getOpeningCurtainColor([
+      { type: 'Talk', delay: 0, wait: true, data: {} },
+      { type: 'BlackOut', delay: 0, wait: true, data: {} }
+    ]),
+    null
+  )
 
   const res = await mgr.exportVideo({
     fps: 30,
@@ -410,10 +527,18 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
   })
 
   assert.equal(res.success, true)
-  assert.equal(events.filter((e) => e.kind === 'setOpeningCover').length, 0, 'Must pre-cover opening curtain instead of setOpeningCover when BlackOut opens story')
+  assert.equal(
+    events.filter((e) => e.kind === 'setOpeningCover').length,
+    0,
+    'Must pre-cover opening curtain instead of setOpeningCover when BlackOut opens story'
+  )
   assert.deepEqual(events[0], { kind: 'sfxFadeOut', ms: 0, color: 'black' })
   assert.equal(seLoadCalls, 1, 'SePlan.load must run even when TTS & BGM are disabled')
-  assert.equal(mixInt16Calls, 1, 'AudioMuxer.mixToInt16Interleaved must run when only sePlan has changes')
+  assert.equal(
+    mixInt16Calls,
+    1,
+    'AudioMuxer.mixToInt16Interleaved must run when only sePlan has changes'
+  )
 })
 
 test('VideoExportManager mounts model/stage probe for validateModelRendering on 0x000000 background and resets cleanly', async (t) => {
@@ -423,9 +548,11 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       electron: {
         ipcRenderer: {
           invoke: async (ch) => {
-            if (ch === 'electron:frames-stream-start') return { id: 'pipe-2', videoPath: '/tmp/vid2.mp4' }
+            if (ch === 'electron:frames-stream-start')
+              return { id: 'pipe-2', videoPath: '/tmp/vid2.mp4' }
             if (ch === 'electron:frames-stream-finish') return { videoPath: '/tmp/vid2.mp4' }
-            if (ch === 'electron:api-remux-video-from-files') return { success: true, fileSize: 999 }
+            if (ch === 'electron:api-remux-video-from-files')
+              return { success: true, fileSize: 999 }
             return { success: true }
           }
         }
@@ -438,7 +565,9 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
 
   const { mocks } = loader
   const logger = { info: noop, warn: noop, error: noop, debug: noop }
-  const { SnippetTimestampRecorder } = loader.load('managers/video-export/SnippetTimestampRecorder.ts')
+  const { SnippetTimestampRecorder } = loader.load(
+    'managers/video-export/SnippetTimestampRecorder.ts'
+  )
   const { applyTalkPatch } = loader.load('managers/video-export/talkPatch.ts')
 
   class MockSprite {
@@ -483,7 +612,7 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       return
     }
     const modelLit = layerModelChildren.some(
-      (m) => m.visible && ((m.filters?.[0]?.alpha ?? 0) >= 0.5)
+      (m) => m.visible && (m.filters?.[0]?.alpha ?? 0) >= 0.5
     )
     const spriteLit = stageChildren.some((c) => c instanceof MockSprite)
     frameIsLit = modelLit || spriteLit
@@ -504,7 +633,11 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
   mocks.set(path.join(rendererRoot, 'utils/Logger.ts'), { __esModule: true, default: () => logger })
   mocks.set(path.join(rendererRoot, 'utils/WebGLContextValidator.ts'), {
     webGLValidator: {
-      validateCanvas: async () => ({ success: true, errors: [], contextInfo: { renderer: 'TestGPU' } }),
+      validateCanvas: async () => ({
+        success: true,
+        errors: [],
+        contextInfo: { renderer: 'TestGPU' }
+      }),
       validateModelRendering: async () => ({
         success: frameIsLit,
         averageBrightness: frameIsLit ? 42 : 0
@@ -512,12 +645,20 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
     }
   })
   mocks.set(path.join(rendererRoot, 'utils/FrameContentValidator.ts'), {
-    frameValidator: { reset: noop, validateFrame: () => ({ isValid: true, isBlackScreen: false, brightness: 50 }) }
+    frameValidator: {
+      reset: noop,
+      validateFrame: () => ({ isValid: true, isBlackScreen: false, brightness: 50 })
+    }
   })
   mocks.set(path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveBgmUrl: (p) => p })
   mocks.set(path.join(rendererRoot, 'managers/AnimationManager.ts'), {
     __esModule: true,
-    default: { setExportMode: noop, exportSpeedMultiplier: 1, exportTargetFPS: 30, exportEncodeFPS: 30 }
+    default: {
+      setExportMode: noop,
+      exportSpeedMultiplier: 1,
+      exportTargetFPS: 30,
+      exportEncodeFPS: 30
+    }
   })
   mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {
     getLayoutRunningEndMs: () => 0,
@@ -525,13 +666,32 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
     resetStageTiming: noop
   })
   mocks.set('./video-export', {
-    ExportLogger: class { info = noop; warn = noop; error = noop },
-    CheckpointManager: class { clearCheckpoint = noop; hasCheckpoint = () => false },
-    ErrorRecoveryManager: class { reset = noop },
-    ProgressTracker: class { start = noop; update = noop },
-    ExportError: class extends Error { constructor(c, m) { super(m); this.code = c } },
+    ExportLogger: class {
+      info = noop
+      warn = noop
+      error = noop
+    },
+    CheckpointManager: class {
+      clearCheckpoint = noop
+      hasCheckpoint = () => false
+    },
+    ErrorRecoveryManager: class {
+      reset = noop
+    },
+    ProgressTracker: class {
+      start = noop
+      update = noop
+    },
+    ExportError: class extends Error {
+      constructor(c, m) {
+        super(m)
+        this.code = c
+      }
+    },
     ExportErrorCode: { CANCELLED: 'CANCELLED', TIMEOUT: 'TIMEOUT', UNKNOWN: 'UNKNOWN' },
-    AudioMuxer: class { dispose = noop },
+    AudioMuxer: class {
+      dispose = noop
+    },
     ConcurrentExportPipeline: class {
       startTTSPipeline = noop
       isTTSReady = () => false
@@ -554,7 +714,16 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       install() {
         virtualClock = FakeTimers.withGlobal(loader.context).install({
           now: 0,
-          toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate']
+          toFake: [
+            'Date',
+            'performance',
+            'setTimeout',
+            'clearTimeout',
+            'setInterval',
+            'clearInterval',
+            'setImmediate',
+            'clearImmediate'
+          ]
         })
       }
       uninstall() {
@@ -574,10 +743,19 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
     }
   })
   mocks.set('./video-export/BgmPlan', {
-    BgmPlan: class { hasStoryFiles = false; hasLoadedFiles = false; hasChanges = false; load = async () => {} }
+    BgmPlan: class {
+      hasStoryFiles = false
+      hasLoadedFiles = false
+      hasChanges = false
+      load = async () => {}
+    }
   })
   mocks.set('./video-export/SePlan', {
-    SePlan: class { hasChanges = false; load = async () => {}; build = () => [] }
+    SePlan: class {
+      hasChanges = false
+      load = async () => {}
+      build = () => []
+    }
   })
   mocks.set('./video-export/WebCodecsMp4Encoder', {
     WebCodecsMp4Encoder: class {
@@ -590,17 +768,25 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       }
       async initialize() {}
       async encodeFrame() {}
-      async finish() { return '/tmp/pipe/video.mp4' }
+      async finish() {
+        return '/tmp/pipe/video.mp4'
+      }
       dispose() {}
     }
   })
   mocks.set('./video-export/JpegFrameSink', {
     JpegFrameSink: class {
-      get isPipeMode() { return true }
-      get framesDirectory() { return '' }
+      get isPipeMode() {
+        return true
+      }
+      get framesDirectory() {
+        return ''
+      }
       async initialize() {}
       async captureFrame() {}
-      async finish() { return '/tmp/pipe/video.mp4' }
+      async finish() {
+        return '/tmp/pipe/video.mp4'
+      }
       async dispose() {}
     }
   })
@@ -610,7 +796,11 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
   const canvas = {
     width: 1280,
     height: 720,
-    getContext: () => ({ isContextLost: () => false, getExtension: () => null, getParameter: () => '' })
+    getContext: () => ({
+      isContextLost: () => false,
+      getExtension: () => null,
+      getParameter: () => ''
+    })
   }
   const makeApp = (storyModels) => ({
     exporting: false,
@@ -655,12 +845,26 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       getBGMConfig: () => ({ enabled: false }),
       getConfig: () => ({ timeoutMs: 90_000 }),
       buildTimelineWithoutTTS: () => [
-        { snippetIndex: 0, snippetType: 'BlackOut', delayStartTimeMs: 0, startTimeMs: 0, durationMs: 0, endTimeMs: 0, ttsDurationMs: 0, hasTTS: false, blocking: true, durationSource: 'fixed' }
+        {
+          snippetIndex: 0,
+          snippetType: 'BlackOut',
+          delayStartTimeMs: 0,
+          startTimeMs: 0,
+          durationMs: 0,
+          endTimeMs: 0,
+          ttsDurationMs: 0,
+          hasTTS: false,
+          blocking: true,
+          durationSource: 'fixed'
+        }
       ],
       setTimeline: noop,
       clearAudioTracks: noop
     },
-    snippetStrategyManager: { resetBackgroundSnippets: noop, handleSnippetForExport: async () => {} }
+    snippetStrategyManager: {
+      resetBackgroundSnippets: noop,
+      handleSnippetForExport: async () => {}
+    }
   })
 
   // 1) Model probe passes on 0x000000 background and restores clean state
@@ -679,7 +883,11 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
     apiOutputPath: '/tmp/probe-model.mp4'
   })
   assert.equal(res1.success, true)
-  assert.equal(frameIsLit, false, 'stage must be reset to black 0x000000 after validation probe & prewarm')
+  assert.equal(
+    frameIsLit,
+    false,
+    'stage must be reset to black 0x000000 after validation probe & prewarm'
+  )
   assert.equal(layerModelChildren.length, 0, 'model probe must be removed from layerModel')
   assert.equal(modelAlphaFilter.alpha, 0, 'model alpha must be restored to 0')
   assert.equal(model.visible, true, 'model visible flag must be preserved')

@@ -161,3 +161,23 @@ test('writeExportDiagnostics writes JSON and human-readable logs next to the vid
   assert.match(reportText, /Pixi renderer is an approximation/)
   assert.match(reportText, /frame plan: 240 frames @ 60fps/)
 })
+
+test('async diagnostics writer fills encoder/segments/convert/color without blocking the caller', async (t) => {
+  const { writeExportDiagnosticsAsync } = require('../../out-host/host/exportDiagnostics.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-diag-async-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const videoPath = path.join(dir, 'export-2.mp4')
+  fs.writeFileSync(videoPath, 'video')
+  const diagnostics = report()
+  diagnostics.export.encoder = 'ffmpeg-libx265'
+  diagnostics.export.segments = 1
+  diagnostics.export.convert = 'ffmpeg'
+  diagnostics.export.color = 'bt709/tv'
+
+  const written = await writeExportDiagnosticsAsync(videoPath, diagnostics)
+  const reportText = fs.readFileSync(written.reportPath, 'utf8')
+  assert.match(reportText, /encoder: ffmpeg-libx265 segments: 1 convert: ffmpeg color: bt709\/tv/)
+  const parsed = JSON.parse(fs.readFileSync(written.jsonPath, 'utf8'))
+  assert.equal(parsed.export.encoder, 'ffmpeg-libx265')
+  assert.equal(parsed.export.color, 'bt709/tv')
+})

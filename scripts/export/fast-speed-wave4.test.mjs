@@ -951,6 +951,12 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
         return new Promise((r) => realSetTimeoutFn(r, ms))
       }
       tick = (ms) => virtualClock.tickAsync(ms)
+      advanceStorySteps = async (steps, onStep) => {
+        for (let i = 0; i < Math.floor(steps); i++) {
+          await virtualClock.tickAsync(1000 / 60)
+          onStep?.(virtualClock.now)
+        }
+      }
     }
   })
   mocks.set('./video-export/BgmPlan', {

@@ -122,7 +122,7 @@ export class VirtualClockController {
     const ticker = Ticker.shared as Ticker & { lastTime: number }
     for (let i = 0; i < count; i++) {
       await this.clock.tickAsync(FRAME_MS)
-      const now = this.clock.now()
+      const now = this.clock.now
       // 强制本次 update 的 elapsedMS = FRAME_MS，不受上一次 rAF/update 影响
       ticker.lastTime = now - FRAME_MS
       ticker.update(now)

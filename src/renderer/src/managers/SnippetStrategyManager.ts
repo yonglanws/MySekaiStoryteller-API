@@ -61,6 +61,11 @@ export default class SnippetStrategyManager {
   /** PlayCore 当前正在运行的协程集合（WaitFinished 前置栅栏与收尾统一等待）。 */
   private readonly runningTasks = new BackgroundSnippetTasks()
   private lastLaunchedTask: Promise<void> = Promise.resolve()
+  /**
+   * 片段 `runSnippet()` 启动（同步前缀已应用初始状态）后的回调。
+   * 导出帧泵用它保证帧 0 拍到第一个片段的初始画面。
+   */
+  onSnippetStarted: ((snippetIndex: number) => void) | null = null
 
   constructor(app: App) {
     this.app = app
@@ -147,6 +152,7 @@ export default class SnippetStrategyManager {
     const task = snippet.runSnippet()
     this.lastLaunchedTask = task
     this.runningTasks.track(task)
+    this.onSnippetStarted?.(snippetIndex)
     if (!forExport) {
       void task.catch((error) => this.logger.error(error))
     }

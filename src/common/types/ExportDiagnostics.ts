@@ -77,6 +77,14 @@ export interface ExportDiagnostics {
     durationMs: number
     outputSize?: number
     timings?: Record<string, number>
+    /** 视频编码器（webcodecs-h264 / ffmpeg-libx265 / qsv 等） */
+    encoder?: string
+    /** 并行编码段数；单段为 1 */
+    segments?: number
+    /** 帧到 YUV 的转换路径：browser（WebCodecs）/ ffmpeg / gpu */
+    convert?: string
+    /** 输出色彩标准，例如 bt709/tv */
+    color?: string
   }
   summary: {
     models: number

@@ -25,6 +25,7 @@ import { BgmPlan } from './video-export/BgmPlan'
 import { SePlan } from './video-export/SePlan'
 import { WebCodecsMp4Encoder, type WebCodecsProbeResult } from './video-export/WebCodecsMp4Encoder'
 import { JpegFrameSink } from './video-export/JpegFrameSink'
+import { FrameInterpolator, type FrameSnapshot } from './video-export/FrameInterpolator'
 import { applyTalkPatch } from './video-export/talkPatch'
 import type { VideoExportOptions } from './video-export'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
@@ -94,6 +95,9 @@ export default class VideoExportManager {
     { channel0: Float32Array; channel1: Float32Array; sampleRate: number }
   >()
   private lastWebCodecsProbeConfig: VideoEncoderConfig | null = null
+  /** 最近一次导出实际使用的帧通道，用于诊断报告（encoder/convert 字段）。 */
+  private lastSinkKind: 'webcodecs' | 'image2pipe' | 'frames' = 'image2pipe'
+  private lastEncoderLabel = 'ffmpeg'
 
   /** 已在同一常驻 worker 页面上通过首次 WebGL/黑屏校验的 App 实例集合 */
   private static readonly warmValidatedApps = new WeakSet<object>()
@@ -374,7 +378,16 @@ export default class VideoExportManager {
           result.timings?.videoDurationMs ??
           Math.round((result.frameCount / Math.max(1, options.fps)) * 1000),
         ...(result.outputSize !== undefined ? { outputSize: result.outputSize } : {}),
-        ...(result.timings ? { timings: result.timings } : {})
+        ...(result.timings ? { timings: result.timings } : {}),
+        encoder: this.lastEncoderLabel,
+        segments: 1,
+        convert:
+          this.lastSinkKind === 'webcodecs'
+            ? 'browser'
+            : this.lastSinkKind === 'frames'
+              ? 'ffmpeg'
+              : 'ffmpeg',
+        color: 'bt709/tv'
       },
       provider: this.app.ttsManager?.getConfig().provider,
       ttsEnabled,
@@ -872,6 +885,8 @@ export default class VideoExportManager {
     }
 
     await createSink()
+    this.lastSinkKind = sinks.encoder ? 'webcodecs' : 'image2pipe'
+    this.lastEncoderLabel = sinks.encoder ? 'webcodecs-h264' : 'ffmpeg'
 
     const realStart = virtualClock.realTimeMs()
 
@@ -889,7 +904,11 @@ export default class VideoExportManager {
     const animationSteps = AnimationManager as unknown as {
       dispatchExportStep?: (ticker: Ticker) => void
       resetExportStepHandlers?: () => void
+      setExportStepDriver?: (active: boolean) => void
     }
+    animationSteps.setExportStepDriver?.(true)
+    // 非整除帧率（24/25fps）的连续量插值；30/60fps 余量为 0，不参与任何绘制覆盖
+    const frameInterpolator = new FrameInterpolator(this.app, this.logger)
 
     virtualClock.install()
     const virtualRenderStartMs = virtualClock.now()
@@ -941,6 +960,7 @@ export default class VideoExportManager {
       concurrentPipeline.abort()
       markFirstSnippetStarted()
       animationSteps.resetExportStepHandlers?.()
+      animationSteps.setExportStepDriver?.(false)
       setPumpPaused(false)
       pumpDone = true
     }
@@ -956,8 +976,7 @@ export default class VideoExportManager {
     let storyStep = 0
 
     /** 输出帧 k 对应的故事步：floor(k×60/fps)，非整除帧率按余量分配。 */
-    const storyStepForFrame = (frame: number): number =>
-      Math.floor((frame * STORY_FPS) / encodeFps)
+    const storyStepForFrame = (frame: number): number => Math.floor((frame * STORY_FPS) / encodeFps)
 
     const advanceToStoryStep = async (target: number): Promise<void> => {
       if (target <= storyStep) return
@@ -986,12 +1005,32 @@ export default class VideoExportManager {
           }
           const frameStart = virtualClock.realTimeMs()
 
-          // 帧 n = 故事时间 n/fps：先把模拟推进到 floor(n×60/fps) 个 1/60 步，再渲染。
-          await advanceToStoryStep(storyStepForFrame(frameIndex))
+          // 帧 n = 故事时间 n/fps：先把模拟推进到 floor(n×60/fps) 个 1/60 步。
+          const baseStoryStep = storyStepForFrame(frameIndex)
+          const storyTween = (frameIndex * STORY_FPS) / encodeFps - baseStoryStep
+          await advanceToStoryStep(baseStoryStep)
+
+          let interpolatedTo: FrameSnapshot | null = null
+          if (storyTween > 1e-9) {
+            if (frameInterpolator.active) {
+              // base 与 base+1 两个故事步之间按余量 lerp 连续量，阶梯量保持 base
+              const fromSnapshot = frameInterpolator.snapshot()
+              await advanceToStoryStep(baseStoryStep + 1)
+              const toSnapshot = frameInterpolator.snapshot()
+              frameInterpolator.apply(fromSnapshot, toSnapshot, storyTween)
+              interpolatedTo = toSnapshot
+            } else {
+              frameInterpolator.logUnavailableOnce()
+            }
+          }
 
           const renderStart = virtualClock.realTimeMs()
           this.app.pixiApplication.render()
           renderMs += virtualClock.realTimeMs() - renderStart
+          if (interpolatedTo) {
+            // 插值只影响本帧绘制；恢复 base+1，保证后续模拟连续
+            frameInterpolator.restore(interpolatedTo)
+          }
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
           const durationUs = Math.round(1_000_000 / encodeFps)
@@ -1047,6 +1086,16 @@ export default class VideoExportManager {
     try {
       const totalSnippets = snippets.length
       if (totalSnippets === 0) markFirstSnippetStarted()
+      // 片段 runSnippet() 启动后立刻放行帧 0；不能等 handleSnippetForExport 返回，
+      // 因为它会等到该片段结束（Talk 可达数秒），帧泵不推进就会死锁。
+      const strategyManager = this.app.snippetStrategyManager as unknown as {
+        onSnippetStarted?: ((snippetIndex: number) => void) | null
+      }
+      if (strategyManager) {
+        strategyManager.onSnippetStarted = (snippetIndex) => {
+          if (snippetIndex === 0) markFirstSnippetStarted()
+        }
+      }
       const extendedApp = this.app as unknown as ExtendedApp
       const openingCurtainColor = this.getOpeningCurtainColor(snippets)
       if (openingCurtainColor) {
@@ -1207,8 +1256,15 @@ export default class VideoExportManager {
         }
 
         const snippetStartedAtMs = performance.now()
-        await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
-        if (i === 0) markFirstSnippetStarted()
+        const snippetSetup = this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
+        if (i === 0) {
+          // 生产路径由 onSnippetStarted 在 runSnippet() 启动时放行；
+          // 这里再等两个微任务，兼容不实现该钩子的测试替身，避免帧泵永远等不到首帧。
+          await Promise.resolve()
+          await Promise.resolve()
+          markFirstSnippetStarted()
+        }
+        await snippetSetup
         const hasAsyncTaskTracker =
           typeof this.app.snippetStrategyManager?.getLastLaunchedTask === 'function'
         const launchedTask = hasAsyncTaskTracker
@@ -1269,10 +1325,114 @@ export default class VideoExportManager {
         virtualClock.now(),
         virtualRenderStartMs + maxTimelineEndMs + endingEnvelopeMs
       )
+
+      // 收尾并行：帧泵还在追尾帧时就开始混音/流式写 WAV。
+      // 时长在片段全部落定后即可精确推出（帧数 = ceil(target/frameMs)）。
+      const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
+      const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
+      const finalFrameCount = Math.max(1, Math.ceil(pumpTargetVirtualMs / frameMs))
+      const totalDurationMs = Math.max(
+        actualVideoDurationMs + endingEnvelopeMs,
+        Math.round((finalFrameCount / encodeFps) * 1000)
+      )
+      const actualStartTimesMs = snippets.map((_, index) =>
+        timestampRecorder.getVideoRelativeStartTimeMs(index)
+      )
+      if (bgmPlan.hasChanges) {
+        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
+      }
+      if (sePlan.hasChanges) {
+        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
+      }
+
+      let audioFilePath: string | undefined
+      const audioTask = (async (): Promise<string | undefined> => {
+        if (!(hasTtsTracks || bgmActive || sePlan.hasChanges)) return undefined
+        if (hasTtsTracks) {
+          const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
+          for (const placement of audioPlacements) {
+            audioMuxer.addAudioTrack({
+              audioBuffer: placement.audioBuffer,
+              pcmData: placement.pcmData,
+              startTime: placement.startTimeMs,
+              endTime: placement.endTimeMs,
+              characterName: placement.characterName,
+              text: placement.text
+            })
+          }
+        }
+
+        const mixInputBgm = bgmBuffer || undefined
+        const muxer = audioMuxer as unknown as {
+          mixToInt16Chunks?: (durationMs: number, bgm?: AudioBuffer) => AsyncGenerator<Int16Array>
+          createWavHeader?: (durationMs: number) => ArrayBuffer
+          mixToInt16Interleaved?: (durationMs: number, bgm?: AudioBuffer) => Promise<Int16Array>
+          encodeWavFromInt16?: (pcm: Int16Array) => ArrayBuffer
+          mixAudioTracks?: (durationMs: number, bgm?: AudioBuffer) => Promise<AudioBuffer>
+          audioBufferToWav?: (buffer: AudioBuffer) => Promise<ArrayBuffer>
+        }
+
+        let path: string
+        if (
+          typeof muxer.mixToInt16Chunks === 'function' &&
+          typeof muxer.createWavHeader === 'function'
+        ) {
+          // 流式：先写 44 字节头，再按块追加 Int16 PCM；不再分配整段 Int16 + WAV
+          path = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
+            data: new ArrayBuffer(0),
+            prefix: 'mss-audio',
+            extension: 'wav'
+          })
+          try {
+            await window.electron.ipcRenderer.invoke('electron:append-to-file', {
+              filePath: path,
+              data: muxer.createWavHeader(totalDurationMs)
+            })
+            for await (const chunk of muxer.mixToInt16Chunks(totalDurationMs, mixInputBgm)) {
+              await window.electron.ipcRenderer.invoke('electron:append-to-file', {
+                filePath: path,
+                // bridge 客户端只把 ArrayBuffer/Uint8Array 识别为二进制参数
+                data: new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+              })
+            }
+          } catch (error) {
+            await window.electron.ipcRenderer
+              .invoke('electron:delete-temp-file', { filePath: path })
+              .catch(() => undefined)
+            throw error
+          }
+        } else {
+          let wavBuffer: ArrayBuffer
+          if (
+            typeof muxer.mixToInt16Interleaved === 'function' &&
+            typeof muxer.encodeWavFromInt16 === 'function'
+          ) {
+            const pcm = await muxer.mixToInt16Interleaved(totalDurationMs, mixInputBgm)
+            wavBuffer = muxer.encodeWavFromInt16(pcm)
+          } else {
+            const mixedAudioBuffer = await muxer.mixAudioTracks!(totalDurationMs, mixInputBgm)
+            wavBuffer = await muxer.audioBufferToWav!(mixedAudioBuffer)
+          }
+          path = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
+            data: wavBuffer,
+            prefix: 'mss-audio',
+            extension: 'wav'
+          })
+        }
+        this.pcmCache.clear()
+        this.lipSyncCache.clear()
+        return path
+      })()
+
       setPumpPaused(false)
       pumpDone = true
       await framePump
       if (pumpError) throw pumpError
+
+      const audioFinishStart = virtualClock.realTimeMs()
+      audioFilePath = await audioTask
+      audioMs = virtualClock.realTimeMs() - audioFinishStart
+      sinks.audioFilePath = audioFilePath ?? null
 
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
@@ -1290,67 +1450,6 @@ export default class VideoExportManager {
       encodeMs = virtualClock.realTimeMs() - encodeStart
 
       virtualClock.uninstall()
-
-      const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
-      const capturedVideoDurationMs = Math.round((frameIndex / encodeFps) * 1000)
-      const totalDurationMs = Math.max(
-        actualVideoDurationMs + endingEnvelopeMs,
-        capturedVideoDurationMs
-      )
-      const hasTtsTracks = ttsEnabled && ttsAudioResults.size > 0
-
-      const actualStartTimesMs = snippets.map((_, index) =>
-        timestampRecorder.getVideoRelativeStartTimeMs(index)
-      )
-      if (bgmPlan.hasChanges) {
-        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
-      }
-      if (sePlan.hasChanges) {
-        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
-      }
-
-      let audioFilePath: string | undefined
-      if (hasTtsTracks || bgmActive || sePlan.hasChanges) {
-        const audioStart = virtualClock.realTimeMs()
-        if (hasTtsTracks) {
-          const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
-          for (const placement of audioPlacements) {
-            audioMuxer.addAudioTrack({
-              audioBuffer: placement.audioBuffer,
-              pcmData: placement.pcmData,
-              startTime: placement.startTimeMs,
-              endTime: placement.endTimeMs,
-              characterName: placement.characterName,
-              text: placement.text
-            })
-          }
-        }
-
-        let wavBuffer: ArrayBuffer
-        const mixInputBgm = bgmBuffer || undefined
-        if (
-          typeof (audioMuxer as unknown as { mixToInt16Interleaved?: unknown })
-            .mixToInt16Interleaved === 'function' &&
-          typeof (audioMuxer as unknown as { encodeWavFromInt16?: unknown }).encodeWavFromInt16 ===
-            'function'
-        ) {
-          const pcm = await audioMuxer.mixToInt16Interleaved(totalDurationMs, mixInputBgm)
-          wavBuffer = audioMuxer.encodeWavFromInt16(pcm)
-        } else {
-          const mixedAudioBuffer = await audioMuxer.mixAudioTracks(totalDurationMs, mixInputBgm)
-          wavBuffer = await audioMuxer.audioBufferToWav(mixedAudioBuffer)
-        }
-        this.pcmCache.clear()
-        this.lipSyncCache.clear()
-
-        audioFilePath = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
-          data: wavBuffer,
-          prefix: 'mss-audio',
-          extension: 'wav'
-        })
-        sinks.audioFilePath = audioFilePath ?? null
-        audioMs = virtualClock.realTimeMs() - audioStart
-      }
 
       if (exportStatus) exportStatus.textContent = '正在合成视频…'
       onProgress({
@@ -1443,6 +1542,7 @@ export default class VideoExportManager {
       VideoExportManager.warmValidatedApps.delete(this.app)
       markFirstSnippetStarted()
       animationSteps.resetExportStepHandlers?.()
+      animationSteps.setExportStepDriver?.(false)
       setPumpPaused(false)
       pumpDone = true
       sinks.encoder?.dispose()
@@ -1455,6 +1555,15 @@ export default class VideoExportManager {
     } finally {
       this.signal?.removeEventListener('abort', abortFastWait)
       animationSteps.resetExportStepHandlers?.()
+      animationSteps.setExportStepDriver?.(false)
+      try {
+        const strategy = this.app.snippetStrategyManager as unknown as {
+          onSnippetStarted?: ((snippetIndex: number) => void) | null
+        }
+        if (strategy) strategy.onSnippetStarted = null
+      } catch {
+        /* app may already be destroyed */
+      }
       Ticker.shared.maxFPS = prevTickerMaxFps
       try {
         virtualClock.uninstall()
@@ -2159,6 +2268,8 @@ export default class VideoExportManager {
       duration: (performance.now() - captureStartTime) / 1000,
       frameCount: capturedFrames
     }
+    this.lastSinkKind = 'frames'
+    this.lastEncoderLabel = 'ffmpeg'
     return this.attachDiagnostics(
       result,
       snippets,

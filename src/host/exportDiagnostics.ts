@@ -16,6 +16,10 @@ function formatExportReport(videoPath: string, diagnostics: ExportDiagnostics): 
   lines.push(`video: ${path.basename(videoPath)}`)
   lines.push(`generated: ${diagnostics.generatedAt}`)
   lines.push(`mode: ${meta.mode} ${meta.width}x${meta.height} ${meta.fps}fps`)
+  lines.push(
+    `encoder: ${meta.encoder ?? 'unknown'} segments: ${meta.segments ?? 1} ` +
+      `convert: ${meta.convert ?? 'ffmpeg'} color: ${meta.color ?? 'bt709'}`
+  )
   lines.push(`duration: ${Math.round(meta.durationMs)}ms frames=${meta.frameCount}`)
   lines.push(
     `snippets: ${summary.snippets} talks=${summary.talks} appears=${summary.layoutAppears} ` +
@@ -65,5 +69,29 @@ export function writeExportDiagnostics(
   )
   fs.writeFileSync(textPath, `${formatDiagnosticsText(diagnostics)}\n`, 'utf8')
   fs.writeFileSync(reportPath, `${formatExportReport(outputPath, diagnostics)}\n`, 'utf8')
+  return { jsonPath, textPath, reportPath }
+}
+
+/**
+ * 异步写盘版本：导出收尾不再同步阻塞宿主主线程（诊断 JSON 可达数百 KB）。
+ * 三个文件并行写；返回值与同步版本一致。
+ */
+export async function writeExportDiagnosticsAsync(
+  outputPath: string,
+  diagnostics: ExportDiagnostics
+): Promise<WrittenExportLogs> {
+  const base = outputPath.replace(/\.mp4$/i, '')
+  const jsonPath = `${base}.log.json`
+  const textPath = `${base}.log`
+  const reportPath = `${base}.report.txt`
+  const json = `${JSON.stringify(sanitizeDiagnostics(diagnostics), null, 2)}\n`
+  const text = `${formatDiagnosticsText(diagnostics)}\n`
+  const report = `${formatExportReport(outputPath, diagnostics)}\n`
+  await fs.promises.mkdir(path.dirname(outputPath), { recursive: true })
+  await Promise.all([
+    fs.promises.writeFile(jsonPath, json, 'utf8'),
+    fs.promises.writeFile(textPath, text, 'utf8'),
+    fs.promises.writeFile(reportPath, report, 'utf8')
+  ])
   return { jsonPath, textPath, reportPath }
 }

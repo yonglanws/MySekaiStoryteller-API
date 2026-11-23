@@ -822,6 +822,10 @@ export default class AdvancedModel extends Live2DModel {
   public resetClockBaselines(now = performance.now()): void {
     this.lastNaturalUpdateMs = now
     this.currentBodyStartedAt = now
+    // 同一 worker 连续导出时，眨眼/呼吸相位必须回到固定起点，否则两次导出
+    // 的逐帧结果不同（确定性要求）。固定 1/60 步进下从这里开始演进。
+    this.blinkState = createBlinkState(1)
+    this.breathDegree = 0
     if (this.lastChangeBlinkTime !== null) {
       this.lastChangeBlinkTime = now
     }
