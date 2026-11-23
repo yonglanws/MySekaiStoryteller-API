@@ -108,7 +108,9 @@ export class App {
   private cameraOffsetX = 0
   private cameraOffsetY = 0
   private cameraMoveGen = 0
+  private cameraMoveTarget: { x: number; y: number } | null = null
   private cameraZoomGen = 0
+  private cameraZoomTarget: number | null = null
   private dollyZoomGen = 0
   /** 震屏附加偏移，不改变相机基准值 */
   private shakeOffsetX = 0
@@ -291,6 +293,8 @@ export class App {
     this.cameraScale = 1
     this.cameraOffsetX = 0
     this.cameraOffsetY = 0
+    this.cameraMoveTarget = null
+    this.cameraZoomTarget = null
     this.shakeOffsetX = 0
     this.shakeOffsetY = 0
     this.envFilters = []
@@ -314,7 +318,10 @@ export class App {
     this.layerUI = new UILayer(this.pixiApplication)
     this.layerSpecialEffect = new SpecialEffectLayer(this.pixiApplication)
 
-    this.scenarioContainer.addChild(this.layerBackground.getContainer(), this.layerModel.getContainer())
+    this.scenarioContainer.addChild(
+      this.layerBackground.getContainer(),
+      this.layerModel.getContainer()
+    )
 
     this.layerEnvironment.setFilterSyncCallback((filters) => {
       this.envFilters = filters
@@ -350,8 +357,10 @@ export class App {
     const gen = ++this.cameraMoveGen
     const toX = x / 1920
     const toY = y / 1080
-    const fromX = this.cameraOffsetX
-    const fromY = this.cameraOffsetY
+    // `Kill(complete)`：上一条 tween 被中断时直接取它的目标值作为新起点。
+    const fromX = this.cameraMoveTarget?.x ?? this.cameraOffsetX
+    const fromY = this.cameraMoveTarget?.y ?? this.cameraOffsetY
+    this.cameraMoveTarget = { x: toX, y: toY }
     await runEasedTween(
       durationMs,
       ease,
@@ -368,8 +377,10 @@ export class App {
   /** 相机缩放：scale 为绝对倍率，1 = 初始视角，默认 DOTween OutQuad 缓动。 */
   public async cameraZoom(scale: number, durationMs: number, ease = 'OutQuad'): Promise<void> {
     const gen = ++this.cameraZoomGen
-    const from = this.cameraScale
+    // `Kill(complete)`：从上一条 zoom tween 的目标值继续。
+    const from = this.cameraZoomTarget ?? this.cameraScale
     const to = Math.max(0.1, scale)
+    this.cameraZoomTarget = to
     await runEasedTween(
       durationMs,
       ease,
@@ -383,15 +394,20 @@ export class App {
   }
 
   /** 官方 `EffectType 45 DollyZoom`: 同步缩放场景 + 桶形畸变与边缘径向模糊。 */
-  public async dollyZoom(zoom: number, durationMs: number, ease = 'OutQuad'): Promise<void> {
+  public async dollyZoom(
+    zoom: number,
+    durationMs: number,
+    ease = 'OutQuad',
+    dist?: number,
+    blur?: number
+  ): Promise<void> {
     const gen = ++this.dollyZoomGen
     const fromScale = this.cameraScale
     const toScale = Math.max(0.1, zoom)
     const fromDist = this.dollyZoomFilter.samplingDistance
-    const targetDelta = toScale - 1
-    const scaleFactor = this.stage_size[0] / 1920
-    const toDistortion = -targetDelta * 0.42
-    const toSampling = Math.min(2.8, Math.abs(targetDelta) * 2.2) * scaleFactor
+    // 官方 `CalcDistortionStrength`：distortion = dist × −(zoom − 1)；未给 dist 时为 0。
+    const toDistortion = dist === undefined ? 0 : dist * -(toScale - 1)
+    const toSampling = Math.max(0, blur ?? 0) * (this.stage_size[0] / 1920)
     const fromDistortion = this.dollyZoomFilter.distortion
 
     await runEasedTween(
@@ -424,38 +440,79 @@ export class App {
   public async shakeScreen(durationSec: number, intensity = 10): Promise<void> {
     const height = this.stage_size[1]
     const scaleY = height / 1080
-    const amp = intensity > 0 && intensity < 1 ? intensity * height : Math.max(0, intensity) * scaleY
-    const baseY = -8 * scaleY
     const clampedSec = Math.min(3600, Math.max(0, durationSec))
     const durationMs = clampedSec * 1000
     const fadeOut = clampedSec < 3600
-    const vibrato = Math.max(8, Math.round(16 * Math.max(0.5, Math.min(60, clampedSec))))
+    // `DOShakePosition(duration, strength, vibrato=16, randomness=90, fadeOut)`：
+    // n = max(2, trunc(16×duration)) 段，段内 OutQuad，段末幅度减 strength/n。
+    const segments = Math.max(2, Math.trunc(16 * clampedSec))
     const generation = ++this.shakeGeneration
     const rng = createMulberry32((generation * 2654435761) >>> 0)
-    const dirs = Array.from({ length: vibrato + 1 }, () => {
-      const a = rng() * Math.PI * 2
-      return [Math.cos(a), Math.sin(a)] as const
-    })
+    const amp =
+      (intensity > 0 && intensity < 1 ? intensity * height : Math.max(0, intensity)) * scaleY
+    const decay = amp / segments
+    let magnitude = amp
+    let angle = rng() * 360
+    const tos: Array<[number, number]> = []
+    for (let i = 0; i < segments; i++) {
+      if (i + 1 < segments) {
+        if (i > 0) angle = angle - 180 + (rng() * 2 - 1) * 90
+        const rad = (angle * Math.PI) / 180
+        const x = magnitude * Math.cos(rad) * Math.cos(((rng() * 2 - 1) * 90 * Math.PI) / 180)
+        const y = magnitude * Math.sin(rad)
+        tos.push([x, y])
+        if (fadeOut) magnitude -= decay
+      } else {
+        tos.push([0, 0])
+      }
+    }
+    // `fadeOut` 时每段时长 (i+1)/n×duration 再按总和归一（后段更长）。
+    const durations = Array.from({ length: segments }, (_, i) =>
+      fadeOut ? ((i + 1) / segments) * clampedSec : clampedSec / segments
+    )
+    const sum = durations.reduce((a, b) => a + b, 0)
+    const ends: number[] = []
+    let acc = 0
+    for (const d of durations) {
+      acc += (d * clampedSec) / sum
+      ends.push(acc)
+    }
+    // 有限抖动：父节点 y 从 -8 用 OutQuad 升到 0。
+    const baseStart = -8 * scaleY
+    const startWall = performance.now()
 
-    await AnimationManager.linear((progress) => {
-      if (generation !== this.shakeGeneration) return
-      const decay = fadeOut ? 1 - evaluateEase('OutQuad', progress) : 1
-      const segFloat = progress * vibrato
-      const seg = Math.min(vibrato - 1, Math.floor(segFloat))
-      const segT = segFloat - seg
-      const env = Math.sin(segT * Math.PI)
-      const [dx, dy] = dirs[seg]
-      this.shakeOffsetX = dx * amp * env * decay
-      this.shakeOffsetY = baseY * (fadeOut ? 1 - progress * 0.25 : 1) + dy * amp * env * decay
-      this.applyViewTransform()
-    }, Math.max(1, durationMs))
+    await AnimationManager.linear(
+      (progress) => {
+        if (generation !== this.shakeGeneration) return
+        const t = progress * clampedSec
+        let index = ends.findIndex((e) => e >= t)
+        if (index < 0) index = segments - 1
+        const segStart = index === 0 ? 0 : ends[index - 1]
+        const segLen = ends[index] - segStart
+        let p = segLen > 0 ? (t - segStart) / segLen : 1
+        p = -p * (p - 2)
+        const from = index === 0 ? [0, 0] : tos[index - 1]
+        const to = tos[index]
+        this.shakeOffsetX = from[0] + (to[0] - from[0]) * p
+        this.shakeOffsetY = from[1] + (to[1] - from[1]) * p
+        if (fadeOut) {
+          // 父节点基线：从 -8 用 OutQuad 升到 0（与持续时间的进度同步）。
+          const eased = -progress * (progress - 2)
+          this.shakeOffsetY += baseStart * (1 - eased)
+        } else {
+          this.shakeOffsetY += baseStart
+        }
+        this.applyViewTransform()
+      },
+      Math.max(1, durationMs)
+    )
 
-    // 被 StopShakeScreen 抢先归零时不要覆盖它的结果。
     if (generation === this.shakeGeneration) {
       this.shakeOffsetX = 0
       this.shakeOffsetY = 0
       this.applyViewTransform()
     }
+    void startWall
   }
 
   /** 官方 EffectType 25：StopShakeScreen。 */

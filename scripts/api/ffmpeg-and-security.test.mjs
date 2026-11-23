@@ -45,7 +45,40 @@ function makeFakeChild({ code = 0, stderrText = '', onClose } = {}) {
   return child
 }
 
-test('detectAvailableGpuEncoder uses cached 1-frame smoke probe and falls back from broken NVENC to QSV/CPU', async (t) => {
+function assertBt709Args(args, { scaled = null } = {}) {
+  const vfIndex = args.indexOf('-vf')
+  assert.ok(vfIndex >= 0, 'every frame path must carry -vf, even at identity size')
+  const filter = String(args[vfIndex + 1])
+  assert.match(filter, /out_color_matrix=bt709:out_range=tv/)
+  assert.match(filter, /setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709/)
+  if (scaled === true) assert.match(filter, /scale=\d+:\d+:flags=lanczos:/)
+  if (scaled === false) assert.match(filter, /scale=flags=bicubic:/)
+  for (const [key, value] of [
+    ['-colorspace', 'bt709'],
+    ['-color_primaries', 'bt709'],
+    ['-color_trc', 'bt709'],
+    ['-color_range', 'tv']
+  ]) {
+    const index = args.indexOf(key)
+    assert.ok(index >= 0 && args[index + 1] === value, `missing ${key} ${value}`)
+  }
+}
+
+function makeOpenChild() {
+  const child = new EventEmitter()
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  child.stdin = new EventEmitter()
+  child.stdin.write = (_chunk, cb) => cb?.()
+  child.stdin.end = () => {}
+  child.stdin.destroy = () => {}
+  child.kill = () => {
+    queueMicrotask(() => child.emit('close', 0, 'SIGKILL'))
+  }
+  return child
+}
+
+test('detectAvailableGpuEncoder uses a cached 3-frame smoke probe that derives the export filters, tags and pix_fmt', async (t) => {
   const ffmpeg = loadFreshFfmpeg()
   ffmpeg.resetGpuEncoderCache()
 
@@ -54,32 +87,53 @@ test('detectAvailableGpuEncoder uses cached 1-frame smoke probe and falls back f
     spawnCalls.push(args)
     const codecIdx = args.indexOf('-c:v')
     const codec = codecIdx >= 0 ? args[codecIdx + 1] : ''
-    if (codec === 'h264_nvenc') {
+    if (codec === 'hevc_nvenc') {
       return makeFakeChild({ code: 1, stderrText: 'Cannot load nvcuda.dll' })
     }
-    if (codec === 'h264_amf') {
-      return makeFakeChild({ code: 1, stderrText: 'AMF not supported' })
-    }
-    if (codec === 'h264_qsv') {
+    if (codec === 'hevc_qsv' || codec === 'h264_qsv') {
       return makeFakeChild({ code: 0 })
     }
     return makeFakeChild({ code: 1 })
   })
 
-  const first = await ffmpeg.detectAvailableGpuEncoder()
+  const first = await ffmpeg.detectAvailableGpuEncoder('hevc')
   assert.equal(first, 'intel')
   assert.equal(ffmpeg.getCachedGpuEncoder(), 'intel')
-  assert.equal(spawnCalls.length, 3)
+  assert.equal(spawnCalls.length, 2, 'nvidia fails then QSV succeeds')
   for (const args of spawnCalls) {
     assert.ok(!args.includes('-encoders'), 'must not use compile-time -encoders listing')
-    assert.equal(args[args.indexOf('-frames:v') + 1], '1')
-    assert.equal(args[args.indexOf('-f', args.indexOf('-frames:v')) + 1], 'null')
+    assert.equal(args[args.indexOf('-frames:v') + 1], '3', 'probe must really encode 3 frames')
+    assertBt709Args(args, { scaled: false })
+    const codec = args[args.indexOf('-c:v') + 1]
+    const pixFmt = args[args.indexOf('-pix_fmt') + 1]
+    assert.equal(
+      args[args.indexOf('-vf') + 1],
+      ffmpeg.buildVideoFilterChain({
+        inputWidth: 256,
+        inputHeight: 256,
+        outputWidth: 256,
+        outputHeight: 256,
+        pixFmt
+      }),
+      `probe filters must come from the export filter builder (${codec})`
+    )
   }
 
-  // Second call uses cache without spawning
-  const second = await ffmpeg.detectAvailableGpuEncoder()
+  // Second call uses the codec-keyed cache without spawning
+  const second = await ffmpeg.detectAvailableGpuEncoder('hevc')
   assert.equal(second, 'intel')
-  assert.equal(spawnCalls.length, 3)
+  assert.equal(spawnCalls.length, 2)
+
+  // H.264 probes again with its own codec and is cached separately
+  const h264 = await ffmpeg.detectAvailableGpuEncoder('h264')
+  assert.equal(h264, 'intel')
+  assert.equal(spawnCalls.length, 4)
+  assert.equal(spawnCalls.at(-1)[spawnCalls.at(-1).indexOf('-c:v') + 1], 'h264_qsv')
+  assert.equal(
+    spawnCalls.at(-2)[spawnCalls.at(-2).indexOf('-c:v') + 1],
+    'h264_nvenc',
+    'codec-specific H.264 probe must run before falling through'
+  )
 })
 
 test('detectAvailableGpuEncoder falls back to cpu when all GPU smoke probes fail', async (t) => {
@@ -92,7 +146,7 @@ test('detectAvailableGpuEncoder falls back to cpu when all GPU smoke probes fail
   assert.equal(ffmpeg.getCachedGpuEncoder(), 'cpu')
 })
 
-test('QSV paths omit invalid hw_upload filter and runtime GPU failure falls back to CPU + invalidates cache', async (t) => {
+test('QSV paths convert to BT.709 at identity size and runtime GPU failure falls back to CPU + invalidates cache', async (t) => {
   const ffmpeg = loadFreshFfmpeg()
   ffmpeg.resetGpuEncoderCache()
 
@@ -107,20 +161,17 @@ test('QSV paths omit invalid hw_upload filter and runtime GPU failure falls back
     calls.push({ args, opts })
     const codecIdx = args.indexOf('-c:v')
     const codec = codecIdx >= 0 ? args[codecIdx + 1] : ''
-    // Smoke probe succeeds for nvidia; runtime encode fails for nvidia and succeeds for libx264
-    if (args.includes('null') && codec === 'h264_nvenc') {
+    // Smoke probe succeeds for nvidia; runtime encode fails for nvidia and succeeds for libx265
+    if (args.includes('null') && codec === 'hevc_nvenc') {
       return makeFakeChild({ code: 0 })
     }
-    if (codec === 'h264_nvenc') {
+    if (codec === 'hevc_nvenc') {
       return makeFakeChild({ code: 1, stderrText: 'nvenc runtime failure' })
-    }
-    if (codec === 'h264_qsv') {
-      return makeFakeChild({ code: 0 })
     }
     return makeFakeChild({ code: 0 })
   })
 
-  // Test QSV path directly: no hw_upload, no -init_hw_device, identity skips -vf
+  // Test QSV path directly: no hw_upload, no -init_hw_device, identity still converts to BT.709
   await ffmpeg.apiConvertVideoWithCompression(
     inputPath,
     outputPath,
@@ -130,15 +181,18 @@ test('QSV paths omit invalid hw_upload filter and runtime GPU failure falls back
     1280,
     720,
     1280,
-    720
+    720,
+    8_000_000,
+    'h264'
   )
   const qsvCall = calls.at(-1)
   assert.equal(qsvCall.opts.windowsHide, true)
   assert.ok(!qsvCall.args.includes('-init_hw_device'))
-  assert.ok(!qsvCall.args.includes('-vf'))
   assert.ok(!qsvCall.args.some((a) => String(a).includes('hw_upload')))
+  assertBt709Args(qsvCall.args, { scaled: false })
+  assert.equal(qsvCall.args[qsvCall.args.indexOf('-pix_fmt') + 1], 'nv12')
 
-  // Test runtime fallback from auto->nvidia->libx264 and cache invalidation
+  // Test runtime fallback from auto->nvidia->libx265 and cache invalidation
   calls.length = 0
   await ffmpeg.apiConvertVideoWithCompression(
     inputPath,
@@ -153,11 +207,14 @@ test('QSV paths omit invalid hw_upload filter and runtime GPU failure falls back
   )
   assert.equal(ffmpeg.getCachedGpuEncoder(), null, 'failed GPU encoder cache must be invalidated')
   const usedCodecs = calls.map((c) => c.args[c.args.indexOf('-c:v') + 1])
-  assert.ok(usedCodecs.includes('h264_nvenc'))
-  assert.ok(usedCodecs.includes('libx264'))
+  assert.ok(usedCodecs.includes('hevc_nvenc'))
+  assert.ok(usedCodecs.includes('libx265'))
+  for (const call of calls.filter((c) => !c.args.includes('null'))) {
+    assertBt709Args(call.args, { scaled: false })
+  }
 })
 
-test('encodeFramesToVideo omits hw_upload, computes duration from frame count, and falls back to libx264', async (t) => {
+test('encodeFramesToVideo keeps BT.709 at identity size, returns the frame count, and falls back to libx264 with aq-mode intact', async (t) => {
   const ffmpeg = loadFreshFfmpeg()
   ffmpeg.resetGpuEncoderCache()
 
@@ -178,17 +235,361 @@ test('encodeFramesToVideo omits hw_upload, computes duration from frame count, a
     return makeFakeChild({ code: 0 })
   })
 
-  await ffmpeg.encodeFramesToVideo(30, dir, outputPath, 'intel', 1280, 720, 23, 1280, 720)
+  const frames = await ffmpeg.encodeFramesToVideo(
+    30,
+    dir,
+    outputPath,
+    'intel',
+    1280,
+    720,
+    23,
+    1280,
+    720,
+    'h264'
+  )
+  assert.equal(frames, 6)
   assert.equal(calls.length, 2)
   assert.equal(calls[0].args[calls[0].args.indexOf('-c:v') + 1], 'h264_qsv')
   assert.ok(!calls[0].args.some((a) => String(a).includes('hw_upload')))
-  assert.ok(!calls[0].args.includes('-vf'), 'identity dimensions skip scale filter')
+  assertBt709Args(calls[0].args, { scaled: false })
   assert.equal(calls[1].args[calls[1].args.indexOf('-c:v') + 1], 'libx264')
-  const aq = calls[1].args.indexOf('-x264-params')
-  assert.ok(
-    aq > 0 && String(calls[1].args[aq + 1]).includes('aq-mode=3'),
-    'dark fades need aq-mode=3'
+  const x264 = calls[1].args.indexOf('-x264-params')
+  assert.ok(x264 > 0, 'x264 params must be present')
+  assert.match(String(calls[1].args[x264 + 1]), /aq-mode=3/)
+  assert.match(String(calls[1].args[x264 + 1]), /deblock=2,2/)
+  assert.match(String(calls[1].args[x264 + 1]), /rc-lookahead=20/)
+  assert.equal(calls[1].args[calls[1].args.indexOf('-threads') + 1], '4')
+})
+
+test('BT.709 filters and four colour tags appear on all four frame output paths', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-bt709-test-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const inputPath = path.join(dir, 'in.webm')
+  const audioPath = path.join(dir, 'audio.wav')
+  await writeFile(inputPath, Buffer.alloc(2048))
+  await writeFile(audioPath, 'RIFF')
+  for (let i = 0; i < 3; i++) {
+    await writeFile(path.join(dir, `frame-${String(i).padStart(6, '0')}.jpg`), 'jpg')
+  }
+
+  const calls = []
+  t.mock.method(childProcess, 'spawn', (_bin, args, opts) => {
+    calls.push({ args, opts })
+    return makeFakeChild({ code: 0 })
+  })
+
+  // 1. transcode (identity -> bicubic conversion; scaled -> Lanczos)
+  await ffmpeg.apiConvertVideoWithCompression(
+    inputPath,
+    path.join(dir, 'convert.mp4'),
+    18,
+    30,
+    'cpu',
+    1920,
+    1080,
+    1920,
+    1080,
+    8_000_000,
+    'h264'
   )
+  assertBt709Args(calls.at(-1).args, { scaled: false })
+
+  await ffmpeg.apiConvertVideoWithCompression(
+    inputPath,
+    path.join(dir, 'convert-scaled.mp4'),
+    18,
+    30,
+    'cpu',
+    1920,
+    1080,
+    1280,
+    720,
+    8_000_000,
+    'h264'
+  )
+  assertBt709Args(calls.at(-1).args, { scaled: true })
+
+  // 2. merge with audio: -t frames/fps instead of -shortest, AAC 192k
+  await ffmpeg.apiMergeVideoAudioWithCompression(
+    inputPath,
+    audioPath,
+    path.join(dir, 'merge.mp4'),
+    18,
+    '192k',
+    30,
+    'cpu',
+    1920,
+    1080,
+    1920,
+    1080,
+    8_000_000,
+    'h264',
+    300
+  )
+  const mergeArgs = calls.at(-1).args
+  assertBt709Args(mergeArgs, { scaled: false })
+  assert.equal(mergeArgs.includes('-shortest'), false, '-shortest must be replaced by -t')
+  assert.equal(mergeArgs[mergeArgs.indexOf('-t') + 1], '10.000000')
+  assert.equal(mergeArgs[mergeArgs.indexOf('-b:a') + 1], '192k')
+
+  // 3. frame sequence
+  await ffmpeg.encodeFramesToVideo(
+    30,
+    dir,
+    path.join(dir, 'frames.mp4'),
+    'cpu',
+    1920,
+    1080,
+    18,
+    1920,
+    1080,
+    'h264'
+  )
+  assertBt709Args(calls.at(-1).args, { scaled: false })
+
+  // 4. image2pipe / rawvideo session
+  const session = await ffmpeg.createFramesPipeSession({
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    encoder: 'cpu',
+    codec: 'h264',
+    outputPath: path.join(dir, 'pipe.mp4')
+  })
+  assertBt709Args(calls.at(-1).args, { scaled: false })
+  await session.abort()
+})
+
+test('rawvideo yuv420p pipe carries BT.709 tags on the input and only tags the encoded frames', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-raw-pipe-test-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  const calls = []
+  t.mock.method(childProcess, 'spawn', (_bin, args, opts) => {
+    calls.push({ args, opts })
+    return makeOpenChild()
+  })
+
+  const session = await ffmpeg.createFramesPipeSession({
+    fps: 30,
+    width: 640,
+    height: 360,
+    encoder: 'cpu',
+    codec: 'h264',
+    frameFormat: 'rawvideo',
+    outputPath: path.join(dir, 'raw.mp4')
+  })
+  const args = calls.at(-1).args
+  assert.deepEqual(args.slice(args.indexOf('-f'), args.indexOf('-f') + 3), [
+    '-f',
+    'rawvideo',
+    '-pix_fmt'
+  ])
+  assert.equal(args[args.indexOf('-s') + 1], '640x360')
+  const filter = args[args.indexOf('-vf') + 1]
+  assert.equal(filter.includes('scale='), false, 'GPU frames must not be scaled again')
+  assert.match(filter, /setparams=range=tv:colorspace=bt709/)
+  assert.equal(args[args.indexOf('-pix_fmt', args.indexOf('-vf')) + 1], 'yuv420p')
+  const inputTagIndex = args.indexOf('-colorspace')
+  assert.ok(
+    inputTagIndex > 0 && inputTagIndex < args.indexOf('-i'),
+    'the piped 4:2:0 frames are declared as BT.709 before the input'
+  )
+
+  const frameBytes = (640 * 360 * 3) / 2
+  await session.write(Buffer.alloc(frameBytes))
+  assert.equal(session.frameCount, 1)
+  await assert.rejects(session.write(Buffer.alloc(100)), /not a multiple/)
+  await session.abort()
+})
+
+test('codec matrix: HEVC default with hvc1 and x264 threads/lookahead without losing aq-mode', () => {
+  const ffmpeg = loadFreshFfmpeg()
+  const codecNames = {
+    hevc: { nvidia: 'hevc_nvenc', amd: 'hevc_amf', intel: 'hevc_qsv', cpu: 'libx265' },
+    h264: { nvidia: 'h264_nvenc', amd: 'h264_amf', intel: 'h264_qsv', cpu: 'libx264' }
+  }
+  for (const codec of ['hevc', 'h264']) {
+    for (const backend of ['nvidia', 'amd', 'intel', 'cpu']) {
+      const selection = ffmpeg.getGpuEncoderArgs(backend, 18, codec)
+      assert.equal(selection.codec, codecNames[codec][backend], `${codec}/${backend}`)
+      const argv = ffmpeg.videoEncoderOutputArgs(
+        selection,
+        ffmpeg.buildVideoFilterChain({
+          inputWidth: 1920,
+          inputHeight: 1080,
+          outputWidth: 1920,
+          outputHeight: 1080,
+          pixFmt: selection.pixFmt
+        })
+      )
+      assert.equal(argv[0], '-vf')
+      assert.equal(argv[argv.indexOf('-pix_fmt') + 1], selection.pixFmt)
+      for (const [key, value] of [
+        ['-colorspace', 'bt709'],
+        ['-color_primaries', 'bt709'],
+        ['-color_trc', 'bt709'],
+        ['-color_range', 'tv']
+      ]) {
+        assert.equal(argv[argv.indexOf(key) + 1], value, `${codec}/${backend} ${key}`)
+      }
+      if (codec === 'hevc') {
+        assert.ok(selection.args.includes('hvc1'), `${backend} HEVC must be tagged hvc1`)
+      } else {
+        assert.equal(selection.args.includes('hvc1'), false)
+      }
+      if (backend === 'cpu') {
+        assert.equal(selection.preset, 'medium')
+        if (codec === 'hevc') {
+          assert.ok(selection.args.includes('-x265-params'))
+          assert.equal(selection.args[selection.args.indexOf('-crf') + 1], '18')
+        } else {
+          const params = selection.args[selection.args.indexOf('-x264-params') + 1]
+          assert.match(params, /aq-mode=3/)
+          assert.match(params, /deblock=2,2/)
+          assert.match(params, /rc-lookahead=20/)
+          assert.equal(selection.args[selection.args.indexOf('-threads') + 1], '4')
+        }
+      }
+    }
+  }
+})
+
+test('software encoder choice follows codec, while legacy libx264 still forces H.264', async () => {
+  const ffmpeg = loadFreshFfmpeg()
+  assert.equal((await ffmpeg.resolveVideoEncoderArgs('cpu', 18, 'hevc')).codec, 'libx265')
+  assert.equal((await ffmpeg.resolveVideoEncoderArgs('cpu', 18, 'h264')).codec, 'libx264')
+  assert.equal((await ffmpeg.resolveVideoEncoderArgs('libx264', 18, 'hevc')).codec, 'libx264')
+})
+
+test('mux uses -t frames/fps, AAC 192k by default, and offsets the mix to the first video frame', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-mux-test-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const videoPath = path.join(dir, 'video.mp4')
+  const audioPath = path.join(dir, 'audio.wav')
+  await writeFile(videoPath, Buffer.alloc(4096))
+  await writeFile(audioPath, 'RIFF')
+
+  const calls = []
+  t.mock.method(childProcess, 'spawn', (_bin, args, opts) => {
+    calls.push({ args, opts })
+    return makeFakeChild({ code: 0 })
+  })
+
+  await ffmpeg.apiMuxVideoAudioCopy(videoPath, audioPath, path.join(dir, 'out.mp4'), '192k', {
+    frameCount: 18_000,
+    fps: 30
+  })
+  const args = calls.at(-1).args
+  assert.equal(args.includes('-shortest'), false)
+  assert.equal(args[args.indexOf('-t') + 1], '600.000000')
+  assert.equal(args[args.indexOf('-b:a') + 1], '192k')
+  assert.equal(args.includes('-ss'), false, 'no offset when the video starts at frame 0')
+
+  await ffmpeg.apiMuxVideoAudioCopy(
+    videoPath,
+    audioPath,
+    path.join(dir, 'out-offset.mp4'),
+    '192k',
+    { frameCount: 18_000, fps: 30, startFrame: 900 }
+  )
+  const offsetArgs = calls.at(-1).args
+  const ssIndex = offsetArgs.indexOf('-ss')
+  assert.ok(ssIndex > 0, 'resumed exports must seek the mix')
+  assert.equal(offsetArgs[ssIndex + 1], '30.000000')
+  assert.ok(ssIndex < offsetArgs.lastIndexOf('-i'), '-ss must apply to the audio input')
+})
+
+test('export preflight rejects odd encode sizes and empty frame ranges before model/TTS work', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  assert.throws(() => ffmpeg.checkEncodeSize(1921, 1081), /even width and height/)
+  assert.throws(() => ffmpeg.checkFrameRange(120, 120), /from must be less than to/)
+  assert.throws(() => ffmpeg.checkFrameRange(121, 120), /from must be less than to/)
+  assert.doesNotThrow(() => ffmpeg.checkEncodeSize(1920, 1080))
+  assert.doesNotThrow(() => ffmpeg.checkFrameRange(0, 1))
+
+  const outputDir = await mkdtemp(path.join(tmpdir(), 'msst-preflight-test-'))
+  let prepared = 0
+  let dispatched = 0
+  let spawnCalls = 0
+  t.mock.method(childProcess, 'spawn', () => {
+    spawnCalls++
+    return makeOpenChild()
+  })
+  const api = new VideoApiServer(new Logger({ type: 'hidden' }), {
+    port: 0,
+    host: '127.0.0.1',
+    outputDir,
+    video: {
+      width: 1921,
+      height: 1081,
+      fps: 30,
+      crf: 23,
+      renderScale: 1,
+      codec: 'hevc',
+      audioBitrate: '192k',
+      encoder: 'auto',
+      watermark: false,
+      exportMode: 'fast',
+      exportBitrate: 12_000_000,
+      exportFastEncoder: 'frames',
+      fastFps: 30,
+      idleChainGapSec: 0,
+      ttsMode: 'serial'
+    },
+    prepareStory: async () => {
+      prepared++
+    }
+  })
+  api.setDispatcher({
+    dispatch: () => {
+      dispatched++
+    },
+    cancel: () => {}
+  })
+  await api.start()
+  const server = api.getHttpServer()
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    api.stop()
+    server.closeAllConnections()
+    await closed
+    await rm(outputDir, { recursive: true, force: true })
+  })
+
+  const startedAt = Date.now()
+  const res = await new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/api/v1/export', method: 'POST' },
+      (response) => {
+        const chunks = []
+        response.on('data', (c) => chunks.push(c))
+        response.on('end', () =>
+          resolve({
+            status: response.statusCode,
+            body: Buffer.concat(chunks).toString('utf8')
+          })
+        )
+      }
+    )
+    req.on('error', reject)
+    req.end(JSON.stringify({ story: { models: [], images: [], snippets: [] } }))
+  })
+  const elapsedMs = Date.now() - startedAt
+  assert.equal(res.status, 400)
+  assert.match(JSON.parse(res.body).message, /even width and height/)
+  assert.ok(elapsedMs < 100, `odd-size request must fail fast (took ${elapsedMs}ms)`)
+  assert.equal(prepared, 0, 'story preparation (resource/TTS preflight) must not run')
+  assert.equal(dispatched, 0, 'no render task may be queued')
+  assert.equal(spawnCalls, 0, 'a rejected request must not spawn ffmpeg')
 })
 
 test('VideoApiServer hardens /api/v1/download and protects active multi-dot sidecars from cleanup', async (t) => {
@@ -512,6 +913,277 @@ test('/bridge enforces session token, same-origin, path containment, proxy allow
   assert.equal(JSON.parse(framesRes.body).result.success, false)
   const remaining = await readdir(outputDir)
   assert.deepEqual(remaining, [], 'intermediate .mss-frames-video-*.mp4 must be cleaned up')
+})
+
+test('bridge encodes to <name>.partial.mp4 and renames only after ffmpeg succeeds', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-atomic-export-'))
+  const outputDir = path.join(workDir, 'out')
+  const framesDir = path.join(workDir, 'frames')
+  await fs.promises.mkdir(framesDir, { recursive: true })
+  await fs.promises.mkdir(outputDir, { recursive: true })
+
+  const app = express()
+  app.use(
+    '/bridge',
+    createBridgeRouter({
+      logger: new Logger({ type: 'hidden' }),
+      config: {
+        paths: { output: outputDir },
+        video: { width: 1280, height: 720, fps: 30, crf: 23, encoder: 'cpu', codec: 'hevc' },
+        render: { workers: 1 },
+        tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+        llm: { enabled: false }
+      },
+      bridgeToken: 'tok'
+    })
+  )
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    server.close()
+    server.closeAllConnections()
+    await closed
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  const post = (body) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/bridge/invoke/electron:api-encode-frames-video',
+          method: 'POST',
+          headers: { 'x-mss-bridge-token': 'tok', 'content-type': 'application/json' }
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) })
+          )
+        }
+      )
+      req.on('error', reject)
+      req.end(JSON.stringify([body]))
+    })
+
+  const finalPath = path.join(outputDir, 'final.mp4')
+  const partialPath = path.join(outputDir, 'final.partial.mp4')
+  const encodedPaths = []
+  let writeOutput = async (outPath) => {
+    await writeFile(outPath, 'encoded-mp4')
+    return 3
+  }
+  t.mock.method(bridgeFfmpeg, 'encodeFramesToVideo', async (_fps, _dir, outPath) => {
+    encodedPaths.push(outPath)
+    return writeOutput(outPath)
+  })
+
+  const ok = await post({
+    framesDir,
+    outputPath: finalPath,
+    fps: 30,
+    audioBitrate: '192k'
+  })
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.result.success, true)
+  assert.deepEqual(encodedPaths, [partialPath], 'ffmpeg must write the partial file only')
+  assert.equal(await readFile(finalPath, 'utf8'), 'encoded-mp4')
+  await assert.rejects(stat(partialPath), { code: 'ENOENT' })
+  assert.deepEqual(
+    (await readdir(outputDir)).filter((name) => name.includes('.partial')),
+    []
+  )
+
+  // Failure: the target name never appears and the partial file is removed
+  await rm(finalPath, { force: true })
+  writeOutput = async (outPath) => {
+    await writeFile(outPath, 'half-written')
+    throw new Error('ffmpeg exited with code 1')
+  }
+  const failed = await post({
+    framesDir,
+    outputPath: finalPath,
+    fps: 30,
+    audioBitrate: '192k'
+  })
+  assert.equal(failed.body.result.success, false)
+  await assert.rejects(stat(finalPath), { code: 'ENOENT' })
+  await assert.rejects(stat(partialPath), { code: 'ENOENT' })
+  assert.deepEqual(await readdir(outputDir), [])
+})
+
+test('remux reuses the image2pipe frame count and fps to truncate the mix exactly', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-pipe-remux-'))
+  const outputDir = path.join(workDir, 'out')
+  const audioPath = path.join(workDir, 'audio.wav')
+  await fs.promises.mkdir(outputDir, { recursive: true })
+  await writeFile(audioPath, 'RIFF')
+
+  const pipeSessions = []
+  const app = express()
+  app.use(
+    '/bridge',
+    createBridgeRouter({
+      logger: new Logger({ type: 'hidden' }),
+      config: {
+        paths: { output: outputDir },
+        video: { width: 1280, height: 720, fps: 30, crf: 18, encoder: 'cpu', codec: 'hevc' },
+        render: { workers: 1 },
+        tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+        llm: { enabled: false }
+      },
+      bridgeToken: 'tok',
+      createFramesPipe: async (options) => {
+        const session = {
+          outputPath: options.outputPath,
+          frameCount: 90,
+          async write() {},
+          async finish() {
+            await writeFile(options.outputPath, 'encoded-video')
+            return options.outputPath
+          },
+          async abort() {}
+        }
+        pipeSessions.push(session)
+        return session
+      }
+    })
+  )
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    server.close()
+    server.closeAllConnections()
+    await closed
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  const invoke = (channel, body) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: `/bridge/invoke/${channel}`,
+          method: 'POST',
+          headers: { 'x-mss-bridge-token': 'tok', 'content-type': 'application/json' }
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) })
+          )
+        }
+      )
+      req.on('error', reject)
+      req.end(JSON.stringify(body))
+    })
+
+  const started = await invoke('electron:frames-stream-start', [{ fps: 30 }])
+  assert.equal(started.status, 200)
+  const finished = await invoke('electron:frames-stream-finish', [{ id: started.body.result.id }])
+  assert.equal(finished.status, 200)
+  const videoPath = finished.body.result.videoPath
+
+  let muxOptions = null
+  t.mock.method(
+    bridgeFfmpeg,
+    'apiMuxVideoAudioCopy',
+    async (_v, _a, outPath, _bitrate, options) => {
+      muxOptions = options
+      await writeFile(outPath, 'remuxed-video')
+    }
+  )
+
+  const outputPath = path.join(outputDir, 'final.mp4')
+  const remuxed = await invoke('electron:api-remux-video-from-files', [
+    { videoPath, audioPath, outputPath, audioBitrate: '192k' }
+  ])
+  assert.equal(remuxed.status, 200)
+  assert.equal(remuxed.body.result.success, true)
+  assert.deepEqual(muxOptions, { frameCount: 90, fps: 30, startFrame: undefined })
+  assert.equal(await readFile(outputPath, 'utf8'), 'remuxed-video')
+  assert.deepEqual(
+    (await readdir(outputDir)).filter((name) => name.includes('.partial')),
+    []
+  )
+  assert.equal(pipeSessions.length, 1)
+})
+
+test('bridge rejects an empty or reversed frame range before spawning ffmpeg', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-range-preflight-'))
+  const outputDir = path.join(workDir, 'out')
+  await fs.promises.mkdir(outputDir, { recursive: true })
+  let pipeStarts = 0
+  const app = express()
+  app.use(
+    '/bridge',
+    createBridgeRouter({
+      logger: new Logger({ type: 'hidden' }),
+      config: {
+        paths: { output: outputDir },
+        video: { width: 1280, height: 720, fps: 30, crf: 23, encoder: 'cpu', codec: 'hevc' },
+        render: { workers: 1 },
+        tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+        llm: { enabled: false }
+      },
+      bridgeToken: 'tok',
+      createFramesPipe: async () => {
+        pipeStarts++
+        throw new Error('must not be called')
+      }
+    })
+  )
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    server.close()
+    server.closeAllConnections()
+    await closed
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  const post = (body) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/bridge/invoke/electron:frames-stream-start',
+          method: 'POST',
+          headers: { 'x-mss-bridge-token': 'tok', 'content-type': 'application/json' }
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) })
+          )
+        }
+      )
+      req.on('error', reject)
+      req.end(JSON.stringify([body]))
+    })
+
+  const empty = await post({ fps: 30, fromFrame: 120, toFrame: 120 })
+  assert.equal(empty.status, 400)
+  assert.match(empty.body.error, /from must be less than to/)
+  const reversed = await post({ fps: 30, fromFrame: 121, toFrame: 120 })
+  assert.equal(reversed.status, 400)
+  assert.match(reversed.body.error, /from must be less than to/)
+  const odd = await post({ fps: 30, width: 1921, height: 1081 })
+  assert.equal(odd.status, 400)
+  assert.match(odd.body.error, /even width and height/)
+  assert.equal(pipeStarts, 0, 'rejected requests must not spawn ffmpeg')
 })
 
 test('electron:write-file-at caches FileHandle across chunks and closes on explicit flush or idle timeout', async (t) => {

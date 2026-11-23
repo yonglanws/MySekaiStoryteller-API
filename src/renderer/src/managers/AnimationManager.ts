@@ -1,6 +1,7 @@
 import { Ticker, UPDATE_PRIORITY } from 'pixi.js'
 import getSubLogger from '../utils/Logger'
 import { ILogObj, Logger } from 'tslog'
+import { FRAME_MS } from '../../../common/official/timing'
 
 /**
  * 帧步进：导出模式按真实 elapsed 推进（最多 1 秒），预览模式最多 250ms。
@@ -27,10 +28,22 @@ export default class AnimationManager {
   public static exportEncodeFPS: number = 60
   private static isExportMode: boolean = false
 
+  /**
+   * 导出模式的动画步进订阅：由帧泵在每个 1/60 故事步调用一次 dispatchExportStep，
+   * 不再使用独立的 17ms setTimeout。每条订阅在 when_finish 返回 true 时解除。
+   */
+  private static exportStepHandlers = new Set<{
+    onStep: (ticker: Ticker) => void
+    whenFinish: (ticker: Ticker) => boolean
+    startedAt: number
+    resolve: () => void
+  }>()
+
   public static setExportMode(enabled: boolean): void {
     this.isExportMode = enabled
     if (!enabled) {
       this.exportEncodeFPS = 60
+      this.exportStepHandlers.clear()
     }
   }
 
@@ -38,58 +51,57 @@ export default class AnimationManager {
     return this.isExportMode
   }
 
+  /** 帧泵每个固定 1/60 故事步调用一次；ticker 为 Ticker.shared（deltaMS=1000/60）。 */
+  public static dispatchExportStep(ticker: Ticker): void {
+    if (this.exportStepHandlers.size === 0) return
+    const now = performance.now()
+    for (const handler of Array.from(this.exportStepHandlers)) {
+      handler.onStep(ticker)
+      if (handler.whenFinish(ticker)) {
+        this.exportStepHandlers.delete(handler)
+        handler.resolve()
+        continue
+      }
+      // 与旧 setTimeout 实现相同的 60s 剧情时间兜底，避免任务永久挂起
+      if (now - handler.startedAt > 60_000) {
+        this.logger.warn('in_ticker export step exceeded 60000ms, forcing completion')
+        this.exportStepHandlers.delete(handler)
+        handler.resolve()
+      }
+    }
+  }
+
+  /** 导出异常/取消时清空订阅，避免下一轮导出继承悬挂的 Promise。 */
+  public static resetExportStepHandlers(): void {
+    for (const handler of this.exportStepHandlers) {
+      handler.resolve()
+    }
+    this.exportStepHandlers.clear()
+  }
+
   public static async in_ticker(
     on_step: (ticker: Ticker) => void,
     when_finish: (ticker: Ticker) => boolean
   ): Promise<void> {
     if (AnimationManager.isExportMode) {
-      await AnimationManager.in_ticker_settimeout(on_step, when_finish)
+      await AnimationManager.in_ticker_export(on_step, when_finish)
     } else {
       await AnimationManager.in_ticker_raf(on_step, when_finish)
     }
   }
 
-  private static async in_ticker_settimeout(
+  /** 导出模式：注册到帧泵的故事步；每次 dispatch 用同一个 Ticker.shared 步进。 */
+  private static in_ticker_export(
     on_step: (ticker: Ticker) => void,
     when_finish: (ticker: Ticker) => boolean
   ): Promise<void> {
-    const interval = Math.max(Math.round(1000 / AnimationManager.exportTargetFPS), 8)
-    let lastTime = performance.now()
-    let startTime = lastTime
-    const maxDuration = 60_000
-
-    await new Promise<void>((resolve) => {
-      const step = (): void => {
-        const now = performance.now()
-        if (now < lastTime) lastTime = now
-        if (now < startTime) startTime = now
-        const delta = Math.max(0, now - lastTime)
-        lastTime = now
-
-        const fakeTicker = {
-          elapsedMS: delta,
-          deltaTime: delta * 0.06,
-          lastTime: now
-        } as Ticker
-
-        on_step(fakeTicker)
-        if (when_finish(fakeTicker)) {
-          resolve()
-          return
-        }
-
-        if (now - startTime > maxDuration) {
-          this.logger.warn(
-            `in_ticker_settimeout exceeded ${maxDuration}ms, forcing completion (started at ${startTime}, now=${now})`
-          )
-          resolve()
-          return
-        }
-
-        setTimeout(step, interval)
-      }
-
-      setTimeout(step, interval)
+    return new Promise<void>((resolve) => {
+      AnimationManager.exportStepHandlers.add({
+        onStep: on_step,
+        whenFinish: when_finish,
+        startedAt: performance.now(),
+        resolve
+      })
     })
   }
 
@@ -139,12 +151,45 @@ export default class AnimationManager {
     await task
   }
 
+  /**
+   * 0..1 的线性进度，只由虚拟时钟决定：同一时刻求值结果相同，暂停后不累积漂移。
+   * `startMs` 是绝对开始时刻，`frames` 是官方帧数。
+   */
+  public static progressAt(startMs: number, frames: number, now = performance.now()): number {
+    if (!(frames > 0) || !Number.isFinite(now)) return 1
+    return Math.max(0, Math.min(1, (now - startMs) / (frames * FRAME_MS)))
+  }
+
   public static async linear(
     animation: (progress: number) => void,
     time_ms: number,
     elegant: boolean = false,
-    opts?: { maxProgressPerFrame?: number }
+    opts?: { maxProgressPerFrame?: number; startMs?: number; frames?: number }
   ): Promise<void> {
+    // 绝对时间模式：官方 `Tween::at(frame)` 的等价物，progress 不再逐帧累加。
+    if (opts?.startMs !== undefined && opts?.frames !== undefined) {
+      const startMs = opts.startMs
+      const frames = Math.max(0, opts.frames)
+      if (frames === 0) {
+        animation(1)
+        return
+      }
+      let progress = 0
+      const evaluate = (): number => {
+        progress = AnimationManager.progressAt(startMs, frames)
+        animation(progress)
+        return progress
+      }
+      if (evaluate() >= 1) return
+      await AnimationManager.in_ticker(
+        () => {
+          evaluate()
+        },
+        () => progress >= 1
+      )
+      animation(1)
+      return
+    }
     const effectiveTime = time_ms / AnimationManager.exportSpeedMultiplier
     let progress = 0
     animation(0)

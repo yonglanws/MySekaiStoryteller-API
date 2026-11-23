@@ -2,24 +2,53 @@ import {
   BREATH_INFLUENCE,
   BREATH_VECTOR_DEGREES_PER_FRAME,
   DEG2RAD,
-  EYEBLINK_CLOSED_SECONDS,
-  EYEBLINK_CLOSING_SECONDS,
   EYEBLINK_MAX_DEVIATION_SECONDS,
   EYEBLINK_MEAN_SECONDS,
-  EYEBLINK_OPENING_SECONDS
+  EYEBLINK_SPEED
 } from '../../../common/official/timing'
 
-export type BlinkStatus = 'sleep' | 'ready' | 'closing' | 'closed' | 'opening'
+/**
+ * 官方 `Live2DEyeBlinkController.Status`。
+ *
+ * 自动眨眼只有 Ready（间隔计时）、Closing（|sin| 下降沿）、Opening（|sin| 上升沿）
+ * 三个相位；Sleep 只是把自动眨眼停住，不关掉控制器。
+ */
+export type BlinkStatus = 'sleep' | 'ready' | 'closing' | 'opening'
+
+/** `Live2DEyeBlinkController.PlayMode`：Auto 自动眨眼，Command 由动作事件驱动。 */
+export type BlinkMode = 'auto' | 'command'
+
+/** `PlayStatus`；一旦播过命令就不会再回到 None。 */
+export type BlinkPlayStatus = 'none' | 'playing' | 'finish'
+
+/** `PlayCommand(closing, closed, opening)` 的 DOTween 序列。 */
+export interface BlinkCommand {
+  closing: number
+  closed: number
+  opening: number
+  /** 序列位置；null 表示 DOTween 的 OnStart 还没跑（事件帧本身）。 */
+  elapsed: number | null
+  /** closing 段起始值，OnStart 时取当时的 EyeOpening。 */
+  from: number
+  /** 事件与 tick 落在同一帧时先跳过一帧：命令从下一帧才开始推进。 */
+  deferred: boolean
+}
 
 export interface BlinkState {
   status: BlinkStatus
+  mode: BlinkMode
+  playStatus: BlinkPlayStatus
+  command: BlinkCommand | null
   /** 距离下一次自动眨眼的剩余秒数；首次唤醒后为 0，下一帧立刻开始。 */
   untilTime: number
-  /** 当前相位的已用时间（秒）。 */
-  phaseElapsed: number
+  /** |sin| 的相位（弧度），从 -π/2 起每帧 += speed×dt。 */
+  blinkRadian: number
   lastValue: number
-  /** 1 = 完全睁开，0 = 完全闭合。 */
+  /** Auto 模式写出的开合（1 = 完全睁开，0 = 完全闭合）。 */
   opening: number
+  /** `eyeValue`：Auto 与 Command 共用，命令模式直接写它。 */
+  eyeValue: number
+  /** `doSleep`：当前这眨结束后停住自动眨眼。 */
   doSleep: boolean
   nextRandom: () => number
 }
@@ -37,122 +66,196 @@ export function createSeededRandom(seed: number): () => number {
 }
 
 /**
- * 官方 `CubismAutoEyeBlinkInput`：新模型先 Sleep；身体动作开始时 Sleep，
- * 非循环动作结束后 Wake。`untilTime` 初值为 0，所以唤醒后的第一次眨眼立即开始。
+ * 官方 `Live2DModel.BuildModelComponent`：控制器建好后立即 `Sleep()`，
+ * 新模型不会眨眼；`untilTime` 初值 0，所以第一次唤醒后的下一帧就开眨。
  */
-export function createBlinkState(seed: number): BlinkState {
-  return {
-    status: 'sleep',
+export function createBlinkState(seed = 1): BlinkState {
+  const state: BlinkState = {
+    status: 'ready',
+    mode: 'auto',
+    playStatus: 'none',
+    command: null,
     untilTime: 0,
-    phaseElapsed: 0,
-    lastValue: 1,
+    blinkRadian: 0,
+    lastValue: 0,
     opening: 1,
-    doSleep: true,
+    eyeValue: 0,
+    doSleep: false,
     nextRandom: createSeededRandom(seed)
   }
+  sleepBlink(state)
+  return state
 }
 
+/** `Sleep()`：停住自动眨眼；已在进行的这一眨会走完再停。 */
 export function sleepBlink(state: BlinkState): void {
   if (state.status === 'ready') state.status = 'sleep'
   state.doSleep = true
 }
 
+/**
+ * `WakeUp()`：只有 Sleep 状态会清 `doSleep`（飞行中的这一眨仍然在结束时停住），
+ * 模式总是回到 Auto；`untilTime` 不重置。
+ */
 export function wakeBlink(state: BlinkState): void {
   if (state.status === 'sleep') {
     state.status = 'ready'
-    state.phaseElapsed = 0
-    state.opening = 1
+    state.doSleep = false
   }
-  // 眨眼途中被唤醒：这一眨走完后回到间隔计时，而不是回到 Sleep。
-  state.doSleep = false
+  state.mode = 'auto'
 }
 
-function phaseDuration(status: 'closing' | 'closed' | 'opening'): number {
-  return status === 'closing'
-    ? EYEBLINK_CLOSING_SECONDS
-    : status === 'closed'
-      ? EYEBLINK_CLOSED_SECONDS
-      : EYEBLINK_OPENING_SECONDS
+/** `ScenarioModel.ChangeMotionCore` 的结尾：任何身体动作切换都 `Sleep()`。 */
+export function bodyMotionChangedBlink(state: BlinkState): void {
+  sleepBlink(state)
 }
 
-function phaseOpening(status: 'closing' | 'closed' | 'opening', elapsed: number): number {
-  if (status === 'closing') {
-    return Math.max(0, 1 - elapsed / EYEBLINK_CLOSING_SECONDS)
-  }
-  if (status === 'closed') return 0
-  return Math.min(1, Math.max(0, elapsed / EYEBLINK_OPENING_SECONDS))
-}
-
-function scheduleNextBlink(state: BlinkState): void {
-  state.untilTime =
-    EYEBLINK_MEAN_SECONDS + (state.nextRandom() * 2 - 1) * EYEBLINK_MAX_DEVIATION_SECONDS
+/** `ScenarioModel.OnFinishMotion`：只有非循环身体 clip 越过结尾才 `WakeUp()`。 */
+export function bodyMotionFinishedBlink(state: BlinkState, looping: boolean): void {
+  if (!looping) wakeBlink(state)
 }
 
 /**
- * 推进一帧，返回本帧的 EyeOpening（1 表示完全睁开）。
- *
- * 四段线性相位（闭眼/全闭/睁眼），一帧内跨过多个相位时把剩余时间带到下一相位，
- * 30fps 导出也能完整走完"闭—合—睁"，而不是被正弦曲线磨成一次抽搐。
+ * `ChangeMotionCore` 请求了模型没有的动作：`OnFinishMotion` 先按当前 clip 是否
+ * 非循环决定唤醒，随后照常 `Sleep()`；当前 clip 早已报过结束，所以之后不会
+ * 再有唤醒，眨眼永久停住。
  */
-export function stepBlink(state: BlinkState, deltaSeconds: number): number {
-  if (state.status === 'sleep') return state.opening
-  const dt = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0
-  let budget = dt
+export function missingBodyMotionBlink(state: BlinkState, currentLooping: boolean): void {
+  if (!currentLooping) wakeBlink(state)
+  sleepBlink(state)
+}
 
+/** `PlayCommand(closingTime, closedTime, openingTime)`；序列播放中忽略新命令。 */
+export function playBlinkCommand(
+  state: BlinkState,
+  closing: number,
+  closed: number,
+  opening: number
+): void {
+  if (state.playStatus === 'playing') return
+  state.mode = 'command'
+  state.playStatus = 'playing'
+  state.command = { closing, closed, opening, elapsed: null, from: 0, deferred: true }
+}
+
+/**
+ * `OnLive2DInvokeUserData`（例如 `eyeblink,0.2,0.79,0.24`）。
+ * 少于 4 段时官方在 `PlayCommand` 之前就报错返回；参数按 `float.TryParse`，
+ * 解析失败写 0。
+ */
+export function invokeBlinkUserData(state: BlinkState, data: string): void {
+  const parts = String(data).split(',')
+  if (parts.length < 4) return
+  const arg = (text: string): number => {
+    const value = Number.parseFloat(text.trim())
+    return Number.isFinite(value) ? value : 0
+  }
+  playBlinkCommand(state, arg(parts[1]), arg(parts[2]), arg(parts[3]))
+}
+
+/** DOTween 的 Update tick：命令序列无论当前模式都会推进。 */
+function tickBlinkCommand(state: BlinkState, delta: number): void {
+  const command = state.command
+  if (!command) return
+  if (command.deferred) {
+    // 事件在动作求值时触发，LateUpdate 的 tick 已过；参考里命令从下一帧才 OnStart。
+    command.deferred = false
+    return
+  }
+  // 官方序列时间是 f32；用 fround 累加，0.2s 的 closing 段在第 12 步正好落到 0。
+  const step = Math.fround(delta)
+  let elapsed: number
+  if (command.elapsed === null) {
+    // OnStart：eyeValue = EyeOpening，closing 段从它开始。
+    state.eyeValue = state.opening
+    command.from = state.eyeValue
+    elapsed = step
+  } else {
+    elapsed = Math.fround(command.elapsed + step)
+  }
+  command.elapsed = elapsed
+  const held = command.closing + command.closed
+  if (elapsed < command.closing) {
+    state.eyeValue = command.from + (elapsed / command.closing) * (0 - command.from)
+  } else if (elapsed < held) {
+    state.eyeValue = 0
+  } else if (elapsed < held + command.opening) {
+    state.eyeValue = (elapsed - held) / command.opening
+  } else {
+    // 睁眼段在终点完成，然后 OnComplete。
+    state.command = null
+    state.playStatus = 'finish'
+    state.eyeValue = 1
+  }
+}
+
+/**
+ * `PlayAutoMode`：Ready 状态下 `untilTime` 递减，越过 0 后从 -π/2 起走一段
+ * `π / speed` 秒的 |sin| 眨眼，并在同一帧推进；|sin| 回到上升沿时停下，
+ * 重抽 `3 + Random.Range(-2, 2)` 的间隔。
+ */
+function autoMode(state: BlinkState, delta: number): void {
+  if (state.status === 'sleep') return
   if (state.status === 'ready') {
-    const wait = Math.max(0, state.untilTime)
-    if (budget < wait) {
-      state.untilTime = wait - budget
-      state.opening = 1
-      return 1
-    }
-    budget -= wait
-    state.untilTime = 0
-    state.phaseElapsed = 0
+    state.untilTime -= delta
+    // 官方 `if (untilTime >= 0) return`，NaN 也在这里返回。
+    if (state.untilTime >= 0 || Number.isNaN(state.untilTime)) return
+    state.blinkRadian = -Math.PI / 2
+    state.lastValue = 1
     state.status = 'closing'
   }
-
-  // 单帧最多跨 3 个相位（闭/合/睁）；防御异常大的 dt，剩余时间直接丢弃。
-  let status = state.status as BlinkStatus
-  for (let guard = 0; guard < 4; guard++) {
-    if (status !== 'closing' && status !== 'closed' && status !== 'opening') break
-    const phase = status
-    const left = phaseDuration(phase) - state.phaseElapsed
-    if (budget < left) {
-      state.phaseElapsed += budget
-      state.opening = phaseOpening(phase, state.phaseElapsed)
-      state.lastValue = state.opening
-      state.status = phase
-      return state.opening
-    }
-    budget -= Math.max(0, left)
-    state.phaseElapsed = 0
-    if (phase === 'closing') {
-      status = 'closed'
-      state.opening = 0
-    } else if (phase === 'closed') {
-      status = 'opening'
-      state.opening = 0
-    } else {
-      // 一眨结束：官方在睁眼完成后回到间隔计时；动作期间 Sleep。
-      status = state.doSleep ? 'sleep' : 'ready'
-      state.opening = 1
-      state.lastValue = 1
-      if (status === 'ready') scheduleNextBlink(state)
-      state.status = status
-      return 1
-    }
-    state.status = status
+  state.blinkRadian += delta * EYEBLINK_SPEED
+  state.eyeValue = Math.abs(Math.sin(state.blinkRadian))
+  if (state.status === 'opening' && state.eyeValue < state.lastValue) {
+    state.status = state.doSleep ? 'sleep' : 'ready'
+    state.eyeValue = 1
+    state.untilTime =
+      EYEBLINK_MEAN_SECONDS + (state.nextRandom() * 2 - 1) * EYEBLINK_MAX_DEVIATION_SECONDS
+  } else if (state.status === 'closing' && state.eyeValue > state.lastValue) {
+    state.status = 'opening'
   }
+  state.opening = state.eyeValue
+  state.lastValue = state.eyeValue
+}
 
-  state.lastValue = state.opening
+/** `LateUpdate`：Auto 模式跑自动眨眼，Command 模式把 eyeValue 写到开合上。 */
+function lateUpdateBlink(state: BlinkState, delta: number): void {
+  if (state.mode === 'command') {
+    if (state.playStatus === 'finish') state.mode = 'auto'
+    state.opening = state.eyeValue
+    state.lastValue = state.eyeValue
+    return
+  }
+  autoMode(state, delta)
+}
+
+/**
+ * 一帧：tick 命令序列，再让当前模式写 EyeOpening，返回本帧开合（1 = 完全睁开）。
+ *
+ * 自动眨眼是 |sin| 控制器而不是四段线性相位：一眨 19 步小于 1、第 20 步强制
+ * 回到 1.0，30fps 抽取时按步号奇偶得到 0.0707 或 0.0957 两个谷值。
+ */
+export function stepBlink(state: BlinkState, deltaSeconds: number): number {
+  const delta = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0
+  tickBlinkCommand(state, delta)
+  lateUpdateBlink(state, delta)
   return state.opening
 }
 
-/** `Live2DModel.Update`: breathDegree += deltaK × breathVector；这里 deltaK 按 60fps 帧数。 */
+/** `BuildModelComponent`: `breathDegree = Random.Range(0, 360)`（int 重载）。 */
+export function createBreathDegree(seed: number): number {
+  return Math.floor(createSeededRandom(seed ^ 0x6272656174)() * 360)
+}
+
+/**
+ * `Live2DModel.LateUpdate`：`d = breathDegree + breathVector × deltaK`，
+ * 越过一整圈只减一次 360。deltaK 按 60fps 帧数，story 的 60fps 下即帧差。
+ */
 export function advanceBreathDegree(degree: number, deltaSeconds: number): number {
-  const frames = Math.max(0, deltaSeconds) * 60
-  return degree + frames * BREATH_VECTOR_DEGREES_PER_FRAME
+  const deltaK = Math.max(0, deltaSeconds) * 60
+  const next = degree + deltaK * BREATH_VECTOR_DEGREES_PER_FRAME
+  // 官方 `if (!(d < 360f)) d += -360f`：只减一次，也没有下界。
+  return next >= 360 ? next - 360 : next
 }
 
 /** LateUpdate 写入 ParamBreath 的值。 */

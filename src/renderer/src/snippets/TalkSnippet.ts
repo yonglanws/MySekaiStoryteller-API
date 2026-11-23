@@ -3,7 +3,12 @@ import AdvancedModel from '../model/AdvancedModel'
 import type { CharacterAction } from '../../../common/types/Story'
 import AnimationManager from '../managers/AnimationManager'
 import { scheduleCharacterActions } from '../utils/CharacterActionScheduler'
-import { sampleLipSync, textLipSequence, type LipSyncEnvelope } from '../utils/LipSyncEnvelope'
+import {
+  sampleLipSync,
+  textLipSequence,
+  type LipSyncEnvelope,
+  type TextLipSequence
+} from '../utils/LipSyncEnvelope'
 import {
   AUTO_NEXT_PAGE_DELAY_MS,
   AUTO_WAIT_AFTER_VOICE_MS,
@@ -11,11 +16,7 @@ import {
   TALK_WINDOW_OPEN_CLOSE_MS,
   VOICE_END_LATENCY_MS
 } from '../../../common/official/timing'
-import {
-  calculateTalkDurationMs,
-  TALK_DISPLAY_MS_PER_CHAR,
-  visibleTextLength
-} from '../utils/TalkTiming'
+import { calculateTalkDurationMs, visibleTextLength } from '../utils/TalkTiming'
 import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
 import {
   areTrackedMotionsSettled,
@@ -66,39 +67,36 @@ export default class TalkSnippet extends BaseSnippet {
   }
 
   /**
-   * 本句口型开度。语音包络仍是官方曲线裸输出 + policy；只在说话人这一侧
-   * 叠一层约 6Hz、±12% 的音节起伏，避免长元音 RMS 几乎恒定时嘴停在中等开口。
-   * 听者不走这条，保持闭嘴。
+   * 本句口型开度；`null` = 官方 `Lip::None` 已脱手（本帧不写参数）。
+   *
+   * 语音与文本都按剧情 60Hz 步进、按步号直接取值（不插值）：语音步号从 talk
+   * 开始（= 语音起点）算，文本步号从 typing_start 算。平滑到 <0.001 的那一步
+   * 之后脱手，`Talk` 结束时也脱手。
    */
-  private speakerOpen(
+  private speakerOpening(
     elapsed: number,
-    hasVoice: boolean,
     envelope: LipSyncEnvelope | null,
-    textLip: Float32Array | null,
-    textStartDelayMs: number,
-    halfMs: number
-  ): number {
-    if (hasVoice) {
-      const open = sampleLipSync(envelope!, elapsed)
-      if (open <= 0) return 0
-      // ±35%、约 8Hz：长元音 RMS 几乎恒定时仍能看出开合，不改包络本身。
-      const syllable = 0.65 + 0.35 * Math.sin((elapsed / 1000) * 2 * Math.PI * 8)
-      return Math.min(1, Math.max(0, open * syllable))
+    textLip: TextLipSequence | null,
+    typingStartMs: number
+  ): number | null {
+    if (envelope && envelope.values.length > 0) {
+      const step = Math.floor(elapsed / envelope.frameMs + 1e-9)
+      if (step < 0 || step > envelope.releaseStep) return null
+      return sampleLipSync(envelope, elapsed)
     }
-    if (!textLip || textLip.length === 0) return 0
-    const textElapsed = Math.max(0, elapsed - textStartDelayMs)
-    const frame = textElapsed / halfMs
-    const index = Math.floor(frame)
-    const tail = textLip[Math.min(index, textLip.length - 1)] ?? 0
-    const next = textLip[Math.min(index + 1, textLip.length - 1)] ?? 0
-    return tail + (next - tail) * (frame - index)
+    // 没有可显示的字符（纯标点）：官方文本口型在 typing_start 就收尾并脱手。
+    if (!textLip || textLip.values.length === 0) return null
+    const frame = Math.floor((elapsed - typingStartMs) / FRAME_MS + 1e-9)
+    // typing_start 之前官方不写嘴；收尾平滑完（<0.001）后脱手。
+    if (frame < 0 || frame > textLip.releaseStep) return null
+    return textLip.values[frame] ?? 0
   }
 
   private startMouthAnimation(
     model: AdvancedModel,
     contentLength: number,
     envelope: LipSyncEnvelope | null,
-    textStartDelayMs = 0
+    typingStartMs = 0
   ): void {
     this.stopMouthAnimation()
     if (model.destroyed || model.actionSignal?.aborted) return
@@ -106,26 +104,19 @@ export default class TalkSnippet extends BaseSnippet {
       Boolean(envelope?.values.length) &&
       Number.isFinite(envelope?.durationMs) &&
       (envelope?.durationMs ?? 0) > 0
-    // 无语音时官方用 LipLevels 文本口型；每半字推进一次，结束前两个字归零。
-    const textLip = hasVoice ? null : textLipSequence(contentLength * 2)
-    const halfMs = TALK_DISPLAY_MS_PER_CHAR / 2
+    // 无语音时官方用 LipLevels 文本口型：每半字推进一次 LipLevels，收尾提前一个整字。
+    // 本句只有一个说话人模型，slot = 0 of 1（first = slot + 1）。
+    const textLip = hasVoice ? null : textLipSequence(contentLength * 2, { index: 0, total: 1 })
     let startTime = this.app.currentTalkStartedAtMs
-    const layer = this.app.layerModel as { getVisibleModels?: () => AdvancedModel[] }
     const update = (): void => {
       if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
       const current = nowMs()
       if (current < startTime) startTime = current
       const elapsed = Math.max(0, current - startTime)
-      const open = this.speakerOpen(elapsed, hasVoice, envelope, textLip, textStartDelayMs, halfMs)
-      model.setMouthOpening(open)
-      // 同台其他人闭嘴。每个模型在自己的 coreModel.update() 之前重写，
-      // 这样听者自己的 updateMotions 把嘴张开之后、网格定稿之前会被按住。
-      const others = layer.getVisibleModels?.() ?? []
-      for (const other of others) {
-        if (other === model || other.destroyed) continue
-        if (!this.app.layerModel.isModelVisible(other.metadata.id)) continue
-        other.setMouthOpening(0)
-      }
+      const open = this.speakerOpening(elapsed, hasVoice ? envelope : null, textLip, typingStartMs)
+      // 只有本次 talk 的 speaker 挂口型；同台听者不写 0，嘴由他们自己的动作/表情决定。
+      if (open === null) model.releaseMouth()
+      else model.setMouthOpening(open)
     }
     // The dependency emits this event after physics but omits it from its declaration.
     const events = model.internalModel as unknown as {
@@ -138,9 +129,8 @@ export default class TalkSnippet extends BaseSnippet {
     this.mouthCleanup = () => {
       events.off('beforeModelUpdate', update)
       model.actionSignal?.removeEventListener('abort', onDestroyed)
-      if (!model.destroyed) {
-        model.setMouthOpening(0)
-      }
+      // Talk 结束：官方 `Lip::None`，参数回到动作/表情/默认值。
+      if (!model.destroyed) model.releaseMouth()
     }
     model.actionSignal?.addEventListener('abort', onDestroyed, { once: true })
   }

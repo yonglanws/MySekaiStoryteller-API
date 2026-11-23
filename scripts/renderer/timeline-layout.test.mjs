@@ -87,7 +87,7 @@ test('timeline durations match the real LayoutAppear/LayoutClear transitions', (
   ]
   assert.deepEqual(
     Array.from(calculateTimeline(snippets).entries, (entry) => entry.durationMs),
-    [116.667, 116.667, 250, 750]
+    [116.667, 116.667, 250, 766.667]
   )
 })
 

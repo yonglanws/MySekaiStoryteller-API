@@ -1,13 +1,13 @@
 import {
-  AUTO_NEXT_PAGE_DELAY_FRAMES,
   AUTO_WAIT_AFTER_VOICE_FRAMES,
   FRAME_MS,
   TALK_DISPLAY_MS_PER_CHAR,
-  VOICE_END_LATENCY_SECONDS,
   WORD_INTERVAL_FRAMES,
   framesForSeconds,
-  framesToMs
+  framesToMs,
+  msToFrameCount
 } from '../../../common/official/timing'
+import { talkAutoFrameTiming } from '../../../common/official/talkAuto'
 import { sliceVisibleText, visibleTextLength } from '../../../common/official/text'
 
 export { sliceVisibleText, visibleTextLength }
@@ -67,40 +67,50 @@ export function calculateTalkDurationMs(
   ttsText = '',
   options: TalkDurationOptions = {}
 ): number {
-  const length = visibleTextLength(content)
-  const windowFrames = framesForSeconds((options.windowOpenMs ?? 0) / 1000)
-  const typingFrames = windowFrames + length * WORD_INTERVAL_FRAMES
-  const speechMs =
-    Number.isFinite(ttsDurationMs) && ttsDurationMs > 0
-      ? ttsDurationMs
-      : options.hasVoice
-        ? Math.max(0, (ttsText || content).length) * TALK_ESTIMATED_SPEECH_MS_PER_CHAR
-        : 0
-
-  if (speechMs <= 0) {
-    const postHoldFrames =
-      Number.isFinite(options.silentHoldMs) && (options.silentHoldMs as number) > 0
-        ? framesForSeconds((options.silentHoldMs as number) / 1000)
-        : AUTO_NEXT_PAGE_DELAY_FRAMES
-    return framesToMs(typingFrames + postHoldFrames)
-  }
-
-  const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
-  const layoutFrames =
-    Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
-      ? framesForSeconds((options.layoutRunningMs as number) / 1000)
-      : 0
-  const settleFrames =
-    Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
-      ? framesForSeconds((options.motionSettleMs as number) / 1000)
-      : 0
-  const gateFrames = Math.max(typingFrames, voiceFrames, layoutFrames, settleFrames)
-  const tailFrames =
-    voiceFrames < typingFrames ? AUTO_NEXT_PAGE_DELAY_FRAMES : AUTO_WAIT_AFTER_VOICE_FRAMES
-  return framesToMs(gateFrames + tailFrames)
+  return framesToMs(talkAutoTiming(content, ttsDurationMs, ttsText, options).endFrame)
 }
 
-/** 诊断/测试用：把 Talk 拆成官方自动模式的四个阶段（毫秒，已帧量化）。 */
+function resolveSpeechSeconds(
+  content: string,
+  ttsDurationMs: number,
+  ttsText: string,
+  hasVoice: boolean
+): number {
+  if (Number.isFinite(ttsDurationMs) && ttsDurationMs > 0) return ttsDurationMs / 1000
+  if (!hasVoice) return 0
+  return (Math.max(0, (ttsText || content).length) * TALK_ESTIMATED_SPEECH_MS_PER_CHAR) / 1000
+}
+
+function talkAutoTiming(
+  content: string,
+  ttsDurationMs: number,
+  ttsText: string,
+  options: TalkDurationOptions
+): ReturnType<typeof talkAutoFrameTiming> {
+  // 这些毫秒通常已经由 framesToMs 量化（例如 7 帧 = 116.667ms）：
+  // 不能再走 f32 累加，否则 116.667ms 会被算成 8 帧。
+  const silentHoldFrames =
+    Number.isFinite(options.silentHoldMs) && (options.silentHoldMs as number) > 0
+      ? msToFrameCount(options.silentHoldMs as number)
+      : undefined
+  return talkAutoFrameTiming({
+    startFrame: 0,
+    windowFrames: msToFrameCount(options.windowOpenMs ?? 0),
+    length: visibleTextLength(content),
+    voiceSeconds: resolveSpeechSeconds(content, ttsDurationMs, ttsText, Boolean(options.hasVoice)),
+    layoutEndFrame:
+      Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
+        ? msToFrameCount(options.layoutRunningMs as number)
+        : 0,
+    settleFrames:
+      Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
+        ? framesForSeconds((options.motionSettleMs as number) / 1000)
+        : 0,
+    silentHoldFrames
+  })
+}
+
+/** 诊断/测试用：把 Talk 拆成官方自动模式的阶段（毫秒，已帧量化）。 */
 export function describeTalkTiming(
   content: string,
   ttsDurationMs = 0,
@@ -112,45 +122,12 @@ export function describeTalkTiming(
   gateEndMs: number
   totalMs: number
 } {
-  const length = visibleTextLength(content)
-  const windowFrames = framesForSeconds((options.windowOpenMs ?? 0) / 1000)
-  const typingFrames = windowFrames + length * WORD_INTERVAL_FRAMES
-  const speechMs =
-    Number.isFinite(ttsDurationMs) && ttsDurationMs > 0
-      ? ttsDurationMs
-      : options.hasVoice
-        ? Math.max(0, (ttsText || content).length) * TALK_ESTIMATED_SPEECH_MS_PER_CHAR
-        : 0
-  const typingMs = framesToMs(typingFrames)
-  if (speechMs <= 0) {
-    const postHoldFrames =
-      Number.isFinite(options.silentHoldMs) && (options.silentHoldMs as number) > 0
-        ? framesForSeconds((options.silentHoldMs as number) / 1000)
-        : AUTO_NEXT_PAGE_DELAY_FRAMES
-    return {
-      typingMs,
-      voiceEndMs: null,
-      gateEndMs: typingMs,
-      totalMs: framesToMs(typingFrames + postHoldFrames)
-    }
-  }
-  const voiceFrames = framesForSeconds(speechMs / 1000 + VOICE_END_LATENCY_SECONDS)
-  const layoutFrames =
-    Number.isFinite(options.layoutRunningMs) && (options.layoutRunningMs ?? 0) > 0
-      ? framesForSeconds((options.layoutRunningMs as number) / 1000)
-      : 0
-  const settleFrames =
-    Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
-      ? framesForSeconds((options.motionSettleMs as number) / 1000)
-      : 0
-  const gateFrames = Math.max(typingFrames, voiceFrames, layoutFrames, settleFrames)
-  const tailFrames =
-    voiceFrames < typingFrames ? AUTO_NEXT_PAGE_DELAY_FRAMES : AUTO_WAIT_AFTER_VOICE_FRAMES
+  const timing = talkAutoTiming(content, ttsDurationMs, ttsText, options)
   return {
-    typingMs,
-    voiceEndMs: framesToMs(voiceFrames),
-    gateEndMs: framesToMs(gateFrames),
-    totalMs: framesToMs(gateFrames + tailFrames)
+    typingMs: framesToMs(timing.typingEndFrame),
+    voiceEndMs: timing.voiceEndFrame === null ? null : framesToMs(timing.voiceEndFrame),
+    gateEndMs: framesToMs(timing.gateEndFrame),
+    totalMs: framesToMs(timing.endFrame)
   }
 }
 

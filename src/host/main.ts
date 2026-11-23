@@ -75,12 +75,12 @@ async function bootstrap(): Promise<void> {
 
   installProcessGuards(logger)
 
-  // 启动时探测一次硬件编码器并缓存：避免每次导出都 spawn ffmpeg -encoders，
-  // health 也能上报真实使用的编码器（此前只报配置值）
-  const detectedEncoder = await detectAvailableGpuEncoder()
+  // 启动时并行探测一次硬件编码器：探测要真编 3 帧（QSV/NVENC 初始化可能数百毫秒），
+  // 不阻塞 HTTP 服务启动；结果按 codec 缓存，health 与首次导出直接读取。
+  const encoderProbe = detectAvailableGpuEncoder(config.video.codec)
 
   logger.info(
-    `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder} (detected: ${detectedEncoder})`
+    `Starting MySekaiStoryteller-API host: root=${config.rootDir}, port=${config.server.port}, workers=${config.render.workers}, encoder=${config.video.encoder} (detected: pending)`
   )
 
   const bridgeToken = crypto.randomBytes(32).toString('hex')
@@ -850,6 +850,10 @@ async function bootstrap(): Promise<void> {
     `BGM: enabled=${config.bgm.enabled}, volume=${config.bgm.volume}, path=${config.bgm.path}`
   )
   logger.info(`Host ready: API http://${config.server.host}:${config.server.port}/api/v1/health`)
+
+  void encoderProbe.then((detected) => {
+    logger.info(`[ffmpeg] Encoder probe ready: ${detected} (codec=${config.video.codec})`)
+  })
 
   let shuttingDown = false
   const shutdown = async (signal: string): Promise<void> => {

@@ -1,9 +1,11 @@
 /**
  * PLAN SNAPSHOT — 与 doc/sekai-exporter-parity-plan.md 同步维护。
  *
- * 官方 PlayableAnimator 的动作混合：
- * - 身体：同类别或链接动作 0.125s，否则 0.5s，新模型第一段 0；
- * - 表情：普通 0.25s，Force 0s；
+ * 官方 PlayableAnimator 的动作混合（`ScenarioModel.ChangeMotionCore` 与
+ * `Live2DModel.play`）：
+ * - 身体分支顺序：force&&first → 0、same_category/链接 → 0.125s、force → 0、
+ *   否则新 clip 的 FadeInTime（缺省 0.5s）；没有旧 clip 时权重直接为 1；
+ * - 表情：Force → 0，否则 clip FadeInTime（缺省 0.25s）；
  * - 类别是 `[a-z]-[alnum]+-[alnum]+` 的最长前缀，`_f` 等后缀不参与。
  */
 import test from 'node:test'
@@ -62,6 +64,7 @@ test('motion categories and link motions follow the official rule', () => {
 
 test('body blend is 0.125s for same category/links and 0.5s otherwise', () => {
   const blend = loadBlend()
+  // 第一段 clip：没有旧姿势，权重直接 1（混合时间 0）。
   assert.equal(blend.bodyBlendSeconds(null, 'w-normal-nod01'), 0)
   assert.equal(blend.bodyBlendSeconds('w-normal-nod05', 'w-normal-nod05'), 0.125)
   assert.equal(blend.bodyBlendSeconds('w-normal-nod05_f', 'w-normal-nod05'), 0.125)
@@ -69,8 +72,36 @@ test('body blend is 0.125s for same category/links and 0.5s otherwise', () => {
   assert.equal(blend.bodyBlendSeconds('w-a-b01', 'w-a-b01_to_w-a-c02'), 0.125)
 })
 
-test('facial blend is 0.25s normally and 0s when forced', () => {
+test('body blend uses the clip FadeInTime unless the category rule wins', () => {
+  const blend = loadBlend()
+  // 不同类：clip 的 FadeInTime（0.2）覆盖缺省 0.5。
+  assert.equal(blend.bodyBlendSeconds('w-normal-nod01', 'w-cute-smile01', { clipFadeIn: 0.2 }), 0.2)
+  // 同类：仍是 0.125，FadeInTime 不生效。
+  assert.equal(
+    blend.bodyBlendSeconds('w-normal-nod05', 'w-normal-nod05', { clipFadeIn: 0.2 }),
+    0.125
+  )
+  // force + 同类（非首个）：走 0.125 而不是 0。
+  assert.equal(
+    blend.bodyBlendSeconds('w-normal-nod05', 'w-normal-nod05', { force: true, first: false }),
+    0.125
+  )
+  // force + 不同类：0。
+  assert.equal(
+    blend.bodyBlendSeconds('w-normal-nod01', 'w-cute-smile01', { force: true, first: false }),
+    0
+  )
+  // force + 首个：0。
+  assert.equal(
+    blend.bodyBlendSeconds('w-normal-nod01', 'w-cute-smile01', { force: true, first: true }),
+    0
+  )
+})
+
+test('facial blend uses the clip FadeInTime and Force is 0', () => {
   const blend = loadBlend()
   assert.equal(blend.facialBlendSeconds(false), 0.25)
   assert.equal(blend.facialBlendSeconds(true), 0)
+  assert.equal(blend.facialBlendSeconds(false, 0.1), 0.1)
+  assert.equal(blend.facialBlendSeconds(true, 0.1), 0)
 })

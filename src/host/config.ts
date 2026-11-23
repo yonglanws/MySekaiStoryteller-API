@@ -60,9 +60,11 @@ const VideoSchema = z.object({
   width: z.number().default(1280),
   height: z.number().default(720),
   fps: z.number().default(30),
-  crf: z.number().default(23),
+  crf: z.number().default(18),
   renderScale: z.number().default(1.5),
-  audioBitrate: z.string().default('128k'),
+  /** 视频编码 codec：hevc（默认，libx265 或同名硬件编码器）或 h264 */
+  codec: z.enum(['hevc', 'h264']).default('hevc'),
+  audioBitrate: z.string().default('192k'),
   encoder: z.string().default('auto'),
   watermark: z.boolean().default(true),
   /** 自定义水印文字：显示在自带水印下一行；空 = 不追加 */
@@ -356,6 +358,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     const v = parseInt(env.MSS_VIDEO_CRF, 10)
     if (Number.isFinite(v)) config.video.crf = v
   }
+  if (env.MSS_VIDEO_CODEC) {
+    const v = env.MSS_VIDEO_CODEC.toLowerCase()
+    if (v === 'hevc' || v === 'h264') config.video.codec = v
+  }
   if (env.MSS_VIDEO_WATERMARK !== undefined) {
     config.video.watermark = !['0', 'false', 'no', 'off'].includes(
       env.MSS_VIDEO_WATERMARK.toLowerCase()
@@ -563,6 +569,24 @@ export function loadHostConfig(): HostConfig {
   }
 
   applyEnvOverrides(config)
+
+  // 4:2:0 编码要求宽高为偶数；在启动时就拒绝而不是等导出半程失败
+  const { width: encodeWidth, height: encodeHeight } = config.video
+  if (
+    !Number.isInteger(encodeWidth) ||
+    !Number.isInteger(encodeHeight) ||
+    encodeWidth <= 0 ||
+    encodeHeight <= 0 ||
+    encodeWidth % 2 !== 0 ||
+    encodeHeight % 2 !== 0
+  ) {
+    throw new Error(
+      `Invalid encode size: ${encodeWidth}x${encodeHeight}; yuv420p requires even width and height.`
+    )
+  }
+  if (!Number.isFinite(config.video.fps) || config.video.fps <= 0) {
+    throw new Error(`Invalid video.fps in config: ${config.video.fps} (must be > 0)`)
+  }
 
   if (config.video.exportMode === 'record') {
     console.warn(

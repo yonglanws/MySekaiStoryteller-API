@@ -126,12 +126,12 @@ test('story plan bakes the official frame timeline', () => {
   assert.deepEqual(
     Array.from(plan.entries, (entry) => [entry.index, entry.startFrame, entry.endFrame]),
     [
-      [0, 0, 7],
-      [1, 7, 212],
-      [2, 212, 412],
-      [3, 412, 413],
-      [4, 413, 625],
-      [5, 625, 640]
+      [0, 10, 18],
+      [1, 18, 223],
+      [2, 223, 424],
+      [3, 424, 425],
+      [4, 425, 638],
+      [5, 638, 653]
     ]
   )
   assert.deepEqual(
@@ -142,7 +142,7 @@ test('story plan bakes the official frame timeline', () => {
       voiceEnd: plan.entries[1].talk.voiceEndFrame,
       gateEnd: plan.entries[1].talk.gateEndFrame
     },
-    { window: 12, typingStart: 19, typingEnd: 99, voiceEnd: 182, gateEnd: 182 }
+    { window: 12, typingStart: 30, typingEnd: 110, voiceEnd: 193, gateEnd: 193 }
   )
   assert.deepEqual(
     {
@@ -151,18 +151,20 @@ test('story plan bakes the official frame timeline', () => {
       voiceEnd: plan.entries[2].talk.voiceEndFrame,
       gateEnd: plan.entries[2].talk.gateEndFrame
     },
-    { window: 0, typingEnd: 292, voiceEnd: 275, gateEnd: 292 }
+    { window: 0, typingEnd: 303, voiceEnd: 287, gateEnd: 303 }
   )
   assert.equal(plan.entries[4].talk.windowOpenFrames, 12, 'HideTalk 后重新打开窗口')
   assert.equal(plan.entries[4].talk.voiceEndFrame, null)
-  assert.equal(plan.entries[4].talk.gateEndFrame, 505)
-  assert.equal(plan.entries[0].layout.fadeStartFrame, 1)
-  assert.equal(plan.entries[0].layout.fadeEndFrame, 7)
-  assert.equal(plan.entries[5].layout.fadeStartFrame, 634)
-  assert.equal(plan.entries[5].layout.fadeEndFrame, 640)
-  assert.equal(plan.entries[0].actions[0].frame, 0)
-  assert.equal(plan.entries[1].actions[0].frame, 7)
-  assert.equal(plan.totalFrames, 640)
+  assert.equal(plan.entries[4].talk.gateEndFrame, 517)
+  // 带 motion 的新角色：类型分支延后一帧，fade 从 12 到 18。
+  assert.equal(plan.entries[0].layout.fadeStartFrame, 12)
+  assert.equal(plan.entries[0].layout.fadeEndFrame, 18)
+  assert.equal(plan.entries[5].layout.fadeStartFrame, 647)
+  assert.equal(plan.entries[5].layout.fadeEndFrame, 653)
+  assert.equal(plan.entries[0].actions[0].frame, 10)
+  assert.equal(plan.entries[1].actions[0].frame, 18)
+  // PlayCore 10 帧暖场 + cleanup 后 31 帧尾。
+  assert.equal(plan.totalFrames, 684)
 })
 
 test('diagnostics carries the baked plan and approximation list', () => {
@@ -199,7 +201,7 @@ test('diagnostics carries the baked plan and approximation list', () => {
     provider: 'irodori'
   })
   assert.equal(report.plan.entries.length, 1)
-  assert.equal(report.plan.entries[0].talk.gateEndFrame, 175)
+  assert.equal(report.plan.entries[0].talk.gateEndFrame, 185)
   assert.ok(report.approximations.some((item) => /PixiJS/.test(item)))
 })
 
@@ -229,22 +231,23 @@ test('pre-start fence lets Now overlap at frame 0 while WaitFinished drains prio
   const timeline = calculator.calculateTimeline(snippets, new Map())
   const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
 
-  // 前置栅栏：snippet 0 与 Now 的 snippet 1 同在 0 帧开跑；snippet 2 (WaitFinished) 等 0 和 1 全部跑完（15 帧）再启动。
+  // PlayCore 从第 10 帧开始：snippet 0 与 Now 的 snippet 1 同在该帧开跑；
+  // snippet 2 (WaitFinished) 等 0 和 1 全部跑完（第 25 帧）再启动。
   assert.deepEqual(
     Array.from(plan.entries, (entry) => [entry.startFrame, entry.endFrame, entry.durationFrames]),
     [
-      [0, 7, 7],
-      [0, 15, 15],
-      [15, 22, 7],
-      [22, 37, 15]
+      [10, 17, 7],
+      [10, 25, 15],
+      [25, 32, 7],
+      [32, 47, 15]
     ]
   )
-  assert.equal(plan.entries[1].layout.fadeStartFrame, 9)
-  assert.equal(plan.entries[1].layout.fadeEndFrame, 15)
-  assert.equal(plan.entries[2].layout.fadeStartFrame, 16)
-  assert.equal(plan.entries[2].layout.fadeEndFrame, 22)
-  assert.equal(plan.entries[3].layout.fadeStartFrame, 31)
-  assert.equal(plan.entries[3].layout.fadeEndFrame, 37)
+  assert.equal(plan.entries[1].layout.fadeStartFrame, 19)
+  assert.equal(plan.entries[1].layout.fadeEndFrame, 25)
+  assert.equal(plan.entries[2].layout.fadeStartFrame, 26)
+  assert.equal(plan.entries[2].layout.fadeEndFrame, 32)
+  assert.equal(plan.entries[3].layout.fadeStartFrame, 41)
+  assert.equal(plan.entries[3].layout.fadeEndFrame, 47)
 })
 
 test('Talk closeWindowOnFinish and async LayoutAppear slide end gate in storyPlan', () => {
@@ -274,12 +277,12 @@ test('Talk closeWindowOnFinish and async LayoutAppear slide end gate in storyPla
   const timeline = calculator.calculateTimeline(snippets, tts)
   const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
 
-  // Appear 7f 完成后启动有声 Talk (frame 7)，后台滑行仍跑到 frame 30 > max(typing=23, voice=28) -> gateEnd=30
-  assert.equal(plan.entries[0].startFrame, 0)
-  assert.equal(plan.entries[0].endFrame, 7)
-  assert.equal(plan.entries[1].startFrame, 7)
-  assert.equal(plan.entries[1].talk.gateEndFrame, 30)
-  assert.equal(plan.entries[1].talk.computedEndFrame, 60)
+  // Appear 7f 完成后启动有声 Talk (frame 17)，后台滑行到 frame 40 > max(typing=21, voice=38) -> gateEnd=40
+  assert.equal(plan.entries[0].startFrame, 10)
+  assert.equal(plan.entries[0].endFrame, 17)
+  assert.equal(plan.entries[1].startFrame, 17)
+  assert.equal(plan.entries[1].talk.gateEndFrame, 40)
+  assert.equal(plan.entries[1].talk.computedEndFrame, 70)
   assert.equal(plan.entries[1].durationFrames, 53)
   // closeWindowOnFinish 后下一句 Talk 重新打开 12f 对话框
   assert.equal(plan.entries[2].talk.windowOpenFrames, 12)

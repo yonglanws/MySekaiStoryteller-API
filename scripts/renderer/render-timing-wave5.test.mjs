@@ -157,7 +157,10 @@ function createFixture(t, extraMocks = new Map()) {
         Ticker: MockTicker
       }
     ],
-    ['pixi-live2d-display-advanced', { Cubism4InternalModel, Cubism2InternalModel, Live2DModel: class {} }],
+    [
+      'pixi-live2d-display-advanced',
+      { Cubism4InternalModel, Cubism2InternalModel, Live2DModel: class {} }
+    ],
     [path.join(rendererRoot, 'utils/Logger.ts'), { default: () => new Logger() }],
     ...extraMocks.entries()
   ])
@@ -228,8 +231,15 @@ test('SpecialEffectLayer fadeOut/setEndingEnvelope never flash alpha=0 when alre
   f.mocks.set('../../assets/ui/ui_se_black.svg', 'ui_se_black.svg')
   f.mocks.set('../components/SEBlack', { default: f.Sprite })
   f.mocks.set('../effects/Ease', { runEasedTween: async () => {} })
-  f.mocks.set('../effects/InappTextures', { inappUrl: (p) => p, loadInappTexture: async () => null })
-  f.mocks.set('../effects/OfficialFilters', { CameraBlurFilter: class { spread = 0 } })
+  f.mocks.set('../effects/InappTextures', {
+    inappUrl: (p) => p,
+    loadInappTexture: async () => null
+  })
+  f.mocks.set('../effects/OfficialFilters', {
+    CameraBlurFilter: class {
+      spread = 0
+    }
+  })
   f.mocks.set('../effects/TriangleParticleEffect', {
     ScenarioEffectOverlay: class {},
     SekaiTransitionParticles: class {}
@@ -238,7 +248,10 @@ test('SpecialEffectLayer fadeOut/setEndingEnvelope never flash alpha=0 when alre
   const AnimationManager = f.load('managers/AnimationManager.ts').default
   AnimationManager.setExportMode(true, 1, 30)
   const SpecialEffectLayer = f.load('layers/SpecialEffectLayer.ts').default
-  const layer = new SpecialEffectLayer({ stage: new f.Container(), screen: { width: 1920, height: 1080 } })
+  const layer = new SpecialEffectLayer({
+    stage: new f.Container(),
+    screen: { width: 1920, height: 1080 }
+  })
 
   // BlackOut fades smoothly from 0 -> 1 (export step is 33ms so pass 250ms to finish 200ms fade)
   const outSamples = []
@@ -290,7 +303,7 @@ test('resolveCharacterFadeMs and LayoutAppearSnippet sync 30fps export slide com
   assert.equal(timing.resolveCharacterFadeMs(false, 60), 100)
   assert.equal(timing.resolveCharacterFadeMs(false, 30), 100)
   assert.equal(timing.resolveCharacterFadeMs(true, 60), 100)
-  assert.equal(timing.resolveCharacterFadeMs(true, 30), 200)
+  assert.equal(timing.resolveCharacterFadeMs(true, 30), 100)
 
   f.mocks.set('pixi-live2d-display-advanced', {
     Cubism4InternalModel: f.Cubism4InternalModel,
@@ -369,7 +382,7 @@ test('resolveCharacterFadeMs and LayoutAppearSnippet sync 30fps export slide com
     }
   }
 
-  // Case 1: 30fps export waits for moveTask completion (500ms) and uses 200ms fade
+  // Case 1: 30fps export uses the official 100ms fade and does not wait for the 500ms slide
   AnimationManager.setExportMode(true)
   AnimationManager.exportEncodeFPS = 30
   const exportModel = makeMockModel()
@@ -388,12 +401,20 @@ test('resolveCharacterFadeMs and LayoutAppearSnippet sync 30fps export slide com
     }
   })
   const appearPromise = appearExport.runSnippet()
-  await f.clock.tickAsync(1000)
-  await appearPromise
+  let exportFinishedAt = -1
+  await Promise.all([
+    appearPromise.then(() => {
+      exportFinishedAt = f.clock.now
+    }),
+    f.clock.tickAsync(1000)
+  ])
   const showStart = exportModel.events.find((e) => e.kind === 'showStart')
   const moveEnd = exportModel.events.find((e) => e.kind === 'moveEnd')
-  assert.equal(showStart.ms, 200, '30fps export uses smoothed 200ms character fade-in')
-  assert.ok(f.clock.now >= moveEnd.at, 'export LayoutAppear must await slide completion before returning')
+  assert.equal(showStart.ms, 100, '30fps export keeps the 100ms character fade-in')
+  assert.ok(
+    exportFinishedAt < moveEnd.at,
+    'export LayoutAppear returns after the fade while the slide continues'
+  )
 
   const clearExport = new LayoutClearSnippet(exportApp, {
     type: 'LayoutClear',
@@ -411,7 +432,7 @@ test('resolveCharacterFadeMs and LayoutAppearSnippet sync 30fps export slide com
   await f.clock.tickAsync(1000)
   await clearPromise
   const hideStart = exportModel.events.find((e) => e.kind === 'hideStart')
-  assert.equal(hideStart.ms, 200, '30fps export uses smoothed 200ms character fade-out')
+  assert.equal(hideStart.ms, 100, '30fps export keeps the 100ms character fade-out')
 
   // Case 2: Non-export preserves fast 100ms fade and returns after hold+100ms without awaiting 500ms slide
   AnimationManager.setExportMode(false)
@@ -438,7 +459,10 @@ test('resolveCharacterFadeMs and LayoutAppearSnippet sync 30fps export slide com
   await f.clock.tickAsync(200)
   await livePromise
   const elapsedLive = finishedAt - liveStartedAt
-  assert.ok(elapsedLive < 250, `Expected non-export LayoutAppear to finish after ~117ms, got ${elapsedLive}`)
+  assert.ok(
+    elapsedLive < 250,
+    `Expected non-export LayoutAppear to finish after ~117ms, got ${elapsedLive}`
+  )
   assert.equal(liveModel.events.find((e) => e.kind === 'showStart').ms, 100)
   await f.clock.tickAsync(400)
 })
@@ -456,13 +480,19 @@ test('hasSpeakableSpeechText, TalkTiming, TalkSnippet, and TTSManager skip punct
   assert.equal(speech.hasSpeakableSpeechText('…はい'), true)
   assert.equal(speech.hasSpeakableSpeechText('123'), true)
 
-  const expectedBasePunctMs = timing.framesToMs(4 * timing.WORD_INTERVAL_FRAMES + timing.AUTO_NEXT_PAGE_DELAY_FRAMES)
-  const expectedExportPunctMs = timing.framesToMs(4 * timing.WORD_INTERVAL_FRAMES + timing.SILENT_PUNCTUATION_HOLD_FRAMES)
+  const expectedBasePunctMs = timing.framesToMs(
+    4 * timing.WORD_INTERVAL_FRAMES + timing.AUTO_NEXT_PAGE_DELAY_FRAMES
+  )
+  const expectedExportPunctMs = timing.framesToMs(
+    4 * timing.WORD_INTERVAL_FRAMES + timing.SILENT_PUNCTUATION_HOLD_FRAMES
+  )
 
   // Default TalkTiming preserves official 2000ms floor; explicit silentHoldMs overrides for punctuation beat
   assert.equal(talkTiming.calculateTalkDurationMs('…………'), expectedBasePunctMs)
   assert.equal(
-    talkTiming.calculateTalkDurationMs('…………', 0, '', { silentHoldMs: timing.SILENT_PUNCTUATION_HOLD_MS }),
+    talkTiming.calculateTalkDurationMs('…………', 0, '', {
+      silentHoldMs: timing.SILENT_PUNCTUATION_HOLD_MS
+    }),
     expectedExportPunctMs
   )
 
@@ -473,17 +503,36 @@ test('hasSpeakableSpeechText, TalkTiming, TalkSnippet, and TTSManager skip punct
     data: { speaker: '绘名', content: '…………', modelId: 1, voice: '', ttsText: '' }
   }
   // Default bakeStoryPlan / calculateTimeline preserves exact 60fps official baseline (includes 200ms = 12f window open)
-  const expectedBaseWithOpenMs = timing.framesToMs(12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.AUTO_NEXT_PAGE_DELAY_FRAMES)
-  const expectedExportWithOpenMs = timing.framesToMs(12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.SILENT_PUNCTUATION_HOLD_FRAMES)
+  const expectedBaseWithOpenMs = timing.framesToMs(
+    12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.AUTO_NEXT_PAGE_DELAY_FRAMES
+  )
+  const expectedExportWithOpenMs = timing.framesToMs(
+    12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.SILENT_PUNCTUATION_HOLD_FRAMES
+  )
   const baselineTimeline = timelineCalc.calculateTimelineWithoutTTS([punctTalk])
   assert.equal(baselineTimeline.entries[0].durationMs, expectedBaseWithOpenMs)
-  const exportTimeline = timelineCalc.calculateTimelineWithoutTTS([punctTalk], { exportFps: 30, ttsEnabled: true })
+  const exportTimeline = timelineCalc.calculateTimelineWithoutTTS([punctTalk], {
+    exportFps: 30,
+    ttsEnabled: true
+  })
   assert.equal(exportTimeline.entries[0].durationMs, expectedExportWithOpenMs)
 
   const basePlan = storyPlan.bakeStoryPlan([punctTalk], baselineTimeline.entries)
-  const exportPlan = storyPlan.bakeStoryPlan([punctTalk], exportTimeline.entries, { exportFps: 30, ttsEnabled: true })
-  assert.equal(Math.round(basePlan.totalFrames * timing.FRAME_MS * 1000) / 1000, expectedBaseWithOpenMs)
-  assert.equal(Math.round(exportPlan.totalFrames * timing.FRAME_MS * 1000) / 1000, expectedExportWithOpenMs)
+  const exportPlan = storyPlan.bakeStoryPlan([punctTalk], exportTimeline.entries, {
+    exportFps: 30,
+    ttsEnabled: true
+  })
+  // 计划从 PlayCore 的 10 帧暖场开始，末尾再补 playedWaitTime + 1 + BGM 淡出 31 帧。
+  const planTotalMs = (snippetFrames) =>
+    timing.framesToMs(timing.PLAYCORE_WARMUP_FRAMES + timing.storyEndFrame(snippetFrames))
+  assert.equal(
+    Math.round(basePlan.totalFrames * timing.FRAME_MS * 1000) / 1000,
+    planTotalMs(12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.AUTO_NEXT_PAGE_DELAY_FRAMES)
+  )
+  assert.equal(
+    Math.round(exportPlan.totalFrames * timing.FRAME_MS * 1000) / 1000,
+    planTotalMs(12 + 4 * timing.WORD_INTERVAL_FRAMES + timing.SILENT_PUNCTUATION_HOLD_FRAMES)
+  )
 
   // TTSManager skips synthesis/translation and warns 0 times for punctuation-only lines
   let synthCalled = 0
@@ -536,8 +585,12 @@ test('hasSpeakableSpeechText, TalkTiming, TalkSnippet, and TTSManager skip punct
     destroyed: false,
     internalModel,
     actionSignal: abort.signal,
+    released: false,
     setMouthOpening(value) {
       mouthWrites.push({ id: 'ParamMouthOpenY', value })
+    },
+    releaseMouth() {
+      this.released = true
     },
     getMouthOpenParamIds() {
       return ['ParamMouthOpenY']
@@ -616,7 +669,11 @@ test('AdvancedModel preserves <50% body motion on MoveSnippet/deferral and respe
 
   // MoveSnippet's preserveActiveShortBodyMotion skips overriding body motion while <50% played
   await model.startMotions('idle_pose', undefined, true, { preserveActiveShortBodyMotion: true })
-  assert.equal(startedCalls.length, 0, 'MoveSnippet preserveActiveShortBodyMotion must keep <50% active body motion')
+  assert.equal(
+    startedCalls.length,
+    0,
+    'MoveSnippet preserveActiveShortBodyMotion must keep <50% active body motion'
+  )
 
   // applyCharacterAction applies facial immediately (t=200) and defers body motion (t=600)
   const actionPromise = model.applyCharacterAction(
@@ -635,14 +692,14 @@ test('AdvancedModel preserves <50% body motion on MoveSnippet/deferral and respe
   assert.equal(startedCalls[1].at, 600)
 })
 
-test('AdvancedModel installNaturalMotion guards closed eyes <=0.25 and respects autoBlink=false', async (t) => {
+test('AdvancedModel multiplies every eye param by EyeOpening and respects autoBlink=false', async (t) => {
   const f = createFixture(t)
   const { createBlinkState } = f.load('model/NaturalMotion.ts')
   const AdvancedModel = f.load('model/AdvancedModel.ts').default
 
   const listeners = new Map()
   const paramValues = new Map([
-    ['ParamEyeLOpen', 0.1],
+    ['ParamEyeLOpen', 0.2],
     ['ParamEyeROpen', 0.9],
     ['ParamBreath', 0]
   ])
@@ -668,14 +725,51 @@ test('AdvancedModel installNaturalMotion guards closed eyes <=0.25 and respects 
   const beforeUpdate = listeners.get('beforeModelUpdate')
   assert.equal(typeof beforeUpdate, 'function')
 
-  // Simulate an active blink closing eyes to 0.5 while ParamEyeLOpen was already <= 0.25 (e.g. wink/closed expression)
-  model.blinkState.status = 'closing'
+  // `CubismEyeBlinkController` 是 Multiply：闭眼表情的 0.1 同样乘 opening。
+  // Sleep 状态不推进 opening，便于固定本帧的乘数。
+  model.blinkState.status = 'sleep'
+  model.blinkState.mode = 'auto'
   model.blinkState.opening = 0.5
+  model.blinkState.command = null
   await f.clock.tickAsync(50)
   beforeUpdate()
-  // Closed eye (0.1 <= 0.25) must stay untouched at 0.1 while open eye multiplies by blink opening
-  assert.equal(paramValues.get('ParamEyeLOpen'), 0.1)
-  assert.ok(paramValues.get('ParamEyeROpen') < 0.9)
+  assert.ok(
+    Math.abs(paramValues.get('ParamEyeLOpen') - 0.1) < 1e-9,
+    `closed eye 0.2 × 0.5 = 0.1, got ${paramValues.get('ParamEyeLOpen')}`
+  )
+  assert.ok(Math.abs(paramValues.get('ParamEyeROpen') - 0.45) < 1e-9)
+
+  // 闭眼表情不冻结 untilTime：Ready 状态的间隔照常递减，眨眼照常发生。
+  paramValues.set('ParamEyeLOpen', 0.1)
+  paramValues.set('ParamEyeROpen', 0.1)
+  model.blinkState.status = 'ready'
+  model.blinkState.mode = 'auto'
+  model.blinkState.untilTime = 0.5
+  await f.clock.tickAsync(1000 / 60)
+  beforeUpdate()
+  assert.ok(
+    model.blinkState.untilTime < 0.5,
+    `untilTime must tick down: ${model.blinkState.untilTime}`
+  )
+  let sawClosedFrame = false
+  for (let i = 0; i < 300; i++) {
+    await f.clock.tickAsync(1000 / 60)
+    beforeUpdate()
+    if (paramValues.get('ParamEyeLOpen') < 0.1) sawClosedFrame = true
+  }
+  assert.equal(sawClosedFrame, true, 'the blink runs even with a closed-eye facial')
+
+  // 非 active 模型冻结呼吸：隐藏 300 步 ParamBreath 逐位不变。
+  const frozenBreath = paramValues.get('ParamBreath')
+  const frozenDegree = model.breathDegree
+  model.visible = false
+  for (let i = 0; i < 300; i++) {
+    await f.clock.tickAsync(1000 / 60)
+    beforeUpdate()
+  }
+  assert.equal(paramValues.get('ParamBreath'), frozenBreath)
+  assert.equal(model.breathDegree, frozenDegree)
+  model.visible = true
 
   // When autoBlink is false (e.g. closeEyes / pause), eyes must NOT be modified at all
   paramValues.set('ParamEyeLOpen', 0.8)
@@ -718,10 +812,16 @@ test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWaterma
   const finalTask = layer.tweenAmbientColor('night', 200)
   await f.clock.tickAsync(400)
   await Promise.all([staleTask, finalTask])
-  assert.ok(layer.layerContainer.filterArea, 'ModelLayer must configure filterArea for ambient filter')
+  assert.ok(
+    layer.layerContainer.filterArea,
+    'ModelLayer must configure filterArea for ambient filter'
+  )
   // Night blue tint [0.83, 0.86, 0.91] must win cleanly without evening overwriting it
   const m = layer.layerContainer.filters[0].matrix
-  assert.ok(m[0] < 0.86 && m[6] < 0.89 && m[12] > m[0] && Math.abs(m[12] - 0.91) < 0.02, `Expected night ambient matrix, got [${m[0]}, ${m[6]}, ${m[12]}]`)
+  assert.ok(
+    m[0] < 0.86 && m[6] < 0.89 && m[12] > m[0] && Math.abs(m[12] - 0.91) < 0.02,
+    `Expected night ambient matrix, got [${m[0]}, ${m[6]}, ${m[12]}]`
+  )
 
   const UIWatermark = f.load('components/UIWatermark.ts').default
   const wm = new UIWatermark(1920, 1080)

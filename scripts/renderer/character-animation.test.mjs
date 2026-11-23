@@ -98,7 +98,12 @@ function loadAdvancedModel() {
     compiled.get(filename).runInContext(context)(exports, require)
     return exports
   }
-  return { AdvancedModel: load('model/AdvancedModel.ts').default, load, frames }
+  return {
+    AdvancedModel: load('model/AdvancedModel.ts').default,
+    Cubism4InternalModel,
+    load,
+    frames
+  }
 }
 
 function makeModel(loader) {
@@ -154,7 +159,7 @@ test('move lands exactly on the destination in both axes', async () => {
   assert.equal(model.position.y, 800)
 })
 
-test('move x samples the OutQuad curve at each frame', async () => {
+test('move x samples the official linear curve at each frame', async () => {
   const loader = loadAdvancedModel()
   const { model, positions } = makeModel(loader)
   await model.move([1000, 1000], { x: 0.2, y: 0.5 }, { x: 0.8, y: 0.5 }, 500)
@@ -166,14 +171,15 @@ test('move x samples the OutQuad curve at each frame', async () => {
       last = entry.x
     }
   }
-  // 期望：p=0 → 200；0.25 → 462.5；0.5 → 650；0.75 → 762.5；1 → 800。
-  for (const [i, expected] of [200, 462.5, 650, 762.5, 800].entries()) {
+  // 官方 `DOLocalMove(...).SetEase(Linear)`：p=0 → 200；0.25 → 350；0.5 → 500；
+  // 0.75 → 650；1 → 800。
+  for (const [i, expected] of [200, 350, 500, 650, 800].entries()) {
     assert.ok(
       Math.abs((xs[i] ?? Number.NaN) - expected) < 1e-6,
       `sample ${i}: expected ${expected}, got ${xs[i]} (${xs.join(',')})`
     )
   }
-  assert.ok(xs[2] > 500, 'OutQuad is past the linear midpoint at 50% time')
+  assert.equal(xs[2], 500, 'linear midpoint at 50% time')
 })
 
 test('show fades from the current alpha instead of always restarting at 0', async () => {
@@ -212,4 +218,55 @@ test('hide fades from the current alpha instead of snapping to 1', async () => {
     seen.map((v) => Math.round(v * 100) / 100),
     [0.4, 0.3, 0.2, 0.1, 0]
   )
+})
+
+test('releaseMouth hands ParamMouthOpenY back to the next writer', async () => {
+  const loader = loadAdvancedModel()
+  const { AdvancedModel, Cubism4InternalModel } = loader
+  const model = Object.create(AdvancedModel.prototype)
+  const values = new Map([['ParamMouthOpenY', 0]])
+  const core = {
+    getParameterIndex: () => 0,
+    getParameterCount: () => 1,
+    getParameterMinimumValue: () => 0,
+    getParameterMaximumValue: () => 1,
+    getParameterDefaultValue: () => 0,
+    getParameterValueById: (id) => values.get(id),
+    setParameterValueById: (id, value) => values.set(id, value),
+    update: () => {}
+  }
+  const internal = new Cubism4InternalModel()
+  internal.coreModel = core
+  model.internalModel = internal
+  model.mouthOpenParamIds = ['ParamMouthOpenY']
+  model.mouthOpenIndices = new Map([['ParamMouthOpenY', 0]])
+  model.mouthParamCount = 1
+  model.mouthFormParamId = null
+  model.mouthFormIndex = -1
+  model.mouthFormRange = null
+  model.mouthUpdateHooked = false
+  model.pendingMouthOpen = null
+  model.setMouthOpening(0.5)
+  assert.equal(values.get('ParamMouthOpenY'), 0.5)
+  // 官方 Lip::None：脱手后外部（动作/表情/默认值）写入的 0.8 必须在 core.update 后保留。
+  model.releaseMouth()
+  values.set('ParamMouthOpenY', 0.8)
+  core.update()
+  assert.equal(values.get('ParamMouthOpenY'), 0.8)
+})
+
+test('the model lip-sync scale follows the game character id', async () => {
+  const loader = loadAdvancedModel()
+  const { AdvancedModel } = loader
+  const model = Object.create(AdvancedModel.prototype)
+  model._metadata = {
+    model: 'resources/models/01ichika_normal/01ichika_normal_3.0_f_t04/01ichika_normal.model3.json'
+  }
+  assert.equal(model.inferCharacterId(), 1)
+  assert.equal(model.getLipSyncScale(), 1.25)
+  model._metadata = { model: 'v2_20mizuki_culture' }
+  assert.equal(model.inferCharacterId(), 20)
+  assert.equal(model.getLipSyncScale(), 1)
+  model._metadata = { model: 'v2_07airi' }
+  assert.equal(model.getLipSyncScale(), 1)
 })

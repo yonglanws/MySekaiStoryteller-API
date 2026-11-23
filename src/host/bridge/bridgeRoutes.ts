@@ -12,7 +12,13 @@ import {
   apiCopyVideo,
   encodeFramesToVideo,
   createFramesPipeSession,
+  partialOutputPath,
+  checkEncodeSize,
+  checkFrameRange,
+  normalizeVideoCodec,
+  type FramePipeFormat,
   type FramesPipeSession,
+  type VideoCodec,
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
 
@@ -460,6 +466,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     session: FramesPipeSession
     dir: string
     videoPath: string
+    fps: number
     workerId: string | null
     taskId: string | null
     idleTimer: ReturnType<typeof setTimeout> | null
@@ -469,6 +476,59 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   const framesPipeIdleMs = deps.framesPipeIdleMs ?? DEFAULT_FRAMES_PIPE_IDLE_MS
   const createPipe = deps.createFramesPipe ?? createFramesPipeSession
 
+  /**
+   * image2pipe 会话写出的实际帧数与编码帧率，按视频路径交接给随后的 remux：
+   * 渲染端不必额外传 frameCount/fps，宿主也能用 `-t frames/fps` 精确截断。
+   */
+  interface PipeFrameInfo {
+    frameCount: number
+    fps: number
+  }
+  const pipeVideoFrameCounts = new Map<string, PipeFrameInfo>()
+  const MAX_PIPE_FRAME_COUNT_ENTRIES = 8
+
+  function rememberPipeFrameCount(videoPath: string, frameCount: number, fps: number): void {
+    if (frameCount <= 0 || !Number.isFinite(fps) || fps <= 0) return
+    const key = path.resolve(videoPath)
+    pipeVideoFrameCounts.set(key, { frameCount, fps })
+    while (pipeVideoFrameCounts.size > MAX_PIPE_FRAME_COUNT_ENTRIES) {
+      const oldest = pipeVideoFrameCounts.keys().next().value
+      if (oldest === undefined) break
+      pipeVideoFrameCounts.delete(oldest)
+    }
+  }
+
+  function pipeFrameInfoFor(videoPath: string): PipeFrameInfo | undefined {
+    return pipeVideoFrameCounts.get(path.resolve(videoPath))
+  }
+
+  /**
+   * 原子写盘（对齐 sse-export export_video）：ffmpeg 只写 `<name>.partial.mp4`，
+   * 成功后 rename 到目标名；失败/取消删除 partial，目录里不会出现半截成片。
+   */
+  async function writeOutputAtomically<T>(
+    outputPath: string,
+    write: (partialPath: string) => Promise<T>,
+    isCancelled?: () => boolean
+  ): Promise<T> {
+    const partialPath = partialOutputPath(outputPath)
+    await fs.promises.rm(partialPath, { force: true }).catch(() => {})
+    try {
+      const result = await write(partialPath)
+      if (isCancelled?.()) {
+        throw new Error('Export task was cancelled')
+      }
+      if (!fs.existsSync(partialPath)) {
+        throw new Error(`Encoder reported success but wrote no output: ${partialPath}`)
+      }
+      await fs.promises.rename(partialPath, outputPath)
+      return result
+    } catch (error) {
+      await fs.promises.rm(partialPath, { force: true }).catch(() => {})
+      throw error
+    }
+  }
+
   async function cleanupPipeSession(id: string, reason?: Error): Promise<void> {
     const entry = framesPipeSessions.get(id)
     if (!entry) return
@@ -477,6 +537,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       return
     }
     framesPipeSessions.delete(id)
+    pipeVideoFrameCounts.delete(path.resolve(entry.videoPath))
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer)
       entry.idleTimer = null
@@ -741,6 +802,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       inputWidth?: number
       inputHeight?: number
       crf?: number
+      codec?: string
+      /** 帧输入格式：mjpeg（默认）| rawvideo（GPU 已转 BT.709 yuv420p） */
+      frameFormat?: FramePipeFormat | string
+      /** 导出帧区间 [fromFrame, toFrame)；入口校验 from < to */
+      fromFrame?: number
+      toFrame?: number
       workerId?: string
       taskId?: string
     }
@@ -752,6 +819,16 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     const fps = Number(payload.fps) > 0 ? Number(payload.fps) : config.video.fps
     const width = Number(payload.width) > 0 ? Number(payload.width) : config.video.width
     const height = Number(payload.height) > 0 ? Number(payload.height) : config.video.height
+    const codec: VideoCodec = normalizeVideoCodec(payload.codec ?? config.video.codec)
+    const frameFormat: FramePipeFormat = payload.frameFormat === 'rawvideo' ? 'rawvideo' : 'mjpeg'
+    try {
+      checkEncodeSize(width, height)
+      if (payload.fromFrame !== undefined || payload.toFrame !== undefined) {
+        checkFrameRange(payload.fromFrame ?? 0, payload.toFrame ?? Number.MAX_SAFE_INTEGER)
+      }
+    } catch (error) {
+      throw new BridgeSecurityError(error instanceof Error ? error.message : String(error), 400)
+    }
     const dir = path.join(tmpdir(), `mss-fpipe-${Date.now()}-${randomSuffix()}`)
     await fs.promises.mkdir(dir, { recursive: true })
     const videoPath = path.join(dir, 'video.mp4')
@@ -767,6 +844,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         inputHeight: payload.inputHeight,
         crf: payload.crf ?? config.video.crf,
         encoder: config.video.encoder as VideoEncoderChoice,
+        codec,
+        frameFormat,
+        fromFrame: payload.fromFrame,
+        toFrame: payload.toFrame,
         outputPath: videoPath
       })
     } catch (error) {
@@ -786,6 +867,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       session,
       dir,
       videoPath,
+      fps,
       workerId,
       taskId,
       idleTimer: null
@@ -860,6 +942,10 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         }
         try {
           const videoPath = await entry.session.finish()
+          const frameCount = entry.session.frameCount
+          if (typeof frameCount === 'number') {
+            rememberPipeFrameCount(videoPath, frameCount, entry.fps)
+          }
           framesPipeSessions.delete(id)
           return { videoPath }
         } catch (error) {
@@ -891,6 +977,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           inputHeight?: number
           /** 录制时使用的视频码率（bps），用于 ffmpeg 超时/进度估算 */
           recordedBitrate?: number
+          /** 视频帧数；用于 `-t frames/fps` 精确截断 */
+          frameCount?: number
+          /** 视频起点在故事时间轴上的帧号（断点续传）；音频按该位置起播 */
+          startFrame?: number
+          /** 输出 codec：hevc（默认）| h264 */
+          codec?: string
         }
         const safeVideoPath = assertContainedPath(payload?.videoPath, allowedTempRoots, 'videoPath')
         const safeAudioPath = payload?.audioPath
@@ -924,41 +1016,54 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const encoder = config.video.encoder as VideoEncoderChoice
-          // 输入尺寸缺省时保守回退配置分辨率：与输出相同时会跳过缩放滤镜，
-          // 旧渲染端（renderScale≠1 时画布大于输出）因此保持原有缩放行为
+          const codec = normalizeVideoCodec(payload.codec ?? config.video.codec)
+          // 输入尺寸缺省时保守回退配置分辨率：与输出相同时仍挂 scale（BT.709 转换），
+          // 旧渲染端（renderScale≠1 时画布大于输出）保持原有缩放行为
           const inputWidth = payload.inputWidth ?? config.video.width
           const inputHeight = payload.inputHeight ?? config.video.height
           const recordedBitrate = payload.recordedBitrate ?? 8_000_000
+          const pipeFrameInfo = pipeFrameInfoFor(safeVideoPath)
+          const frameCount = payload.frameCount ?? pipeFrameInfo?.frameCount
+          const fps = payload.fps ?? pipeFrameInfo?.fps ?? config.video.fps
 
-          if (safeAudioPath && fs.existsSync(safeAudioPath)) {
-            await apiMergeVideoAudioWithCompression(
-              safeVideoPath,
-              safeAudioPath,
-              safeOutputPath,
-              payload.crf,
-              payload.audioBitrate,
-              payload.fps,
-              encoder,
-              config.video.width,
-              config.video.height,
-              inputWidth,
-              inputHeight,
-              recordedBitrate
-            )
-          } else {
-            await apiConvertVideoWithCompression(
-              safeVideoPath,
-              safeOutputPath,
-              payload.crf,
-              payload.fps,
-              encoder,
-              config.video.width,
-              config.video.height,
-              inputWidth,
-              inputHeight,
-              recordedBitrate
-            )
-          }
+          await writeOutputAtomically(
+            safeOutputPath,
+            async (partialPath) => {
+              if (safeAudioPath && fs.existsSync(safeAudioPath)) {
+                await apiMergeVideoAudioWithCompression(
+                  safeVideoPath,
+                  safeAudioPath,
+                  partialPath,
+                  payload.crf,
+                  payload.audioBitrate,
+                  fps,
+                  encoder,
+                  config.video.width,
+                  config.video.height,
+                  inputWidth,
+                  inputHeight,
+                  recordedBitrate,
+                  codec,
+                  frameCount
+                )
+              } else {
+                await apiConvertVideoWithCompression(
+                  safeVideoPath,
+                  partialPath,
+                  payload.crf,
+                  fps,
+                  encoder,
+                  config.video.width,
+                  config.video.height,
+                  inputWidth,
+                  inputHeight,
+                  recordedBitrate,
+                  codec
+                )
+              }
+            },
+            () => Boolean(taskId && isTaskCancelled(taskId))
+          )
 
           if (!fs.existsSync(safeOutputPath)) {
             logger.error(`[Bridge] API: Output file NOT found at: ${safeOutputPath}`)
@@ -1001,6 +1106,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           audioPath?: string
           outputPath: string
           audioBitrate: string
+          /** 视频帧数；缺省时用 image2pipe 会话记录的实际帧数，再退回 WAV 头时长 */
+          frameCount?: number
+          /** 视频编码帧率，与 frameCount 一起给出 `-t frames/fps` */
+          fps?: number
+          /** 视频起点在故事时间轴上的帧号（断点续传）；音频按该位置起播 */
+          startFrame?: number
           /** true 时保留输入文件由调用方自行清理（record 会在 finally 中取消 session） */
           keepInputs?: boolean
         }
@@ -1036,16 +1147,26 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const hasAudio = !!safeAudioPath && fs.existsSync(safeAudioPath)
-          if (hasAudio) {
-            await apiMuxVideoAudioCopy(
-              safeVideoPath,
-              safeAudioPath!,
-              safeOutputPath,
-              payload.audioBitrate
-            )
-          } else {
-            await apiCopyVideo(safeVideoPath, safeOutputPath)
-          }
+          const pipeFrameInfo = pipeFrameInfoFor(safeVideoPath)
+          const frameCount = payload.frameCount ?? pipeFrameInfo?.frameCount
+          const fps = payload.fps ?? pipeFrameInfo?.fps
+          await writeOutputAtomically(
+            safeOutputPath,
+            async (partialPath) => {
+              if (hasAudio) {
+                await apiMuxVideoAudioCopy(
+                  safeVideoPath,
+                  safeAudioPath!,
+                  partialPath,
+                  payload.audioBitrate,
+                  { frameCount, fps, startFrame: payload.startFrame }
+                )
+              } else {
+                await apiCopyVideo(safeVideoPath, partialPath)
+              }
+            },
+            () => Boolean(taskId && isTaskCancelled(taskId))
+          )
 
           if (!fs.existsSync(safeOutputPath)) {
             logger.error(`[Bridge] API remux: Output file NOT found at: ${safeOutputPath}`)
@@ -1078,6 +1199,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           } else {
             try {
               await fs.promises.unlink(safeVideoPath)
+              pipeVideoFrameCounts.delete(path.resolve(safeVideoPath))
               const parent = path.dirname(safeVideoPath)
               if (path.basename(parent).startsWith('mss-fpipe-')) {
                 await fs.promises.rmdir(parent).catch(() => {})
@@ -1104,6 +1226,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           audioBitrate: string
           inputWidth?: number
           inputHeight?: number
+          /** 输出 codec：hevc（默认）| h264 */
+          codec?: string
+          /** 帧区间 [from, to)；入口校验 from < to */
+          from?: number
+          to?: number
         }
         const safeFramesDir = assertContainedPath(payload?.framesDir, allowedTempRoots, 'framesDir')
         const safeAudioPath = payload?.audioPath
@@ -1127,6 +1254,15 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           `[Bridge] API frames-encode: framesDir=${safeFramesDir}, audioPath=${safeAudioPath}, outputPath=${safeOutputPath}`
         )
 
+        try {
+          checkEncodeSize(config.video.width, config.video.height)
+          if (payload.from !== undefined || payload.to !== undefined) {
+            checkFrameRange(payload.from ?? 0, payload.to ?? Number.MAX_SAFE_INTEGER)
+          }
+        } catch (error) {
+          return { success: false, error: error instanceof Error ? error.message : String(error) }
+        }
+
         let encoded = false
         let intermediatePath: string | null = null
         try {
@@ -1137,29 +1273,50 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           const encoder = config.video.encoder as VideoEncoderChoice
+          const codec = normalizeVideoCodec(payload.codec ?? config.video.codec)
           const hasAudio = Boolean(safeAudioPath && fs.existsSync(safeAudioPath))
-          intermediatePath = hasAudio
-            ? path.join(outputDir, `.mss-frames-video-${Date.now()}-${randomSuffix()}.mp4`)
-            : safeOutputPath
+          if (hasAudio) {
+            intermediatePath = path.join(
+              outputDir,
+              `.mss-frames-video-${Date.now()}-${randomSuffix()}.mp4`
+            )
+          }
 
-          await encodeFramesToVideo(
-            payload.fps,
-            safeFramesDir,
-            intermediatePath,
-            encoder,
-            config.video.width,
-            config.video.height,
-            config.video.crf,
-            payload.inputWidth ?? 0,
-            payload.inputHeight ?? 0
-          )
+          const encodeArgs = (targetPath: string): Promise<number> =>
+            encodeFramesToVideo(
+              payload.fps,
+              safeFramesDir,
+              targetPath,
+              encoder,
+              config.video.width,
+              config.video.height,
+              config.video.crf,
+              payload.inputWidth ?? 0,
+              payload.inputHeight ?? 0,
+              codec
+            )
+          const isCancelled = (): boolean => Boolean(taskId && isTaskCancelled(taskId))
 
-          if (hasAudio && safeAudioPath) {
-            await apiMuxVideoAudioCopy(
-              intermediatePath,
-              safeAudioPath,
+          if (hasAudio && safeAudioPath && intermediatePath) {
+            const frameCount = await encodeArgs(intermediatePath)
+            await writeOutputAtomically(
               safeOutputPath,
-              payload.audioBitrate
+              async (partialPath) => {
+                await apiMuxVideoAudioCopy(
+                  intermediatePath!,
+                  safeAudioPath,
+                  partialPath,
+                  payload.audioBitrate,
+                  { frameCount, fps: payload.fps }
+                )
+              },
+              isCancelled
+            )
+          } else {
+            await writeOutputAtomically(
+              safeOutputPath,
+              (partialPath) => encodeArgs(partialPath),
+              isCancelled
             )
           }
 

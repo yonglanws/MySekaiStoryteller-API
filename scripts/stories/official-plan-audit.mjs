@@ -95,7 +95,9 @@ function depthOf(value) {
 
 function parseDollyZoom(raw) {
   let zoom = null
-  for (const part of String(raw || '').replace(/：/g, ':').split(',')) {
+  for (const part of String(raw || '')
+    .replace(/：/g, ':')
+    .split(',')) {
     const idx = part.indexOf(':')
     if (idx < 0) continue
     if (part.slice(0, idx).trim().toLowerCase() === 'zoom') {
@@ -366,7 +368,13 @@ export function mapOfficialEpisode(scenario) {
             // 官方 Noop / 等候占位 / 不支持的 3D MV
             break
           case 1:
-            push({ type: 'BlackIn', wait, progressBehavior, delay, data: { duration: durationMs, color: 'black' } })
+            push({
+              type: 'BlackIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'black' }
+            })
             break
           case 2:
             push({ type: 'HideTalk', wait: true, progressBehavior: 'WaitFinished', delay: 0 })
@@ -379,7 +387,13 @@ export function mapOfficialEpisode(scenario) {
             })
             break
           case 3:
-            push({ type: 'BlackIn', wait, progressBehavior, delay, data: { duration: durationMs, color: 'white' } })
+            push({
+              type: 'BlackIn',
+              wait,
+              progressBehavior,
+              delay,
+              data: { duration: durationMs, color: 'white' }
+            })
             break
           case 4:
             push({ type: 'HideTalk', wait: true, progressBehavior: 'WaitFinished', delay: 0 })
@@ -422,7 +436,13 @@ export function mapOfficialEpisode(scenario) {
             })
             break
           case 8:
-            push({ type: 'Telop', wait, progressBehavior, delay, data: { content: effect.StringVal || '' } })
+            push({
+              type: 'Telop',
+              wait,
+              progressBehavior,
+              delay,
+              data: { content: effect.StringVal || '' }
+            })
             break
           case 18:
             push({
@@ -519,7 +539,9 @@ export function mapOfficialEpisode(scenario) {
             })
             break
           case 22: {
-            const rawShader = String(effect.StringVal || '').trim().toLowerCase()
+            const rawShader = String(effect.StringVal || '')
+              .trim()
+              .toLowerCase()
             const shader = ['hologram', 'monitor', 'blur', 'none'].includes(rawShader)
               ? rawShader
               : 'none'
@@ -808,7 +830,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
   let layouts = 0
   let actions = 0
   let windowOpen = false
-  let cursorFrame = 0
+  let cursorFrame = timing.PLAYCORE_WARMUP_FRAMES
   let runningEndFrame = 0
   let activeLayoutEndFrame = 0
   let lastEndFrame = 0
@@ -818,9 +840,9 @@ export function auditEpisode(scenario, episodeId, runtime) {
     const entry = baked.entries[i]
     const timelineEntry = result.entries[i]
     const delayFrames = timing.framesForSeconds(Number(snippet.delay) || 0)
-    const blocking =
-      (snippet.progressBehavior ? snippet.progressBehavior === 'WaitFinished' : snippet.wait !== false) ||
-      snippet.type === 'Talk'
+    const blocking = snippet.progressBehavior
+      ? snippet.progressBehavior === 'WaitFinished'
+      : snippet.wait !== false
     if (entry.blocking !== blocking) {
       frameFails(fails, episodeId, i, `blocking ${entry.blocking} != ${blocking}`)
     }
@@ -828,7 +850,12 @@ export function auditEpisode(scenario, episodeId, runtime) {
       cursorFrame = Math.max(cursorFrame, runningEndFrame)
     }
     if (entry.delayStartFrame !== cursorFrame) {
-      frameFails(fails, episodeId, i, `delayStart ${entry.delayStartFrame} != cursor ${cursorFrame}`)
+      frameFails(
+        fails,
+        episodeId,
+        i,
+        `delayStart ${entry.delayStartFrame} != cursor ${cursorFrame}`
+      )
     }
     if (entry.startFrame !== cursorFrame + delayFrames) {
       frameFails(
@@ -838,13 +865,14 @@ export function auditEpisode(scenario, episodeId, runtime) {
         `start ${entry.startFrame} != cursor ${cursorFrame} + delay ${delayFrames}`
       )
     }
-    if (entry.durationFrames !== timing.framesForSeconds(timelineEntry.durationMs / 1000)) {
+    // timeline 的 durationMs 已由 framesToMs 量化；再走 f32 秒累加会多一帧。
+    if (entry.durationFrames !== timing.msToFrameCount(timelineEntry.durationMs)) {
       frameFails(
         fails,
         episodeId,
         i,
-        `duration ${entry.durationFrames} != timeline ${timing.framesForSeconds(
-          timelineEntry.durationMs / 1000
+        `duration ${entry.durationFrames} != timeline ${timing.msToFrameCount(
+          timelineEntry.durationMs
         )}`
       )
     }
@@ -885,16 +913,18 @@ export function auditEpisode(scenario, episodeId, runtime) {
       if (talk.voiceEndFrame !== null) {
         frameFails(fails, episodeId, i, `voiceEnd ${talk.voiceEndFrame} != null`)
       }
-      if (talk.gateEndFrame !== talk.typingEndFrame) {
+      // 无语音的审计：gate 只等打字结束与仍在跑的布局。
+      const expectedGate = Math.max(talk.typingEndFrame, activeLayoutEndFrame)
+      if (talk.gateEndFrame !== expectedGate) {
+        frameFails(fails, episodeId, i, `gate ${talk.gateEndFrame} != ${expectedGate}`)
+      }
+      if (talk.computedEndFrame !== expectedGate + timing.AUTO_NEXT_PAGE_DELAY_FRAMES) {
         frameFails(
           fails,
           episodeId,
           i,
-          `gate ${talk.gateEndFrame} != typing ${talk.typingEndFrame}`
+          `computedEnd ${talk.computedEndFrame} != gate+${timing.AUTO_NEXT_PAGE_DELAY_FRAMES}`
         )
-      }
-      if (talk.computedEndFrame !== talk.typingEndFrame + timing.AUTO_NEXT_PAGE_DELAY_FRAMES) {
-        frameFails(fails, episodeId, i, `computedEnd ${talk.computedEndFrame} != typing+120`)
       }
       if (entry.durationFrames !== talk.computedEndFrame - entry.startFrame) {
         frameFails(
@@ -933,8 +963,8 @@ export function auditEpisode(scenario, episodeId, runtime) {
         frameFails(fails, episodeId, i, `${snippet.type} missing plan`)
         continue
       }
-      const moveFrames = timing.framesForSeconds(
-        timing.MOVE_SPEED_DURATION_MS[snippet.data.moveSpeed] / 1000
+      const moveFrames = timing.msToFrameCount(
+        timing.MOVE_SPEED_DURATION_MS[snippet.data.moveSpeed]
       )
       const moved =
         snippet.data.from.side !== snippet.data.to.side ||
@@ -943,31 +973,35 @@ export function auditEpisode(scenario, episodeId, runtime) {
       const modelId = snippet.data.modelId
       const wasVisible = visibleModels.has(modelId)
       if (snippet.type === 'LayoutAppear') {
+        const hasMotion = String(snippet.data.motion ?? '').trim() !== ''
+        const forced = !wasVisible && hasMotion ? 1 : 0
+        const at = entry.startFrame + forced
         const expectedMove = wasVisible ? timing.APPEAR_SHOWN_MOVE_FRAMES : moveFrames
         if (wasVisible) {
           if (layout.fadeStartFrame !== null || layout.fadeEndFrame !== null) {
             frameFails(fails, episodeId, i, 'shown appear must not fade')
           }
         } else {
-          if (layout.fadeStartFrame !== entry.startFrame + 1) {
+          if (layout.fadeStartFrame !== at + 1) {
             frameFails(fails, episodeId, i, `appear fadeStart ${layout.fadeStartFrame}`)
           }
-          if (layout.fadeEndFrame !== entry.startFrame + timing.APPEAR_FADE_TOTAL_FRAMES) {
+          if (layout.fadeEndFrame !== at + timing.APPEAR_FADE_TOTAL_FRAMES) {
             frameFails(fails, episodeId, i, `appear fadeEnd ${layout.fadeEndFrame}`)
           }
         }
-        if (layout.moveEndFrame !== entry.startFrame + expectedMove) {
+        const expectedMoveEnd = wasVisible ? entry.startFrame + expectedMove : at + expectedMove
+        if (layout.moveEndFrame !== expectedMoveEnd) {
           frameFails(fails, episodeId, i, `appear moveEnd ${layout.moveEndFrame}`)
         }
         const expectedDuration = wasVisible
           ? timing.APPEAR_SHOWN_MOVE_FRAMES
-          : timing.APPEAR_FADE_TOTAL_FRAMES
+          : timing.APPEAR_FADE_TOTAL_FRAMES + forced
         if (entry.durationFrames !== expectedDuration) {
           frameFails(fails, episodeId, i, `appear duration ${entry.durationFrames}`)
         }
         const activeSlideEnd = wasVisible
           ? layout.moveEndFrame
-          : Math.max(entry.startFrame + timing.APPEAR_FADE_TOTAL_FRAMES, moved ? layout.moveEndFrame : 0)
+          : Math.max(at + timing.APPEAR_FADE_TOTAL_FRAMES, moved ? layout.moveEndFrame : 0)
         activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
@@ -984,7 +1018,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
           visibleModels.delete(modelId)
           continue
         }
-        const fadeFrames = timing.framesForSeconds(timing.CHARACTER_FADE_MS / 1000)
+        const fadeFrames = timing.msToFrameCount(timing.CHARACTER_FADE_MS)
         if (moved) {
           if (layout.moveEndFrame !== entry.startFrame + moveFrames) {
             frameFails(fails, episodeId, i, `clear moveEnd ${layout.moveEndFrame}`)
@@ -1001,7 +1035,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
         } else {
           if (
             layout.fadeStartFrame !==
-            entry.startFrame + timing.framesForSeconds(timing.HIDE_DELAY_IN_PLACE_MS / 1000)
+            entry.startFrame + timing.msToFrameCount(timing.HIDE_DELAY_IN_PLACE_MS)
           ) {
             frameFails(fails, episodeId, i, `clear in-place fadeStart ${layout.fadeStartFrame}`)
           }
@@ -1009,7 +1043,10 @@ export function auditEpisode(scenario, episodeId, runtime) {
             frameFails(fails, episodeId, i, `clear in-place duration ${entry.durationFrames}`)
           }
         }
-        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? entry.startFrame)
+        activeLayoutEndFrame = Math.max(
+          activeLayoutEndFrame,
+          layout.fadeEndFrame ?? entry.startFrame
+        )
         visibleModels.delete(modelId)
       } else {
         if (layout.moveEndFrame !== entry.startFrame + moveFrames) {
@@ -1023,15 +1060,17 @@ export function auditEpisode(scenario, episodeId, runtime) {
     }
   }
 
-  // 非阻塞片段不推进 cursor，但它的 delay/动画仍可能成为最后一个 end。
-  if (baked.totalFrames !== lastEndFrame) {
-    fails.push(`${episodeId}: plan total ${baked.totalFrames} != replay end ${lastEndFrame}`)
+  // 非阻塞片段不推进 cursor，但它的 delay/动画仍可能成为最后一个 end；
+  // 成片尾固定补 playedWaitTime + 1 + BGM 淡出 31 帧。
+  const totalFrames = timing.storyEndFrame(lastEndFrame)
+  if (baked.totalFrames !== totalFrames) {
+    fails.push(`${episodeId}: plan total ${baked.totalFrames} != replay end ${totalFrames}`)
   }
   const subFrameCues = result.entries.filter(
     (entry) => entry.durationMs > 0 && entry.durationMs < timing.FRAME_MS
   ).length
   const tolerance = 17 + subFrameCues * timing.FRAME_MS
-  if (Math.abs(timing.framesToMs(lastEndFrame) - baked.totalMs) > tolerance) {
+  if (Math.abs(timing.framesToMs(totalFrames) - baked.totalMs) > tolerance) {
     fails.push(`${episodeId}: plan totalMs ${Math.round(baked.totalMs)} != frame end`)
   }
 

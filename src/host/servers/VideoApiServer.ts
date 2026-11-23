@@ -8,6 +8,7 @@ import { StorySchema, StoryData } from '../../common/types/Story'
 import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 import type { VideoSettings } from '../config'
 import { writeExportDiagnostics } from '../exportDiagnostics'
+import { checkEncodeSize, detectAvailableGpuEncoder } from '../../shared/ffmpeg'
 
 export interface ApiExportRequest {
   story: StoryData
@@ -885,7 +886,7 @@ export class VideoApiServer {
       height: this.video.height,
       renderScale: this.video.renderScale,
       fps: this.video.fps,
-      codec: 'h264',
+      codec: this.video.codec,
       crf: this.video.crf,
       audioBitrate: this.video.audioBitrate,
       watermark: this.video.watermark,
@@ -897,6 +898,37 @@ export class VideoApiServer {
       idleChainGapSec: this.video.idleChainGapSec,
       ttsMode: this.video.ttsMode
     }
+  }
+
+  /**
+   * 导出参数前置校验（对齐 sse-export check_encode_size / check_range）：
+   * yuv420p 要求偶数码率尺寸；在资源物化、模型加载与 TTS 合成之前以 400 拒绝。
+   */
+  private validateVideoOptions(): string | null {
+    try {
+      checkEncodeSize(this.video.width, this.video.height)
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    if (!Number.isFinite(this.video.fps) || this.video.fps <= 0) {
+      return `Invalid video.fps: ${this.video.fps} (must be > 0)`
+    }
+    return null
+  }
+
+  /**
+   * 硬件编码器探测与故事预检/加载并行：探测结果按 (binary, codec, backend, size) 缓存，
+   * 正式编码时直接命中，不再等编码前临时 spawn。
+   */
+  private probeEncoderInBackground(): Promise<void> {
+    if (this.video.encoder !== 'auto') return Promise.resolve()
+    return detectAvailableGpuEncoder(this.video.codec)
+      .then((encoder) => {
+        this.logger.debug(`[API] GPU encoder probe for ${this.video.codec}: ${encoder}`)
+      })
+      .catch((error) => {
+        this.logger.warn('[API] GPU encoder probe failed', error)
+      })
   }
 
   private async prepareStory(story: StoryData): Promise<void> {
@@ -1003,9 +1035,13 @@ export class VideoApiServer {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_EXPORT_TIMEOUT_MS) {
       throw new Error(`Invalid timeout: expected an integer between 1 and ${MAX_EXPORT_TIMEOUT_MS}`)
     }
+    const configError = this.validateVideoOptions()
+    if (configError) {
+      throw new Error(configError)
+    }
 
     const parsedStory = StorySchema.parse(story)
-    await this.prepareStory(parsedStory)
+    await Promise.all([this.prepareStory(parsedStory), this.probeEncoderInBackground()])
     const { taskId, exportPromise } = this.registerExport(parsedStory, timeoutMs)
     let timeoutId: ReturnType<typeof setTimeout> | null = null
     const onAbort = (): void => {
@@ -1042,6 +1078,14 @@ export class VideoApiServer {
         success: false,
         message: 'No render worker available. Please ensure the render pool is running.'
       })
+      return
+    }
+
+    // 编码尺寸校验最先执行：0 个 ffmpeg 进程、不加载模型、不发 TTS 请求
+    const configError = this.validateVideoOptions()
+    if (configError) {
+      this.logger.warn(`[API] Export rejected by video config preflight: ${configError}`)
+      res.status(400).json({ success: false, message: configError })
       return
     }
 
@@ -1090,7 +1134,7 @@ export class VideoApiServer {
     }
 
     try {
-      await this.prepareStory(parsedStory)
+      await Promise.all([this.prepareStory(parsedStory), this.probeEncoderInBackground()])
     } catch (error) {
       const message = this.redactPaths(error instanceof Error ? error.message : String(error))
       this.logger.warn(`[API] Export rejected by story preflight: ${message}`)

@@ -142,7 +142,7 @@ const SNIPPET_TYPE_DEFAULTS: Record<string, number> = {
   DollyZoom: 500,
   AmbientColor: 1,
   CharacterShake: CHARACTER_SHAKE_MS,
-  PlaceInfo: PLACE_INFO_TRANSITION_MS,
+  PlaceInfo: 0,
   SimpleSelectable: SIMPLE_SELECTABLE_TOTAL_MS
 }
 
@@ -306,10 +306,8 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'SekaiIn':
     case 'SekaiOut': {
       const dataDur = getSnippetDataField(snippet, 'duration')
-      const fadeMs =
-        dataDur !== undefined ? normalizeEffectDurationMs(dataDur, 500) : 500
-      const preDelayMs =
-        snippet.type === 'SekaiIn' ? SEKAI_IN_PRE_DELAY_MS : SEKAI_OUT_PRE_DELAY_MS
+      const fadeMs = dataDur !== undefined ? normalizeEffectDurationMs(dataDur, 500) : 500
+      const preDelayMs = snippet.type === 'SekaiIn' ? SEKAI_IN_PRE_DELAY_MS : SEKAI_OUT_PRE_DELAY_MS
       const ms = preDelayMs + fadeMs
       return {
         durationMs: ms,
@@ -335,11 +333,7 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'Movie': {
       const dataDur = getSnippetDataField(snippet, 'duration')
       const ms =
-        typeof dataDur === 'number' && dataDur > 0
-          ? dataDur > 300
-            ? dataDur
-            : dataDur * 1000
-          : 0
+        typeof dataDur === 'number' && dataDur > 0 ? (dataDur > 300 ? dataDur : dataDur * 1000) : 0
       return {
         durationMs: ms,
         source: 'data_duration',
@@ -428,12 +422,14 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
       const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
       if (snippet.type === 'LayoutAppear') {
-        // 官方 Appear 在 1 帧 alpha=0 + 0.1s 淡入后就算完成；CharacterMoveTo 的滑入
-        // 继续在后台播放，不阻塞下一条，但仍在 Talk Gate 里等待。
+        // 官方 Appear 在 1 帧 alpha=0 + 0.1s 淡入后就算完成；新 view 没有滑入。
+        // 带 motion 且角色未显示时，类型分支延后一帧（at = frame + forced）。
+        const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
+        const appearMs = APPEAR_FADE_TOTAL_MS + (hasMotion ? FRAME_MS : 0)
         return {
-          durationMs: APPEAR_FADE_TOTAL_MS,
+          durationMs: appearMs,
           source: 'content_estimation',
-          detail: `LayoutAppear: fade ${APPEAR_FADE_TOTAL_MS}ms; move=${moveMs}ms continues`
+          detail: `LayoutAppear: fade ${APPEAR_FADE_TOTAL_MS}ms${hasMotion ? ' (+1 frame motion branch)' : ''}; move=${moveMs}ms not waited`
         }
       }
       if (snippet.type === 'LayoutClear') {
@@ -798,20 +794,17 @@ export function calculateTimeline(
       const to = getSnippetDataField(snippet, 'to')
       const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
-      const appearFadeTotalMs = isExport ? FRAME_MS + fadeMs : APPEAR_FADE_TOTAL_MS
-      layoutDurationMs = shown
-        ? APPEAR_SHOWN_MOVE_MS
-        : isExport
-          ? Math.max(appearFadeTotalMs, moved ? moveMs : 0)
-          : appearFadeTotalMs
+      // 官方 `at = frame + (hidden && motion)`：隐藏角色的类型分支（淡入与滑入）
+      // 带 motion 时延后一帧。片段只等淡入 0.1s，滑入在后台继续。
+      const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
+      const forcedMs = hasMotion ? FRAME_MS : 0
+      layoutDurationMs = shown ? APPEAR_SHOWN_MOVE_MS : APPEAR_FADE_TOTAL_MS + forcedMs
       layoutDecision = shown
         ? 'LayoutAppear: character already shown, CharacterMoveTo 0.2s'
-        : isExport
-          ? 'LayoutAppear: export synchronized fade + slide'
-          : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade'
+        : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade, slide in background'
       const slideMs = shown
         ? APPEAR_SHOWN_MOVE_MS
-        : Math.max(appearFadeTotalMs, moved ? moveMs : 0)
+        : forcedMs + Math.max(APPEAR_FADE_TOTAL_MS, moved ? moveMs : 0)
       activeLayoutEndMs = Math.max(
         activeLayoutEndMs,
         startTimeMs + (slideMs >= 30 ? quantizeMsToFrame(slideMs) : slideMs)

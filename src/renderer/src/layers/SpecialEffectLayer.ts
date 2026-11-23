@@ -28,7 +28,15 @@ function buildSolidColorTexture(color: string): Texture {
   return Texture.EMPTY
 }
 
-export type SideFadeDirection = 'Left' | 'Right' | 'Top' | 'Bottom' | 'left' | 'right' | 'top' | 'bottom'
+export type SideFadeDirection =
+  | 'Left'
+  | 'Right'
+  | 'Top'
+  | 'Bottom'
+  | 'left'
+  | 'right'
+  | 'top'
+  | 'bottom'
 
 function buildFeatheredSideFadeTexture(
   w: number,
@@ -228,7 +236,8 @@ export default class SpecialEffectLayer extends BaseLayer {
       this.setSpriteAlpha(other, 0)
     }
 
-    if (duration <= 0 || startAlpha >= 1 - 1e-3) {
+    if (duration <= 0 || startAlpha >= 1 - 1e-3 || (other.visible && otherAlpha >= 1 - 1e-3)) {
+      // 单一颜色 fader：已在全遮不透明时换色只吸附 RGB，alpha 保持 1。
       this.setSpriteAlpha(sprite, 1)
       other.visible = false
       this.setSpriteAlpha(other, 0)
@@ -261,8 +270,8 @@ export default class SpecialEffectLayer extends BaseLayer {
     other.visible = false
     this.setSpriteAlpha(other, 0)
     const sprite = this.spriteFor(color)
-    const currentAlpha = Math.max(0, Math.min(1, this.getSpriteAlpha(sprite)))
-    const startAlpha = currentAlpha > 1e-3 ? currentAlpha : 1
+    // 官方 FadeIn 无条件从该色 alpha=1 淡到 0（`Play(Some([rgb, 1.0]), delay, duration)`）。
+    const startAlpha = 1
     sprite.visible = true
     if (duration <= 0) {
       this.setSpriteAlpha(sprite, 0)
@@ -315,7 +324,11 @@ export default class SpecialEffectLayer extends BaseLayer {
       return
     }
 
-    const burst = new SekaiTransitionParticles(this.app.screen.width, this.app.screen.height, variant)
+    const burst = new SekaiTransitionParticles(
+      this.app.screen.width,
+      this.app.screen.height,
+      variant
+    )
     this.fxContainer.addChild(burst)
     this.activeTransitions.add(burst)
 
@@ -386,82 +399,69 @@ export default class SpecialEffectLayer extends BaseLayer {
     const gen = ++this.sideFadeGen
     const w = this.app.screen.width
     const h = this.app.screen.height
-    const feather = Math.round(512 * (w / 1920))
+    // 官方 `ScenarioSideFadePlayer.Play`：位移 = 内容宽/高 + 512，硬边面板，无羽化。
+    const ox = w + 512
+    const oy = h + 512
     const normMode = String(mode).toLowerCase() === 'in' ? 'in' : 'out'
     const dir = String(direction).toLowerCase() as 'left' | 'right' | 'top' | 'bottom'
     const horizontal = dir === 'left' || dir === 'right'
-
-    // Out = 黑幕盖住画面；In = 黑幕离开揭示画面
-    let featherSide: 'start' | 'end' = 'end'
-    let startPos = 0
-    let endPos = 0
+    let from = { x: 0, y: 0 }
+    let to = { x: 0, y: 0 }
+    let hide = false
     if (dir === 'left') {
-      if (normMode === 'out') {
-        featherSide = 'end'
-        startPos = -(w + feather)
-        endPos = 0
+      if (normMode === 'in') {
+        to = { x: ox, y: 0 }
+        hide = true
       } else {
-        featherSide = 'start'
-        startPos = -feather
-        endPos = w
+        from = { x: -ox, y: 0 }
       }
     } else if (dir === 'right') {
-      if (normMode === 'out') {
-        featherSide = 'start'
-        startPos = w
-        endPos = -feather
+      if (normMode === 'in') {
+        to = { x: -ox, y: 0 }
+        hide = true
       } else {
-        featherSide = 'end'
-        startPos = 0
-        endPos = -(w + feather)
+        from = { x: ox, y: 0 }
       }
     } else if (dir === 'top') {
-      if (normMode === 'out') {
-        featherSide = 'end'
-        startPos = -(h + feather)
-        endPos = 0
+      if (normMode === 'in') {
+        to = { x: 0, y: -oy }
+        hide = true
       } else {
-        featherSide = 'start'
-        startPos = -feather
-        endPos = h
+        from = { x: 0, y: oy }
       }
     } else {
-      if (normMode === 'out') {
-        featherSide = 'start'
-        startPos = h
-        endPos = -feather
+      if (normMode === 'in') {
+        to = { x: 0, y: oy }
+        hide = true
       } else {
-        featherSide = 'end'
-        startPos = 0
-        endPos = -(h + feather)
+        from = { x: 0, y: -oy }
       }
     }
 
-    this.wipeSprite.texture = this.getSideFadeTexture(horizontal, featherSide, w, h, feather)
-    this.wipeSprite.width = horizontal ? w + feather : w
-    this.wipeSprite.height = horizontal ? h : h + feather
+    const raw = Texture.from(ui_se_black)
+    this.wipeSprite.texture = isTextureUsable(raw) ? raw : buildSolidColorTexture('#000000')
+    this.wipeSprite.width = horizontal ? ox : w
+    this.wipeSprite.height = horizontal ? h : oy
     this.wipeSprite.visible = true
-    this.wipeSprite.x = horizontal ? startPos : 0
-    this.wipeSprite.y = horizontal ? 0 : startPos
+    this.wipeSprite.x = from.x
+    this.wipeSprite.y = from.y
 
     await runEasedTween(
       durationMs,
       'OutQuad',
       (p) => {
         if (gen !== this.sideFadeGen) return
-        const value = startPos + (endPos - startPos) * p
-        if (horizontal) this.wipeSprite.x = value
-        else this.wipeSprite.y = value
+        this.wipeSprite.x = from.x + (to.x - from.x) * p
+        this.wipeSprite.y = from.y + (to.y - from.y) * p
       },
       () => gen !== this.sideFadeGen
     )
 
     if (gen !== this.sideFadeGen) return
-    if (normMode === 'in') {
-      this.wipeSprite.visible = false
-      this.wipeSprite.x = 0
-      this.wipeSprite.y = 0
-    }
+    this.wipeSprite.x = to.x
+    this.wipeSprite.y = to.y
+    // In 类型在结束时 deactivate；Out 类型保留面板盖住画面。
+    this.wipeSprite.visible = !hide
   }
 
   /** 向后兼容旧签名 `(edge, mode, duration)`。 */
@@ -501,9 +501,13 @@ export default class SpecialEffectLayer extends BaseLayer {
   public async setCameraBlur(active: boolean, durationMs: number): Promise<void> {
     const gen = ++this.cameraBlurGen
     const scale = this.app.screen.width / 1920
-    const startSpread = this.cameraBlurFilter.spread
-    const targetSpread = active ? 3.0 * scale : 0
-
+    const seconds = Math.max(0, durationMs) / 1000
+    // 官方 `Spread = 3 × min(tween / duration, 1)`（Out 为 `3 × (1 − …)`）：
+    // tween 值本身是 0..1，所以短于 1 秒的模糊会提前饱和，长于 1 秒的到不了 3。
+    const spreadAt = (progress: number): number => {
+      const k = seconds > 0 ? Math.min(progress / seconds, 1) : 1
+      return 3 * scale * (active ? k : 1 - k)
+    }
     if (active) {
       this.filterSyncCallback?.(this.cameraBlurFilter)
     }
@@ -512,14 +516,16 @@ export default class SpecialEffectLayer extends BaseLayer {
       'OutQuad',
       (p) => {
         if (gen !== this.cameraBlurGen) return
-        this.cameraBlurFilter.spread = startSpread + (targetSpread - startSpread) * p
-        this.filterSyncCallback?.(this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null)
+        this.cameraBlurFilter.spread = spreadAt(p)
+        this.filterSyncCallback?.(
+          this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null
+        )
       },
       () => gen !== this.cameraBlurGen
     )
     if (gen !== this.cameraBlurGen) return
-    this.cameraBlurFilter.spread = targetSpread
-    this.filterSyncCallback?.(targetSpread > 0.001 ? this.cameraBlurFilter : null)
+    this.cameraBlurFilter.spread = active ? 3 * scale * Math.min(1 / Math.max(seconds, 1e-6), 1) : 0
+    this.filterSyncCallback?.(this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null)
   }
 
   /** 官方 `EffectType 19 Movie`: 0.5s 黑屏淡出 → 播放居中 2338x1080 视频 → 0.5s 恢复。 */
@@ -528,7 +534,10 @@ export default class SpecialEffectLayer extends BaseLayer {
     if (typeof document !== 'undefined' && file) {
       try {
         const video = document.createElement('video')
-        video.src = /^https?:\/\//i.test(file) || file.startsWith('/') ? file : `/resources/${file.replace(/^\/+/, '')}`
+        video.src =
+          /^https?:\/\//i.test(file) || file.startsWith('/')
+            ? file
+            : `/resources/${file.replace(/^\/+/, '')}`
         video.muted = true
         video.playsInline = true
         this.movieSprite.texture = Texture.from(video)

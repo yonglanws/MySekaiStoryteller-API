@@ -124,9 +124,30 @@ export default class VideoExportManager {
     this.logger.info('Export aborted by user')
   }
 
+  /**
+   * 本句说话人模型的口型系数（官方 `SetLipSyncK(tvs, tvs × 1.75)` 的 tvs）。
+   * MSST 剧本没有 per-talk `TargetValueScale`，用模型初值：资源名角色号属于
+   * 1/4/8/12/17/18 时为 1.25，否则 1.0。
+   */
+  private lipScaleForSnippet(snippets: SnippetData[], index: number): number {
+    const snippet = snippets[index] as { data?: { modelId?: number } } | undefined
+    const modelId = snippet?.data?.modelId
+    if (typeof modelId !== 'number' || modelId < 0) return 1
+    let model: ReturnType<App['getModelById']> | undefined
+    try {
+      model = this.app.getModelById?.(modelId)
+    } catch {
+      // 模型尚未加载（预热早期）时退回 1.0，不让口型解码中断导出。
+      model = undefined
+    }
+    const scale = model?.getLipSyncScale?.()
+    return typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1
+  }
+
   private async decodeLipSyncEnvelope(
     audioBuffer: ArrayBuffer,
-    snippetIndex = -1
+    snippetIndex = -1,
+    targetValueScale = 1
   ): Promise<ReturnType<typeof buildLipSyncEnvelope> | null> {
     try {
       // Offline decoding must not wait on timers while the fast frame pump is paused.
@@ -145,7 +166,7 @@ export default class VideoExportManager {
           sampleRate: decoded.sampleRate
         })
       }
-      return buildLipSyncEnvelope(channels, decoded.sampleRate)
+      return buildLipSyncEnvelope(channels, decoded.sampleRate, { targetValueScale })
     } catch (error) {
       this.checkAborted()
       this.logger.warn('Speech envelope unavailable; skipping lip sync', error)
@@ -153,7 +174,11 @@ export default class VideoExportManager {
     }
   }
 
-  private predecodeTalkLipSync(snippetIndex: number, audioBuffer?: ArrayBuffer): void {
+  private predecodeTalkLipSync(
+    snippetIndex: number,
+    audioBuffer?: ArrayBuffer,
+    targetValueScale = 1
+  ): void {
     if (
       snippetIndex < 0 ||
       !audioBuffer ||
@@ -162,7 +187,7 @@ export default class VideoExportManager {
     ) {
       return
     }
-    const task = this.decodeLipSyncEnvelope(audioBuffer, snippetIndex)
+    const task = this.decodeLipSyncEnvelope(audioBuffer, snippetIndex, targetValueScale)
       .then((envelope) => {
         this.lipSyncCache.set(snippetIndex, envelope)
         return envelope
@@ -173,7 +198,11 @@ export default class VideoExportManager {
     this.pendingLipSync.set(snippetIndex, task)
   }
 
-  private async prepareTalkLipSync(audioBuffer?: ArrayBuffer, snippetIndex = -1): Promise<void> {
+  private async prepareTalkLipSync(
+    audioBuffer?: ArrayBuffer,
+    snippetIndex = -1,
+    targetValueScale = 1
+  ): Promise<void> {
     this.app.currentTalkLipSync = null
     if (snippetIndex >= 0 && this.lipSyncCache.has(snippetIndex)) {
       this.app.currentTalkLipSync = this.lipSyncCache.get(snippetIndex) ?? null
@@ -184,7 +213,7 @@ export default class VideoExportManager {
       return
     }
     if (!audioBuffer) return
-    const envelope = await this.decodeLipSyncEnvelope(audioBuffer, snippetIndex)
+    const envelope = await this.decodeLipSyncEnvelope(audioBuffer, snippetIndex, targetValueScale)
     if (snippetIndex >= 0) this.lipSyncCache.set(snippetIndex, envelope)
     this.app.currentTalkLipSync = envelope
   }
@@ -223,7 +252,7 @@ export default class VideoExportManager {
           : null
       if (res?.success && res.duration > 0) {
         const buf = this.app.ttsManager.getAudioBufferForSnippet(j)
-        if (buf) this.predecodeTalkLipSync(j, buf)
+        if (buf) this.predecodeTalkLipSync(j, buf, this.lipScaleForSnippet(snippets, j))
       }
     }
   }
@@ -691,7 +720,13 @@ export default class VideoExportManager {
         ? (snippetIndex, res) => {
             if (res.success && res.duration > 0) {
               const buf = this.app.ttsManager?.getAudioBufferForSnippet(snippetIndex)
-              if (buf) this.predecodeTalkLipSync(snippetIndex, buf)
+              if (buf) {
+                this.predecodeTalkLipSync(
+                  snippetIndex,
+                  buf,
+                  this.lipScaleForSnippet(snippets, snippetIndex)
+                )
+              }
             }
           }
         : undefined
@@ -761,7 +796,7 @@ export default class VideoExportManager {
         const res = await concurrentPipeline.waitForTTSReady(idx)
         if (res?.success && res.duration > 0) {
           const buf = this.app.ttsManager.getAudioBufferForSnippet(idx)
-          if (buf) this.predecodeTalkLipSync(idx, buf)
+          if (buf) this.predecodeTalkLipSync(idx, buf, this.lipScaleForSnippet(snippets, idx))
         }
       }
       if (this.pendingLipSync.size > 0) {
@@ -840,14 +875,13 @@ export default class VideoExportManager {
 
     const realStart = virtualClock.realTimeMs()
 
-    // fast 模式每帧只渲染一次：停掉应用私有 ticker，由帧泵在推进虚拟时钟后显式 render；
-    // 在虚拟时钟下把 Ticker.shared.maxFPS 设为 0（不设内部节流阈值），避免 FakeTimers 16ms
-    // rAF 与 maxFPS=60 的 16.67ms 阈值撞车漏帧。
+    // fast 模式每帧只渲染一次：停掉应用私有 ticker，由帧泵在故事步推进后显式 render；
+    // Ticker.shared 在导出期间不启动（VirtualClockController 会 autoStart=false + stop），
+    // 每个 1/60 故事步由帧泵显式 update 一次，不再由 16ms rAF 驱动。
     this.app.pixiApplication.ticker.stop()
     this.logger.info('Fast export: app render ticker stopped, rendering once per frame')
 
-    const simFps = Math.max(STORY_FPS, fps)
-    AnimationManager.exportTargetFPS = simFps
+    AnimationManager.exportTargetFPS = STORY_FPS
     AnimationManager.exportEncodeFPS = encodeFps
     const prevTickerMaxFps = Ticker.shared.maxFPS
     Ticker.shared.maxFPS = 0
@@ -887,8 +921,21 @@ export default class VideoExportManager {
         pumpResumeResolve = resolve
       })
 
+    // 帧 0 必须等第一个片段真正启动后再渲染，否则会拍到片段应用之前的默认舞台
+    let signalFirstSnippet: (() => void) | null = null
+    const firstSnippetStarted = new Promise<void>((resolve) => {
+      signalFirstSnippet = resolve
+    })
+    const markFirstSnippetStarted = (): void => {
+      const resolve = signalFirstSnippet
+      signalFirstSnippet = null
+      resolve?.()
+    }
+
     const abortFastWait = (): void => {
       concurrentPipeline.abort()
+      markFirstSnippetStarted()
+      AnimationManager.resetExportStepHandlers()
       setPumpPaused(false)
       pumpDone = true
     }
@@ -900,13 +947,31 @@ export default class VideoExportManager {
     let blackFrameValidationCount = 0
     frameValidator.reset()
     let frameIndex = 0
+    /** 已执行的固定 1/60 故事步数 */
+    let storyStep = 0
+
+    /** 输出帧 k 对应的故事步：floor(k×60/fps)，非整除帧率按余量分配。 */
+    const storyStepForFrame = (frame: number): number =>
+      Math.floor((frame * STORY_FPS) / encodeFps)
+
+    const advanceToStoryStep = async (target: number): Promise<void> => {
+      if (target <= storyStep) return
+      const tickStart = virtualClock.realTimeMs()
+      await virtualClock.advanceStorySteps(target - storyStep, () => {
+        AnimationManager.dispatchExportStep(Ticker.shared)
+      })
+      storyStep = target
+      tickMs += virtualClock.realTimeMs() - tickStart
+    }
 
     const framePump = (async (): Promise<void> => {
       try {
+        await firstSnippetStarted
         const shouldStop = (): boolean => {
           if (!pumpDone) return false
           if (pumpTargetVirtualMs < 0) return true
-          return virtualClock.now() >= pumpTargetVirtualMs
+          if (frameIndex === 0) return false
+          return frameIndex * frameMs >= pumpTargetVirtualMs - 1e-6
         }
         while (!shouldStop()) {
           this.checkAborted()
@@ -916,18 +981,8 @@ export default class VideoExportManager {
           }
           const frameStart = virtualClock.realTimeMs()
 
-          const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
-          const deltaForFrame = Math.max(0, nextFrameVirtualMs - virtualClock.now())
-          // 30fps（frameMs≈33.33ms）按单步推进 1 个虚拟 tick，消除每帧双倍 tickAsync 开销；
-          // Live2D Physics 内部会按 _physicsRig.fps 子步积分，AnimationManager 会完成区间内全部补间
-          const subTicks = deltaForFrame > 50 ? Math.max(1, Math.ceil(deltaForFrame / 34)) : 1
-          const subStepMs = deltaForFrame / subTicks
-
-          const tickStart = virtualClock.realTimeMs()
-          for (let s = 0; s < subTicks; s++) {
-            await virtualClock.tick(subStepMs)
-          }
-          tickMs += virtualClock.realTimeMs() - tickStart
+          // 帧 n = 故事时间 n/fps：先把模拟推进到 floor(n×60/fps) 个 1/60 步，再渲染。
+          await advanceToStoryStep(storyStepForFrame(frameIndex))
 
           const renderStart = virtualClock.realTimeMs()
           this.app.pixiApplication.render()
@@ -937,6 +992,7 @@ export default class VideoExportManager {
           const durationUs = Math.round(1_000_000 / encodeFps)
           // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
           // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
+          const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
           const tailFrames = Math.ceil(encodeFps * 0.6)
           const inEndingTail =
             pumpTargetVirtualMs >= 0 &&
@@ -985,6 +1041,7 @@ export default class VideoExportManager {
 
     try {
       const totalSnippets = snippets.length
+      if (totalSnippets === 0) markFirstSnippetStarted()
       const extendedApp = this.app as unknown as ExtendedApp
       const openingCurtainColor = this.getOpeningCurtainColor(snippets)
       if (openingCurtainColor) {
@@ -1095,7 +1152,11 @@ export default class VideoExportManager {
           if (needsDecodeWait && !pumpPaused) {
             setPumpPaused(true)
           }
-          await this.prepareTalkLipSync(audioEntry?.audioBuffer, i)
+          await this.prepareTalkLipSync(
+            audioEntry?.audioBuffer,
+            i,
+            this.lipScaleForSnippet(snippets, i)
+          )
           const decodedPcm = this.pcmCache.get(i)
           if (decodedPcm && audioEntry && !audioEntry.pcmData) {
             audioEntry.pcmData = decodedPcm
@@ -1142,6 +1203,7 @@ export default class VideoExportManager {
 
         const snippetStartedAtMs = performance.now()
         await this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
+        if (i === 0) markFirstSnippetStarted()
         const hasAsyncTaskTracker =
           typeof this.app.snippetStrategyManager?.getLastLaunchedTask === 'function'
         const launchedTask = hasAsyncTaskTracker
@@ -1374,6 +1436,8 @@ export default class VideoExportManager {
       return result
     } catch (error) {
       VideoExportManager.warmValidatedApps.delete(this.app)
+      markFirstSnippetStarted()
+      AnimationManager.resetExportStepHandlers()
       setPumpPaused(false)
       pumpDone = true
       sinks.encoder?.dispose()
@@ -1385,6 +1449,7 @@ export default class VideoExportManager {
       throw error
     } finally {
       this.signal?.removeEventListener('abort', abortFastWait)
+      AnimationManager.resetExportStepHandlers()
       Ticker.shared.maxFPS = prevTickerMaxFps
       try {
         virtualClock.uninstall()

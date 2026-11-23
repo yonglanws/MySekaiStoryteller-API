@@ -27,6 +27,14 @@ export interface SseCurve {
   segments?: SseCurveSegment[]
 }
 
+export interface SseMotionEvent {
+  time?: number
+  function?: string
+  data?: string
+  float?: number
+  int?: number
+}
+
 export interface SseMotion {
   format?: string
   version?: number
@@ -37,12 +45,20 @@ export interface SseMotion {
   loopTime?: boolean
   fade?: { in?: number; out?: number }
   curves?: SseCurve[]
+  events?: SseMotionEvent[]
 }
 
 export interface Motion3Curve {
   Target: 'Parameter' | 'PartOpacity'
   Id: string
   Segments: number[]
+}
+
+export interface Motion3UserData {
+  /** 事件时间（秒）。 */
+  Time: number
+  /** `OnLive2DInvokeUserData` 的 data，例如 `eyeblink,0.2,0.24,0.24`。 */
+  Value: string
 }
 
 export interface Motion3File {
@@ -59,7 +75,7 @@ export interface Motion3File {
     TotalUserDataSize: number
   }
   Curves: Motion3Curve[]
-  UserData: unknown[]
+  UserData: Motion3UserData[]
 }
 
 export interface ConvertedMotion {
@@ -245,6 +261,21 @@ export function convertSseMotion(raw: unknown): ConvertedMotion {
     points += counted.points
   }
 
+  // `OnLive2DInvokeUserData` 事件 -> motion3 `UserData`（pixi 以 `motion:<Value>` 发出，
+  // AdvancedModel 的眨眼控制器消费其中的 `eyeblink,...`）。
+  const userData: Motion3UserData[] = (sse.events ?? [])
+    .filter(
+      (event) =>
+        event &&
+        String(event.function ?? '') === 'OnLive2DInvokeUserData' &&
+        event.data !== undefined
+    )
+    .map((event) => ({
+      Time: round(Math.max(0, Number(event.time ?? 0) || 0)),
+      Value: String(event.data ?? '')
+    }))
+    .sort((a, b) => a.Time - b.Time)
+
   return {
     name,
     fadeIn: Number(sse.fade?.in ?? 0.5),
@@ -259,11 +290,11 @@ export function convertSseMotion(raw: unknown): ConvertedMotion {
         CurveCount: list.length,
         TotalSegmentCount: records,
         TotalPointCount: points,
-        UserDataCount: 0,
-        TotalUserDataSize: 0
+        UserDataCount: userData.length,
+        TotalUserDataSize: userData.reduce((sum, entry) => sum + entry.Value.length, 0)
       },
       Curves: list,
-      UserData: []
+      UserData: userData
     }
   }
 }

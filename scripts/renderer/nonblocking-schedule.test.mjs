@@ -4,7 +4,7 @@
  * 官方语义：片段协程启动后调度器立刻继续下一条；delay/动画在后台跑，
  * 收尾 WaitAllFinished 再统一等待。这里锁死三件事：
  * - timeline 给非阻塞片段 0ms，plan 不推进下一句起点，但保留它的 delay；
- * - Talk 强制阻塞（TTS/字幕串行），即使剧本写了 wait:false；
+ * - Talk 与其它片段一样只看 ProgressBehavior：Now 不再有隐式前置栅栏；
  * - BackgroundSnippetTasks 能等待完成、传播错误、reset 后不再阻塞。
  */
 import test from 'node:test'
@@ -68,21 +68,28 @@ test('Now snippets overlap at caller cursor while WaitFinished fences prior task
   const result = timeline.calculateTimeline(snippets, new Map())
   const baked = plan.bakeStoryPlan(snippets, result.entries)
 
-  // PlayCore 前置栅栏：snippet 0 (WaitFinished) 启动后立即推进到 snippet 1 (Now)，
+  // PlayCore 从第 10 帧开始：snippet 0 (WaitFinished) 启动后立即推进到 snippet 1 (Now)，
   // snippet 1 自身仍有 7f (116.667ms) 淡入；snippet 2 (WaitFinished) 前置等待前两条都完成。
   assert.equal(result.entries[1].blocking, false)
   assert.equal(result.entries[1].durationMs, 116.667)
   assert.equal(result.validationSummary.crossValidationPassed, true)
   assert.equal(result.validationSummary.anomaliesDetected.length, 0)
 
-  const talk1Frames = Math.round(result.entries[0].durationMs / timing.FRAME_MS)
-  assert.equal(baked.entries[1].delayStartFrame, 0)
-  assert.equal(baked.entries[1].startFrame, timing.framesForSeconds(0.5))
-  assert.equal(baked.entries[1].endFrame, timing.framesForSeconds(0.5) + 7)
+  const talk1EndFrame =
+    timing.PLAYCORE_WARMUP_FRAMES + Math.round(result.entries[0].durationMs / timing.FRAME_MS)
+  assert.equal(baked.entries[1].delayStartFrame, timing.PLAYCORE_WARMUP_FRAMES)
+  assert.equal(
+    baked.entries[1].startFrame,
+    timing.PLAYCORE_WARMUP_FRAMES + timing.framesForSeconds(0.5)
+  )
+  assert.equal(
+    baked.entries[1].endFrame,
+    timing.PLAYCORE_WARMUP_FRAMES + timing.framesForSeconds(0.5) + 7
+  )
   assert.equal(baked.entries[1].blocking, false)
   assert.equal(
     baked.entries[2].startFrame,
-    talk1Frames,
+    talk1EndFrame,
     '下一个 WaitFinished 片段等前面所有在跑任务完成后才启动'
   )
 
@@ -105,17 +112,14 @@ test('Now snippets overlap at caller cursor while WaitFinished fences prior task
   assert.equal(fenced.entries[1].startTimeMs, 1200)
 })
 
-test('Talk stays blocking even if the scenario says ProgressBehavior=0', () => {
+test('Talk follows an explicit ProgressBehavior=Now instead of forcing a pre-fence', () => {
   const snippets = [talk('あ'.repeat(10), false)]
   const result = timeline.calculateTimeline(snippets, new Map())
   const baked = plan.bakeStoryPlan(snippets, result.entries)
-  assert.equal(result.entries[0].blocking, true)
+  assert.equal(result.entries[0].blocking, false)
   assert.ok(result.entries[0].durationMs > 0)
-  assert.equal(baked.entries[0].blocking, true)
-  assert.equal(
-    baked.entries[0].durationFrames,
-    timing.framesForSeconds(result.entries[0].durationMs / 1000)
-  )
+  assert.equal(baked.entries[0].blocking, false)
+  assert.equal(baked.entries[0].durationFrames, timing.msToFrameCount(result.entries[0].durationMs))
 })
 
 test('BackgroundSnippetTasks waits, propagates failures and resets', async () => {

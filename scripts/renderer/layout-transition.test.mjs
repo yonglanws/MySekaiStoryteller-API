@@ -129,7 +129,10 @@ function fixture() {
   const mocks = new Map([
     ['zod', nodeRequire('zod')],
     ['pixi.js', { Ticker: class {}, Container: class {}, Filter: class {} }],
-    ['pixi-live2d-display-advanced', { Cubism2InternalModel: class {}, Cubism4InternalModel: class {} }],
+    [
+      'pixi-live2d-display-advanced',
+      { Cubism2InternalModel: class {}, Cubism4InternalModel: class {} }
+    ],
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new Logger() }],
     [
       path.join(renderer, 'managers/AnimationManager.ts'),
@@ -377,7 +380,11 @@ test('LayoutAppear finishes after 7 frames while async slide continues, and re-a
   })
   await clock.drive(secondAppear.runSnippet())
   assert.equal(clock.now - tBeforeSecond, 200)
-  assert.equal(app.getModelById(1).calls.shows.length, 1, 'already shown does not call show() again')
+  assert.equal(
+    app.getModelById(1).calls.shows.length,
+    1,
+    'already shown does not call show() again'
+  )
   assert.equal(app.getModelById(1).calls.opacities.at(-1).alpha, 1)
   assert.equal(round(app.getModelById(1).calls.moves.at(-1).to.x), 1.427)
 
@@ -444,7 +451,7 @@ test('LayoutClear matches hidden/in-place/slide fade offsets and visibility pree
   assert.equal(round(app.getModelById(2).calls.hides[0].fadeMs), 100)
   assert.equal(removed.at(-1).id, 2)
 
-  // 3) 滑动 Clear (Slow = 750ms)：等 650ms 后淡出 100ms，合计 750ms
+  // 3) 滑动 Clear (Slow = 766.667ms = 46 帧)：等 666.667ms 后淡出 100ms
   const appear3 = new LayoutAppearSnippet(app, {
     type: 'LayoutAppear',
     delay: 0,
@@ -474,8 +481,8 @@ test('LayoutClear matches hidden/in-place/slide fade offsets and visibility pree
     }
   })
   await clock.drive(clearSlide.runSnippet())
-  assert.equal(round(clock.now - tStartSlide), 750)
-  assert.equal(round(app.getModelById(3).calls.hides[0].startAt - tStartSlide), 650)
+  assert.equal(round(clock.now - tStartSlide), 766.667)
+  assert.equal(round(app.getModelById(3).calls.hides[0].startAt - tStartSlide), 666.667)
 
   // 4) 滑动退场途中被新 Appear 抢占：旧 Clear 不得删掉新 Appear 的模型
   const appearPreemptA = new LayoutAppearSnippet(app, {

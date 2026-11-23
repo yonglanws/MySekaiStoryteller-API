@@ -25,33 +25,38 @@
 **内置默认值不等于示例文件值。** 下表前一列取自 `src/host/config.ts`，后一列是公开模板明确填写的值。
 复制 [config.example.yaml](../config.example.yaml) 后会采用模板值，不能再把它称为“未配置默认”。
 
-| `video` 字段         | 内置默认       | 模板显式值      | 单位、范围或约束                                                                       |
-| -------------------- | -------------- | --------------- | -------------------------------------------------------------------------------------- |
-| `width` / `height`   | `1280` / `720` | `1920` / `1080` | 像素；使用正偶整数，推荐 16:9                                                          |
-| `fps`                | `30`           | `60`            | 帧/秒；应为有限正数，推荐 24、30、60 等常用值                                          |
-| `crf`                | `23`           | `28`            | 无单位质量因子；作用于 `image2pipe` / 帧序列的宿主 ffmpeg 编码（WebCodecs 不使用此值） |
-| `renderScale`        | `1.5`          | `1`             | 渲染倍率；使用正数，`1` 为输出尺寸对应渲染，`<1` 降采样，`>1` 超采样                   |
-| `audioBitrate`       | `128k`         | `128k`          | AAC 目标码率字符串，例如 `96k`、`128k`、`192k`；有音轨时生效                           |
-| `encoder`            | `auto`         | `auto`          | 宿主 ffmpeg 编码选择：`auto` / `nvidia` / `amd` / `intel` / `libx264`                  |
-| `watermark`          | `true`         | `true`          | 布尔值，是否显示水印                                                                   |
-| `watermarkText`      | `""`           | `""`            | 自定义水印，最多两行，追加在自带两行下方；`\n` 换行                                    |
-| `exportMode`         | `fast`         | `fast`          | 枚举 `fast` / `record`；`fast` 为默认与唯一实现，`record` 已废弃（告警并回落 `fast`）  |
-| `exportBitrate`      | `12000000`     | `12000000`      | bps；正数，仅 `fast` 的 WebCodecs 视频编码使用                                         |
-| `exportFastEncoder`  | `auto`         | `auto`          | 枚举 `auto` / `webcodecs` / `frames`                                                   |
-| `fastFps`            | `30`           | `30`            | 帧/秒；`fast` 有效编码帧率为 `max(1, min(fastFps, fps))`，建议 `1 ≤ fastFps ≤ fps`     |
-| `recordTargetSizeMb` | `0`            | `0`             | **[已废弃]** 仅兼容保留；`> 0` 时启动打印告警并忽略，请改用 `exportBitrate` 或 `crf`   |
-| `ttsMode`            | `concurrent`   | `concurrent`    | 枚举 `concurrent` / `serial`；`concurrent`（默认）边渲染边并发合成，`serial` 先合成完  |
-| `idleChainGapSec`    | `0`            | `0`             | 秒；`0` 关闭动作续演（保持末帧姿态），正数以该间隔（±25% 抖动）接同情绪族手势          |
+| `video` 字段         | 内置默认       | 模板显式值       | 单位、范围或约束                                                                       |
+| -------------------- | -------------- | ---------------- | -------------------------------------------------------------------------------------- |
+| `width` / `height`   | `1280` / `720` | `1920` / `1080`  | 像素；使用正偶整数，推荐 16:9                                                          |
+| `fps`                | `30`           | `60`             | 帧/秒；应为有限正数，推荐 24、30、60 等常用值                                          |
+| `crf`                | `18`           | `28`             | 无单位质量因子；作用于 `image2pipe` / 帧序列的宿主 ffmpeg 编码（WebCodecs 不使用此值） |
+| `renderScale`        | `1.5`          | `1`              | 渲染倍率；使用正数，`1` 为输出尺寸对应渲染，`<1` 降采样，`>1` 超采样                   |
+| `codec`              | `hevc`         | 未填写（取默认） | 枚举 `hevc` / `h264`；HEVC 用 libx265 或同名硬件编码器，MP4 带 `-tag:v hvc1`           |
+| `audioBitrate`       | `192k`         | `128k`           | AAC 目标码率字符串，例如 `96k`、`128k`、`192k`；有音轨时生效                           |
+| `encoder`            | `auto`         | `auto`           | 宿主 ffmpeg 编码选择：`auto` / `nvidia` / `amd` / `intel` / `libx264`                  |
+| `watermark`          | `true`         | `true`           | 布尔值，是否显示水印                                                                   |
+| `watermarkText`      | `""`           | `""`             | 自定义水印，最多两行，追加在自带两行下方；`\n` 换行                                    |
+| `exportMode`         | `fast`         | `fast`           | 枚举 `fast` / `record`；`fast` 为默认与唯一实现，`record` 已废弃（告警并回落 `fast`）  |
+| `exportBitrate`      | `12000000`     | `12000000`       | bps；正数，仅 `fast` 的 WebCodecs 视频编码使用                                         |
+| `exportFastEncoder`  | `auto`         | `auto`           | 枚举 `auto` / `webcodecs` / `frames`                                                   |
+| `fastFps`            | `30`           | `30`             | 帧/秒；`fast` 有效编码帧率为 `max(1, min(fastFps, fps))`，建议 `1 ≤ fastFps ≤ fps`     |
+| `recordTargetSizeMb` | `0`            | `0`              | **[已废弃]** 仅兼容保留；`> 0` 时启动打印告警并忽略，请改用 `exportBitrate` 或 `crf`   |
+| `ttsMode`            | `concurrent`   | `concurrent`     | 枚举 `concurrent` / `serial`；`concurrent`（默认）边渲染边并发合成，`serial` 先合成完  |
+| `idleChainGapSec`    | `0`            | `0`              | 秒；`0` 关闭动作续演（保持末帧姿态），正数以该间隔（±25% 抖动）接同情绪族手势          |
 
 宿主 schema 对多数数值仅检查类型，不统一检查范围；GPU 纹理、显存、浏览器编码能力决定实际可用上限。
-`crf` 对 libx264 是 CRF，对 NVIDIA 是 CQ，对 AMD 是 QP，对 Intel 是 `global_quality`；同一个数字不代表同等画质或体积。libx264 额外带 `aq-mode=3:deblock=2,2`（暗部自适应量化加偏强去块），减轻片尾淡出至黑时 yuv420 近黑渐变的块状伪影，不改变 CRF 数值。WebCodecs 直编在成片最后约 0.6 秒把关键帧间隔收到每 4 帧一次，同一目的。
+`width` / `height` 必须是正偶数（yuv420p 4:2:0 的硬性要求），非法尺寸会在加载模型与 TTS 之前以 400 拒绝，宿主启动时也会校验。
+`codec: hevc` 用 libx265（`-preset medium -crf … -x265-params log-level=error -tag:v hvc1`），硬件后端对应 `hevc_nvenc` / `hevc_qsv` / `hevc_amf`；`codec: h264` 用 libx264（`-threads 4`、`rc-lookahead=20`）或 `h264_*`。`encoder: libx264` 是旧版显式 CPU 选项，始终输出 H.264；`cpu` / `auto` 跟随 `codec`。
+`crf` 对 libx264 / libx265 是 CRF，对 NVIDIA 是 CQ，对 AMD 是 QP，对 Intel 是 `global_quality`；同一个数字不代表同等画质或体积。libx264 额外带 `aq-mode=3:deblock=2,2`（暗部自适应量化加偏强去块）与 `rc-lookahead=20` 合并在同一个 `-x264-params` 里，减轻片尾淡出至黑时 yuv420 近黑渐变的块状伪影，不改变 CRF 数值。WebCodecs 直编在成片最后约 0.6 秒把关键帧间隔收到每 4 帧一次，同一目的。
 WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率，并将解码器上报的 `colorSpace` 通过 `normalizeDecoderColorSpace` 统一归一化到 BT.709 区间。
+所有 ffmpeg 出帧路径（恒等尺寸、缩放、帧序列、image2pipe 与 GPU rawvideo）都显式挂 `scale=…:out_color_matrix=bt709:out_range=tv`（无缩放 `flags=bicubic`，有缩放 `flags=lanczos`）、`setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709`，并追加 `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv` 四个输出标记。恒等尺寸也不省略 `-vf`：这条 scale 滤镜同时负责矩阵转换与有限范围。
 
 常用环境变量映射如下；没有列出的字段不要自行推测 `MSS_*` 名称。
 
 | 字段                               | 环境变量                                                                   |
 | ---------------------------------- | -------------------------------------------------------------------------- |
 | `width` / `height` / `fps` / `crf` | `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF` |
+| `codec`                            | `MSS_VIDEO_CODEC`（`hevc` / `h264`）                                       |
 | `encoder`                          | `MSS_FFMPEG_ENCODER`，不是 ffmpeg codec 名 `nvenc`                         |
 | `exportMode` / `exportBitrate`     | `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                   |
 | `exportFastEncoder` / `fastFps`    | `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                 |
@@ -119,9 +124,16 @@ WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率�
 
 WebGL 负责画模型，视频编码负责压缩帧，二者是独立路径：有硬件 WebGL 不等于 ffmpeg 或 WebCodecs 已用硬件编码。
 查看 worker 的 `WebGL renderer` 日志；`SwiftShader`、`software`、`llvmpipe` 通常提示软件渲染。
-ffmpeg 选择值对应 `nvidia → h264_nvenc`、`amd → h264_amf`、`intel → h264_qsv`、`libx264 → CPU`。
+ffmpeg 选择值按 `video.codec` 映射：`nvidia → hevc_nvenc/h264_nvenc`、`amd → hevc_amf/h264_amf`、`intel → hevc_qsv/h264_qsv`、`cpu → libx265/libx264`、`libx264 → libx264`（旧版显式 CPU 选项）。
 WebCodecs 自行探测浏览器能力，不受 `video.encoder: nvidia` 强制控制；`prefer-hardware` 需同时通过能力探测与 5 帧测速。
-健康检查的 `host.ffmpegEncoderDetected` 来自宿主启动时执行的 1 帧真实冒烟试编码缓存，并非仅凭 `ffmpeg -encoders` 列表判断。
+健康检查的 `host.ffmpegEncoderDetected` 来自宿主启动时执行的真实冒烟试编码缓存，并非仅凭 `ffmpeg -encoders` 列表判断。
+冒烟探测真编 **3 帧** 256×256，参数由与正式导出相同的滤镜/标记/pix_fmt 派生函数生成，结果按 `(binary, codec, 后端, 尺寸)` 缓存；导出请求会与故事预检并行预热该缓存，正式编码直接命中，不会在收尾时再等一次探测。
+
+### 输出文件的原子写与时长截断
+
+- 宿主 ffmpeg 只写 `<name>.partial.mp4`，进程成功退出后才 `rename` 到目标名；失败或取消会删除 partial、临时帧目录与中间 MP4，输出目录里不会留下半截成片。中途杀掉 ffmpeg 时最多只剩可删除的 `.partial` 文件。
+- 合流不再使用 `-shortest`：音频按 `-t frames/fps`（六位小数）精确截断，与视频帧数严格一致。`image2pipe` 会话会把实际写入的帧数与编码帧率交给宿主 remux；两者都拿不到时退回 WAV 头里的 data 块时长。音频默认 AAC 192k。
+- 断点续传/片段的音频起点按首个视频帧的样本位置对齐（对音频输入加 `-ss frame/fps`），避免片头音画错位与长片累积漂移。
 
 ## 路径选择与回退顺序
 
@@ -133,7 +145,8 @@ WebCodecs 自行探测浏览器能力，不受 `video.encoder: nvidia` 强制控
 3. **运行时初始化回退**：`auto` 模式下即便探测通过、若 `WebCodecsMp4Encoder.initialize()` 失败仍会无缝回落 `JpegFrameSink`；`webcodecs` 显式模式初始化失败则会直接报错终止。
 4. **`JpegFrameSink` 管道与编码回退**：
    - 优先调用 `electron:frames-stream-start` 启动宿主 `FramesPipeSession`（`image2pipe` MJPEG stdin 直通 ffmpeg，无磁盘帧文件）；该通道选用 `video.encoder`（`auto` 按真实冒烟结果选用 NVIDIA/AMD/Intel/CPU），若运行时 GPU 编码失败会自动 `invalidateGpuEncoder()` 并在后续导出避开故障编码器。
-   - 若 `image2pipe` 不可用，惰性调用 `electron:get-temp-dir` 落盘 JPEG 批次并走 `electron:api-encode-frames-video`（`encodeFramesToVideo` 在 GPU 编码报错时会立即重试 `libx264`）。
+   - `FramesPipeSession` 也接受 `frameFormat: rawvideo`：渲染端离屏 WebGL2 全屏 pass 完成缩放与 BT.709 定点转换后，按 yuv420p 原始帧入管道（每帧 `1.5 × W × H` 字节），ffmpeg 只做标记与编码，不再解码 JPEG；当前默认仍是 MJPEG `image2pipe`。
+   - 若 `image2pipe` 不可用，惰性调用 `electron:get-temp-dir` 落盘 JPEG 批次并走 `electron:api-encode-frames-video`（`encodeFramesToVideo` 在 GPU 编码报错时按 `codec` 立即重试软件编码 `libx265` / `libx264`）。
 
 ## 调参案例
 

@@ -4,7 +4,109 @@
 > **历史重构记录（已完成并合入当前管线）**：本文件记录 60fps 帧基常量、Talk 自动播放节奏、布局淡化、眨眼/呼吸/口型曲线与逐帧报告的早期对齐计划，相关能力已落地至 `src/common/official/` 与 `src/renderer/`。
 > 现行使用与配置请查阅 [故事文件格式](story-format.md) 与 [导出模式](export-modes.md)。
 
+## 2026-11 入场、出场、走位、动作调度与演出效果对齐
+
+本轮按 `sse-core/src/time.rs`、`sse-timeline/src/lib.rs`、`sse-bake/src/{lib,shake}.rs`
+继续对齐舞台层。已落地：
+
+- `framesForSeconds` 改为 Unity 的 f32 逐帧累加：0.06→4、0.1→6、0.125→8、0.5→30、
+  0.75→46、1.0→61、2.0→121、30.0→1801；0/−1/NaN→0，Infinity 饱和到 u32 上限。
+  `quantizeMsToFrame` 不再对已是整帧的毫秒（如 116.667ms）二次换算。
+- `talkAuto.ts`：TalkWindow 自动推进按参考移植。无语音 / 语音先于打字结束 → 打字结束
+  +121 帧；语音未结束 → 等到 `min(voice_end, typing_end+1800)`，再 Gate 30 帧。
+  10 字 + 40s 语音 = 1882、10 字 + 2s = 154、无语音 10 字 = 173、1s 语音 20 字 = 213。
+- 打字长度用官方正文的 UTF-16 长度：官方换行计入，本工程排版折行写成
+  「零宽空格 + 换行」标记、计数时跳过；UIText 第 4 帧显示第 2 个字。
+- `AnimationManager.linear` 新增绝对时间模式（`startMs` + `frames`，progress 只由
+  虚拟时钟决定，同帧求值一致、暂停不累积）；`Ease.ts` 支持 DOTween 22 种缓动
+  （补 Quint/Circ/Back，删 Expo，未知名字回落 Linear）。
+- `storyPlan`：首片段 act = 10 + frames_for(delay)，总帧数 = 最后 finish + 31；
+  Appear 新角色 finish = act+7（带 motion 为 act+8，类型分支延后一帧），
+  从 from 到 to 的滑入与淡入并发、继续在后台（`moveEnd = at + move_frames`）。
+- 角色位移改线性插值；`SIDE_UNDER_Y` = −1359.2；Telop 停留 = frames_for(2)−1；
+  Talk 的强制前置栅栏移除，只看 ProgressBehavior。
+- 震屏改 DOTween 分段（n = max(2, trunc(16×d))、段内 OutQuad、段末幅度减
+  strength/n、最后一段 0、有限抖动父节点 y 从 −8 用 OutQuad 升到 0）；相机
+  Move/Zoom 的 from 取上一条 tween 的目标值（Kill(complete)），DollyZoom 用
+  `dist × −(zoom−1)`；黑场 FadeIn 无条件从 alpha=1 淡出；Blur spread =
+  `3 × min(t/d, 1)`；SideFade 改硬边面板 + 官方 ±(W/H+512) 偏移；Choice 时序
+  1.5s 作答 / 0.1s 按压 / 121 帧结束；PlaceInfo 片段 0 帧（面板后台滑入）。
+
+尚未完成（本轮未改，保持旧行为）：人物层级 DepthType、独立换装时序、
+FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/SEKAI 生命周期、
+背景 prefab 分支、Talk 内嵌动作的 PlayTime/Text 同步模式。对应路线图条目仍需后续波次。
+
+## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
+
+本节取代下面「2026-11 口型链路按 ournotes 忠实重构」一节。参考实现回到仓库外的
+SekaiStoryExporter checkout（`sse-bake/src/lipsync.rs`、`sse-bake/src/lib.rs`、
+`sse-live2d/src/blink.rs`、`runtime.rs`、`motion.rs`、`sse-core/src/consts.rs`），
+按「能整段移植就整段移植」重写口型两条链与待机自然动作。ournotes 的
+`AdvLipSyncPolicy` 预设、p95 响度归一、450ms 指数尾、8Hz 音节正弦、四段线性眨眼
+全部删除。
+
+口型（`Lip::Voice` / `Lip::Text`）：
+
+- 语音与文本两条链都按剧情 60Hz（16.667ms）步进，每一步只做一次官方三档 `smooth()`：
+  当前值 <0.1 用 0.6/0.4；目标与当前值差 <0.1 用 0.2/0.8；否则 0.25/0.75。
+  恒 1.0 输入 60 步后开度 0.99999999；1.0 释放到 <0.001 用 14 步，0.2 用 8 步。
+- 语音目标：窗口是「结束于当前步时刻的最后一帧样本」
+  （`end = (frame/60)×rate` 取整，`len = rate/60` 取整，48k 下 800 个），窗口内
+  混音求 RMS；`a = rms × tvs`，`target = a×(a+1)^(tvs×1.75)`，`target < 0.06`
+  记 0，否则限幅 0.2~1。第 0 步窗口为空，第一声在第 1 步 = 0.6×target。
+- 口型系数：一次 talk 把说话人重设为 `(tvs, tvs×1.75)`。MSST 剧本没有 per-talk
+  `TargetValueScale`，包络按模型初值构建：资源名角色号属于 1/4/8/12/17/18 时
+  1.25（`01ichika_normal`），否则 1.0（`v2_20mizuki_culture`）。rms=0.2 时
+  tvs1 → 0.2752、tvs1.25 → 0.4073；rms=0.3 → 0.4748 / 0.7526；
+  rms=0.05 且 tvs1.25 落在 0.2 下限。
+- 文本目标：`LipLevels[(k·step + first) % 38]`，`step = 说话人数`、
+  `first = slot + 1`（全员 talk 时 step=1、first=0）；`k = (frame − typing_start) / 2`
+  取整，所以一个半字 = 2 个相同 target 的 60Hz 步。`typing_end − 一个整字`
+  （4 帧）处开始归零；点击提前结束时从点击帧归零。
+- 脱手：样本放完（或文本已收尾）且平滑值 <0.001 的那一步官方写 0 后把 `Lip`
+  换成 `None`；之后不再写 `ParamMouthOpenY`。`LipSyncEnvelope.releaseStep`
+  记录该步，`AdvancedModel.releaseMouth()` 清掉待写值，Talk 结束时也调用它。
+- 写入范围：只有本次 talk 的 speaker 挂 `beforeModelUpdate` 监听；同台听者不写 0，
+  嘴由他们自己的动作/表情决定。`TalkSnippet` 直接按 60Hz 步号取包络值，不再对
+  半字做线性插值，也不在包络上叠 8Hz、±35% 的正弦。
+
+眨眼（`Live2DEyeBlinkController`）：
+
+- `|sin|` 控制器：Ready 状态 `untilTime -= dt`，<0 时相位从 `-π/2` 起，
+  每步 `+= 10×dt`，`EyeOpening = |sin(radian)|`；`|sin|` 回到上升沿
+  （本帧值 < 上帧值）时结束并重抽 `3 + Random.Range(-2, 2)`。一眨 19 步 <1、
+  第 20 步强制 1.0；60Hz 谷值 0.0707，30fps 抽取按步号奇偶得 0.0707 或 0.0957。
+- `untilTime` 睡眠期间不递减，`WakeUp` 不重置；睡梦中唤醒不改变当前这眨，
+  只在结束时停住。新模型 `Sleep`；任何身体动作切换都 `Sleep`，只有非循环
+  身体 clip 越过结尾才 `WakeUp`；请求模型没有的身体动作同样 `Sleep` 且不再唤醒。
+- 眼参数无条件乘 `EyeOpening`（`CubismEyeBlinkController` 的 Multiply），
+  不再按 `base > 0.25` 跳过、也不因眼睛本来闭着冻结 `untilTime`。
+- 动作 `UserData` 的 `OnLive2DInvokeUserData`（例如 `eyeblink,0.2,0.24,0.24`）
+  由 `convertSseMotion` 写进 motion3 `UserData`，`AdvancedModel` 在
+  `MotionQueueManager` 的事件回调里转给眨眼控制器：闭 eye→0（closing）、
+  保持 0（closed）、eye→1（opening）；序列播放中忽略新命令，少于 4 段不触发。
+
+呼吸（`Live2DModel.LateUpdate`）：
+
+- `breathDegree` 初值是 `Random.Range(0, 360)` 的整数；每个 60Hz 步 +2°，
+  越过 360 只减一次 360（不取模到负）；`ParamBreath = (sin(degree×DEG2RAD)×0.5+0.5)×0.5`，
+  180 步一个周期，隐藏（非 active）时冻结。
+
+动作混合（`ScenarioModel.ChangeMotionCore` / `Live2DModel.play`）：
+
+- 身体分支顺序：`force && first` → 0；同类别或链接动作 → 0.125s；
+  `force` → 0；否则新 clip 的 `FadeInTime`（model3
+  `FileReferences.Motions[name][0].FadeInTime`，缺省 0.5s）。
+- 表情：Force → 0；否则 clip 的 `FadeInTime`（缺省 `live2d.facial_fade = 0.25s`）。
+- 已知未移植：官方在淡出期间把「旧 clip 覆盖、进入 clip 不覆盖」的参数滑向默认值；
+  pixi 的队列只按权重混合各自的曲线，没有这个归位层。本轮只对齐混合时长。
+
+已知未移植（口型）：点击提前结束时截断 PCM 后继续平滑（`Lip::cut_voice`）。
+导出没有点击；交互播放点击后整个 snippet 结束并 `releaseMouth()`。
+
 ## 2026-11 口型链路按 ournotes 忠实重构
+
+> 已被上一节取代；本节仅保留为历史记录。
 
 本节记录 2026-11 对语音口型链路（`src/common/official/timing.ts` + `src/renderer/src/utils/LipSyncEnvelope.ts`）的第二次对齐：以 ournotes-player 的实时口型观感为蓝本，不再在官方曲线上叠本项目自加的平滑层。
 
@@ -49,25 +151,25 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
 `crates/sse-bake/src/{lib,character,lipsync}.rs`、`crates/sse-live2d/src/{runtime,motion,blink}.rs`
 后确认：
 
-| 项目         | 官方/SSE                                                                           | 本项目当前                                                                                                                          | 影响                               |
-| ------------ | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------------------- | ---------- |
-| 打字速度     | `word_interval=0.06s`，每半字 `ceil(0.03×60)=2` 帧，合计 **4 帧/字 = 66.67ms**     | `TALK_DISPLAY_MS_PER_CHAR=80`                                                                                                       | 每句慢 20%                         |
-| 语音后停留   | 语音结束 + `0.05s` 延迟，再过 **0.5s** 自动翻页                                    | 固定 `+600ms`                                                                                                                       | 句间节奏偏慢/不一致                |
-| 无语音台词   | 打字结束 + **2.0s**                                                                | 固定 `+600ms`，且有 1800ms 下限                                                                                                     | 无声段落过快                       |
-| 动作收尾闸门 | 自动模式要等布局结束、所有身体动作播完，再等 0.5s                                  | 完全不等                                                                                                                            | 长动作被下一句硬切                 |
-| 对话框打开   | `PlayActive(1,0.2)`，打字等 0.2s                                                   | 70ms                                                                                                                                | 首次台词提前                       |
-| 入场淡入     | `FadeOpacity(1, 0.1)`，先 1 帧 alpha=0                                             | `show(200)`                                                                                                                         | 入场慢一倍                         |
-| 已在场再入场 | `CharacterMoveToCoroutine(side, 0.2)`，不淡入                                      | 统一 show+move                                                                                                                      | 语义不符                           |
-| 入场完成     | 淡入结束（约 7 帧）即完成，滑入继续                                                | 等 show + 完整 move                                                                                                                 | 每场多等 0.5~0.75s                 |
-| 退场         | 原地 `delay 0.15 + fade 0.1`；滑动 `delay=move-0.1 + fade 0.1`                     | 原地 300ms；滑动 `max(400, move)` 同时淡出                                                                                          | 退场时序不符                       |
-| 移动速度     | Slow 0.75s / Normal 0.5s / Fast 0.33s                                              | 700/500/300ms                                                                                                                       | 固定偏差                           |
-| 站位         | 普通 `±350/1920`，三人 `±550/1920`，三人缩放 0.9                                   | 0.3/0.7，0.25/0.75                                                                                                                  | 三人模式偏内                       |
-| 身体动作混合 | 0.5s 交叉淡化；同类别/链接动作 0.125s                                              | 依赖默认 0.5s，但每次先 `stopAllMotions()`，旧姿势被丢弃                                                                            | 动作切换跳变、节奏感不稳           |
-| 表情混合     | 0.25s；Force 时 0                                                                  | 默认 0.5s                                                                                                                           | 表情变慢                           |
-| 眨眼         | 均值 3s、±2s、速度 10；动作播放时 Sleep，非循环动作结束 Wake；                     | sin                                                                                                                                 | 曲线 20 帧                         | 固定 4~6.5s，闭眼 200ms/睁眼 250ms，动作中仍眨 | 待机不自然 |
-| 呼吸         | 3s 周期、影响 0.5、ParamBreath                                                     | 无                                                                                                                                  | 待机僵硬                           |
-| 口型         | 每帧 RMS → `a×scale`、`a×pow(a+1,1.75)`、阈值 0.06、限幅 0.2~1、按当前值加权的平滑 | 2026-11 起对齐：官方曲线裸输出（无 smoothLipValue、无 RMS 下限放宽）+ 每句 p95 归一 + AdvLipSyncPolicy fallback 原值 + 450ms 释放尾 | 已对齐（见「2026-11 口型链路」节） |
-| 导出可观测性 | `report.txt` + 逐帧参数表                                                          | `.log`/`.log.json` + 动作追踪                                                                                                       | 缺少帧级计划和近似清单             |
+| 项目         | 官方/SSE                                                                                                                                                                | 本项目当前                                                                                                    | 影响                                       |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| 打字速度     | `word_interval=0.06s`，每半字 `ceil(0.03×60)=2` 帧，合计 **4 帧/字 = 66.67ms**                                                                                          | `TALK_DISPLAY_MS_PER_CHAR=80`                                                                                 | 每句慢 20%                                 |
+| 语音后停留   | 语音结束 + `0.05s` 延迟，再过 **0.5s** 自动翻页                                                                                                                         | 固定 `+600ms`                                                                                                 | 句间节奏偏慢/不一致                        |
+| 无语音台词   | 打字结束 + **2.0s**                                                                                                                                                     | 固定 `+600ms`，且有 1800ms 下限                                                                               | 无声段落过快                               |
+| 动作收尾闸门 | 自动模式要等布局结束、所有身体动作播完，再等 0.5s                                                                                                                       | 完全不等                                                                                                      | 长动作被下一句硬切                         |
+| 对话框打开   | `PlayActive(1,0.2)`，打字等 0.2s                                                                                                                                        | 70ms                                                                                                          | 首次台词提前                               |
+| 入场淡入     | `FadeOpacity(1, 0.1)`，先 1 帧 alpha=0                                                                                                                                  | `show(200)`                                                                                                   | 入场慢一倍                                 |
+| 已在场再入场 | `CharacterMoveToCoroutine(side, 0.2)`，不淡入                                                                                                                           | 统一 show+move                                                                                                | 语义不符                                   |
+| 入场完成     | 淡入结束（约 7 帧）即完成，滑入继续                                                                                                                                     | 等 show + 完整 move                                                                                           | 每场多等 0.5~0.75s                         |
+| 退场         | 原地 `delay 0.15 + fade 0.1`；滑动 `delay=move-0.1 + fade 0.1`                                                                                                          | 原地 300ms；滑动 `max(400, move)` 同时淡出                                                                    | 退场时序不符                               |
+| 移动速度     | Slow 0.75s / Normal 0.5s / Fast 0.33s                                                                                                                                   | 700/500/300ms                                                                                                 | 固定偏差                                   |
+| 站位         | 普通 `±350/1920`，三人 `±550/1920`，三人缩放 0.9                                                                                                                        | 0.3/0.7，0.25/0.75                                                                                            | 三人模式偏内                               |
+| 身体动作混合 | 0.5s 交叉淡化；同类别/链接动作 0.125s                                                                                                                                   | 依赖默认 0.5s，但每次先 `stopAllMotions()`，旧姿势被丢弃                                                      | 动作切换跳变、节奏感不稳                   |
+| 表情混合     | clip `FadeInTime`（缺省 0.25s）；Force 时 0                                                                                                                             | 按 clip `FadeInTime`，缺省 0.25s；Force 0                                                                     | 已对齐                                     |
+| 眨眼         | 均值 3s、±2s、速度 10 的 \|sin\| 控制器（19 步 <1、第 20 步 1.0）；动作期间 Sleep，非循环动作结束 Wake；眼参数无条件乘 EyeOpening；动作 UserData 的 eyeblink 走命令序列 | 2026-11 起按 `sse-live2d/src/blink.rs` 移植（见「2026-11 口型、眨眼、呼吸」节）                               | 已对齐                                     |
+| 呼吸         | 3s 周期、影响 0.5、ParamBreath；整数相位初值、每步 +2°、非 active 冻结                                                                                                  | 已按 `Live2DModel.LateUpdate` 移植                                                                            | 已对齐                                     |
+| 口型         | 60Hz 每帧 RMS → `a×tvs`、`a×pow(a+1,tvs×1.75)`、阈值 0.06、限幅 0.2~1、三档 smooth()；文本 LipLevels 按半字推进；<0.001 脱手                                            | 2026-11 起两条链都按 60Hz 步进、只走 smooth()，删除 p95 归一/450ms 尾/8Hz 正弦/半字插值；speaker 独占口型监听 | 已对齐（见「2026-11 口型、眨眼、呼吸」节） |
+| 导出可观测性 | `report.txt` + 逐帧参数表                                                                                                                                               | `.log`/`.log.json` + 动作追踪                                                                                 | 缺少帧级计划和近似清单                     |
 
 ## 3. 实施范围
 
@@ -121,6 +223,7 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
       Immediate 为 0。
 - [x] 角色位移统一走 DOTween `OutQuad`（`evaluateEase`，与 `sse-core/src/ease.rs` 同款）：
       入场/退场/Move 的滑入滑出不再是线性匀速。
+      （2026-11 波次已按 `sse-bake` 的 `move_view` 改回线性；本条为历史记录。）
 - [x] `show`/`hide` 从当前 AlphaFilter 值补间到目标值：退场中途重新 Appear、
       或连续 Hide 时不会闪一帧全透明/全不透明。
 - [x] `TimelineCalculator` 的 Appear/Clear/Move 时长改为上述帧值；Appear 固定 116.667ms
@@ -135,26 +238,27 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
   - 覆盖 `ParallelMotionManager._startMotion`，跳过它内部的 `queueManager.stopAllMotions()`，
     用 `queueManager.startMotion` 让旧 entry 淡出。
 - [x] 类别/链接动作判定按 SSE 正则：`[a-z]-[alnum]+-[alnum]+`，链接 `RULE_to_RULE`。
-- [x] 眨眼控制器：
-  - 状态机 Sleep/Ready/Closing/Closed/Opening；官方 `CubismAutoEyeBlinkInput` 四段线性
-    （闭眼 0.1s / 全闭 0.05s / 睁眼 0.15s，Timescale=10），间隔 3±2s；确定性种子。
-  - 全闭相位保证至少 1 帧 EyeOpening=0；30fps 导出同样走完"闭—合—睁"。
-  - 身体动作开始 `Sleep`；非循环动作结束 `Wake`；`beforeModelUpdate` 写眼参数。
+- [x] 眨眼控制器（2026-11 改为 `sse-live2d/src/blink.rs` 的 |sin| 控制器）：
+  - Ready 状态 `untilTime -= dt`，<0 后相位从 `-π/2` 起每步 `+= 10×dt`，
+    `EyeOpening = |sin|`；回到上升沿时重抽 `3 + Random.Range(-2, 2)`。
+  - 一眨 19 步 <1、第 20 步强制 1.0；60Hz 谷值 0.0707，30fps 抽取 0.0707/0.0957。
+  - 身体动作切换 `Sleep`；只有非循环 body clip 越过结尾 `Wake`；缺失动作永久 Sleep。
+  - 眼参数无条件乘 `EyeOpening`；动作 UserData 的 `eyeblink,...` 走 Command 序列。
   - 关闭 `internalModel.eyeBlink` 自带眨眼，避免双重驱动。
-- [x] 呼吸：`ParamBreath = (sin(degree×DEG2RAD)×0.5+0.5)×0.5`，
-      `degree += dt×60×2°/frame`，3s 周期；仅模型可见时推进。
-- [x] 口型（2026-11 重构，详见头部「2026-11 口型链路按 ournotes 忠实重构」节）：
-  - `buildLipSyncEnvelope`：60 fps 窗 RMS + 官方 `pow`/阈值/限幅裸输出
-    （`minValue=0`，无下限放宽、无 `smoothLipValue` 平滑调用，函数本体保留导出）。
-  - 再叠加 ournotes `AdvLipSyncPolicy` Fallback 预设逐位原值：attack 0.032 /
-    release 0.10 / hold 0.06 / hfs 0.022 / speakingThr 0.026 / silenceFloor 0.015 /
-    speechFloor 0.11 / minSpeech 0.17 / onset 0.13 / openScale 1.03 / comp 0.07 /
-    openCap 0.88 / formOpenSupp 0；轻声保底由 speechFloor/minSpeech 承担。
-  - 每句按 95 分位目标值做一次只放大不衰减的响度归一（上限 2.4×），
-    TTS 音量不同也能保持稳定的张嘴幅度；音频结束补 450ms 指数释放尾（无 120ms 线性收尾）。
-  - 口型链路不写 `ParamMouthForm`：form 由表情/动作拥有（ournotes fallback 路径语义）。
-  - 无 TTS 时用 `LIP_LEVELS` 文本口型兜底（半字推进、跟随窗口打开延迟、指数尾收口）。
-  - 保留现有 `sampleLipSync` API 和监听器清理语义。
+- [x] 呼吸：整数相位初值，每个 60Hz 步 +2°、越过 360 只减一次，
+      `ParamBreath = (sin(degree×DEG2RAD)×0.5+0.5)×0.5`，180 步周期；非 active 冻结。
+- [x] 口型（2026-11 重写，详见头部「2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写」节）：
+  - `buildLipSyncEnvelope`：60Hz 窗 RMS（结束于当前步的最后一帧样本）+ 官方
+    `a×(a+1)^(tvs×1.75)`、阈值 0.06、限幅 0.2~1，再逐步走三档 `smooth()`。
+  - 口型系数按 talk 重设为 `(tvs, tvs×1.75)`；包络按模型初值
+    （角色号 1/4/8/12/17/18 → 1.25，其余 1.0）构建。取消 p95 响度归一。
+  - 样本放完/文本收尾且平滑值 <0.001 后脱手（`releaseStep` + `releaseMouth()`）；
+    Talk 结束时也脱手。
+  - 文本口型：一个半字 = 2 个相同 target 的 60Hz 步，`slot = {index,total}`，
+    `typing_end − 一个整字`起归零；删除 TalkSnippet 的半字线性插值。
+  - 只有本次 talk 的 speaker 挂监听；同台听者不写 0。删除 8Hz 音节正弦。
+  - 口型链路不写 `ParamMouthForm`：form 由表情/动作拥有。
+  - 保留 `sampleLipSync`（按步号取值、不插值）与监听器清理语义。
 
 ### Phase E：Pass 1 故事帧计划与报告
 
@@ -172,12 +276,15 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
       无语音+2s、动作闸门、窗口 0.2s。
 - [x] `scripts/renderer/layout-transition.test.mjs`：Appear 116.667/200、Clear 250/move、
       Move 750/500/333.333、站位 350/550。
-- [x] `scripts/renderer/motion-blend.test.mjs`：交叉淡化、同类别 125ms、表情 250ms、
-      不再 stopAll。
-- [x] `scripts/renderer/natural-motion.test.mjs`：眨眼 18 帧四段曲线/全闭帧/30fps 采样、
-      呼吸 3s、口型 fallback 原值 preset、官方裸曲线 + p95 归一 + 音节动态与 450ms 释放尾。
-- [x] `scripts/renderer/lipsync-envelope.test.mjs`：句间 450ms 静音闭嘴、释放尾 450ms、
-      gain 只放大不衰减/上限 2.4、sampleLipSync 越界返 0、极轻语音 peak 钉在 minSpeech 0.17。
+- [x] `scripts/renderer/motion-blend.test.mjs`：交叉淡化、同类别 125ms、
+      clip FadeInTime、force+同类 0.125s、表情 FadeInTime/Force 0。
+- [x] `scripts/renderer/natural-motion.test.mjs`：|sin| 眨眼 19+1 步/0.0707/30fps 奇偶、
+      Sleep/Wake 与 untilTime、动作切换 Sleep/非循环结束 Wake/缺失动作永久 Sleep、
+      eyeblink 命令序列、呼吸整数相位与 180 步周期、三档 smooth() 与 14/8 步释放、
+      语音 0.6×target、静音与轻声下限、文本 slot/LipLevels。
+- [x] `scripts/renderer/lipsync-envelope.test.mjs`：RMS 窗口边界、句间静音、
+      <0.001 脱手、p95 归一已删除、按步号取值（30fps 与 60fps 同值）、
+      文本半字两步与 typing_end−一个整字。
 - [x] `scripts/renderer/story-plan.test.mjs`：逐帧计划与 timeline 对齐。
 - [x] `scripts/api/export-report.test.mjs`：report 落盘。
 - [x] 更新 `doc/ai-script.md`、`doc/export-modes.md`、`doc/story-format.md`、
@@ -328,6 +435,13 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
 - 2026-11-08：完成 SSE 源码拆解与差异清单，开始 Phase A。
 
 - 2026-11-08：Phase A~F 全部实现并通过测试。
+
+- 2026-11-23：口型两条链改为 60Hz 步进 + 官方三档 smooth()（删除 AdvLipSyncPolicy /
+  p95 归一 / 8Hz 正弦 / 半字插值），脱手改 `releaseStep` + `releaseMouth()`；
+  眨眼改 |sin| 控制器并补动作 UserData eyeblink 命令序列；呼吸整数相位与 180 步周期；
+  表情/身体混合改用 clip `FadeInTime` 与 `force && first → same_category → force → fade`
+  的分支顺序。对应测试：`natural-motion`、`lipsync-envelope`、`character-animation`、
+  `dialogue-timing`、`motion-blend`、`render-timing-wave5`、`assets/motion3`。
   - 实导出（8 句双人、1920x1080/30fps、stream、Irodori 日语 TTS）：
     planned 24535ms、actual 24586ms、avgAbsDrift 44ms、max drift 78ms、anomalies 0；
     frame plan 1474 帧 / 24567ms，成片 24.55s / 717 帧；

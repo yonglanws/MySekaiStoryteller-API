@@ -74,12 +74,15 @@ export default class UIText extends Text {
       return
     }
 
-    // 官方 PlayWords(startFirst: true)：第一次迭代就显示 1 个 UTF-16 单元，
-    // 之后每 4 帧（66.7ms）多显示一个。
+    // 官方 ShowWords(startFirst: true)：第一次迭代就显示 1 个字，之后每 4 帧
+    // （两个半字）多显示一个；第 4 帧第 2 个字已可见。
     this.text = sliceVisibleText(this.data, 1)
     await AnimationManager.linear((progress) => {
       if (gen !== this.animGen) return
-      const charsToShow = Math.max(1, Math.min(Math.ceil(progress * contentLength), contentLength))
+      const charsToShow = Math.max(
+        1,
+        Math.min(1 + Math.floor(progress * contentLength + 1e-9), contentLength)
+      )
       this.text = sliceVisibleText(this.data, charsToShow)
     }, timeMS)
     if (gen === this.animGen) {

@@ -1,6 +1,7 @@
 import { Container, Graphics, Sprite, Text, TextStyle } from 'pixi.js'
 import { inappUrl, loadInappTexture } from '../effects/InappTextures'
 import AnimationManager from '../managers/AnimationManager'
+import { framesForSeconds, framesToMs } from '../../../common/official/timing'
 import {
   SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS,
   SIMPLE_SELECTABLE_CLOSE_SECONDS,
@@ -126,14 +127,19 @@ export default class UIChoiceDialog extends Container {
     this.windowRoot.alpha = 1
     this.playUiSe('audio/MenuCommon/SE_UI_CHOICES_OPEN.wav')
 
-    await AnimationManager.linear((p) => {
+    // 官方时序：打开动画与 1.5s 作答等待并行；pressed = answered − 0.1s；
+    // 作答后关闭动画在这 0.5s 内跑完。片段 act→finish = 91+30 = 121 帧。
+    const answeredMs = framesToMs(framesForSeconds(EXPORT_CHOICE_WAIT_MS / 1000))
+    const pressedMs = framesToMs(
+      framesForSeconds(EXPORT_CHOICE_WAIT_MS / 1000) -
+        framesForSeconds(EXPORT_CHOICE_PRESS_MS / 1000)
+    )
+    void AnimationManager.linear((p) => {
       if (gen !== this.animGen) return
       this.windowRoot.scale.set(p)
     }, DIALOG_SCALE_DURATION_MS)
-    if (gen !== this.animGen) return clampedIndex
-    this.windowRoot.scale.set(1)
 
-    await AnimationManager.delay(EXPORT_CHOICE_WAIT_MS)
+    await AnimationManager.delay(pressedMs)
     if (gen !== this.animGen) return clampedIndex
 
     const pickedBtn = buttons[clampedIndex]
@@ -143,10 +149,7 @@ export default class UIChoiceDialog extends Container {
     this.playUiSe('audio/MenuCommon_Built_in/SE_DECIDE1.wav')
     this.playUiSe('audio/MenuCommon/SE_UI_CHOICES_DECIDE.wav')
 
-    await AnimationManager.delay(EXPORT_CHOICE_PRESS_MS)
-    if (gen !== this.animGen) return clampedIndex
-
-    await AnimationManager.delay(ANSWER_FINISH_DELAY_MS)
+    await AnimationManager.delay(Math.max(0, answeredMs - pressedMs))
     if (gen !== this.animGen) return clampedIndex
 
     await AnimationManager.linear((p) => {
@@ -154,6 +157,8 @@ export default class UIChoiceDialog extends Container {
       this.windowRoot.scale.set(1 - p)
       this.windowRoot.alpha = 1 - p
     }, DIALOG_SCALE_DURATION_MS)
+    await AnimationManager.delay(Math.max(0, ANSWER_FINISH_DELAY_MS - DIALOG_SCALE_DURATION_MS))
+    if (gen !== this.animGen) return clampedIndex
 
     if (gen === this.animGen) {
       this.visible = false

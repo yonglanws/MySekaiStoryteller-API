@@ -164,3 +164,22 @@ test('unknown curve kinds fail the single clip instead of producing bad data', (
     /unsupported sse-motion curve kind/
   )
 })
+
+test('OnLive2DInvokeUserData events become motion3 UserData entries', () => {
+  const converted = convertSseMotion(
+    sse([parameter('ParamAngleX', { kind: 'constant', value: 0 })], {
+      name: 'w-adult-blushed01',
+      events: [
+        { time: 0.383, function: 'OnLive2DInvokeUserData', data: 'eyeblink,0.2,0.24,0.24' },
+        { time: 0.9, function: 'Other', data: 'ignored' }
+      ]
+    })
+  )
+  assert.equal(converted.motion3.Meta.UserDataCount, 1)
+  assert.equal(converted.motion3.Meta.TotalUserDataSize, 'eyeblink,0.2,0.24,0.24'.length)
+  assert.deepEqual(converted.motion3.UserData, [{ Time: 0.383, Value: 'eyeblink,0.2,0.24,0.24' }])
+  // 没有事件的动作保持空数组。
+  const plain = convertSseMotion(sse([parameter('ParamAngleX', { kind: 'constant', value: 0 })]))
+  assert.equal(plain.motion3.Meta.UserDataCount, 0)
+  assert.deepEqual(plain.motion3.UserData, [])
+})

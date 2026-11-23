@@ -8,15 +8,16 @@ import {
   CHARACTER_FADE_MS,
   HIDE_DELAY_IN_PLACE_MS,
   MOVE_SPEED_DURATION_MS,
+  PLAYCORE_WARMUP_FRAMES,
   SILENT_PUNCTUATION_HOLD_FRAMES,
   TALK_WINDOW_OPEN_CLOSE_MS,
-  VOICE_END_LATENCY_SECONDS,
-  WORD_INTERVAL_FRAMES,
   framesForSeconds,
   framesToMs,
+  msToFrameCount,
   msToFrames,
-  resolveCharacterFadeMs
+  storyEndFrame
 } from '../official/timing'
+import { talkAutoFrameTiming } from '../official/talkAuto'
 
 /**
  * Pass 1 的轻量版本：把剧本 + 时间线烘焙成逐帧计划。
@@ -136,7 +137,7 @@ function deriveWindowOpen(snippets: SnippetData[]): Map<number, number> {
 function moveFramesFor(data: LayoutLike): number {
   const ms =
     MOVE_SPEED_DURATION_MS[(data.moveSpeed as keyof typeof MOVE_SPEED_DURATION_MS) ?? 'Normal']
-  return framesForSeconds((ms ?? MOVE_SPEED_DURATION_MS.Normal) / 1000)
+  return msToFrameCount(ms ?? MOVE_SPEED_DURATION_MS.Normal)
 }
 
 function layoutMoved(data: LayoutLike): boolean {
@@ -156,14 +157,15 @@ export function bakeStoryPlan(
   options: StoryPlanOptions = {}
 ): StoryPlan {
   const isExport = options.exportFps !== undefined
-  const fadeMs = isExport ? resolveCharacterFadeMs(true, options.exportFps) : CHARACTER_FADE_MS
-  const fadeFrames = framesForSeconds(fadeMs / 1000)
-  const appearFadeFrames = isExport ? 1 + fadeFrames : APPEAR_FADE_TOTAL_FRAMES
+  // 角色淡入固定 100ms（6 帧），与成片帧率无关。
+  const fadeFrames = msToFrameCount(CHARACTER_FADE_MS)
+  const appearFadeFrames = 1 + fadeFrames
   const windowOpen = options.windowOpenMs ?? deriveWindowOpen(snippets)
   const timelineByIndex = new Map(timeline.map((entry) => [entry.snippetIndex, entry]))
   const entries: StoryPlanEntry[] = []
   const visibleModels = new Set<number>()
-  let cursorFrame = 0
+  // `PlayCore` 前 10 帧不放任何 snippet。
+  let cursorFrame = PLAYCORE_WARMUP_FRAMES
   let runningEndFrame = 0
   let activeLayoutEndFrame = 0
   let lastEndFrame = 0
@@ -182,7 +184,7 @@ export function bakeStoryPlan(
     const delayStartFrame = cursorFrame
     const delayFrames = framesForSeconds(snippet.delay)
     const startFrame = delayStartFrame + delayFrames
-    const durationFrames = framesForSeconds((timing?.durationMs ?? 0) / 1000)
+    const durationFrames = msToFrameCount(timing?.durationMs ?? 0)
     const endFrame = startFrame + durationFrames
     const actions: StoryPlanActionCue[] = []
 
@@ -223,43 +225,31 @@ export function bakeStoryPlan(
     if (snippet.type === 'Talk') {
       const talkData = data as TalkLike
       const content = typeof talkData.content === 'string' ? talkData.content : ''
-      const windowFrames = msToFrames(windowOpen.get(i) ?? 0)
-      const typingStartFrame = startFrame + windowFrames
-      const typingEndFrame = typingStartFrame + visibleTextLength(content) * WORD_INTERVAL_FRAMES
       const ttsMs = timing?.ttsDurationMs && timing.ttsDurationMs > 0 ? timing.ttsDurationMs : 0
-      const voiceEndFrame =
-        ttsMs > 0 ? startFrame + framesForSeconds(ttsMs / 1000 + VOICE_END_LATENCY_SECONDS) : null
-      const settleFrames = framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000)
-      const layoutGateFrame = activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0
-      const doneFrame =
-        voiceEndFrame !== null
-          ? Math.max(typingEndFrame, voiceEndFrame, layoutGateFrame, startFrame + settleFrames)
-          : typingEndFrame
-      const voiceFinishedBeforeTyping = voiceEndFrame !== null && voiceEndFrame < typingEndFrame
       const ttsText = typeof talkData.ttsText === 'string' ? talkData.ttsText : ''
       const isSilentPunctuationBeat =
         isExport &&
         options.ttsEnabled !== false &&
-        voiceEndFrame === null &&
+        ttsMs <= 0 &&
         !talkData.voice &&
         !hasSpeakableSpeechText(content) &&
         !hasSpeakableSpeechText(ttsText)
-      const tailFrames =
-        voiceEndFrame !== null
-          ? voiceFinishedBeforeTyping
-            ? framesForSeconds(2)
-            : framesForSeconds(0.5)
-          : isSilentPunctuationBeat
-            ? SILENT_PUNCTUATION_HOLD_FRAMES
-            : framesForSeconds(2)
-      const computedEndFrame = doneFrame + tailFrames
+      const timingFrames = talkAutoFrameTiming({
+        startFrame,
+        windowFrames: msToFrames(windowOpen.get(i) ?? 0),
+        length: visibleTextLength(content),
+        voiceSeconds: ttsMs / 1000,
+        layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
+        settleFrames: framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000),
+        silentHoldFrames: isSilentPunctuationBeat ? SILENT_PUNCTUATION_HOLD_FRAMES : undefined
+      })
       talk = {
-        windowOpenFrames: windowFrames,
-        typingStartFrame,
-        typingEndFrame,
-        voiceEndFrame,
-        gateEndFrame: doneFrame,
-        computedEndFrame
+        windowOpenFrames: timingFrames.windowOpenFrames,
+        typingStartFrame: timingFrames.typingStartFrame,
+        typingEndFrame: timingFrames.typingEndFrame,
+        voiceEndFrame: timingFrames.voiceEndFrame,
+        gateEndFrame: timingFrames.gateEndFrame,
+        computedEndFrame: timingFrames.endFrame
       }
     }
 
@@ -275,18 +265,39 @@ export function bakeStoryPlan(
       const modelId = Number(layoutData.modelId) || -1
       if (snippet.type === 'LayoutAppear') {
         const shown = visibleModels.has(modelId)
-        const moveEndFrame = startFrame + (shown ? APPEAR_SHOWN_MOVE_FRAMES : moveFrames)
-        layout = {
-          kind: 'appear',
-          fadeStartFrame: shown ? null : startFrame + 1,
-          fadeEndFrame: shown ? null : startFrame + appearFadeFrames,
-          // 已在场 Appear 是 CharacterMoveTo(side, 0.2)，与 moveSpeed 无关。
-          moveEndFrame
+        const hasMotion =
+          typeof (layoutData as { motion?: string }).motion === 'string' &&
+          (layoutData as { motion?: string }).motion!.trim() !== ''
+        // 官方 `at = frame + (hidden && motion)`：类型分支（淡入/滑入）延后一帧；
+        // 新角色从 from 滑向 to，片段只等淡入，滑入继续在后台。
+        const layoutAt = startFrame + (!shown && hasMotion ? 1 : 0)
+        const fadeEnd = layoutAt + appearFadeFrames
+        if (shown) {
+          layout = {
+            kind: 'appear',
+            fadeStartFrame: null,
+            fadeEndFrame: null,
+            // 已在场 Appear 是 CharacterMoveTo(side, 0.2)，与 moveSpeed 无关。
+            moveEndFrame: startFrame + APPEAR_SHOWN_MOVE_FRAMES
+          }
+          activeLayoutEndFrame = Math.max(
+            activeLayoutEndFrame,
+            startFrame + APPEAR_SHOWN_MOVE_FRAMES
+          )
+        } else {
+          // AppearCharacter(from) 之后紧接 CharacterMoveTo(to, moveSpeed)：
+          // 滑入从类型分支帧起跑，片段只等 7/8 帧的淡入。
+          layout = {
+            kind: 'appear',
+            fadeStartFrame: layoutAt + 1,
+            fadeEndFrame: fadeEnd,
+            moveEndFrame: layoutAt + moveFrames
+          }
+          activeLayoutEndFrame = Math.max(
+            activeLayoutEndFrame,
+            Math.max(fadeEnd, moved ? layoutAt + moveFrames : 0)
+          )
         }
-        const activeSlideEnd = shown
-          ? moveEndFrame
-          : Math.max(startFrame + appearFadeFrames, moved ? moveEndFrame : 0)
-        activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
         const shown = visibleModels.has(modelId)
@@ -306,7 +317,7 @@ export function bakeStoryPlan(
           }
           activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)
         } else {
-          const hideDelayFrames = framesForSeconds(HIDE_DELAY_IN_PLACE_MS / 1000)
+          const hideDelayFrames = msToFrameCount(HIDE_DELAY_IN_PLACE_MS)
           layout = {
             kind: 'clear',
             fadeStartFrame: startFrame + hideDelayFrames,
@@ -344,11 +355,13 @@ export function bakeStoryPlan(
     lastEndFrame = Math.max(lastEndFrame, endFrame)
   }
 
+  // 成片尾：cleanup 之后 + playedWaitTime + 1 + BGM 淡出 = cleanup + 31。
+  const totalFrames = storyEndFrame(lastEndFrame)
   return {
     schemaVersion: 1,
     fps: 60,
-    totalFrames: lastEndFrame,
-    totalMs: framesToMs(lastEndFrame),
+    totalFrames,
+    totalMs: framesToMs(totalFrames),
     entries
   }
 }

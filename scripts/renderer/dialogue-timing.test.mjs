@@ -144,9 +144,16 @@ function fixture(t) {
       destroyed: false,
       visible: true,
       writes,
+      mouthCalls: [],
+      released: false,
       pendingMouthOpen: null,
       mouthUpdateHooked: false,
+      releaseMouth() {
+        this.pendingMouthOpen = null
+        this.released = true
+      },
       setMouthOpening(value) {
+        this.mouthCalls.push({ value, at: clock.now })
         const core = this.internalModel.coreModel
         if (typeof core.update !== 'function') {
           write('ParamMouthOpenY', value)
@@ -224,34 +231,20 @@ function fixture(t) {
 }
 
 const timingCases = [
-  ['20 characters without TTS', twentyChars, 0, '', 3333.333, 3533.333],
+  ['20 characters without TTS', twentyChars, 0, '', 3350, 3550],
   ['equivalent real speech', twentyChars, 2860, '', 3416.667, 3416.667],
-  ['longer real speech', twentyChars, 4000, '', 4550, 4550],
-  ['short text minimum', 'あ', 0, '', 2066.667, 2266.667],
-  ['empty text minimum', '', 0, '', 2000, 2200],
-  ['long text is not capped', 'あ'.repeat(300), 0, '', 22000, 22200],
-  ['audio over 30 seconds is not capped', 'あ', 60000, '', 60550, 60550],
-  [
-    'ttsText without a voice file stays silent pacing',
-    twentyChars,
-    0,
-    'い'.repeat(30),
-    3333.333,
-    3533.333
-  ],
-  ['short ttsText still waits for visible text', twentyChars, 0, 'い', 3333.333, 3533.333],
-  [
-    'real speech replaces long ttsText estimate',
-    twentyChars,
-    1000,
-    'い'.repeat(100),
-    3333.333,
-    3533.333
-  ],
-  ['UTF-16 length matches UIText', '😀'.repeat(10), 0, '', 3333.333, 3533.333],
-  ['NaN falls back to estimation', twentyChars, NaN, '', 3333.333, 3533.333],
-  ['Infinity falls back to estimation', twentyChars, Infinity, '', 3333.333, 3533.333],
-  ['negative duration falls back to estimation', twentyChars, -100, '', 3333.333, 3533.333]
+  ['longer real speech', twentyChars, 4000, '', 4566.667, 4566.667],
+  ['short text minimum', 'あ', 0, '', 2083.333, 2283.333],
+  ['empty text minimum', '', 0, '', 2016.667, 2216.667],
+  ['long text is not capped', 'あ'.repeat(300), 0, '', 22016.667, 22216.667],
+  ['audio over 30 seconds is capped by auto_voice_timeout', 'あ', 60000, '', 30566.667, 30766.667],
+  ['ttsText without a voice file stays silent pacing', twentyChars, 0, 'い'.repeat(30), 3350, 3550],
+  ['short ttsText still waits for visible text', twentyChars, 0, 'い', 3350, 3550],
+  ['real speech replaces long ttsText estimate', twentyChars, 1000, 'い'.repeat(100), 3350, 3550],
+  ['UTF-16 length matches UIText', '😀'.repeat(10), 0, '', 3350, 3550],
+  ['NaN falls back to estimation', twentyChars, NaN, '', 3350, 3550],
+  ['Infinity falls back to estimation', twentyChars, Infinity, '', 3350, 3550],
+  ['negative duration falls back to estimation', twentyChars, -100, '', 3350, 3550]
 ]
 
 for (const [name, content, ttsDurationMs, ttsText, expected, withWindow] of timingCases) {
@@ -288,20 +281,21 @@ test('UIText keeps UTF-16 typewriter progress and shares the display constant', 
   assert.equal(f.uiText.text, f.uiText.data)
 })
 
-test('UIText counts visible characters, so layout newlines do not slow typing', async (t) => {
+test('UIText counts the official UTF-16 body length, including its newlines', async (t) => {
   const f = fixture(t)
-  assert.equal(f.timing.visibleTextLength('あ\nい'), 2)
-  assert.equal(f.timing.sliceVisibleText('あ\nい', 1), 'あ\n')
-  assert.equal(f.timing.sliceVisibleText('あ\nい', 2), 'あ\nい')
-  assert.equal(f.timing.talkTypingDurationMs('あ\nい'), f.timing.talkTypingDurationMs('あい'))
-  assert.equal(
-    f.timing.calculateTalkDurationMs('あ\nい', 0),
-    f.timing.calculateTalkDurationMs('あい', 0)
-  )
+  // 官方正文的换行计入 UTF-16 长度；排版折行的零宽空格标记不计。
+  assert.equal(f.timing.visibleTextLength('あ\nい'), 3)
+  assert.equal(f.timing.sliceVisibleText('あ\nい', 1), 'あ')
+  assert.equal(f.timing.sliceVisibleText('あ\nい', 2), 'あ\n')
+  assert.equal(f.timing.sliceVisibleText('あ\nい', 3), 'あ\nい')
+  assert.equal(f.timing.talkTypingDurationMs('あ\nい'), 200)
+  assert.equal(f.timing.talkTypingDurationMs('あい'), 133.333)
+  assert.equal(f.timing.calculateTalkDurationMs('あ\nい', 0), 2216.667)
+  assert.equal(f.timing.calculateTalkDurationMs('あい', 0), 2150)
 
   f.uiText.data = `${'あ'.repeat(26)}\n${'い'.repeat(4)}`
   const run = f.uiText.startDisplayContent()
-  await f.clock.tickAsync(30 * 66.667 + 20)
+  await f.clock.tickAsync(31 * 66.667 + 20)
   await run
   assert.equal(f.uiText.text, f.uiText.data)
 })
@@ -364,14 +358,13 @@ for (const id of [1, 2]) {
     await f.clock.tickAsync(40)
     assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 1)
     model.internalModel.emit('beforeModelUpdate')
-    const sampled = f.load('utils/LipSyncEnvelope.ts').sampleLipSync(envelope, 40)
+    const sampled = f
+      .load('utils/LipSyncEnvelope.ts')
+      .sampleLipSync(envelope, f.clock.now - f.app.currentTalkStartedAtMs)
     const written = model.writes.at(-1).value
-    // 说话人侧叠了约 8Hz、±35% 的音节起伏，所以不是包络原值，但必须贴着它。
-    assert.ok(
-      Math.abs(written - sampled) / Math.max(sampled, 1e-6) < 0.4,
-      `speaker opening stays near the envelope: written ${written} sampled ${sampled}`
-    )
-    assert.ok(model.writes.at(-1).value > 0)
+    // 没有音节正弦、没有插值：写入值就是包络在该 60Hz 步上的值。
+    assert.equal(written, sampled, 'speaker opening is the envelope value at this step')
+    assert.ok(written > 0)
     model.visible = false
     const beforeHidden = model.writes.length
     model.internalModel.emit('beforeModelUpdate')
@@ -382,12 +375,13 @@ for (const id of [1, 2]) {
     const afterVoice = model.writes.at(-1).value
     assert.ok(afterVoice > 0, 'the mouth releases instead of snapping shut at the audio end')
     assert.ok(afterVoice < 0.6, `release must decay: ${afterVoice}`)
-    // 450ms 指数释放尾（durationMs=100ms 音频 + 450ms）：先推进 420ms，累计 560ms
-    // 越过 durationMs=550ms 后 sampleLipSync 越界才严格返回 0；@440ms 处仍有
-    // ~0.021 残值（0.76×exp(-4.5)≈0.9%），不能提前断言归零。
+    // 样本放完后 smooth 继续衰减；到 <0.001 的那一步官方换成 Lip::None（脱手），
+    // 之后不再写 ParamMouthOpenY，参数回到动作/表情/默认值。
     await f.clock.tickAsync(420)
+    const beforeRelease = model.writes.length
     model.internalModel.emit('beforeModelUpdate')
-    assert.equal(model.writes.at(-1).value, 0, 'the release tail closes the mouth')
+    assert.equal(model.writes.length, beforeRelease, 'the release detaches without writing')
+    assert.equal(model.released, true, 'releaseMouth is called once past the release step')
     await f.clock.tickAsync(3020)
     assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 0)
     await run
@@ -470,17 +464,84 @@ test('a listener stays shut while the speaker keeps a moving mouth through param
     const speakerMouth = [...speaker.writes]
       .reverse()
       .find((entry) => entry.param === 'ParamMouthOpenY')
-    const listenerMouth = [...listener.writes]
-      .reverse()
-      .find((entry) => entry.param === 'ParamMouthOpenY')
-    speakerOpens.push(speakerMouth.value)
-    assert.equal(listenerMouth.value, 0, `listener stays shut at ${ms}ms`)
-    const openedAt = listener.writes.findLastIndex((entry) => entry.param === 'motion-opened')
-    const closedAt = listener.writes.findLastIndex((entry) => entry.param === 'ParamMouthOpenY')
-    assert.ok(closedAt > openedAt, 'listener close is rewritten before the mesh update')
+    speakerOpens.push({ at: f.clock.now, open: speakerMouth.value })
+    // 听者只挂自己的动作参数：口型监听只属于本次 talk 的 speaker，不写 0。
+    assert.equal(
+      listener.writes.some((entry) => entry.param === 'ParamMouthOpenY'),
+      false,
+      `listener must not be written by the speaker's lip sync at ${ms}ms`
+    )
+    assert.equal(listener.mouthCalls.length, 0, 'listener setMouthOpening is never called')
   }
-  const span = Math.max(...speakerOpens) - Math.min(...speakerOpens)
-  assert.ok(span > 0.08, `speaker mouth must keep moving on a held vowel: ${speakerOpens}`)
+  // 说话人的嘴跟随包络（不再叠 8Hz 正弦），每帧写入包络在该 60Hz 步上的值。
+  for (const { at, open } of speakerOpens) {
+    const expected = f
+      .load('utils/LipSyncEnvelope.ts')
+      .sampleLipSync(f.app.currentTalkLipSync, at - f.app.currentTalkStartedAtMs)
+    assert.equal(open, expected, `speaker mouth at ${at}ms`)
+    assert.ok(open > 0)
+  }
+  await f.clock.runAllAsync()
+  await run
+})
+
+test('a constant envelope holds the mouth flat across 30 story steps', async (t) => {
+  const f = fixture(t)
+  const model = f.models.get(1)
+  const stepMs = 1000 / 60
+  const values = new Float32Array(200).fill(0.75)
+  f.app.currentTalkLipSync = {
+    values,
+    frameMs: stepMs,
+    durationMs: values.length * stepMs,
+    audioDurationMs: values.length * stepMs,
+    releaseStep: values.length - 1,
+    targetValueScale: 1,
+    powK: 1.75
+  }
+  const run = f.run(talk())
+  const opens = []
+  for (let i = 0; i < 31; i++) {
+    await f.clock.tickAsync(stepMs)
+    model.internalModel.emit('beforeModelUpdate')
+    opens.push(model.writes.at(-1).value)
+  }
+  for (let i = 1; i < opens.length; i++) {
+    assert.ok(
+      Math.abs(opens[i] - opens[i - 1]) <= 1e-6,
+      `story step ${i}: ${opens[i - 1]} -> ${opens[i]}`
+    )
+  }
+  for (const open of opens) assert.equal(open, 0.75)
+  await f.clock.runAllAsync()
+  await run
+})
+
+test('a listener keeps its own facial mouth value', async (t) => {
+  const f = fixture(t)
+  const speaker = f.models.get(1)
+  const listener = f.models.get(2)
+  const listenerValues = new Map()
+  listener.internalModel.coreModel.update = () => {}
+  listener.internalModel.coreModel.setParameterValueById = (id, value) =>
+    listenerValues.set(id, value)
+  f.app.layerModel.getVisibleModels = () => [speaker, listener]
+  const samples = new Float32Array(4800)
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = Math.sin((i / 48000) * 2 * Math.PI * 180) * 0.4
+  }
+  f.app.currentTalkLipSync = f
+    .load('utils/LipSyncEnvelope.ts')
+    .buildLipSyncEnvelope([samples], 48000)
+  const run = f.run(talk('今天也一起练习吧。', { modelId: 1 }))
+  await f.clock.tickAsync(200)
+  speaker.internalModel.emit('beforeModelUpdate')
+  listener.internalModel.emit('beforeModelUpdate')
+  // 表情把听者的嘴写成 0.8；口型不挂听者，这一帧最终值仍是 0.8。
+  listener.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', 0.8)
+  listener.internalModel.coreModel.update()
+  assert.equal(listenerValues.get('ParamMouthOpenY'), 0.8)
+  assert.equal(listener.mouthCalls.length, 0, 'the listener is never driven by the talk lip')
   await f.clock.runAllAsync()
   await run
 })
@@ -512,11 +573,11 @@ test('voiced to silent dialogue moves text lip sync to the current speaker only'
 })
 
 for (const delay of [0, 1, 10]) {
-  test(`BaseSnippet applies ${delay}s delay once, outside the 3533ms dialogue deadline`, async (t) => {
+  test(`BaseSnippet applies ${delay}s delay once, outside the 3550ms dialogue deadline`, async (t) => {
     const f = fixture(t)
     const snippet = talk(twentyChars, { delay })
     const timeline = f.load('utils/TimelineCalculator.ts').calculateTimelineWithoutTTS([snippet])
-    assert.equal(timeline.entries[0].durationMs, 3533.333)
+    assert.equal(timeline.entries[0].durationMs, 3550)
     f.app.lastSnippetActualDurationMs = timeline.entries[0].durationMs
     let finished = false
     const run = f.run(snippet).then(() => {
@@ -530,12 +591,10 @@ for (const delay of [0, 1, 10]) {
       await f.clock.tickAsync(0)
     }
     assert.deepEqual(f.starts, [delay * 1000])
-    await f.clock.tickAsync(3533)
-    assert.equal(finished, false)
-    await f.clock.tickAsync(1)
+    await f.clock.tickAsync(3550)
     assert.equal(finished, true)
     await run
-    assert.ok(Math.abs(f.clock.now - (delay * 1000 + 3533.333)) <= 1, `finish ${f.clock.now}`)
+    assert.ok(Math.abs(f.clock.now - (delay * 1000 + 3550)) <= 1, `finish ${f.clock.now}`)
   })
 }
 
@@ -562,7 +621,7 @@ for (const planned of [0, -1, NaN, Infinity]) {
     const run = f.run(talk(twentyChars, { delay: 10, ttsText: 'い' }))
     await f.clock.runAllAsync()
     await run
-    assert.equal(f.clock.now, 13334)
+    assert.equal(f.clock.now, 13350)
   })
 }
 
@@ -580,8 +639,8 @@ test('three consecutive silent lines use three independent body deadlines', asyn
   })()
   await f.clock.runAllAsync()
   await run
-  assert.deepEqual(f.starts, [0, 3534, 6868])
-  assert.deepEqual(ends, [3534, 6868, 10202])
+  assert.deepEqual(f.starts, [0, 3550, 6900])
+  assert.deepEqual(ends, [3550, 6900, 10250])
   assert.equal(f.clock.countTimers(), 0)
 })
 
@@ -930,14 +989,14 @@ for (const mode of ['record', 'fast']) {
       ]
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [3416.667, 4550, 3333.333])
+    assert.deepEqual(f.planned, [3416.667, 4566.667, 3350])
     assert.equal(f.patchCalls.length, 3, 'Both real entry paths must reuse talkPatch')
     assert.deepEqual(
       f.patchCalls.map((args) => [args[1], args[2], args[3]]),
       [
         [0, 2860, 3416.667],
-        [1, 4000, 4550],
-        [2, 0, 3333.333]
+        [1, 4000, 4566.667],
+        [2, 0, 3350]
       ]
     )
     assert.ok(
@@ -956,7 +1015,7 @@ for (const mode of ['record', 'fast']) {
       missingTimeline: true
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [3533.333])
+    assert.deepEqual(f.planned, [3550])
     assert.ok(f.models.get(1).writes.length > 0, 'text lip sync writes mouth values')
   })
 
@@ -967,7 +1026,7 @@ for (const mode of ['record', 'fast']) {
       decodeFails: true
     })
     assert.equal((await f.export(mode)).success, true)
-    assert.deepEqual(f.planned, [4550])
+    assert.deepEqual(f.planned, [4566.667])
     assert.ok(f.models.get(1).writes.length > 0, 'text lip sync writes mouth values')
     assert.equal(f.models.get(1).internalModel.listenerCount('beforeModelUpdate'), 0)
     assert.ok(f.warnings.some(([message]) => /skipping lip sync/i.test(message)))

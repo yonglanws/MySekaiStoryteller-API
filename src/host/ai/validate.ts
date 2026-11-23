@@ -130,8 +130,9 @@ export function sanitizeDisplayText(text: unknown, wrap = true): string {
     if (!segment) continue
     let current: string[] = []
     let width = 0
-    const flush = (): void => {
-      if (current.length > 0) lines.push(current.join(''))
+    // 排版折行用 `\u200B` 标记在换行前：官方正文没有这个字符，打字长度与显示都跳过它。
+    const flush = (layoutBreak: boolean): void => {
+      if (current.length > 0) lines.push(current.join('') + (layoutBreak ? '\u200B' : ''))
       current = []
       width = 0
     }
@@ -150,17 +151,17 @@ export function sanitizeDisplayText(text: unknown, wrap = true): string {
         if (breakAt > 0 && breakAt < current.length - 1) {
           const head = current.slice(0, breakAt + 1)
           const tail = current.slice(breakAt + 1)
-          lines.push(head.join(''))
+          lines.push(head.join('') + '\u200B')
           current = tail
           width = tail.reduce((sum, item) => sum + charWidthUnits(item), 0)
         } else {
-          flush()
+          flush(true)
         }
       }
       current.push(char)
       width += charWidth
     }
-    flush()
+    flush(false)
   }
   return lines.join('\n')
 }
@@ -679,7 +680,9 @@ export function validateAndFixStory(
       catalog =
         (path
           ? (view.models.find((model) => model.path === path) ??
-            view.models.find((model) => (model.cloudId ?? '').toLowerCase() === path.toLowerCase()) ??
+            view.models.find(
+              (model) => (model.cloudId ?? '').toLowerCase() === path.toLowerCase()
+            ) ??
             view.models.find((model) => path.endsWith(model.path) || model.path.endsWith(path)))
           : undefined) ??
         view.models.find(
@@ -916,8 +919,7 @@ export function validateAndFixStory(
 
     if (kind === 'PlaySe') {
       const rawFile = cleanPath(data.file)
-      const canonical =
-        view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
+      const canonical = view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
       if (!canonical) {
         droppedSnippets.add(index)
         continue
@@ -932,8 +934,7 @@ export function validateAndFixStory(
 
     if (kind === 'StopSe') {
       const rawFile = cleanPath(data.file)
-      const canonical =
-        view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
+      const canonical = view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
       if (!canonical) {
         droppedSnippets.add(index)
         continue
@@ -1083,13 +1084,15 @@ export function validateAndFixStory(
     }
 
     if (kind === 'SepiaIn' || kind === 'SepiaOut') {
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
       snippet.data = data
       continue
     }
 
     if (kind === 'SekaiIn' || kind === 'SekaiOut') {
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 500)))
       if ('variant' in data) {
         data.variant = toStr(data.variant) === 'v2' ? 'v2' : 'v1'
       }
@@ -1098,7 +1101,9 @@ export function validateAndFixStory(
     }
 
     if (kind === 'SideFade') {
-      const rawDir = toStr(data.direction ?? data.edge, 'Left').trim().toLowerCase()
+      const rawDir = toStr(data.direction ?? data.edge, 'Left')
+        .trim()
+        .toLowerCase()
       const dir =
         rawDir === 'right'
           ? 'Right'
@@ -1136,7 +1141,8 @@ export function validateAndFixStory(
         data.mode = enabled ? 'In' : 'Out'
       }
       if ('level' in data) data.level = Math.min(64, Math.max(0, toNumber(data.level, 8)))
-      if ('duration' in data) data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 300)))
+      if ('duration' in data)
+        data.duration = Math.min(10000, Math.max(0, toNumber(data.duration, 300)))
       snippet.data = data
       continue
     }
@@ -1148,15 +1154,18 @@ export function validateAndFixStory(
     }
 
     if (kind === 'PlayScenarioEffect' || kind === 'StopScenarioEffect') {
-      data.effectName = normalizeScenarioEffectName(data.effectName) || toStr(data.effectName).trim()
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
+      data.effectName =
+        normalizeScenarioEffectName(data.effectName) || toStr(data.effectName).trim()
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
 
     if (kind === 'ChangeBackgroundImage') {
       data.imageId = toNumber(data.imageId, 1)
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
@@ -1175,14 +1184,16 @@ export function validateAndFixStory(
 
     if (kind === 'PlaceInfo') {
       data.text = sanitizeDisplayText(normalizePjskTerminology(toStr(data.text)), false) || '...'
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }
 
     if (kind === 'FullScreenText') {
       data.text = normalizePjskTerminology(toStr(data.text).trim())
-      if ('duration' in data) data.duration = Math.min(120000, Math.max(0, toNumber(data.duration, 2500)))
+      if ('duration' in data)
+        data.duration = Math.min(120000, Math.max(0, toNumber(data.duration, 2500)))
       snippet.data = data
       continue
     }
@@ -1205,14 +1216,17 @@ export function validateAndFixStory(
     if (kind === 'ShakeScreen') {
       data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
       data.amplitude = Math.min(0.2, Math.max(0, toNumber(data.amplitude, 0.01)))
-      if ('intensity' in data) data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
+      if ('intensity' in data)
+        data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
       snippet.data = data
       continue
     }
 
     if (kind === 'ShakeWindow') {
-      if ('duration' in data) data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
-      if ('intensity' in data) data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
+      if ('duration' in data)
+        data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 400)))
+      if ('intensity' in data)
+        data.intensity = Math.min(100, Math.max(0, toNumber(data.intensity, 10)))
       snippet.data = data
       continue
     }
@@ -1253,7 +1267,8 @@ export function validateAndFixStory(
 
     if (kind === 'Movie') {
       data.file = cleanPath(data.file)
-      if ('duration' in data) data.duration = Math.min(600000, Math.max(0, toNumber(data.duration, 0)))
+      if ('duration' in data)
+        data.duration = Math.min(600000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
       continue
     }

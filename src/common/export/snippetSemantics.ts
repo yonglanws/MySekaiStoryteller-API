@@ -22,7 +22,8 @@ export function resolveProgressBehavior(snippet: SnippetWaitLike): ProgressBehav
 }
 
 export function snippetHasPreFence(snippet: SnippetWaitLike): boolean {
-  return resolveProgressBehavior(snippet) === 'WaitFinished' || snippet.type === 'Talk'
+  // Talk 没有额外的前置栅栏：只看 ProgressBehavior；Talk 间冲突交给显式等待。
+  return resolveProgressBehavior(snippet) === 'WaitFinished'
 }
 
 /** 兼容旧调用点名称：返回该片段是否触发前置栅栏。 */

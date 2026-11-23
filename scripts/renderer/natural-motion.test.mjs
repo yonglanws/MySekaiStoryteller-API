@@ -1,15 +1,15 @@
 /**
  * PLAN SNAPSHOT — 与 doc/sekai-exporter-parity-plan.md 同步维护。
  *
- * 官方待机自然动作：
- * - 眨眼：新模型 Sleep；动作开始 Sleep，非循环动作结束 Wake；四段线性相位
- *   闭眼 0.1s / 全闭 0.05s / 睁眼 0.15s（Timescale=10），间隔 3s±2s；
- *   第一次唤醒后立即开始，全闭相位保证至少 1 帧完全合眼。
- * - 呼吸：3s 周期、影响 0.5，每帧 2°。
- * - 口型：官方 RMS 曲线裸输出（pow(a+1,1.75)、阈值 0.06、上限 1，无下限放宽、
- *   无 smoothLipValue 低通）+ 每句 p95 响度归一（只放大不衰减、增益 ≤2.4），
- *   直入 AdvLipSyncPolicy fallback 原值（attack/release/hold、轻声保底 minSpeech
- *   0.17、onset 0.13、张幅上限 0.88），音频后 450ms 指数释放尾。
+ * 官方待机自然动作（`sse-live2d/src/blink.rs`、`runtime.rs`、
+ * `sse-bake/src/lipsync.rs`）：
+ * - 眨眼：|sin| 控制器。新模型 Sleep；身体动作切换 Sleep，只有非循环动作越过结尾
+ *   Wake；`untilTime` 初值 0、睡眠期间不递减、唤醒不重置。相位从 -π/2 起每步
+ *   += 10/60，`EyeOpening = |sin|`；一眨 19 步 <1、第 20 步 1.0，谷值 0.0707。
+ *   动作 UserData 的 `eyeblink,closing,closed,opening` 走 Command 模式。
+ * - 呼吸：整数相位初值，每 60Hz 步 +2°，越过 360 只减一次；隐藏时冻结。
+ * - 口型：语音 RMS 窗口 + 文本 LipLevels 都按 60Hz 步进，只走官方三档 smooth()
+ *   （0.6/0.4、0.2/0.8、0.25/0.75），平滑到 <0.001 脱手。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -59,176 +59,270 @@ function loadNatural() {
   return loadRendererModule('model/NaturalMotion.ts')
 }
 
+function loadTiming() {
+  return loadRendererModule(path.join(root, 'src/common/official/timing.ts'))
+}
+
+const DT = 1 / 60
+const blinkRadian = (j) => -Math.PI / 2 + j * DT * 10
+
 test('a fresh blink controller sleeps and a wake starts the first blink immediately', () => {
   const natural = loadNatural()
   const state = natural.createBlinkState(7)
-  for (let i = 0; i < 600; i++) assert.equal(natural.stepBlink(state, 1 / 60), 1)
+  for (let i = 0; i < 600; i++) assert.equal(natural.stepBlink(state, DT), 1)
   assert.equal(state.status, 'sleep')
+  assert.equal(state.doSleep, true)
   natural.wakeBlink(state)
-  natural.stepBlink(state, 1 / 60)
+  natural.stepBlink(state, DT)
   assert.equal(state.status, 'closing')
-  assert.ok(state.opening < 1)
+  // 第一帧已经推进：|sin(-π/2 + 1/6)|
+  assert.ok(Math.abs(state.opening - Math.abs(Math.sin(blinkRadian(1)))) < 1e-12)
 })
 
-test('one blink is 18 frames with a fully closed phase, then schedules 1~5s later', () => {
+test('one blink is |sin|: 19 steps below 1 and the 20th forced to 1.0', () => {
   const natural = loadNatural()
   const state = natural.createBlinkState(7)
   natural.wakeBlink(state)
   const values = []
   for (let i = 0; i < 100; i++) {
-    values.push(natural.stepBlink(state, 1 / 60))
+    values.push(natural.stepBlink(state, DT))
     if (state.status === 'ready') break
   }
-  // 0.1s 闭 + 0.05s 合 + 0.15s 睁 = 0.3s = 18 帧（允许 1 帧浮点取整误差）。
-  assert.ok(values.length >= 17 && values.length <= 19, `frames ${values.length}`)
+  assert.equal(values.length, 20)
   assert.equal(values.at(-1), 1)
-  const lowest = Math.min(...values)
-  assert.equal(lowest, 0, `lowest ${lowest}`)
+  // 第 j=1..19 步 = |sin(-π/2 + j·(1/60)·10)|
+  for (let j = 1; j <= 19; j++) {
+    assert.ok(
+      Math.abs(values[j - 1] - Math.abs(Math.sin(blinkRadian(j)))) < 1e-4,
+      `step ${j}: ${values[j - 1]}`
+    )
+  }
+  // |sin| 的步长 1/6 rad 跨过零点：第 9 步 0.0707、第 10 步 0.0957。
+  assert.ok(Math.abs(values[8] - 0.0707) < 1e-4, `step 9 ${values[8]}`)
+  assert.ok(Math.abs(values[9] - 0.0957) < 1e-4, `step 10 ${values[9]}`)
+  const lowest = Math.min(...values.slice(0, 19))
+  assert.ok(Math.abs(lowest - 0.0707) < 1e-4, `lowest ${lowest}`)
+  const lowAt = values.indexOf(lowest)
   assert.ok(
-    values.filter((value) => value === 0).length >= 1,
-    'the closed phase must hold the eyes fully shut for at least one frame'
+    values.slice(1, lowAt + 1).every((value, i) => value < values[i]),
+    'closing is monotonic'
+  )
+  assert.ok(
+    values.slice(lowAt, 19).every((value, i) => i === 0 || value > values[lowAt + i - 1]),
+    'opening is monotonic'
   )
   assert.ok(state.untilTime >= 1 && state.untilTime <= 5, `until ${state.untilTime}`)
 })
 
-test('30fps sampling still reaches a fully closed frame', () => {
+test('30fps sampling picks every other |sin| step and keeps 0.0707 / 0.0957', () => {
   const natural = loadNatural()
-  const state = natural.createBlinkState(7)
-  natural.wakeBlink(state)
-  const values = []
-  for (let i = 0; i < 100; i++) {
-    values.push(natural.stepBlink(state, 1 / 30))
-    if (state.status === 'ready') break
+  const sample = (phaseOffset) => {
+    const state = natural.createBlinkState(7)
+    natural.wakeBlink(state)
+    if (phaseOffset) natural.stepBlink(state, DT)
+    const values = []
+    for (let i = 0; i < 100; i++) {
+      values.push(natural.stepBlink(state, 1 / 30))
+      if (state.status === 'ready') break
+    }
+    return values
   }
-  assert.ok(values.length >= 8 && values.length <= 10, `frames ${values.length}`)
-  assert.equal(Math.min(...values), 0)
-  assert.equal(values.at(-1), 1)
+  // 30fps 抽到的步号奇偶由唤醒帧决定，两种序列都允许；按抽样步号复算期望值。
+  const even = sample(false)
+  assert.equal(even.length, 10)
+  for (let i = 0; i < even.length - 1; i++) {
+    const j = (i + 1) * 2
+    assert.ok(Math.abs(even[i] - Math.abs(Math.sin(blinkRadian(j)))) < 1e-4, `even j=${j}`)
+  }
+  assert.ok(Math.abs(Math.min(...even.slice(0, -1)) - 0.0957) < 1e-4)
+  const odd = sample(true)
+  for (let i = 0; i < odd.length - 1; i++) {
+    const j = i * 2 + 3
+    assert.ok(Math.abs(odd[i] - Math.abs(Math.sin(blinkRadian(j)))) < 1e-4, `odd j=${j}`)
+  }
+  assert.ok(Math.abs(Math.min(...odd.slice(0, -1)) - 0.0707) < 1e-4)
 })
 
-test('sleep during a blink finishes the blink and parks the controller', () => {
+test('sleep during a blink parks at the end and wake does not clear doSleep', () => {
   const natural = loadNatural()
   const state = natural.createBlinkState(7)
   natural.wakeBlink(state)
-  natural.stepBlink(state, 1 / 60)
-  natural.stepBlink(state, 1 / 60)
+  natural.stepBlink(state, DT)
+  const during = state.opening
   natural.sleepBlink(state)
-  for (let i = 0; i < 100 && state.status !== 'sleep'; i++) natural.stepBlink(state, 1 / 60)
+  natural.wakeBlink(state)
+  assert.equal(state.opening, during)
+  assert.equal(state.doSleep, true, 'WakeUp only clears doSleep from Sleep')
+  for (let i = 0; i < 40; i++) natural.stepBlink(state, DT)
   assert.equal(state.status, 'sleep')
   assert.equal(state.opening, 1)
 })
 
-test('breath has a 3s cycle and 0.5 influence', () => {
+test('untilTime does not count down while asleep and is not reset by a wake', () => {
   const natural = loadNatural()
-  const timing = (() => {
-    const context = vm.createContext({ console })
-    const modules = new Map()
-    const compiled = new Map()
-    function load(target) {
-      const filename = path.isAbsolute(target) ? target : path.join(renderer, target)
-      if (modules.has(filename)) return modules.get(filename)
-      if (!compiled.has(filename)) {
-        compiled.set(
-          filename,
-          new vm.Script(
-            `(function (exports, require) {\n${
-              ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-                compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-                fileName: filename
-              }).outputText
-            }\n})`,
-            { filename }
-          )
-        )
-      }
-      const exports = {}
-      modules.set(filename, exports)
-      const require = (name) => {
-        assert.ok(name.startsWith('.'), `Unexpected platform dependency: ${name}`)
-        return load(path.resolve(path.dirname(filename), `${name}.ts`))
-      }
-      compiled.get(filename).runInContext(context)(exports, require)
-      return exports
-    }
-    return load(path.join(root, 'src/common/official/timing.ts'))
-  })()
-  let degree = 0
-  for (let i = 0; i < 180; i++) degree = natural.advanceBreathDegree(degree, 1 / 60)
-  assert.ok(Math.abs(degree - 360) < 1e-6, `degree ${degree}`)
-  assert.ok(Math.abs(timing.BREATH_INFLUENCE - 0.5) < 1e-9)
-  assert.ok(Math.abs(natural.breathParameterValue(90) - 0.5) < 1e-5)
-  assert.ok(Math.abs(natural.breathParameterValue(270) - 0) < 1e-5)
+  const state = natural.createBlinkState(7)
+  natural.wakeBlink(state)
+  natural.stepBlink(state, DT)
+  while (state.status !== 'ready') natural.stepBlink(state, DT)
+  const left = state.untilTime
+  assert.ok(left >= 1 && left <= 5, `drawn interval ${left}`)
+  natural.sleepBlink(state)
+  for (let i = 0; i < 600; i++) natural.stepBlink(state, DT)
+  assert.equal(state.untilTime, left)
+  assert.equal(state.opening, 1)
+  natural.wakeBlink(state)
+  let frames = 0
+  while (state.status === 'ready') {
+    natural.stepBlink(state, DT)
+    frames++
+  }
+  let t = left
+  let expected = 0
+  while (t >= 0) {
+    t -= DT
+    expected++
+  }
+  assert.equal(frames, expected)
 })
 
-test('official lip curve thresholds, clamps and smoothing', () => {
-  const timing = (() => {
-    const context = vm.createContext({ console })
-    const modules = new Map()
-    const compiled = new Map()
-    function load(target) {
-      const filename = path.isAbsolute(target) ? target : path.join(renderer, target)
-      if (modules.has(filename)) return modules.get(filename)
-      if (!compiled.has(filename)) {
-        compiled.set(
-          filename,
-          new vm.Script(
-            `(function (exports, require) {\n${
-              ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-                compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-                fileName: filename
-              }).outputText
-            }\n})`,
-            { filename }
-          )
-        )
-      }
-      const exports = {}
-      modules.set(filename, exports)
-      const require = (name) => {
-        assert.ok(name.startsWith('.'), `Unexpected platform dependency: ${name}`)
-        return load(path.resolve(path.dirname(filename), `${name}.ts`))
-      }
-      compiled.get(filename).runInContext(context)(exports, require)
-      return exports
-    }
-    return load(path.join(root, 'src/common/official/timing.ts'))
-  })()
-  assert.ok(timing.LIP_LEVELS.length > 30)
-  assert.equal(timing.lipTargetFromRms(0), 0)
-  assert.ok(Math.abs(timing.lipTargetFromRms(0.2) - 0.275) < 0.01)
-  assert.equal(timing.lipTargetFromRms(10), 1)
-  assert.equal(timing.smoothLipValue(1, 0), 0.6)
-  assert.equal(timing.smoothLipValue(0.5, 0.5), 0.5)
-  // ournotes 官方 fallback 原值（lipsync.js:28-30）逐位锁定。
-  // 模块经 vm 加载，对象原型跨 realm，deepStrictEqual 会因原型不同误报；逐字段比较。
-  const expectedPreset = {
-    attack: 0.032,
-    release: 0.1,
-    hold: 0.06,
-    hfs: 0.022,
-    speakingThr: 0.026,
-    silenceFloor: 0.015,
-    speechFloor: 0.11,
-    minSpeech: 0.17,
-    onset: 0.13,
-    openScale: 1.03,
-    comp: 0.07,
-    openCap: 0.88,
-    formOpenSupp: 0,
-    formScale: 1,
-    baseToDefault: 0
+test('body motion changes sleep the blink and only a non-looping finish wakes it', () => {
+  const natural = loadNatural()
+  const state = natural.createBlinkState(1)
+  natural.wakeBlink(state)
+  // 1.0s 非循环身体动作：前 60 步不眨，第 61 步开始。
+  natural.bodyMotionChangedBlink(state)
+  for (let i = 0; i < 60; i++) assert.equal(natural.stepBlink(state, DT), 1)
+  natural.bodyMotionFinishedBlink(state, false)
+  assert.ok(natural.stepBlink(state, DT) < 1, 'the blink starts on the frame after the end')
+  // 循环 clip 的每圈结束不唤醒。
+  const looping = natural.createBlinkState(1)
+  natural.wakeBlink(looping)
+  natural.bodyMotionChangedBlink(looping)
+  natural.bodyMotionFinishedBlink(looping, true)
+  for (let i = 0; i < 600; i++) assert.equal(natural.stepBlink(looping, DT), 1)
+  // 模型没有这个动作：先按当前 clip 决定唤醒，随后永久 Sleep。
+  const missing = natural.createBlinkState(1)
+  natural.wakeBlink(missing)
+  natural.missingBodyMotionBlink(missing, false)
+  for (let i = 0; i < 1200; i++) assert.equal(natural.stepBlink(missing, DT), 1)
+  assert.equal(missing.status, 'sleep')
+})
+
+test('a motion eyeblink command closes linearly, holds and reopens', () => {
+  const natural = loadNatural()
+  const state = natural.createBlinkState(7)
+  natural.wakeBlink(state)
+  natural.stepBlink(state, DT)
+  while (state.status !== 'ready') natural.stepBlink(state, DT)
+  natural.invokeBlinkUserData(state, 'eyeblink,0.2,0.24,0.24')
+  // 事件帧 N 写出旧 eyeValue（一次自动眨眼结束后是 1.0）。
+  assert.equal(natural.stepBlink(state, DT), 1)
+  const values = []
+  for (let i = 0; i < 80; i++) {
+    values.push(natural.stepBlink(state, DT))
+    if (state.mode === 'auto') break
   }
-  for (const [key, value] of Object.entries(expectedPreset)) {
-    assert.equal(timing.MOUTH_SYNC_FALLBACK_PRESET[key], value, `preset.${key}`)
+  // 0.2s = 12 步闭眼（第 12 步落到 0）。
+  for (let i = 0; i < 11; i++) {
+    assert.ok(Math.abs(values[i] - (1 - (i + 1) * DT * 5)) < 1e-6, `closing ${i}: ${values[i]}`)
   }
-  assert.deepEqual(
-    Object.keys(timing.MOUTH_SYNC_FALLBACK_PRESET).sort(),
-    Object.keys(expectedPreset).sort(),
-    'preset 字段集合与官方 fallback 表一致'
+  assert.equal(values[11], 0)
+  // 0.24s = 14 步保持 0。
+  const zeros = values.slice(12, 26)
+  assert.ok(
+    zeros.every((value) => value === 0),
+    `held ${zeros}`
   )
-  assert.equal(timing.LIP_RMS_MIN_VALUE, undefined, 'RMS 下限放宽已删除（minValue 传 0）')
+  // 14 步线性睁眼，最后一步 1.0。
+  assert.ok(Math.abs(values[26] - 1 / 24) < 1e-6, `opening start ${values[26]}`)
+  for (let i = 27; i < 40; i++) assert.ok(values[i] > values[i - 1], `opening ${i}`)
+  assert.equal(values[40], 1)
+  assert.equal(state.mode, 'auto')
+  assert.equal(state.playStatus, 'finish')
 })
 
-test('voice envelope applies the calm mouth policy, caps the opening and releases after audio', () => {
+test('a second eyeblink command is ignored while one plays; short data is ignored', () => {
+  const natural = loadNatural()
+  const state = natural.createBlinkState(7)
+  natural.wakeBlink(state)
+  natural.invokeBlinkUserData(state, 'eyeblink,0.2,0.79,0.24')
+  natural.stepBlink(state, DT)
+  natural.invokeBlinkUserData(state, 'eyeblink,0.01,0.01,0.01')
+  assert.equal(state.command.closing, 0.2, 'still the first command')
+  natural.invokeBlinkUserData(state, 'eyeblink,0.2,0.24')
+  assert.equal(state.command.closing, 0.2)
+})
+
+test('breath starts at an integer phase, advances 2 degrees per step and freezes when hidden', () => {
+  const natural = loadNatural()
+  const timing = loadTiming()
+  for (const seed of [0, 1, 5, 42, 999]) {
+    const start = natural.createBreathDegree(seed)
+    assert.equal(start, Math.trunc(start))
+    assert.ok(start >= 0 && start < 360, `start ${start}`)
+    const first = natural.advanceBreathDegree(start, DT)
+    const expected = (Math.sin((start + 2) * timing.DEG2RAD) * 0.5 + 0.5) * 0.5
+    assert.ok(Math.abs(natural.breathParameterValue(first) - expected) < 1e-9)
+    // 180 步一个周期：v[k] 与 v[k+180] 逐位相等。
+    let degree = start
+    const values = []
+    for (let i = 0; i < 360; i++) {
+      degree = natural.advanceBreathDegree(degree, DT)
+      values.push(natural.breathParameterValue(degree))
+      assert.ok(degree >= 0 && degree < 360)
+    }
+    for (let k = 0; k < 180; k++) {
+      assert.equal(Object.is(values[k], values[k + 180]), true, `seed ${seed} k ${k}`)
+    }
+  }
+})
+
+test('official lip curve, coefficient reset, smooth() chain and release lengths', () => {
+  const timing = loadTiming()
+  assert.ok(timing.LIP_LEVELS.length === 38)
+  assert.equal(timing.lipTargetFromRms(0), 0)
+  // `a × (a+1)^1.75`，阈值 0.06、限幅 0.2~1。
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.2) - 0.2752) < 1e-4)
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.3) - 0.4748) < 1e-4)
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.05) - 0) < 1e-9, 'below 0.06 stays closed')
+  // 一次 talk 把系数重设为 (tvs, tvs × 1.75)。
+  const coefficients = timing.lipCoefficients(1.25)
+  assert.equal(coefficients.targetValueScale, 1.25)
+  assert.equal(coefficients.powK, 2.1875)
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.2, 1.25, 2.1875) - 0.4073) < 1e-4)
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.3, 1.25, 2.1875) - 0.7526) < 1e-4)
+  assert.ok(Math.abs(timing.lipTargetFromRms(0.05, 1.25, 2.1875) - 0.2) < 1e-9)
+  // smooth()：0.6 → 0.7 → 0.775；1.0 → <0.001 用 14 步、0.2 用 8 步。
+  let value = timing.smoothLipValue(1, 0)
+  assert.ok(Math.abs(value - 0.6) < 1e-12, `first smooth ${value}`)
+  value = timing.smoothLipValue(1, value)
+  assert.ok(Math.abs(value - 0.7) < 1e-12, `second smooth ${value}`)
+  value = timing.smoothLipValue(1, value)
+  assert.ok(Math.abs(value - 0.775) < 1e-12, `third smooth ${value}`)
+  const releaseSteps = (from) => {
+    let current = from
+    let steps = 0
+    while (current >= 0.001 && steps < 100) {
+      current = timing.smoothLipValue(0, current)
+      steps++
+    }
+    return steps
+  }
+  assert.equal(releaseSteps(1), 14)
+  assert.equal(releaseSteps(0.2), 8)
+  // 恒 1.0 输入 60 步后开度 ≥ 0.999999。
+  let held = 0
+  for (let i = 0; i < 60; i++) held = timing.smoothLipValue(1, held)
+  assert.ok(held >= 0.999999, `held ${held}`)
+  // 静音 60 步后 ≤ 1e-4。
+  let silent = 0
+  for (let i = 0; i < 60; i++) silent = timing.smoothLipValue(0, silent)
+  assert.ok(silent <= 1e-4, `silent ${silent}`)
+  // 旧 ournotes policy 已整体删除。
+  assert.equal(timing.MOUTH_SYNC_FALLBACK_PRESET, undefined)
+})
+
+test('the voice envelope steps at 60Hz, keeps the first sound step at 0.6x target', () => {
   const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
   const sampleRate = 48000
   const frames = Math.round(sampleRate * 0.4)
@@ -236,22 +330,41 @@ test('voice envelope applies the calm mouth policy, caps the opening and release
   for (let i = 0; i < frames; i++)
     samples[i] = Math.sin((i / sampleRate) * 2 * Math.PI * 220) * 0.45
   const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
-  assert.ok(envelope.durationMs > envelope.audioDurationMs, 'release tail extends the envelope')
-  assert.ok(
-    envelope.durationMs - envelope.audioDurationMs >= 440,
-    'release tail is the 450ms exponential release'
-  )
-  assert.equal(lip.sampleLipSync(envelope, 0) < 0.5, true)
+  assert.equal(envelope.frameMs, 1000 / 60)
+  assert.equal(envelope.values.length, envelope.releaseStep + 1)
+  assert.equal(envelope.targetValueScale, 1)
+  assert.equal(envelope.powK, 1.75)
+  // 第 0 步窗口为空（end=0），所以第一声在第 1 步：0.6 × target。
+  const timing = loadTiming()
+  let energy = 0
+  for (let i = 0; i < 800; i++) energy += samples[i] * samples[i]
+  const expected = 0.6 * timing.lipTargetFromRms(Math.sqrt(energy / 800), 1, 1.75)
+  assert.ok(Math.abs(envelope.values[1] - expected) < 1e-6, `first ${envelope.values[1]}`)
+  // 峰值按 pow 曲线；旧 openCap 0.88 已删除。
   const peak = Math.max(...envelope.values)
-  assert.ok(peak > 0.6, `voice must open the mouth: peak ${peak}`)
-  assert.ok(peak <= 0.88 + 1e-6, `openCap: peak ${peak}`)
-  assert.ok(envelope.values.at(-1) < 0.02, `tail must close: ${envelope.values.at(-1)}`)
+  assert.ok(peak > 0.45 && peak <= 1, `peak ${peak}`)
+  // 音频放完后平滑到 <0.001 才脱手，末值即 0。
+  assert.equal(envelope.values[envelope.releaseStep], 0)
+  assert.ok(envelope.values[envelope.releaseStep - 1] >= 0 && envelope.releaseStep > 0)
 })
 
-test('syllable rhythm survives the envelope: gaps reopen and the first syllable rises within 5 frames', () => {
+test('a quiet voice opens at the official 0.2 floor instead of the old minSpeech pin', () => {
   const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
   const sampleRate = 48000
-  // 5 个音节：100ms 有声 + 60ms 句内间隙（无 smoothLipValue 低通后节奏不再发黏）。
+  const frames = Math.round(sampleRate * 0.4)
+  const samples = new Float32Array(frames)
+  for (let i = 0; i < frames; i++)
+    samples[i] = Math.sin((i / sampleRate) * 2 * Math.PI * 220) * 0.08
+  const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
+  const peak = Math.max(...envelope.values)
+  assert.ok(peak > 0.19 && peak <= 0.2, `quiet peak ${peak}`)
+  const silent = lip.buildLipSyncEnvelope([new Float32Array(4800)], 48000)
+  assert.equal(Math.max(...silent.values), 0)
+})
+
+test('syllable gaps still close and reopen with the official smooth()', () => {
+  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
+  const sampleRate = 48000
   const chunks = []
   for (let k = 0; k < 5; k++) {
     chunks.push({ ms: 100, amp: 0.45 })
@@ -272,7 +385,6 @@ test('syllable rhythm survives the envelope: gaps reopen and the first syllable 
     envelope.values.slice(0, Math.round(envelope.audioDurationMs / envelope.frameMs))
   )
   const peak = Math.max(...values)
-  // 每个句内间隙的最小开度（最坏的谷）；对比度必须与旧链路的 0.05-0.12 拉开。
   const gapMins = []
   for (let k = 0; k < 4; k++) {
     const startF = Math.round((100 * (k + 1) + 60 * k) / envelope.frameMs)
@@ -282,46 +394,50 @@ test('syllable rhythm survives the envelope: gaps reopen and the first syllable 
   const worstTrough = Math.max(...gapMins)
   assert.ok(
     peak - worstTrough >= 0.12,
-    `syllable contrast must survive: peak ${peak.toFixed(3)} trough ${worstTrough.toFixed(3)}`
+    `syllable contrast: peak ${peak.toFixed(3)} trough ${worstTrough.toFixed(3)}`
   )
-  // 首音节 10-90% 上升不超过 5 帧（无低通拖尾，无单帧 pop）。
-  const idx0 = values.findIndex((x) => x > 0.02)
-  assert.ok(idx0 >= 0)
-  const target = 0.9 * peak
-  let rise = 0
-  for (let i = idx0; i < values.length; i++) {
-    if (values[i] >= target) {
-      rise = i - idx0
-      break
+})
+
+test('text lip levels follow the speaker slot and close one whole char early', () => {
+  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
+  const timing = loadTiming()
+  const expectTargets = (sequence, levels) => {
+    for (let i = 0; i < levels.length; i++) {
+      assert.ok(
+        Math.abs(sequence.targets[i] - levels[i]) < 1e-6,
+        `target ${i}: ${sequence.targets[i]} != ${levels[i]}`
+      )
     }
   }
-  assert.ok(rise <= 5, `first syllable must rise within 5 frames: ${rise}`)
-})
-
-test('a quiet voice is loudness-normalised so the mouth still opens', () => {
-  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
-  const sampleRate = 48000
-  const frames = Math.round(sampleRate * 0.4)
-  const samples = new Float32Array(frames)
-  for (let i = 0; i < frames; i++)
-    samples[i] = Math.sin((i / sampleRate) * 2 * Math.PI * 220) * 0.08
-  const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
-  const peak = Math.max(...envelope.values)
-  assert.ok(peak > 0.15, `quiet voice must still reach a visible opening: peak ${peak}`)
-  assert.ok(peak <= 0.88 + 1e-6)
-  // 轻语音观感预期：gain 已顶 2.4 上限时，peak 恰好钉在 minSpeech=0.17 保底——
-  // 气声台词的嘴型是恒定保底开度而非随语音起伏（official AdvCalm fallback 的
-  // 行为，ournotes 同值同行为；见 doc/sekai-exporter-parity-plan.md 2026-11 节）。
-  assert.ok(peak <= 0.18, `quiet voice pins at the minSpeech floor: peak ${peak}`)
-})
-
-test('silence keeps the mouth shut and text lip starts with an onset and closes at the end', () => {
-  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
-  const envelope = lip.buildLipSyncEnvelope([new Float32Array(4800)], 48000)
-  assert.equal(Math.max(...envelope.values), 0)
-  const text = lip.textLipSequence(12)
-  assert.ok(text.length > 12, 'text lip appends a release tail')
-  assert.ok(text[0] >= 0.13 - 1e-6, `onset: ${text[0]}`)
-  // 450ms 指数尾按 33.3ms 半字步长收尾，末帧残值 <2%（无 120ms 线性收尾）。
-  assert.ok(text.at(-1) < 0.02, `text tail must close: ${text.at(-1)}`)
+  const six = lip.textLipSequence(6, { index: 0, total: 2 })
+  expectTargets(six, [
+    timing.LIP_LEVELS[1],
+    timing.LIP_LEVELS[1],
+    timing.LIP_LEVELS[3],
+    timing.LIP_LEVELS[3],
+    timing.LIP_LEVELS[5],
+    timing.LIP_LEVELS[5]
+  ])
+  const other = lip.textLipSequence(6, { index: 1, total: 2 })
+  expectTargets(other, [
+    timing.LIP_LEVELS[2],
+    timing.LIP_LEVELS[2],
+    timing.LIP_LEVELS[4],
+    timing.LIP_LEVELS[4],
+    timing.LIP_LEVELS[6],
+    timing.LIP_LEVELS[6]
+  ])
+  const everyone = lip.textLipSequence(6, null)
+  expectTargets(everyone, [
+    timing.LIP_LEVELS[0],
+    timing.LIP_LEVELS[0],
+    timing.LIP_LEVELS[1],
+    timing.LIP_LEVELS[1],
+    timing.LIP_LEVELS[2],
+    timing.LIP_LEVELS[2]
+  ])
+  // 6 个字 = 12 个半字：收尾在 typing_end − 一个整字 = 4×(len−1) = 20。
+  const sixChars = lip.textLipSequence(12, { index: 0, total: 2 })
+  assert.equal(sixChars.targets[19] > 0, true)
+  assert.equal(sixChars.targets[20], 0)
 })

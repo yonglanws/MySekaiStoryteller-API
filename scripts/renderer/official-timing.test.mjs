@@ -69,35 +69,65 @@ function fixture() {
 
 const round = (value) => Math.round(value * 1000) / 1000
 
-test('official frame math follows Unity WaitForSeconds and never adds a phantom frame', () => {
+test('framesForSeconds follows Unity f32 accumulation, not a 1e-3 ceil', () => {
   const { load } = fixture()
   const timing = load(path.join(root, 'src/common/official/timing.ts'))
   assert.equal(timing.STORY_FPS, 60)
-  assert.equal(timing.framesForSeconds(0.03), 2)
-  assert.equal(timing.framesForSeconds(0.06), 4)
-  assert.equal(timing.framesForSeconds(0.1), 6)
-  assert.equal(timing.framesForSeconds(0.33), 20)
-  assert.equal(timing.framesForSeconds(timing.APPEAR_FADE_TOTAL_MS / 1000), 7)
+  const cases = [
+    [0.06, 4],
+    [0.1, 6],
+    [0.12, 8],
+    [0.125, 8],
+    [0.15, 9],
+    [0.2, 12],
+    [0.25, 15],
+    [0.3, 18],
+    [0.33333334, 20],
+    [0.5, 30],
+    [0.51, 31],
+    [0.75, 46],
+    [1.0, 61],
+    [1.5, 91],
+    [2.0, 121],
+    [2.5, 151],
+    [3.0, 181],
+    [5.0, 300],
+    [10.0, 600],
+    [30.0, 1801]
+  ]
+  for (const [seconds, frames] of cases) {
+    assert.equal(timing.framesForSeconds(seconds), frames, `framesForSeconds(${seconds})`)
+  }
+  assert.equal(timing.framesForSeconds(2.05), 124)
+  assert.equal(timing.framesForSeconds(3.05), 184)
   assert.equal(timing.framesForSeconds(0), 0)
   assert.equal(timing.framesForSeconds(-1), 0)
+  assert.equal(timing.framesForSeconds(Number.NaN), 0)
+  assert.equal(timing.framesForSeconds(Number.POSITIVE_INFINITY), 0xffffffff)
   assert.equal(round(timing.framesToMs(4)), 66.667)
   assert.equal(timing.WORD_INTERVAL_FRAMES, 4)
+  assert.equal(timing.APPEAR_FADE_TOTAL_FRAMES, 7)
   assert.equal(round(timing.APPEAR_FADE_TOTAL_MS), 116.667)
   assert.equal(round(timing.HIDE_IN_PLACE_TOTAL_MS), 250)
+  // 已量化的毫秒不再被二次换算成多一帧。
+  assert.equal(round(timing.quantizeMsToFrame(timing.APPEAR_FADE_TOTAL_MS)), 116.667)
 })
 
 test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion gate', () => {
   const { load } = fixture()
   const talk = load('utils/TalkTiming.ts')
   const twenty = 'あ'.repeat(20)
-  assert.equal(round(talk.calculateTalkDurationMs(twenty, 0)), 3333.333)
+  // 无语音：打字 80 帧 + auto_next_page_delay 121 帧。
+  assert.equal(round(talk.calculateTalkDurationMs(twenty, 0)), 3350)
+  // 语音未在打字前结束：等 voice_end 再 Gate 30 帧。
   assert.equal(round(talk.calculateTalkDurationMs(twenty, 2860)), 3416.667)
-  // 语音比打字更早结束（1000+50ms=63f < 80f）时，按打字后 2.0s 停留（80+120=200f=3333.333ms）
-  assert.equal(round(talk.calculateTalkDurationMs(twenty, 1000)), 3333.333)
+  // 语音在打字前结束（1000+50ms → 64 帧 < 80 帧）：打字后停 121 帧。
+  assert.equal(round(talk.calculateTalkDurationMs(twenty, 1000)), 3350)
   assert.equal(
     round(talk.calculateTalkDurationMs(twenty, 2860, '', { motionSettleMs: 4000 })),
-    4500
+    4516.667
   )
+  // 布局剩余时间来自帧计划（4000ms 正好 240 帧），不再经过 f32 秒累加。
   assert.equal(
     round(talk.calculateTalkDurationMs(twenty, 2860, '', { layoutRunningMs: 4000 })),
     4500
@@ -106,7 +136,7 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
     round(talk.calculateTalkDurationMs(twenty, 2860, '', { windowOpenMs: 200 })),
     3416.667
   )
-  assert.equal(round(talk.calculateTalkDurationMs(twenty, 0, '', { windowOpenMs: 200 })), 3533.333)
+  assert.equal(round(talk.calculateTalkDurationMs(twenty, 0, '', { windowOpenMs: 200 })), 3550)
   assert.equal(round(talk.talkTypingDurationMs(twenty)), 1333.333)
   const described = talk.describeTalkTiming(twenty, 2860)
   assert.equal(round(described.typingMs), 1333.333)
@@ -133,10 +163,10 @@ test('timeline opens the talk window once, reopens after HideTalk or closeWindow
     talk()
   ])
   const durations = Array.from(result.entries, (entry) => entry.durationMs)
-  assert.deepEqual(durations, [3533.333, 3333.333, 3533.333, 1, 3533.333])
-  assert.equal(round(result.entries[2].delayStartTimeMs), round(3533.333 + 3333.333))
-  assert.equal(round(result.entries[2].startTimeMs), round(3533.333 + 3333.333 + 500))
-  assert.equal(round(result.entries[2].endTimeMs), round(result.entries[2].startTimeMs + 3533.333))
+  assert.deepEqual(durations, [3550, 3350, 3550, 1, 3550])
+  assert.equal(round(result.entries[2].delayStartTimeMs), round(3550 + 3350))
+  assert.equal(round(result.entries[2].startTimeMs), round(3550 + 3350 + 500))
+  assert.equal(round(result.entries[2].endTimeMs), round(result.entries[2].startTimeMs + 3550))
   assert.equal(timing.OPENING_COVER_FADE_MS, 500)
   assert.equal(timing.PLAYED_WAIT_TIME_MS, 250)
   assert.equal(timing.SCENARIO_EXIT_BGM_FADE_MS, 250)
@@ -186,12 +216,12 @@ test('layout and staging match the official transition map', () => {
       ])
       .entries.map((entry) => entry.durationMs)
   )
-  assert.deepEqual(durations, [116.667, 250, 116.667, 750, 333.333])
+  assert.deepEqual(durations, [116.667, 250, 116.667, 766.667, 333.333])
   assert.equal(round(stage.side_to_position('Left', 'Normal', 0).x), 0.318)
   assert.equal(round(stage.side_to_position('Right', 'Normal', 0).x), 0.682)
   assert.equal(round(stage.side_to_position('Left', 'Three', 0).x), 0.214)
   assert.equal(round(stage.side_to_position('Right', 'Three', 0).x), 0.786)
-  assert.equal(stage.move_speed_to_num('Slow'), 750)
+  assert.equal(round(stage.move_speed_to_num('Slow')), 766.667)
   assert.equal(stage.move_speed_to_num('Normal'), 500)
   assert.equal(round(stage.move_speed_to_num('Fast')), 333.333)
   assert.equal(stage.move_speed_to_num('Immediate'), 0)

@@ -83,11 +83,11 @@ function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): n
         num(from.offset) !== num(to.offset) ||
         Boolean(from.under) !== Boolean(to.under)
       if (!moved) return HIDE_IN_PLACE_TOTAL_MS / 1000
-      const speed = (str(data.moveSpeed, 'Normal') as keyof typeof MOVE_SPEED_DURATION_MS)
+      const speed = str(data.moveSpeed, 'Normal') as keyof typeof MOVE_SPEED_DURATION_MS
       return (MOVE_SPEED_DURATION_MS[speed] ?? MOVE_SPEED_DURATION_MS.Normal) / 1000
     }
     case 'Move': {
-      const speed = (str(data.moveSpeed, 'Normal') as keyof typeof MOVE_SPEED_DURATION_MS)
+      const speed = str(data.moveSpeed, 'Normal') as keyof typeof MOVE_SPEED_DURATION_MS
       return (MOVE_SPEED_DURATION_MS[speed] ?? MOVE_SPEED_DURATION_MS.Normal) / 1000
     }
     case 'BlackOut':
@@ -97,9 +97,13 @@ function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): n
     case 'BlurOut':
       return normalizeEffectDurationMs(num(data.duration, 500), 500) / 1000
     case 'SekaiIn':
-      return (SEKAI_IN_PRE_DELAY_MS + normalizeEffectDurationMs(num(data.duration, 500), 500)) / 1000
+      return (
+        (SEKAI_IN_PRE_DELAY_MS + normalizeEffectDurationMs(num(data.duration, 500), 500)) / 1000
+      )
     case 'SekaiOut':
-      return (SEKAI_OUT_PRE_DELAY_MS + normalizeEffectDurationMs(num(data.duration, 500), 500)) / 1000
+      return (
+        (SEKAI_OUT_PRE_DELAY_MS + normalizeEffectDurationMs(num(data.duration, 500), 500)) / 1000
+      )
     case 'Telop':
       return TELOP_TOTAL_MS / 1000
     case 'HideTalk':
@@ -186,7 +190,7 @@ export function lintOfficialStory(
   let runningEndSec = 0
   let windowOpen = false
   let lastTalkIndex = -1
-  const lastAppearMotion = new Map<number, { timeSec: number; facial: string }>()
+  const lastAppearMotion = new Map<number, { timeSec: number; motion: string; facial: string }>()
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
@@ -197,7 +201,11 @@ export function lintOfficialStory(
       slow100SlideCount += 1
     }
 
-    if (snippetHasPreFence(snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' })) {
+    if (
+      snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+    ) {
       cursorSec = Math.max(cursorSec, runningEndSec)
     }
     const startSec = cursorSec + Math.max(0, num(snippet.delay, 0))
@@ -245,7 +253,11 @@ export function lintOfficialStory(
       }
       visible.set(modelId, { side, offset: num(to.offset, 0) })
       if (str(data.motion).trim()) {
-        lastAppearMotion.set(modelId, { timeSec: startSec, facial: str(data.facial) })
+        lastAppearMotion.set(modelId, {
+          timeSec: startSec,
+          motion: str(data.motion).trim(),
+          facial: str(data.facial)
+        })
       }
     } else if (kind === 'LayoutClear') {
       const modelId = num(data.modelId, -1)
@@ -272,7 +284,7 @@ export function lintOfficialStory(
       const checkActionTime = (modelId: number, motionName: string, atFrac: number): void => {
         if (!motionName) return
         const appearInfo = lastAppearMotion.get(modelId)
-        if (!appearInfo) return
+        if (!appearInfo || appearInfo.motion !== motionName) return
         const actionTime = startSec + atFrac * durSec
         if (actionTime - appearInfo.timeSec < 0.4 - 1e-6) {
           appearMotionClashCount += 1
@@ -296,7 +308,11 @@ export function lintOfficialStory(
       const mid = num(data.modelId, -1)
       if (str(data.motion).trim()) {
         const appearInfo = lastAppearMotion.get(mid)
-        if (appearInfo && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
+        if (
+          appearInfo &&
+          appearInfo.motion === str(data.motion).trim() &&
+          startSec - appearInfo.timeSec < 0.4 - 1e-6
+        ) {
           appearMotionClashCount += 1
         }
       }
@@ -367,11 +383,13 @@ export function lintOfficialStory(
   if (sekaiCovered) unclosedEffects.push('SekaiOut 未配对 SekaiIn')
   if (shakeScreenActive) unclosedEffects.push('长时 ShakeScreen 未配对 StopShakeScreen')
   if (shakeWindowActive) unclosedEffects.push('长时 ShakeWindow 未配对 StopShakeWindow')
-  if (activeShaders.size > 0) unclosedEffects.push(`AttachCharacterShader 未在离场前清除 (${[...activeShaders].join(',')})`)
+  if (activeShaders.size > 0)
+    unclosedEffects.push(`AttachCharacterShader 未在离场前清除 (${[...activeShaders].join(',')})`)
   if (cameraDirty) warnings.push('结尾前 CameraMove / CameraZoom 未复位为 (0,0)/1.0')
 
   if (slow100SlideCount > 0) issues.push(`存在 ${slow100SlideCount} 条 ±100px Slow 滑入/滑出`)
-  if (appearMotionClashCount > 0) issues.push(`存在 ${appearMotionClashCount} 处入场 <0.4s 动作连打`)
+  if (appearMotionClashCount > 0)
+    issues.push(`存在 ${appearMotionClashCount} 处入场 <0.4s 动作连打`)
   if (missingWindowCloseBeforeTransitionCount > 0) {
     issues.push(`存在 ${missingWindowCloseBeforeTransitionCount} 处转场/Telop/静默拍前未收窗`)
   }
@@ -393,7 +411,8 @@ export function lintOfficialStory(
       missingWindowCloseBeforeTransitionCount,
       unclosedEffects,
       invalidCatalogAnimations,
-      inPlaceAppearShare: appearCount > 0 ? Number((inPlaceAppearCount / appearCount).toFixed(3)) : 1,
+      inPlaceAppearShare:
+        appearCount > 0 ? Number((inPlaceAppearCount / appearCount).toFixed(3)) : 1,
       stageViolationCount
     }
   }
@@ -435,7 +454,7 @@ export function enforceOfficialStoryInvariants(
   let runningEndSec = 0
   let windowOpen = false
   let lastTalkSnippet: JsonRecord | null = null
-  const lastAppearMotion = new Map<number, { timeSec: number; facial: string }>()
+  const lastAppearMotion = new Map<number, { timeSec: number; motion: string; facial: string }>()
   let dedupedClashes = 0
   let addedCloses = 0
 
@@ -452,7 +471,11 @@ export function enforceOfficialStoryInvariants(
     const kind = str(snippet.type)
     const data = isRecord(snippet.data) ? snippet.data : {}
 
-    if (snippetHasPreFence(snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' })) {
+    if (
+      snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+    ) {
       cursorSec = Math.max(cursorSec, runningEndSec)
     }
     const startSec = cursorSec + Math.max(0, num(snippet.delay, 0))
@@ -473,7 +496,11 @@ export function enforceOfficialStoryInvariants(
     if (kind === 'LayoutAppear') {
       const mid = num(data.modelId, -1)
       if (str(data.motion).trim()) {
-        lastAppearMotion.set(mid, { timeSec: startSec, facial: str(data.facial) })
+        lastAppearMotion.set(mid, {
+          timeSec: startSec,
+          motion: str(data.motion).trim(),
+          facial: str(data.facial)
+        })
       }
     } else if (kind === 'LayoutClear') {
       const mid = num(data.modelId, -1)
@@ -495,7 +522,11 @@ export function enforceOfficialStoryInvariants(
       const speakerId = num(data.modelId, -1)
       if (str(data.motion).trim()) {
         const appearInfo = lastAppearMotion.get(speakerId)
-        if (appearInfo && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
+        if (
+          appearInfo &&
+          appearInfo.motion === str(data.motion).trim() &&
+          startSec - appearInfo.timeSec < 0.4 - 1e-6
+        ) {
           data.motion = ''
           dedupedClashes += 1
         }
@@ -511,6 +542,7 @@ export function enforceOfficialStoryInvariants(
           if (
             str(rawAction.motion).trim() &&
             appearInfo &&
+            appearInfo.motion === str(rawAction.motion).trim() &&
             actionTime - appearInfo.timeSec < 0.4 - 1e-6
           ) {
             const { motion: _dropped, ...rest } = rawAction
@@ -571,10 +603,22 @@ export function enforceOfficialStoryInvariants(
 
   const closers: JsonRecord[] = []
   if (shakeScreenActive) {
-    closers.push({ type: 'StopShakeScreen', wait: false, progressBehavior: 'Now', delay: 0, data: {} })
+    closers.push({
+      type: 'StopShakeScreen',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {}
+    })
   }
   if (shakeWindowActive) {
-    closers.push({ type: 'StopShakeWindow', wait: false, progressBehavior: 'Now', delay: 0, data: {} })
+    closers.push({
+      type: 'StopShakeWindow',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {}
+    })
   }
   for (const mid of activeShaders) {
     closers.push({
@@ -604,10 +648,22 @@ export function enforceOfficialStoryInvariants(
     })
   }
   if (flashbackOpen) {
-    closers.push({ type: 'FlashbackOut', wait: false, progressBehavior: 'Now', delay: 0, data: { duration: 100 } })
+    closers.push({
+      type: 'FlashbackOut',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { duration: 100 }
+    })
   }
   if (sepiaOpen) {
-    closers.push({ type: 'SepiaOut', wait: false, progressBehavior: 'Now', delay: 0, data: { duration: 100 } })
+    closers.push({
+      type: 'SepiaOut',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { duration: 100 }
+    })
   }
   if (closers.length > 0) {
     snippets.splice(lastBlackOutIndex, 0, ...closers)

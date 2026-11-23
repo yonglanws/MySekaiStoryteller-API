@@ -121,7 +121,10 @@ function fixture(extraMocks = []) {
   const mocks = new Map([
     ['zod', nodeRequire('zod')],
     ['pixi.js', { Ticker: class {}, Container: class {}, Filter: class {} }],
-    ['pixi-live2d-display-advanced', { Cubism2InternalModel: class {}, Cubism4InternalModel: class {} }],
+    [
+      'pixi-live2d-display-advanced',
+      { Cubism2InternalModel: class {}, Cubism4InternalModel: class {} }
+    ],
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new Logger() }],
     [
       path.join(renderer, 'managers/AnimationManager.ts'),
@@ -205,7 +208,12 @@ test('StorySchema and snippetSemantics enforce ProgressBehavior and official sni
   )
   assert.equal(semantics.resolveProgressBehavior({ wait: true }), 'WaitFinished')
   assert.equal(semantics.resolveProgressBehavior({ wait: false }), 'Now')
-  assert.equal(semantics.snippetHasPreFence({ type: 'Talk', wait: false }), true)
+  // Talk 不再有隐式前置栅栏：只有显式 WaitFinished 才拦在跑任务。
+  assert.equal(semantics.snippetHasPreFence({ type: 'Talk', wait: false }), false)
+  assert.equal(
+    semantics.snippetHasPreFence({ type: 'Talk', wait: false, progressBehavior: 'WaitFinished' }),
+    true
+  )
 
   const parsed = Story.StorySchema.parse({
     models: [],
@@ -252,7 +260,11 @@ test('StorySchema and snippetSemantics enforce ProgressBehavior and official sni
       { type: 'SekaiIn', delay: 0, data: { duration: 0.5, variant: 'v2' } },
       { type: 'SekaiOut', delay: 0, data: { duration: 0.5, variant: 'v1' } },
       { type: 'SideFade', delay: 0, data: { direction: 'Left', mode: 'In', duration: 0.5 } },
-      { type: 'AttachCharacterShader', delay: 0, data: { modelId: 1, shader: 'hologram', level: 1 } },
+      {
+        type: 'AttachCharacterShader',
+        delay: 0,
+        data: { modelId: 1, shader: 'hologram', level: 1 }
+      },
       { type: 'PlayScenarioEffect', delay: 0, data: { effectName: 'rain', duration: 0 } },
       { type: 'StopScenarioEffect', delay: 0, data: { effectName: 'rain', duration: 0.2 } },
       { type: 'BlurIn', delay: 0, data: { duration: 0.3 } },
@@ -341,8 +353,10 @@ function createManagerHarness(clock) {
       changeCostume: async (...args) => {
         calls.push({ fn: 'changeCostume', at: clock.now, args })
       },
-      setCharacterShader: (...args) => calls.push({ fn: 'setCharacterShader', at: clock.now, args }),
-      updateLayoutMode: (mode) => calls.push({ fn: 'updateLayoutMode', at: clock.now, args: [mode] }),
+      setCharacterShader: (...args) =>
+        calls.push({ fn: 'setCharacterShader', at: clock.now, args }),
+      updateLayoutMode: (mode) =>
+        calls.push({ fn: 'updateLayoutMode', at: clock.now, args: [mode] }),
       resetAmbientColor: () => calls.push({ fn: 'resetAmbientColor', at: clock.now }),
       markMotionSettledAt: () => {}
     },
@@ -366,7 +380,8 @@ function createManagerHarness(clock) {
     },
     layerUI: {
       UITalkShowed: false,
-      hideTextBackground: async (...args) => calls.push({ fn: 'hideTextBackground', at: clock.now, args }),
+      hideTextBackground: async (...args) =>
+        calls.push({ fn: 'hideTextBackground', at: clock.now, args }),
       showPlaceInfo: async (...args) => {
         await clock.sleep(200)
         calls.push({ fn: 'showPlaceInfo', at: clock.now, args })
@@ -425,25 +440,42 @@ test('SnippetStrategyManager enforces identical PlayCore pre-start fence across 
     const manager = new SnippetStrategyManager(app)
 
     const dispatch = (snippet, idx) =>
-      mode === 'export' ? manager.handleSnippetForExport(snippet, idx) : manager.handleSnippet(snippet, idx)
+      mode === 'export'
+        ? manager.handleSnippetForExport(snippet, idx)
+        : manager.handleSnippet(snippet, idx)
 
     await clock.drive(
       (async () => {
         // 0: WaitFinished SideFade(300ms) 与 1: Now CameraMove(500ms) 必须在 0ms 同帧开跑
         await dispatch(
-          { type: 'SideFade', progressBehavior: 'WaitFinished', delay: 0, data: { direction: 'Left', mode: 'In', duration: 0.3 } },
+          {
+            type: 'SideFade',
+            progressBehavior: 'WaitFinished',
+            delay: 0,
+            data: { direction: 'Left', mode: 'In', duration: 0.3 }
+          },
           0
         )
         assert.equal(clock.now, 0, `${mode}: WaitFinished returns immediately after launching`)
         await dispatch(
-          { type: 'CameraMove', progressBehavior: 'Now', delay: 0, data: { x: 0.2, y: 0, duration: 0.5 } },
+          {
+            type: 'CameraMove',
+            progressBehavior: 'Now',
+            delay: 0,
+            data: { x: 0.2, y: 0, duration: 0.5 }
+          },
           1
         )
         assert.equal(clock.now, 0, `${mode}: Now runs at exact same frame`)
 
         // 2: WaitFinished + delay=0.2s：必须先等 0 与 1（500ms）全完成，再开始 200ms delay -> 700ms 启动 CameraZoom
         await dispatch(
-          { type: 'CameraZoom', progressBehavior: 'WaitFinished', delay: 0.2, data: { zoom: 1.3, duration: 0.1 } },
+          {
+            type: 'CameraZoom',
+            progressBehavior: 'WaitFinished',
+            delay: 0.2,
+            data: { zoom: 1.3, duration: 0.1 }
+          },
           2
         )
         assert.equal(clock.now, 500, `${mode}: pre-fence waits for both running tasks (500ms)`)
@@ -547,6 +579,7 @@ test('TalkSnippet runs voice & at=0 motion on act frame, obeys Talk Gate + 2.0s/
     isMotionLooping: () => false,
     getMotionDurationMs: () => 0,
     setMouthOpening() {},
+    releaseMouth() {},
     getMouthOpenParamIds() {
       return ['ParamMouthOpenY']
     },
@@ -636,11 +669,16 @@ test('TalkSnippet runs voice & at=0 motion on act frame, obeys Talk Gate + 2.0s/
   assert.equal(action0Ev.atMs, 0, 'at=0 motion starts on act frame before 0.2s window open')
   assert.equal(typingStartEv.atMs, 200, 'typing starts after 0.2s window open')
   assert.equal(round(clock.now), 3300, 'waits layout end (2800) + 0.5s tail = 3300ms')
-  assert.equal(round(hideEv.atMs), 3300, 'closeWindowOnFinish triggers async hideTextBackground(200) at finish frame')
+  assert.equal(
+    round(hideEv.atMs),
+    3300,
+    'closeWindowOnFinish triggers async hideTextBackground(200) at finish frame'
+  )
   assert.equal(hideEv.dur, 200)
   assert.equal(windowOpen, false, 'next Talk sees closed window and will reopen 0.2s')
 
-  // Case 2: 语音早于打字结束（800ms + 50ms = 850ms < 200+1333.333 = 1533.333ms）-> 按 2.0s 尾延迟 = 3533.333ms
+  // Case 2: 语音早于打字结束（800ms + 50ms = 850ms < 200+1333.333 = 1533.333ms）
+  // 官方 2.0s 尾延迟 = 121 帧 = 2016.667ms -> 总长 3550ms
   events.length = 0
   stageTiming.resetStageTiming(app)
   model._voiceMs = 800
@@ -659,7 +697,11 @@ test('TalkSnippet runs voice & at=0 motion on act frame, obeys Talk Gate + 2.0s/
       }
     }).runSnippet()
   )
-  assert.equal(round(clock.now - t2Start), 3533.333, 'voice finished before typing uses 2.0s post-typing hold')
+  assert.equal(
+    round(clock.now - t2Start),
+    3550,
+    'voice finished before typing uses 2.0s post-typing hold'
+  )
 
   // Case 3: 导出无 voicePromise 模式（isExporting = true），也必须等完计划时长（2200ms），不能打字完立刻退出
   events.length = 0
@@ -713,10 +755,16 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
         exportTraceContext: { reset() {}, setSnippet() {} }
       }
     ],
-    [path.join(renderer, 'managers/video-export/VirtualClockController.ts'), { VirtualClockController: noopClass }],
+    [
+      path.join(renderer, 'managers/video-export/VirtualClockController.ts'),
+      { VirtualClockController: noopClass }
+    ],
     [path.join(renderer, 'managers/video-export/BgmPlan.ts'), { BgmPlan: noopClass }],
     [path.join(renderer, 'managers/video-export/SePlan.ts'), { SePlan: noopClass }],
-    [path.join(renderer, 'managers/video-export/WebCodecsMp4Encoder.ts'), { WebCodecsMp4Encoder: noopClass }],
+    [
+      path.join(renderer, 'managers/video-export/WebCodecsMp4Encoder.ts'),
+      { WebCodecsMp4Encoder: noopClass }
+    ],
     [path.join(renderer, 'managers/video-export/JpegFrameSink.ts'), { JpegFrameSink: noopClass }],
     [path.join(renderer, 'managers/video-export/talkPatch.ts'), { applyTalkPatch: () => 0 }],
     [path.join(renderer, 'utils/WebGLContextValidator.ts'), { webGLValidator: {} }],
@@ -748,7 +796,7 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
         0
       )
     ),
-    4500
+    4516.667
   )
   assert.equal(
     round(
@@ -761,7 +809,7 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
         0
       )
     ),
-    3333.333
+    3350
   )
 
   // talkWindowOpenMs reopens after HideTalk or closeWindowOnFinish

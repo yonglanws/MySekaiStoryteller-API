@@ -11,10 +11,13 @@ interface EffectSet {
 class VFXGlobalTicker {
   private static instance: Ticker
 
+  /**
+   * 共用 Ticker.shared：预览时随它 60fps 运行；导出时 Ticker.shared 由帧泵
+   * 每个 1/60 故事步显式 update，独立的 rAF ticker 会破坏固定步进与确定性。
+   */
   static getInstance(): Ticker {
     if (!VFXGlobalTicker.instance) {
-      VFXGlobalTicker.instance = new Ticker()
-      VFXGlobalTicker.instance.start()
+      VFXGlobalTicker.instance = Ticker.shared
     }
     return VFXGlobalTicker.instance
   }

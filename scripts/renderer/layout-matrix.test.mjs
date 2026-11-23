@@ -4,7 +4,7 @@
  * 这张表直接对应官方 `ScenarioCharacterLayout`：
  * - Appear 只等淡入 7 帧（1 帧 alpha=0 + 6 帧淡入），滑入继续在后台；
  * - Clear 原地 9+6=15 帧；滑动 fade 从 move-6 帧开始，总长 move；
- * - Move 按 MoveSpeedType 20/30/45 帧，Immediate 0；
+ * - Move 按 MoveSpeedType 20/30/46 帧，Immediate 0；
  * - timeline 与 plan 的 moveEnd/fade 帧必须逐项一致。
  */
 import test from 'node:test'
@@ -15,8 +15,8 @@ const runtime = loadAuditRuntime()
 const { timeline, plan, timing } = runtime
 
 const speeds = ['Slow', 'Normal', 'Fast', 'Immediate']
-const framesForSpeed = (speed) =>
-  timing.framesForSeconds(timing.MOVE_SPEED_DURATION_MS[speed] / 1000)
+// `MOVE_SPEED_DURATION_MS` 已由 framesToMs 量化，不能再走 f32 秒累加。
+const framesForSpeed = (speed) => timing.msToFrameCount(timing.MOVE_SPEED_DURATION_MS[speed])
 
 const sides = {
   inPlace: { from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } },
@@ -60,16 +60,17 @@ test('LayoutAppear always completes on the 7-frame fade; move continues in backg
   for (const speed of speeds) {
     for (const position of ['inPlace', 'moved']) {
       const result = run('LayoutAppear', speed, position)
+      const base = result.startFrame
       assert.equal(result.durationFrames, timing.APPEAR_FADE_TOTAL_FRAMES, `${speed}/${position}`)
       assert.equal(result.durationMs, timing.APPEAR_FADE_TOTAL_MS, `${speed}/${position}`)
       assert.equal(result.estimatedMs, timing.APPEAR_FADE_TOTAL_MS, `${speed}/${position}`)
-      assert.equal(result.layout.fadeStartFrame, 1, `${speed}/${position}`)
+      assert.equal(result.layout.fadeStartFrame - base, 1, `${speed}/${position}`)
       assert.equal(
-        result.layout.fadeEndFrame,
+        result.layout.fadeEndFrame - base,
         timing.APPEAR_FADE_TOTAL_FRAMES,
         `${speed}/${position}`
       )
-      assert.equal(result.layout.moveEndFrame, framesForSpeed(speed), `${speed}/${position}`)
+      assert.equal(result.layout.moveEndFrame - base, framesForSpeed(speed), `${speed}/${position}`)
     }
   }
 })
@@ -137,7 +138,7 @@ test('Move waits exactly the MoveSpeedType duration, including zero for Immediat
       const result = run('Move', speed, position)
       const expected = framesForSpeed(speed)
       assert.equal(result.durationFrames, expected, `${speed}/${position}`)
-      assert.equal(result.layout.moveEndFrame, expected, `${speed}/${position}`)
+      assert.equal(result.layout.moveEndFrame - result.startFrame, expected, `${speed}/${position}`)
       assert.equal(result.estimatedMs, timing.framesToMs(expected), `${speed}/${position}`)
     }
   }

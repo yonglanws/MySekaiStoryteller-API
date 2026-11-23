@@ -15,19 +15,25 @@ import { motionTrace } from '../managers/video-export/MotionTraceCollector'
 import { bodyBlendSeconds, facialBlendSeconds } from './MotionBlend'
 import {
   advanceBreathDegree,
+  bodyMotionChangedBlink,
+  bodyMotionFinishedBlink,
   breathParameterValue,
   createBlinkState,
-  createSeededRandom,
+  createBreathDegree,
+  invokeBlinkUserData,
+  missingBodyMotionBlink,
   sleepBlink,
   stepBlink,
-  wakeBlink,
   type BlinkState
 } from './NaturalMotion'
 import {
   BODY_MOTION_FADE_SECONDS,
+  CHARACTER_SHAKE_MS,
   FACIAL_FADE_SECONDS,
+  LIP_LOUD_CHARACTERS,
   LIP_LOUD_TARGET_VALUE_SCALE,
-  LIP_TARGET_VALUE_SCALE
+  LIP_TARGET_VALUE_SCALE,
+  STORY_FPS
 } from '../../../common/official/timing'
 import { evaluateEase } from '../effects/Ease'
 import { registerClockBaselineResetListener } from '../snippets/stageTiming'
@@ -229,7 +235,8 @@ export default class AdvancedModel extends Live2DModel {
 
     const seed = (metadata.id * 2654435761) >>> 0
     this.blinkState = createBlinkState(seed)
-    this.breathDegree = createSeededRandom(seed ^ 0x6272656174)() * 360
+    // `BuildModelComponent`: `breathDegree = Random.Range(0, 360)`（int 重载），整数初值。
+    this.breathDegree = createBreathDegree(seed)
     sleepBlink(this.blinkState)
 
     const motionManager = this.internalModel.motionManager
@@ -328,6 +335,9 @@ export default class AdvancedModel extends Live2DModel {
   /**
    * 官方 LateUpdate 的自然动作：眨眼（动作期间 Sleep，动作结束 Wake）与 3s 呼吸。
    * 监听 `beforeModelUpdate`：此时动作/物理已经求值，写进去的参数会进入本帧 model.update()。
+   *
+   * 眼参数无条件乘 `EyeOpening`（`CubismEyeBlinkController` 的 Multiply 混合），
+   * 不再按 base>0.25 判断，也不因眼睛本来闭着就冻结 `untilTime`。
    */
   private installNaturalMotion(): void {
     if (this.naturalMotionInstalled) return
@@ -357,7 +367,11 @@ export default class AdvancedModel extends Live2DModel {
       if (now < this.lastNaturalUpdateMs) {
         this.lastNaturalUpdateMs = now
       }
-      const dt = Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
+      // 导出时帧泵按固定 1/60 故事步驱动 Ticker.shared，直接用步长而不是墙钟差，
+      // 避免 16/17ms 抖动影响眨眼与呼吸的相位。
+      const dt = AnimationManager.isExporting()
+        ? 1 / STORY_FPS
+        : Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
       this.lastNaturalUpdateMs = now
       const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
       if (!this.visible || alpha <= 0.01 || this.destroyed) return
@@ -365,13 +379,10 @@ export default class AdvancedModel extends Live2DModel {
         const bases = eyeIds.map(
           (id) => core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
         )
-        const eyesOpen = bases.some((b) => b > 0.25)
-        const shouldStep = this.blinkState.status !== 'ready' || eyesOpen
-        const opening = shouldStep ? stepBlink(this.blinkState, dt) : this.blinkState.opening
+        const opening = stepBlink(this.blinkState, dt)
         for (let idx = 0; idx < eyeIds.length; idx++) {
-          const base = bases[idx]
-          const next = base > 0.25 ? base * opening : base
           const id = eyeIds[idx]
+          const next = bases[idx] * opening
           if (core.setParameterValueById) core.setParameterValueById(id, next)
           else core.setParamFloat?.(id, next)
         }
@@ -383,6 +394,37 @@ export default class AdvancedModel extends Live2DModel {
         else core.setParamFloat?.(this.breathParamId, value)
       }
     })
+    this.installBlinkUserData()
+  }
+
+  /**
+   * 动作的 `UserData`（`OnLive2DInvokeUserData`，例如 `eyeblink,0.2,0.24,0.24`）
+   * 由 pixi 的 `MotionQueueManager` 读到后以 `motion:<value>` 事件发出；这里在同一个
+   * 回调里把 eyeblink 交给眨眼控制器（Command 模式）。
+   */
+  private installBlinkUserData(): void {
+    const manager = (
+      this.internalModel as unknown as {
+        motionManager?: {
+          queueManager?: {
+            setEventCallback?: (
+              callback: (caller: unknown, value: string, data: unknown) => void,
+              customData?: unknown
+            ) => void
+            _eventCallBack?: (caller: unknown, value: string, data: unknown) => void
+            _eventCustomData?: unknown
+          }
+        }
+      }
+    )?.motionManager
+    const queue = manager?.queueManager
+    if (!queue || typeof queue.setEventCallback !== 'function') return
+    const original = queue._eventCallBack
+    const host = this
+    queue.setEventCallback((caller, value, data) => {
+      original?.(caller, value, data)
+      if (typeof value === 'string') invokeBlinkUserData(host.blinkState, value)
+    }, queue._eventCustomData)
   }
 
   private resolveCoreParameterIds(): Set<string> | null {
@@ -496,6 +538,14 @@ export default class AdvancedModel extends Live2DModel {
       return original.call(this)
     }
     this.mouthUpdateHooked = true
+  }
+
+  /**
+   * 官方 `Lip::None`：口型脱手。清掉本帧待写的开度，包装过的 `coreModel.update()`
+   * 不再重写 `ParamMouthOpenY`，参数回到动作/表情/默认值。
+   */
+  public releaseMouth(): void {
+    this.pendingMouthOpen = null
   }
 
   private writeMouthOpeningNow(open: number): void {
@@ -903,7 +953,11 @@ export default class AdvancedModel extends Live2DModel {
       !this.bodyFinishReported
     ) {
       this.bodyFinishReported = true
-      wakeBlink(this.blinkState)
+      // `OnFinishMotion`：只有非循环 clip 越过结尾才唤醒自动眨眼。
+      bodyMotionFinishedBlink(
+        this.blinkState,
+        this.currentBodyMotion ? this.isMotionLooping(this.currentBodyMotion) : true
+      )
       const now = performance.now()
       if (now < this.currentBodyStartedAt) this.currentBodyStartedAt = now
       motionTrace.record({
@@ -917,8 +971,10 @@ export default class AdvancedModel extends Live2DModel {
         clipDurationMs: this.currentBodyClipDurationMs
       })
     }
-    // 非循环身体动作播完后 Controller.WakeUp()；空闲时恢复自动眨眼。
-    if (!manager.playing && manager.isFinished()) wakeBlink(this.blinkState)
+    // 非循环身体动作播完后 Controller.WakeUp()；循环 clip 每圈结束不唤醒。
+    if (!manager.playing && manager.isFinished() && this.currentBodyMotion) {
+      bodyMotionFinishedBlink(this.blinkState, this.isMotionLooping(this.currentBodyMotion))
+    }
     if (!this.bodyChainArmed) return
     if (!manager.isFinished() || manager.playing) return
     this.bodyChainArmed = false
@@ -1283,6 +1339,13 @@ export default class AdvancedModel extends Live2DModel {
             ? 'superseded by a newer cue'
             : 'aborted or target hidden'
       })
+      if (channel === 0 && !motion && !this.destroyed) {
+        // 模型没有这个身体动作：官方先 OnFinishMotion、再 Sleep()，之后不会再唤醒。
+        missingBodyMotionBlink(
+          this.blinkState,
+          this.currentBodyMotion ? this.isMotionLooping(this.currentBodyMotion) : false
+        )
+      }
       return
     }
     const clipDurationMs = this.motionClipDurationMs(motion)
@@ -1320,23 +1383,23 @@ export default class AdvancedModel extends Live2DModel {
           previous: name
         })
       }
-      // 仅当身体动作直接驱动眼睛（未隔离 ParamEye*Open）时才 Sleep 眨眼；
-      // 若身体动作隔离了眼睛（如 Talk、facialFirst、循环动作），必须保持自动眨眼开启。
-      if (ignoresEyeOpen) {
-        wakeBlink(this.blinkState)
-      } else {
-        sleepBlink(this.blinkState)
-      }
+      // 官方 `ChangeMotionCore` 结尾无条件 `Sleep()`：任何身体动作切换都停住自动眨眼，
+      // 只有非循环 clip 越过结尾时 `OnFinishMotion` 才 `WakeUp()`。
+      bodyMotionChangedBlink(this.blinkState)
     }
     // 官方 PlayableAnimator 是交叉淡化，不是先 stopAll 清空旧姿势。
+    // 分支顺序与 `ScenarioModel.ChangeMotionCore` 一致：
+    // body force&&first → 0、same_category → 0.125、force → 0、否则 clip FadeInTime/0.5；
+    // facial force → 0、否则 clip FadeInTime（缺省 0.25）。
+    const clipFadeIn = this.clipFadeInSeconds(name)
     const fadeSeconds =
       channel === 0
-        ? this.firstBodyCue || this.currentBodyMotion === this.defaultMotionName
-          ? 0
-          : bodyBlendSeconds(this.currentBodyMotion, name)
-        : this.facialForceNext
-          ? facialBlendSeconds(true)
-          : facialBlendSeconds(false)
+        ? bodyBlendSeconds(this.currentBodyMotion, name, {
+            force: this.firstBodyCue,
+            first: this.firstBodyCue || !this.currentBodyMotion,
+            clipFadeIn
+          })
+        : facialBlendSeconds(this.facialForceNext, clipFadeIn)
     this.channelFadeSeconds[channel] = fadeSeconds
     const invalidateReservation = (): void => {
       if (generation === this.channelGeneration[channel] && !this.destroyed) {
@@ -1386,6 +1449,17 @@ export default class AdvancedModel extends Live2DModel {
     } finally {
       signal?.removeEventListener('abort', invalidateReservation)
     }
+  }
+
+  /** 动作的 clip FadeInTime（model3 的 `FileReferences.Motions[name][0].FadeInTime`）。 */
+  private clipFadeInSeconds(name: string): number | undefined {
+    const definitions = (
+      this.internalModel?.motionManager as unknown as {
+        definitions?: Record<string, Array<{ FadeInTime?: number }>>
+      }
+    )?.definitions
+    const fade = definitions?.[name]?.[0]?.FadeInTime
+    return typeof fade === 'number' && Number.isFinite(fade) ? fade : undefined
   }
 
   private motionClipDurationMs(motion: unknown): number {
@@ -1562,10 +1636,8 @@ export default class AdvancedModel extends Live2DModel {
 
   public async show(time: number, hologram: boolean, generation?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+    // 官方 Appear 不唤醒眨眼：唤醒只发生在非循环身体动作越过结尾时。
     this.autoBlink = true
-    if (this.blinkState.status === 'sleep' && !this.currentBodyMotion) {
-      wakeBlink(this.blinkState)
-    }
 
     if (hologram) {
       this.inHologram = true
@@ -1743,9 +1815,15 @@ export default class AdvancedModel extends Live2DModel {
     return Number.isFinite(parsed) ? parsed : null
   }
 
+  /**
+   * 模型自身的口型初值（`SetLipSyncPowKValue`）：资源名里的角色号属于
+   * `LIPSYNC_LOUD_CHARACTERS`（1/4/8/12/17/18）时 1.25，否则 1.0。
+   * 一次 talk 会用 `(tvs, tvs × 1.75)` 覆盖它；MSST 剧本没有 per-talk tvs，
+   * 因此包络按模型初值构建。
+   */
   public getLipSyncScale(): number {
     const charId = this.inferCharacterId()
-    return charId !== null && [1, 4, 8, 12, 17, 18].includes(charId)
+    return charId !== null && LIP_LOUD_CHARACTERS.includes(charId)
       ? LIP_LOUD_TARGET_VALUE_SCALE
       : LIP_TARGET_VALUE_SCALE
   }
@@ -1810,46 +1888,21 @@ export default class AdvancedModel extends Live2DModel {
     const abs_from: [number, number] = [stage_size[0] * from.x, stage_size[1] * (from.y + 0.3)]
     const abs_to: [number, number] = [stage_size[0] * to.x, stage_size[1] * (to.y + 0.3)]
 
+    // 官方 `CharacterMoveTo` 是 `DOLocalMove(...).SetEase(Linear)`：位置按进度线性插值。
     await AnimationManager.linear((progress) => {
-      // 官方 CharacterMoveTo 用 DOTween 的 OutQuad（ease.rs 同款）：起步快、收尾缓，
-      // 线性匀速的滑入/滑出会显得像传送带。
-      const eased = evaluateEase('OutQuad', progress)
-      this.position.x = (abs_to[0] - abs_from[0]) * eased + abs_from[0]
-      this.position.y = (abs_to[1] - abs_from[1]) * eased + abs_from[1]
+      this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
+      this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
     }, time_ms)
   }
 
-  /** 官方 `CharacterLayout Type 4/5` (`ShakeX / ShakeY`)：0.3s、振幅 15px (1920参考)、20 段 OutQuad 衰减。 */
-  public async shake(axis: 'X' | 'Y', stageWidth = 1920): Promise<void> {
+  /**
+   * 官方 `SnippetActionCharacterLayout` 的 ShakeX / ShakeY：参考实现只按 duration
+   * 计时，没有可见位移（`sse-bake/src/lib.rs:2137-2138` 只记录 approximation）。
+   * 因此这里只等待 0.3s（18 帧），角色位置保持不变；诊断里标注为近似项。
+   */
+  public async shake(_axis: 'X' | 'Y', _stageWidth = 1920): Promise<void> {
     if (this.destroyed) return
-    const generation = ++this.shakeGeneration
-    if (!this.basePositionBeforeShake) {
-      this.basePositionBeforeShake = { x: this.position.x, y: this.position.y }
-    }
-    const base = { ...this.basePositionBeforeShake }
-    const strength = 15 * (stageWidth / 1920)
-    const durationMs = 300
-    const vibrato = 20
-
-    await AnimationManager.linear((progress) => {
-      if (this.destroyed || generation !== this.shakeGeneration) return
-      const decay = 1 - evaluateEase('OutQuad', progress)
-      const seg = Math.min(vibrato - 1, Math.floor(progress * vibrato))
-      const segT = progress * vibrato - seg
-      const sign = seg % 2 === 0 ? 1 : -1
-      const env = Math.sin(segT * Math.PI)
-      const delta = sign * env * strength * decay
-      if (axis === 'X') {
-        this.position.x = base.x + delta
-      } else {
-        this.position.y = base.y + delta
-      }
-    }, durationMs)
-
-    if (!this.destroyed && generation === this.shakeGeneration) {
-      this.position.set(base.x, base.y)
-      this.basePositionBeforeShake = null
-    }
+    await AnimationManager.delay(CHARACTER_SHAKE_MS)
   }
 
   public async playMotionLastFrame(motion?: string, facial?: string): Promise<void> {

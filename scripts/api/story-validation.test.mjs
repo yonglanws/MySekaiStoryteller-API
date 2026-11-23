@@ -151,6 +151,7 @@ test('normalizes paths, speaker, names and defaults ±100 enter/exit to in-place
   assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 0 })
   assert.equal(appears[0].data.to.offset, 0)
   assert.equal(appears[0].data.motion, 'w-normal-nod01')
+  assert.equal(appears[1].data.motion, 'w-normal-tilt01')
 
   const clears = story.snippets.filter((snippet) => snippet.type === 'LayoutClear')
   assert.deepEqual(clears[0].data.to, { side: 'Left', offset: 0 })
@@ -161,7 +162,9 @@ test('normalizes paths, speaker, names and defaults ±100 enter/exit to in-place
   const talks = story.snippets.filter((snippet) => snippet.type === 'Talk')
   const enaTalk = talks.find((snippet) => snippet.data.modelId === 2)
   assert.equal(enaTalk.data.speaker, '绘名')
-  assert.equal(enaTalk.data.actions[0].motion, 'w-normal-tilt01')
+  // Talk 的 ProgressBehavior=Now 不再有隐式前置栅栏：这句紧跟在绘名入场后
+  // 0.4s 内重复同名动作，属于机械连打，linter 只去掉 motion、保留 facial。
+  assert.equal(enaTalk.data.actions[0].motion, undefined)
   assert.equal(enaTalk.data.actions[0].facial, 'face_smile_01')
 
   // 模型漏写 ChangeBackgroundImage 时自动补一张，避免整片白底
@@ -281,14 +284,16 @@ test('sanitizeDisplayText folds blank lines and wraps at 30 CJK cells', () => {
   assert.equal(sanitizeDisplayText(exact), exact)
   const long = '一'.repeat(35)
   const wrapped = sanitizeDisplayText(long)
-  assert.equal(wrapped, `${'一'.repeat(30)}\n${'一'.repeat(5)}`)
+  // 排版折行用零宽空格标记在换行前（官方正文换行没有标记）。
+  assert.equal(wrapped, `${'一'.repeat(30)}\u200B\n${'一'.repeat(5)}`)
 
   // 有标点时优先在标点后折行，不把词拦腰截断
-  const sentence = '今天也一起练习吧，然后我们再对一下明天要用的曲子，顺便把时间也定下来吧，好不好？'
+  const sentence =
+    '今天也一起练习吧，然后我们再对一下明天要用的曲子，顺便把时间也定下来吧，好不好？'
   const natural = sanitizeDisplayText(sentence)
-  assert.ok(natural.split('\n').every((line) => line.length <= 30))
-  assert.ok(natural.split('\n')[0].endsWith('，'))
-  assert.equal(natural.replace(/\n/g, ''), sentence)
+  assert.ok(natural.split('\n').every((line) => line.replace('\u200B', '').length <= 30))
+  assert.ok(natural.split('\n')[0].replace('\u200B', '').endsWith('，'))
+  assert.equal(natural.replace(/\u200B?\n/g, ''), sentence)
 })
 
 test('BGM prompt choices skip undescribed entries but keep them valid', () => {
@@ -466,13 +471,74 @@ test('supports ThreeMode with three simultaneous characters and rejects four on 
     snippets: [
       { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
       { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Three' } },
-      { type: 'LayoutAppear', wait: false, delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
-      { type: 'LayoutAppear', wait: false, delay: 0, data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-tilt01', facial: 'face_smile_01' } },
-      { type: 'LayoutAppear', wait: true, delay: 0, data: { modelId: 3, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
-      { type: 'Talk', wait: true, delay: 0, data: { speaker: '奏', content: '大家都在呢。', ttsText: '', modelId: 3, motion: '', facial: '', closeWindowOnFinish: true } },
-      { type: 'LayoutClear', wait: false, delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
-      { type: 'LayoutClear', wait: false, delay: 0, data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } } },
-      { type: 'LayoutClear', wait: true, delay: 0, data: { modelId: 3, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } }
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: 'w-normal-nod01',
+          facial: 'face_smile_01'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          motion: 'w-normal-tilt01',
+          facial: 'face_smile_01'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 3,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: 'w-normal-nod01',
+          facial: 'face_smile_01'
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '奏',
+          content: '大家都在呢。',
+          ttsText: '',
+          modelId: 3,
+          motion: '',
+          facial: '',
+          closeWindowOnFinish: true
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        delay: 0,
+        data: { modelId: 3, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } }
+      }
     ]
   }
   const { story: validThree } = validateAndFixStory(threeStory, threeView)
@@ -494,19 +560,54 @@ test('accepts all expanded official snippet types and auto-closes open effects',
   story.snippets.splice(
     3,
     0,
-    { type: 'PlaceInfo', wait: false, delay: 0, data: { place: '宫益坂女子学园 屋顶', duration: 2200 } },
-    { type: 'SideFade', wait: true, delay: 0, data: { mode: 'Out', direction: 'LeftOut', duration: 400 } },
-    { type: 'SideFade', wait: true, delay: 0, data: { mode: 'In', direction: 'RightIn', duration: 400 } },
+    {
+      type: 'PlaceInfo',
+      wait: false,
+      delay: 0,
+      data: { place: '宫益坂女子学园 屋顶', duration: 2200 }
+    },
+    {
+      type: 'SideFade',
+      wait: true,
+      delay: 0,
+      data: { mode: 'Out', direction: 'LeftOut', duration: 400 }
+    },
+    {
+      type: 'SideFade',
+      wait: true,
+      delay: 0,
+      data: { mode: 'In', direction: 'RightIn', duration: 400 }
+    },
     { type: 'SekaiIn', wait: true, delay: 0, data: { duration: 700 } },
     { type: 'SekaiOut', wait: true, delay: 0, data: { duration: 700 } },
-    { type: 'AttachCharacterShader', wait: false, delay: 0, data: { modelId: 1, shader: 'hologram', level: 1 } },
-    { type: 'CharacterShake', wait: false, delay: 0, data: { modelId: 2, axis: 'x', duration: 300, amplitude: 0.02 } },
+    {
+      type: 'AttachCharacterShader',
+      wait: false,
+      delay: 0,
+      data: { modelId: 1, shader: 'hologram', level: 1 }
+    },
+    {
+      type: 'CharacterShake',
+      wait: false,
+      delay: 0,
+      data: { modelId: 2, axis: 'x', duration: 300, amplitude: 0.02 }
+    },
     { type: 'LayoutDepth', wait: false, delay: 0, data: { modelId: 1, depth: 'Front' } },
     { type: 'CostumeChange', wait: false, delay: 0, data: { modelId: 2, costume: 'casual_01' } },
-    { type: 'PlayScenarioEffect', wait: false, delay: 0, data: { effect: 'sakura', intensity: 0.6 } },
+    {
+      type: 'PlayScenarioEffect',
+      wait: false,
+      delay: 0,
+      data: { effect: 'sakura', intensity: 0.6 }
+    },
     { type: 'StopScenarioEffect', wait: false, delay: 0, data: { effect: 'sakura' } },
     { type: 'FullScreenText', wait: true, delay: 0, data: { text: '两天后——', duration: 2000 } },
-    { type: 'SimpleSelectable', wait: true, delay: 0, data: { choices: ['继续练习', '先休息一会儿'], pickedIndex: 0 } },
+    {
+      type: 'SimpleSelectable',
+      wait: true,
+      delay: 0,
+      data: { choices: ['继续练习', '先休息一会儿'], pickedIndex: 0 }
+    },
     { type: 'SepiaIn', wait: true, delay: 0, data: { duration: 300 } },
     { type: 'SepiaOut', wait: true, delay: 0, data: { duration: 300 } },
     { type: 'BlurIn', wait: false, delay: 0, data: { duration: 300 } },
@@ -537,5 +638,8 @@ test('accepts all expanded official snippet types and auto-closes open effects',
   assert.ok(types.has('BgmVolume'))
   assert.ok(types.has('Movie'))
   assert.ok(types.has('FlashbackOut'), 'unclosed FlashbackIn should auto-close with FlashbackOut')
-  assert.ok(types.has('StopShakeScreen'), 'unclosed ShakeScreen should auto-close with StopShakeScreen')
+  assert.ok(
+    types.has('StopShakeScreen'),
+    'unclosed ShakeScreen should auto-close with StopShakeScreen'
+  )
 })
