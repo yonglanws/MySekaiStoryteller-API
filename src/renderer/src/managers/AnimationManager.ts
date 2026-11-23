@@ -142,11 +142,22 @@ export default class AnimationManager {
   public static async linear(
     animation: (progress: number) => void,
     time_ms: number,
-    elegant: boolean = false
+    elegant: boolean = false,
+    opts?: { maxProgressPerFrame?: number }
   ): Promise<void> {
     const effectiveTime = time_ms / AnimationManager.exportSpeedMultiplier
     let progress = 0
     animation(0)
+
+    // 预览卡顿限幅：单帧最多推进 opts.maxProgressPerFrame（如 show/hide 传 0.25），
+    // 长帧（切后台/卡顿）不再把 100ms 渐变跳成一步。仅预览生效；导出的虚拟时钟
+    // 33ms 均匀 tick 不受影响，maxStep 追赶语义保留。
+    const maxProgressPerFrame =
+      !AnimationManager.isExportMode &&
+      Number.isFinite(opts?.maxProgressPerFrame) &&
+      (opts?.maxProgressPerFrame ?? 0) > 0
+        ? (opts?.maxProgressPerFrame as number)
+        : 0
 
     if (effectiveTime >= 30) {
       await AnimationManager.in_ticker(
@@ -163,8 +174,12 @@ export default class AnimationManager {
             )
           }
 
+          const previous = progress
           progress += usedTime / effectiveTime
           progress = Math.min(progress, 1)
+          if (maxProgressPerFrame > 0) {
+            progress = Math.min(progress, previous + maxProgressPerFrame)
+          }
           animation(progress)
         },
         () => progress >= 1

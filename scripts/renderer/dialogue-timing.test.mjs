@@ -144,8 +144,24 @@ function fixture(t) {
       destroyed: false,
       visible: true,
       writes,
+      pendingMouthOpen: null,
+      mouthUpdateHooked: false,
       setMouthOpening(value) {
+        const core = this.internalModel.coreModel
+        if (typeof core.update !== 'function') {
+          write('ParamMouthOpenY', value)
+          return
+        }
+        this.pendingMouthOpen = value
         write('ParamMouthOpenY', value)
+        if (this.mouthUpdateHooked) return
+        const original = core.update
+        const host = this
+        core.update = function updateMouthThenMesh() {
+          if (host.pendingMouthOpen !== null) write('ParamMouthOpenY', host.pendingMouthOpen)
+          return original.call(this)
+        }
+        this.mouthUpdateHooked = true
       },
       getMouthOpenParamIds() {
         return ['ParamMouthOpenY']
@@ -348,9 +364,12 @@ for (const id of [1, 2]) {
     await f.clock.tickAsync(40)
     assert.equal(model.internalModel.listenerCount('beforeModelUpdate'), 1)
     model.internalModel.emit('beforeModelUpdate')
-    assert.equal(
-      model.writes.at(-1).value,
-      f.load('utils/LipSyncEnvelope.ts').sampleLipSync(envelope, 40)
+    const sampled = f.load('utils/LipSyncEnvelope.ts').sampleLipSync(envelope, 40)
+    const written = model.writes.at(-1).value
+    // 说话人侧叠了约 8Hz、±35% 的音节起伏，所以不是包络原值，但必须贴着它。
+    assert.ok(
+      Math.abs(written - sampled) / Math.max(sampled, 1e-6) < 0.4,
+      `speaker opening stays near the envelope: written ${written} sampled ${sampled}`
     )
     assert.ok(model.writes.at(-1).value > 0)
     model.visible = false
@@ -363,7 +382,10 @@ for (const id of [1, 2]) {
     const afterVoice = model.writes.at(-1).value
     assert.ok(afterVoice > 0, 'the mouth releases instead of snapping shut at the audio end')
     assert.ok(afterVoice < 0.6, `release must decay: ${afterVoice}`)
-    await f.clock.tickAsync(300)
+    // 450ms 指数释放尾（durationMs=100ms 音频 + 450ms）：先推进 420ms，累计 560ms
+    // 越过 durationMs=550ms 后 sampleLipSync 越界才严格返回 0；@440ms 处仍有
+    // ~0.021 残值（0.76×exp(-4.5)≈0.9%），不能提前断言归零。
+    await f.clock.tickAsync(420)
     model.internalModel.emit('beforeModelUpdate')
     assert.equal(model.writes.at(-1).value, 0, 'the release tail closes the mouth')
     await f.clock.tickAsync(3020)
@@ -411,6 +433,54 @@ test('already destroyed models cannot acquire a mouth listener', async (t) => {
   const run = f.run(talk('あ'))
   await f.clock.tickAsync(0)
   assert.equal(f.models.get(1).internalModel.listenerCount('beforeModelUpdate'), 0)
+  await f.clock.runAllAsync()
+  await run
+})
+
+test('a listener stays shut while the speaker keeps a moving mouth through parameter restore', async (t) => {
+  const f = fixture(t)
+  const speaker = f.models.get(1)
+  const listener = f.models.get(2)
+  // 听者自己的 updateMotions 在网格定稿前把嘴张开。
+  // 口型必须写在这个模型自己的 core.update() 之前，才能进本帧网格。
+  for (const model of [speaker, listener]) {
+    model.internalModel.coreModel.update = () => {}
+  }
+  f.app.layerModel.getVisibleModels = () => [speaker, listener]
+  const samples = new Float32Array(48000)
+  for (let i = 0; i < samples.length; i++) {
+    samples[i] = Math.sin((i / 48000) * 2 * Math.PI * 180) * 0.4
+  }
+  f.app.currentTalkLipSync = f
+    .load('utils/LipSyncEnvelope.ts')
+    .buildLipSyncEnvelope([samples], 48000)
+  const run = f.run(talk('今天也一起练习吧。', { modelId: 1 }))
+  const speakerOpens = []
+  for (const ms of [200, 280, 360, 440]) {
+    await f.clock.tickAsync(ms === 200 ? 200 : 80)
+    speaker.internalModel.emit('beforeModelUpdate')
+    listener.internalModel.emit('beforeModelUpdate')
+    // 动作先把嘴张开，再进被口型钩子包住的 core.update（网格定稿前重写）。
+    for (const model of [speaker, listener]) {
+      const core = model.internalModel.coreModel
+      core.setParameterValueById('motion-opened', 0.9)
+      core.setParamFloat('motion-opened', 0.9)
+      core.update()
+    }
+    const speakerMouth = [...speaker.writes]
+      .reverse()
+      .find((entry) => entry.param === 'ParamMouthOpenY')
+    const listenerMouth = [...listener.writes]
+      .reverse()
+      .find((entry) => entry.param === 'ParamMouthOpenY')
+    speakerOpens.push(speakerMouth.value)
+    assert.equal(listenerMouth.value, 0, `listener stays shut at ${ms}ms`)
+    const openedAt = listener.writes.findLastIndex((entry) => entry.param === 'motion-opened')
+    const closedAt = listener.writes.findLastIndex((entry) => entry.param === 'ParamMouthOpenY')
+    assert.ok(closedAt > openedAt, 'listener close is rewritten before the mesh update')
+  }
+  const span = Math.max(...speakerOpens) - Math.min(...speakerOpens)
+  assert.ok(span > 0.08, `speaker mouth must keep moving on a held vowel: ${speakerOpens}`)
   await f.clock.runAllAsync()
   await run
 })
@@ -629,16 +699,51 @@ test('talkPatch keeps concurrent non-blocking cues after Talk at the Talk start 
   const f = fixture(t)
   const { applyTalkPatch } = f.load('managers/video-export/talkPatch.ts')
   const timeline = [
-    { snippetIndex: 0, delayStartTimeMs: 1000, startTimeMs: 1000, durationMs: 2000, endTimeMs: 3000, ttsDurationMs: 0, hasTTS: false, blocking: true },
-    { snippetIndex: 1, delayStartTimeMs: 1000, startTimeMs: 1000, durationMs: 0, endTimeMs: 1000, ttsDurationMs: 0, hasTTS: false, blocking: false },
-    { snippetIndex: 2, delayStartTimeMs: 3000, startTimeMs: 3000, durationMs: 1500, endTimeMs: 4500, ttsDurationMs: 0, hasTTS: false, blocking: true },
+    {
+      snippetIndex: 0,
+      delayStartTimeMs: 1000,
+      startTimeMs: 1000,
+      durationMs: 2000,
+      endTimeMs: 3000,
+      ttsDurationMs: 0,
+      hasTTS: false,
+      blocking: true
+    },
+    {
+      snippetIndex: 1,
+      delayStartTimeMs: 1000,
+      startTimeMs: 1000,
+      durationMs: 0,
+      endTimeMs: 1000,
+      ttsDurationMs: 0,
+      hasTTS: false,
+      blocking: false
+    },
+    {
+      snippetIndex: 2,
+      delayStartTimeMs: 3000,
+      startTimeMs: 3000,
+      durationMs: 1500,
+      endTimeMs: 4500,
+      ttsDurationMs: 0,
+      hasTTS: false,
+      blocking: true
+    }
   ]
   applyTalkPatch(timeline, 0, 4000, 4500)
   assert.equal(timeline[0].endTimeMs, 5500)
   assert.equal(timeline[1].startTimeMs, 1000, 'PlaySe/Now right after Talk stays at Talk start')
-  assert.equal(timeline[1].delayStartTimeMs, 1000, 'concurrent cue delayStartTimeMs stays at Talk start')
+  assert.equal(
+    timeline[1].delayStartTimeMs,
+    1000,
+    'concurrent cue delayStartTimeMs stays at Talk start'
+  )
   assert.equal(timeline[2].startTimeMs, 5500, 'subsequent blocking Talk shifts to patched end')
-  assert.equal(timeline[2].delayStartTimeMs, 5500, 'subsequent blocking Talk delayStartTimeMs shifts too')
+  assert.equal(
+    timeline[2].delayStartTimeMs,
+    5500,
+    'subsequent blocking Talk delayStartTimeMs shifts too'
+  )
 })
 
 // Exercise both real export loops (not a regex/source inspection). Preparation,
@@ -943,7 +1048,11 @@ test('serial fast export pre-decodes lip-sync envelopes before snippet loop and 
   }
   const res = await f.export('fast', { ttsMode: 'serial' })
   assert.equal(res.success, true)
-  assert.equal(decodeCallsDuringSnippet, 0, 'Serial fast export must pre-decode before snippet loop')
+  assert.equal(
+    decodeCallsDuringSnippet,
+    0,
+    'Serial fast export must pre-decode before snippet loop'
+  )
   assert.equal(openingCoverCalled, 0, 'Must skip setOpeningCover when story starts with BlackOut')
 })
 
@@ -969,18 +1078,35 @@ test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade colli
     Application: class {},
     Container,
     Sprite,
-    Texture: { from: () => ({ valid: true, baseTexture: { valid: true } }), WHITE: { valid: true, baseTexture: { valid: true } }, EMPTY: {} },
+    Texture: {
+      from: () => ({ valid: true, baseTexture: { valid: true } }),
+      WHITE: { valid: true, baseTexture: { valid: true } },
+      EMPTY: {}
+    },
     Ticker: { shared: { add: noop, elapsedMS: 16 } }
   })
   f.mocks.set('../../assets/ui/ui_se_black.svg', 'ui_se_black.svg')
   f.mocks.set('../components/SEBlack', { default: Sprite })
   f.mocks.set('../effects/Ease', { runEasedTween: async () => {} })
-  f.mocks.set('../effects/InappTextures', { inappUrl: (p) => p, loadInappTexture: async () => null })
-  f.mocks.set('../effects/OfficialFilters', { CameraBlurFilter: class { spread = 0 } })
-  f.mocks.set('../effects/TriangleParticleEffect', { ScenarioEffectOverlay: class {}, SekaiTransitionParticles: class {} })
+  f.mocks.set('../effects/InappTextures', {
+    inappUrl: (p) => p,
+    loadInappTexture: async () => null
+  })
+  f.mocks.set('../effects/OfficialFilters', {
+    CameraBlurFilter: class {
+      spread = 0
+    }
+  })
+  f.mocks.set('../effects/TriangleParticleEffect', {
+    ScenarioEffectOverlay: class {},
+    SekaiTransitionParticles: class {}
+  })
 
   const SpecialEffectLayer = f.load('layers/SpecialEffectLayer.ts').default
-  const layer = new SpecialEffectLayer({ stage: new Container(), screen: { width: 1920, height: 1080 } })
+  const layer = new SpecialEffectLayer({
+    stage: new Container(),
+    screen: { width: 1920, height: 1080 }
+  })
   // Case 1: fadeOut called immediately over an already opaque opening cover must NOT snap alpha back to 0 (no bright flash)
   const coverPromise = layer.setOpeningCover(500)
   const blackOutPromise = layer.fadeOut(500, 'black')
@@ -988,21 +1114,35 @@ test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade colli
   const coveredMidAlpha = layer.seBlackSprite.filters[0].alpha
   await f.clock.tickAsync(300)
   await Promise.all([coverPromise, blackOutPromise])
-  assert.equal(coveredMidAlpha, 1, `Expected already-opaque curtain to stay at alpha=1 without flashing bright, got ${coveredMidAlpha}`)
-  assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'BlackOut must end fully opaque without stale fadeIn reset')
+  assert.equal(
+    coveredMidAlpha,
+    1,
+    `Expected already-opaque curtain to stay at alpha=1 without flashing bright, got ${coveredMidAlpha}`
+  )
+  assert.equal(
+    layer.seBlackSprite.filters[0].alpha,
+    1,
+    'BlackOut must end fully opaque without stale fadeIn reset'
+  )
   assert.equal(layer.seBlackSprite.visible, true)
 
   // Case 2: fadeOut after partial fade-in continues monotonically upward from current alpha without cover fight
   const partialCoverPromise = layer.setOpeningCover(500)
   await f.clock.tickAsync(250)
   const preBlackOutAlpha = layer.seBlackSprite.filters[0].alpha
-  assert.ok(preBlackOutAlpha > 0.35 && preBlackOutAlpha < 0.65, `Expected half-faded opening cover ~0.5, got ${preBlackOutAlpha}`)
+  assert.ok(
+    preBlackOutAlpha > 0.35 && preBlackOutAlpha < 0.65,
+    `Expected half-faded opening cover ~0.5, got ${preBlackOutAlpha}`
+  )
   const smoothBlackOutPromise = layer.fadeOut(500, 'black')
   await f.clock.tickAsync(250)
   const smoothMidAlpha = layer.seBlackSprite.filters[0].alpha
   await f.clock.tickAsync(300)
   await Promise.all([partialCoverPromise, smoothBlackOutPromise])
-  assert.ok(smoothMidAlpha > preBlackOutAlpha + 0.1 && smoothMidAlpha < 0.95, `Expected monotonic fadeOut upward from ~0.5 without cover fight, got ${smoothMidAlpha}`)
+  assert.ok(
+    smoothMidAlpha > preBlackOutAlpha + 0.1 && smoothMidAlpha < 0.95,
+    `Expected monotonic fadeOut upward from ~0.5 without cover fight, got ${smoothMidAlpha}`
+  )
   assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'Second BlackOut must end fully opaque')
 })
 

@@ -23,7 +23,7 @@ import { withGlobal } from '@sinonjs/fake-timers'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const renderer = path.join(root, 'src/renderer/src')
 
-function fixture(t) {
+function fixture(t, tickerClass) {
   const context = vm.createContext({
     console,
     setTimeout,
@@ -54,7 +54,7 @@ function fixture(t) {
   }
   const modules = new Map()
   const mocks = new Map([
-    ['pixi.js', { Ticker, UPDATE_PRIORITY: { INTERACTION: 0 } }],
+    ['pixi.js', { Ticker: tickerClass ?? Ticker, UPDATE_PRIORITY: { INTERACTION: 0 } }],
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new Logger() }]
   ])
   const compiled = new Map()
@@ -151,4 +151,77 @@ test('export frame stepping uses real elapsed time instead of the old 20ms clamp
   assert.equal(step(5000, false), 250, '预览模式限制在 250ms')
   assert.equal(step(50, false), 50, '非 elegant 预览不改变帧步进')
   assert.equal(step(50, false, true), 25, 'elegant 预览保留 30~100ms 温和钳制')
+})
+
+test('a stuttered preview frame advances at most maxProgressPerFrame during fades', async (t) => {
+  // 预览卡顿：每帧 rawDelta=250ms（预览 maxStep 上限内），mock Ticker 用
+  // 16ms setInterval 泵帧，fake timers 驱动。
+  class PumpTicker {
+    elapsedMS = 250
+    constructor() {
+      this.listener = null
+      this.timer = null
+    }
+    add(fn) {
+      this.listener = fn
+    }
+    start() {
+      this.timer = setInterval(() => this.listener(), 16)
+    }
+    stop() {
+      if (this.timer) clearInterval(this.timer)
+      this.timer = null
+    }
+    destroy() {
+      this.stop()
+    }
+  }
+  const f = fixture(t, PumpTicker)
+  const animation = f.load('managers/AnimationManager.ts').default
+  const frames = []
+  await animation.linear((progress) => frames.push(progress), 100, false, {
+    maxProgressPerFrame: 0.25
+  })
+  // 250ms raw 帧 + 单帧 0.25 限幅 → 100ms 渐变至少分 4 帧呈现（0.25/0.5/0.75/1）。
+  assert.ok(frames.length >= 4, `expected >=4 animation frames, got ${frames.length}`)
+  assert.deepEqual(
+    frames.slice(1, 4).map((p) => Math.round(p * 100) / 100),
+    [0.25, 0.5, 0.75],
+    `stuttered frames ${JSON.stringify(frames)}`
+  )
+  assert.ok(
+    frames.every((p, i) => i === 0 || p - frames[i - 1] <= 0.25 + 1e-9),
+    'no frame advances more than 0.25'
+  )
+  assert.equal(f.clock.countTimers(), 0, 'ticker cleaned up')
+})
+
+test('without the option a long preview frame still jumps the whole fade (guard against regressions)', async (t) => {
+  class PumpTicker {
+    elapsedMS = 250
+    constructor() {
+      this.listener = null
+      this.timer = null
+    }
+    add(fn) {
+      this.listener = fn
+    }
+    start() {
+      this.timer = setInterval(() => this.listener(), 16)
+    }
+    stop() {
+      if (this.timer) clearInterval(this.timer)
+      this.timer = null
+    }
+    destroy() {
+      this.stop()
+    }
+  }
+  const f = fixture(t, PumpTicker)
+  const animation = f.load('managers/AnimationManager.ts').default
+  const frames = []
+  await animation.linear((progress) => frames.push(progress), 100)
+  assert.equal(frames[0], 0)
+  assert.equal(frames[1], 1, 'no clamp: one 250ms frame finishes the 100ms fade')
+  assert.ok(frames.length <= 3, `no intermediate frames: ${JSON.stringify(frames)}`)
 })

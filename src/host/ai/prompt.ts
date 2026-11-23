@@ -205,10 +205,18 @@ function extractQueryTimeHint(query: string): string | null {
 }
 
 function extractQueryIndoorHint(query: string): string | null {
-  if (/教室|房间|卧室|客厅|厨房|医院|病房|排练室|休息室|咖啡厅|餐厅|室内|家里|家中|语音|通话|电脑/.test(query)) {
+  if (
+    /教室|房间|卧室|客厅|厨房|医院|病房|排练室|休息室|咖啡厅|餐厅|室内|家里|家中|语音|通话|电脑/.test(
+      query
+    )
+  ) {
     return '室内'
   }
-  if (/天台|屋顶|屋上|街头|十字路口|街道|中庭|校门|公园|游乐园|乐园|海边|沙滩|广场|室外|户外|山上/.test(query)) {
+  if (
+    /天台|屋顶|屋上|街头|十字路口|街道|中庭|校门|公园|游乐园|乐园|海边|沙滩|广场|室外|户外|山上/.test(
+      query
+    )
+  ) {
     return '室外'
   }
   return null
@@ -216,7 +224,21 @@ function extractQueryIndoorHint(query: string): string | null {
 
 function extractQueryKeywords(query: string): string[] {
   const tokens = new Set<string>()
-  const stopWords = new Set(['一个', '一起', '之后', '时候', '大家', '他们', '她们', '我们', '自己', '什么', '怎么', '因为', '所以'])
+  const stopWords = new Set([
+    '一个',
+    '一起',
+    '之后',
+    '时候',
+    '大家',
+    '他们',
+    '她们',
+    '我们',
+    '自己',
+    '什么',
+    '怎么',
+    '因为',
+    '所以'
+  ])
   for (const part of query.split(/[\s,，。！？!?、：:；;（）()「」""'']+/).filter(Boolean)) {
     const clean = part.trim().toLowerCase()
     if (clean.length >= 2 && !stopWords.has(clean)) tokens.add(clean)
@@ -340,12 +362,12 @@ export class CatalogView {
       typeof target === 'number'
         ? this.modelById(target)
         : typeof target === 'string'
-          ? this.models.find(
+          ? (this.models.find(
               (m) =>
                 m.name.toLowerCase() === target.toLowerCase() ||
                 (m.shortName ?? '').toLowerCase() === target.toLowerCase() ||
                 (m.cloudId ?? '').toLowerCase() === target.toLowerCase()
-            ) ?? null
+            ) ?? null)
           : target
     if (!refModel) return []
     return this.models
@@ -449,14 +471,18 @@ export class CatalogView {
 
     const scoreOf = (detail: CatalogImage): number => {
       let score = detail.source === 'local' ? 6 : 0
-      const hay = `${detail.name} ${(detail.aliases ?? []).join(' ')} ${(detail.tags ?? []).join(' ')} ${detail.category ?? ''}`.toLowerCase()
+      const hay =
+        `${detail.name} ${(detail.aliases ?? []).join(' ')} ${(detail.tags ?? []).join(' ')} ${detail.category ?? ''}`.toLowerCase()
       for (const kw of keywords) {
         if (detail.name.toLowerCase().includes(kw)) score += 12
         else if (hay.includes(kw)) score += 6
       }
       if (timeHint && detail.timeOfDay) {
         if (detail.timeOfDay === timeHint) score += 6
-        else if ((timeHint === '夜晚' && detail.timeOfDay === '深夜') || (timeHint === '深夜' && detail.timeOfDay === '夜晚')) {
+        else if (
+          (timeHint === '夜晚' && detail.timeOfDay === '深夜') ||
+          (timeHint === '深夜' && detail.timeOfDay === '夜晚')
+        ) {
           score += 3
         } else if (detail.timeOfDay !== '通用') {
           score -= 3
@@ -467,7 +493,8 @@ export class CatalogView {
         else score -= 2
       }
       for (const u of unitHints) {
-        if ((detail.tags ?? []).some((t) => t.includes(u)) || hay.includes(u.toLowerCase())) score += 4
+        if ((detail.tags ?? []).some((t) => t.includes(u)) || hay.includes(u.toLowerCase()))
+          score += 4
       }
       if (detail.id && /^bg_[a-f]00\d{2}0[1-4]$/.test(detail.id)) score += 2
       if (!detail.name.includes('#') && !detail.name.includes('衍生场景')) score += 3
@@ -476,7 +503,11 @@ export class CatalogView {
 
     const scored = effectivePool
       .map((detail) => ({ detail, score: scoreOf(detail) }))
-      .sort((a, b) => b.score - a.score || (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file))
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file)
+      )
 
     // 先拿高匹配度前 40%，再按 category 轮转补齐，兼顾贴题与多样性
     const picked: CatalogImage[] = []
@@ -532,14 +563,19 @@ export class CatalogView {
     const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
     const scoreOf = (detail: CatalogBgm): number => {
       let score = detail.source === 'local' ? 6 : 0
-      const hay = `${detail.name} ${detail.mood ?? ''} ${detail.category ?? ''} ${detail.unit ?? ''} ${detail.description} ${(detail.tags ?? []).join(' ')}`.toLowerCase()
+      const hay =
+        `${detail.name} ${detail.mood ?? ''} ${detail.category ?? ''} ${detail.unit ?? ''} ${detail.description} ${(detail.tags ?? []).join(' ')}`.toLowerCase()
       for (const kw of keywords) {
         if (hay.includes(kw)) score += 8
       }
       for (const u of unitHints) {
         if (detail.unit === u) score += 6
       }
-      if (/经典|日常|温暖|泪|紧绷|暗涌|普通|平凡|宁静|slapstick|into deep/i.test(detail.name + detail.description)) {
+      if (
+        /经典|日常|温暖|泪|紧绷|暗涌|普通|平凡|宁静|slapstick|into deep/i.test(
+          detail.name + detail.description
+        )
+      ) {
         score += 3
       }
       if (!/\(bgm\d+\)$/.test(detail.name)) score += 4
@@ -548,7 +584,11 @@ export class CatalogView {
 
     const scored = choices
       .map((detail) => ({ detail, score: scoreOf(detail) }))
-      .sort((a, b) => b.score - a.score || (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file))
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (a.detail.id ?? a.detail.file).localeCompare(b.detail.id ?? b.detail.file)
+      )
 
     const buckets = new Map<string, CatalogBgm[]>()
     for (const item of scored) {
@@ -644,7 +684,11 @@ export class CatalogView {
     const timeRank = (entry: CatalogImage): number => {
       if (timeHint) {
         if (entry.timeOfDay === timeHint) return 0
-        if ((timeHint === '夜晚' && entry.timeOfDay === '深夜') || (timeHint === '深夜' && entry.timeOfDay === '夜晚')) return 1
+        if (
+          (timeHint === '夜晚' && entry.timeOfDay === '深夜') ||
+          (timeHint === '深夜' && entry.timeOfDay === '夜晚')
+        )
+          return 1
         if (entry.timeOfDay === '通用') return 2
         return 3
       }
@@ -783,11 +827,16 @@ export class CatalogView {
     const charsWithFront = new Set(
       this.models
         .filter((m) => !isBackViewModel(m))
-        .map((m) => (typeof m.characterId === 'number' ? `char:${m.characterId}` : `name:${m.name.toLowerCase()}`))
+        .map((m) =>
+          typeof m.characterId === 'number'
+            ? `char:${m.characterId}`
+            : `name:${m.name.toLowerCase()}`
+        )
     )
     return this.models.filter((m) => {
       if (!isBackViewModel(m)) return true
-      const key = typeof m.characterId === 'number' ? `char:${m.characterId}` : `name:${m.name.toLowerCase()}`
+      const key =
+        typeof m.characterId === 'number' ? `char:${m.characterId}` : `name:${m.name.toLowerCase()}`
       return !charsWithFront.has(key)
     })
   }
@@ -796,7 +845,11 @@ export class CatalogView {
     return this.promptScopeModels()
       .map((model) => {
         const backTag = isBackViewModel(model) ? '[背面视角]' : ''
-        const outfitNote = model.outfitLabel ? ` [${model.outfitLabel}${backTag ? '·背面视角' : ''}]` : backTag ? ` ${backTag}` : ''
+        const outfitNote = model.outfitLabel
+          ? ` [${model.outfitLabel}${backTag ? '·背面视角' : ''}]`
+          : backTag
+            ? ` ${backTag}`
+            : ''
         return `- ${this.shortName(model)}${outfitNote} → modelId=${model.id}, model路径=${model.path}`
       })
       .join('\n')
@@ -941,7 +994,8 @@ export class CatalogView {
     if (keywords.length > 0) {
       const extra = this.seDetails
         .filter((d) => {
-          const hay = `${d.id ?? ''} ${d.category ?? ''} ${d.description} ${(d.tags ?? []).join(' ')}`.toLowerCase()
+          const hay =
+            `${d.id ?? ''} ${d.category ?? ''} ${d.description} ${(d.tags ?? []).join(' ')}`.toLowerCase()
           return keywords.some((kw) => hay.includes(kw))
         })
         .slice(0, Math.max(0, limit - merged.length))
@@ -988,10 +1042,10 @@ export class CatalogView {
 }
 
 const STORY_SYSTEM_PROMPT =
-  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。入场/退场默认原地淡入淡出，禁止 ±100px Slow 滑行；93% 台词 delay 为 0。'
+  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。入场默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），退场默认原地淡出，禁止 ±100px Slow 滑行；93% 台词 delay 为 0。'
 
 const CHAT_SYSTEM_PROMPT =
-  '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，入场/退场默认原地淡入淡出。'
+  '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，入场默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），退场默认原地淡出。'
 
 /** 用当前目录里真实存在的模型/动作/背景生成一段可执行的示例。 */
 export function buildActingExample(view: CatalogView): string {
@@ -1034,11 +1088,41 @@ export function buildActingExample(view: CatalogView): string {
   })
 
   const snippets: Array<Record<string, unknown>> = [
-    { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
-    { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 500 } },
-    { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
-    { type: 'BlackIn', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } },
-    { type: 'PlaceInfo', wait: false, progressBehavior: 'Now', delay: 0, data: { text: '放学后的教室' } }
+    {
+      type: 'ChangeLayoutMode',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { mode: 'Normal' }
+    },
+    {
+      type: 'BlackOut',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: { duration: 500 }
+    },
+    {
+      type: 'ChangeBackgroundImage',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { imageId: 1 }
+    },
+    {
+      type: 'BlackIn',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: { duration: 600 }
+    },
+    {
+      type: 'PlaceInfo',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { text: '放学后的教室' }
+    }
   ]
 
   if (ids.length === 1) {
@@ -1058,7 +1142,9 @@ export function buildActingExample(view: CatalogView): string {
         moveSpeed: 'Normal'
       }
     })
-    snippets.push(talk(id, '今天也想和你多聊一会儿。', [facialOnly(id, 0)], { closeWindowOnFinish: true }))
+    snippets.push(
+      talk(id, '今天也想和你多聊一会儿。', [facialOnly(id, 0)], { closeWindowOnFinish: true })
+    )
     snippets.push({
       type: 'LayoutClear',
       wait: true,
@@ -1139,7 +1225,13 @@ export function buildActingExample(view: CatalogView): string {
     })
   }
 
-  snippets.push({ type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } })
+  snippets.push({
+    type: 'BlackOut',
+    wait: true,
+    progressBehavior: 'WaitFinished',
+    delay: 0,
+    data: { duration: 600 }
+  })
 
   const exampleBgm = view.bgmPromptChoices()[0]?.file
   return JSON.stringify({
@@ -1161,7 +1253,7 @@ const STORY_PROMPT = `# 视觉小说剧本生成
 
 你是 Project SEKAI 风格视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏，完整、自然，但不要写成超长剧情。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数。一场只演完一件事或一个情绪转折就退场，禁止把整段人生、多条支线或连续多场戏塞进这一次。
-表演克制、贴近原作：93% 的台词 delay 为 0，入场/退场默认原地淡入淡出（from == to, offset: 0），禁止 ±100px Slow 滑行。
+表演克制、贴近原作：93% 的台词 delay 为 0，入场默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），退场默认原地淡出，禁止 ±100px Slow 滑行。
 
 ## 角色池
 
@@ -1179,9 +1271,9 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - ChangeLayoutMode.data.mode：固定为 "Normal"（Left / Right 双人或单人 Center）；严禁 3 人及以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
 - **双人全片同场与多人轮换原则**：当整场只有 2 名角色时，保持两人在场（Left/Right），不要每句来回切人淡入淡出。当整场 >=3 名角色时，保持每次最多 2 人在场，按幕次或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
-- **入场/退场动画规则（99% 原地淡入淡出）**：
-  - 默认原地淡入淡出：LayoutAppear 的 from 与 to 写相同槽位且 offset=0（如 {"side":"Left","offset":0} -> {"side":"Left","offset":0}）；双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
-  - 仅在明确“走入/走离”镜头时，才用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
+- **入场/退场动画规则**：
+  - 入场默认画外滑入：LayoutAppear 的 from 写同侧画外（Left 槽→LeftOver、Right 槽→RightOver）且 offset=0，to 写槽位（offset=0），moveSpeed="Normal"；仅飘现/传送类演出显式原地淡入（from == to, offset: 0）；Center 槽保持原地淡入。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
+  - 仅在明确“走入/走离”镜头时，也用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
   - LayoutAppear 若已带入场动作（禁止 default 站姿），紧接着 0.4s 内的该角色首句 Talk 不要再重复触发 body motion（可只改 facial）。
   - LayoutClear 默认原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
 - 可用 Move 做小幅跨步/移近（offset ±80~150 或单人移至 Center），用 CharacterShake（X/Y）演受惊，用 AttachCharacterShader（hologram）演虚拟歌手投影/通话。
@@ -1247,7 +1339,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 
 ## 输出要求
 1. 只输出合法 JSON，无 markdown、无解释；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear/LayoutClear 默认原地淡入淡出（from == to, offset: 0），仅物理走入用 LeftOver/RightOver；全片 Normal 模式最多 2 人同时在场
+2. 开场与退场序列完整；LayoutAppear 默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），仅飘现/传送类演出显式原地淡入；LayoutClear 默认原地淡出（from == to, offset: 0）；全片 Normal 模式最多 2 人同时在场
 3. models 的 id 和路径必须与对照表一致，多角色绝不能写成同一个模型；数组顺序与登场顺序一致
 4. 所有 Talk/Motion/LayoutAppear/LayoutClear 的 modelId：{id_mapping}
 5. 每条 Talk 只写 content、不要写 ttsText；入场后 <0.4s 勿重复触发同角色 body motion；短反应保留 facial
@@ -1263,7 +1355,7 @@ const CHAT_PROMPT = `# 视频角色对话生成
 
 代入人格池中选定的角色，以该角色的身份、口吻和心理状态，生成一段视觉小说式的对话剧本。只输出合法 JSON（仅含 models、images、snippets，可选 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数，按人设把这场回应说完再退场。
-表演克制、贴近原作：93% 的台词 delay 为 0；角色开口时做一个自然小动作，入场/退场默认原地淡入淡出（from == to, offset: 0）。
+表演克制、贴近原作：93% 的台词 delay 为 0；角色开口时做一个自然小动作，入场默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），退场默认原地淡出。
 
 ## 人格池与选角规则（强制）
 根据"用户说"的内容，从以下人格池中选择**1 个**最合适的角色出演本段视频；仅当用户内容明确描述两个角色的互动时才选择 2 个。优先选择用户点名的角色；未点名时选择与内容最相关的角色。未提供详细人设的角色，请依据角色名与场景合理演绎，保持言行前后一致。
@@ -1315,15 +1407,15 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 4. 每条 Talk **最多 3 行**（最多 2 个 \\n）；超长请拆成连续多条 Talk（delay=0）
 5. 不要写 ttsText；宿主会按 content 逐条补日文翻译
 
-开场原地淡入 + 对话表演 + 结尾原地淡出退场：
+开场画外滑入（单人 Center 槽保持原地淡入）+ 对话表演 + 结尾原地淡出退场：
 \`\`\`
-ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(原地淡入) -> Talk(actions)... -> HideTalk/closeWindowOnFinish -> LayoutClear(原地淡出) -> BlackOut
+ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(画外滑入；Center 槽原地淡入) -> Talk(actions)... -> HideTalk/closeWindowOnFinish -> LayoutClear(原地淡出) -> BlackOut
 \`\`\`
 
 **舞台与替换规则**：
 - ChangeLayoutMode.data.mode 写 "Normal"。单人用 Center，两人用 Left / Right，不能同侧，也不能 Center 与另一槽混用。
 - 始终维护在场名单：models 是整场演员表，不是在场名单。任意时刻最多两人；只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位。
-- **入场/退场默认原地淡入淡出（from == to, offset: 0）**：禁止 ±100px 偏移滑行。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
+- **入场默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入；仅飘现/传送类演出显式原地淡入）**：禁止 ±100px 偏移滑行。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
 - Talk 和 actions 只指向已入场角色；旁白可用 modelId=-1，但不能给 -1 配动作。
 
 **结尾退场序列（缺一不可）：**
@@ -1338,7 +1430,7 @@ ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear
 
 ## 输出要求
 1. 只输出合法 JSON，无额外文字；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear/LayoutClear 原地淡入淡出（from == to, offset: 0）；任意时刻最多两人在场
+2. 开场与退场序列完整；LayoutAppear 默认画外滑入（from=同侧 LeftOver/RightOver → to=槽位，moveSpeed Normal；Center 槽保持原地淡入），仅飘现/传送类演出显式原地淡入；LayoutClear 原地淡出（from == to, offset: 0）；任意时刻最多两人在场
 3. speaker 与 modelId 必须来自对照表；每条 Talk 只写 content、不写 ttsText；动作幅度小而自然，禁止大动作
 4. models=[{"id":<所选角色modelId>,"model":"<对照表中的model路径>","normal_scale":2.1,"small_scale":1.8,"anchor":0.5}]（多角色按登场顺序排列）
 5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的背景名或 id>"}]

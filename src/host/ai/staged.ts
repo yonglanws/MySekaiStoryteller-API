@@ -409,11 +409,7 @@ function pickFacialFromHints(
     const fresh = effectivePool.find((name) => name !== currentFacial && hint.test(name))
     if (fresh) return fresh
   }
-  return (
-    effectivePool.find((name) => name !== currentFacial) ??
-    effectivePool[0] ??
-    ''
-  )
+  return effectivePool.find((name) => name !== currentFacial) ?? effectivePool[0] ?? ''
 }
 
 /** 为说话者挑选贴合当前台词语气与情绪的细腻表情（避免反复卡在 face_normal_01，也避免在沉默/紧张拍误笑）。 */
@@ -640,11 +636,7 @@ function pickListenerReactionFacial(
       precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
     )
   }
-  if (
-    precededByTense
-      ? /♪|～♪|太好了/.test(text)
-      : /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)
-  ) {
+  if (precededByTense ? /♪|～♪|太好了/.test(text) : /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
     return pickFacialFromHints(
       facials,
       restrained
@@ -1676,14 +1668,27 @@ export function buildEmotionPrompt(
     .join('\n')
 
   const mid = Math.max(2, Math.floor(dialogue.lines.length * 0.45))
-  const late = Math.max(mid + 1, Math.min(dialogue.lines.length, Math.floor(dialogue.lines.length * 0.78)))
+  const late = Math.max(
+    mid + 1,
+    Math.min(dialogue.lines.length, Math.floor(dialogue.lines.length * 0.78))
+  )
   const endId = dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'
   const example = {
     segments: [
       { from: 'l1', to: `l${Math.max(1, mid - 1)}`, emotion: defaultEmotion },
-      { from: `l${mid}`, to: `l${Math.max(mid, late - 1)}`, emotion: strongLabels[0] ?? defaultEmotion },
+      {
+        from: `l${mid}`,
+        to: `l${Math.max(mid, late - 1)}`,
+        emotion: strongLabels[0] ?? defaultEmotion
+      },
       ...(dialogue.lines.length >= 6
-        ? [{ from: `l${late}`, to: endId, emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion }]
+        ? [
+            {
+              from: `l${late}`,
+              to: endId,
+              emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion
+            }
+          ]
         : [])
     ]
   }
@@ -1864,7 +1869,11 @@ export function stabilizeEmotions(
     const isGlobalSingleton =
       (i === 0 || values[i - 1] !== values[i]) &&
       (i === lines.length - 1 || values[i + 1] !== values[i])
-    if (prevIdx !== undefined && isGlobalSingleton && !isEmotionPivotCue(lines[i].content, values[i])) {
+    if (
+      prevIdx !== undefined &&
+      isGlobalSingleton &&
+      !isEmotionPivotCue(lines[i].content, values[i])
+    ) {
       const prevEmotion = values[prevIdx]
       let nextSame = -1
       for (let scan = i + 1; scan < lines.length; scan++) {
@@ -1873,11 +1882,7 @@ export function stabilizeEmotions(
           break
         }
       }
-      if (
-        prevEmotion !== values[i] &&
-        nextSame !== -1 &&
-        values[nextSame] === prevEmotion
-      ) {
+      if (prevEmotion !== values[i] && nextSame !== -1 && values[nextSame] === prevEmotion) {
         values[i] = prevEmotion
       }
     }
@@ -3429,8 +3434,7 @@ export function composeStory(
       }
     }
 
-    const overlapsPreceding =
-      (!options.hadPrecedingClear && clearedCount > 0) || movedExisting
+    const overlapsPreceding = (!options.hadPrecedingClear && clearedCount > 0) || movedExisting
     const lineAtEntry = dialogue.lines[lineIndex]
     const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
@@ -3438,9 +3442,15 @@ export function composeStory(
     incoming.forEach((id, idx) => {
       const slot = desiredSlotFor.get(id)!
       const isWalk = walkInSet.has(id)
+      // 入场默认画外滑入（官方 Appear 观感）：Left/Right 槽 from=同侧画外
+      // （Left→LeftOver、Right→RightOver），Center 特写保持原地淡入（横穿
+      // 全屏约 1870px 易喧宾，且方向确定性差；Center 滑入方向待观感确认）。
+      // 仅飘现/传送类演出由 prompt 显式指定原地淡入；isWalk 本就来自画外，语义不变。
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
-        : { side: slot, offset: 0 }
+        : slot === 'Center'
+          ? { side: slot, offset: 0 }
+          : { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
       const member = cast.find((c) => c.modelId === id)
       const memberName = member?.name
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
@@ -4173,8 +4183,7 @@ export function composeStory(
         talkDelay < 0.8
       const listenerMotion =
         listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
-      const listenerPrecededByTense =
-        precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+      const listenerPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
       const listenerFacialRaw = directed.listener.facial
       const listenerFacial = shouldAvoidIncongruousSmile(
         listenerFacialRaw,
@@ -4425,8 +4434,7 @@ export function composeStory(
             targetState.lastBodyMotion,
             new Set(targetState.recentBodyMotions)
           )
-        const silentPrecededByTense =
-          precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+        const silentPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
         const rawSilentFacial = ev?.silentReaction?.facial || ''
         const safeSilentFacial = shouldAvoidIncongruousSmile(
           rawSilentFacial,

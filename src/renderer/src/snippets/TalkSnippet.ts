@@ -8,7 +8,6 @@ import {
   AUTO_NEXT_PAGE_DELAY_MS,
   AUTO_WAIT_AFTER_VOICE_MS,
   FRAME_MS,
-  MOUTH_SYNC_FALLBACK_PRESET,
   TALK_WINDOW_OPEN_CLOSE_MS,
   VOICE_END_LATENCY_MS
 } from '../../../common/official/timing'
@@ -48,16 +47,11 @@ interface TalkData {
 }
 
 /**
- * 说话时的 `ParamMouthForm` 中和状态（按模型保存）：
- * 记录表情原本的 form 与我们上一帧写入的值；若当前值被别人改过
- * （新表情/动作），下一帧重新以新值为基准，避免多次台词把 form 逐渐拉向默认。
+ * `ParamMouthForm` 完全不写、由表情/动作拥有：对应 ournotes fallback 路径
+ * （lipsync.js hasForm:false，policy 仅在 hasForm&&hasBase 时介入）。
+ * 说话时向默认值中和 form 不是 ournotes 任何路径的行为（托管路径的
+ * formOpenSupp 是元音 delta 的抑制因子，MSST 无元音数据）。
  */
-interface MouthFormState {
-  base: number
-  lastWritten: number
-}
-const mouthFormStates = new WeakMap<AdvancedModel, MouthFormState>()
-
 export default class TalkSnippet extends BaseSnippet {
   private mouthCleanup: (() => void) | null = null
   private capturedPlannedDurationMs = 0
@@ -71,36 +65,33 @@ export default class TalkSnippet extends BaseSnippet {
     await super.runSnippet()
   }
 
-  private applyMouthForm(model: AdvancedModel, open: number): void {
-    const info = model.getMouthFormInfo()
-    if (!info) return
-    const tolerance = Math.max(1e-4, (info.max - info.min) * 1e-4)
-    let state = mouthFormStates.get(model)
-    if (!state) {
-      state = { base: info.value, lastWritten: info.value }
-      mouthFormStates.set(model, state)
-    } else if (Math.abs(info.value - state.lastWritten) > tolerance) {
-      // 表情/动作刚改过 form：以新值为基准重新中和。
-      state.base = info.value
-      state.lastWritten = info.value
+  /**
+   * 本句口型开度。语音包络仍是官方曲线裸输出 + policy；只在说话人这一侧
+   * 叠一层约 6Hz、±12% 的音节起伏，避免长元音 RMS 几乎恒定时嘴停在中等开口。
+   * 听者不走这条，保持闭嘴。
+   */
+  private speakerOpen(
+    elapsed: number,
+    hasVoice: boolean,
+    envelope: LipSyncEnvelope | null,
+    textLip: Float32Array | null,
+    textStartDelayMs: number,
+    halfMs: number
+  ): number {
+    if (hasVoice) {
+      const open = sampleLipSync(envelope!, elapsed)
+      if (open <= 0) return 0
+      // ±35%、约 8Hz：长元音 RMS 几乎恒定时仍能看出开合，不改包络本身。
+      const syllable = 0.65 + 0.35 * Math.sin((elapsed / 1000) * 2 * Math.PI * 8)
+      return Math.min(1, Math.max(0, open * syllable))
     }
-    const suppression = Math.min(1, Math.max(0, open)) * MOUTH_SYNC_FALLBACK_PRESET.formOpenSupp
-    const target = state.base + (info.defaultValue - state.base) * suppression
-    model.setMouthForm(target)
-    state.lastWritten = target
-  }
-
-  private restoreMouthForm(model: AdvancedModel): void {
-    const state = mouthFormStates.get(model)
-    const info = model.getMouthFormInfo()
-    if (!state || !info) return
-    const tolerance = Math.max(1e-4, (info.max - info.min) * 1e-4)
-    // 只有当 form 仍是我们最后一次写下的值时才能安全还原；
-    // 期间若有新表情接管，保留表情自己的值。
-    if (Math.abs(info.value - state.lastWritten) <= tolerance) {
-      model.setMouthForm(state.base)
-      state.lastWritten = state.base
-    }
+    if (!textLip || textLip.length === 0) return 0
+    const textElapsed = Math.max(0, elapsed - textStartDelayMs)
+    const frame = textElapsed / halfMs
+    const index = Math.floor(frame)
+    const tail = textLip[Math.min(index, textLip.length - 1)] ?? 0
+    const next = textLip[Math.min(index + 1, textLip.length - 1)] ?? 0
+    return tail + (next - tail) * (frame - index)
   }
 
   private startMouthAnimation(
@@ -119,27 +110,22 @@ export default class TalkSnippet extends BaseSnippet {
     const textLip = hasVoice ? null : textLipSequence(contentLength * 2)
     const halfMs = TALK_DISPLAY_MS_PER_CHAR / 2
     let startTime = this.app.currentTalkStartedAtMs
+    const layer = this.app.layerModel as { getVisibleModels?: () => AdvancedModel[] }
     const update = (): void => {
       if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
       const current = nowMs()
       if (current < startTime) startTime = current
       const elapsed = Math.max(0, current - startTime)
-      let open = 0
-      if (hasVoice) {
-        open = sampleLipSync(envelope!, elapsed)
-      } else if (!textLip || textLip.length === 0) {
-        open = 0
-      } else {
-        // 文本口型跟随打字机：窗口打开动画结束、开始显示文字时嘴才动。
-        const textElapsed = Math.max(0, elapsed - textStartDelayMs)
-        const frame = textElapsed / halfMs
-        const index = Math.floor(frame)
-        const tail = textLip[Math.min(index, textLip.length - 1)] ?? 0
-        const next = textLip[Math.min(index + 1, textLip.length - 1)] ?? 0
-        open = tail + (next - tail) * (frame - index)
-      }
+      const open = this.speakerOpen(elapsed, hasVoice, envelope, textLip, textStartDelayMs, halfMs)
       model.setMouthOpening(open)
-      this.applyMouthForm(model, open)
+      // 同台其他人闭嘴。每个模型在自己的 coreModel.update() 之前重写，
+      // 这样听者自己的 updateMotions 把嘴张开之后、网格定稿之前会被按住。
+      const others = layer.getVisibleModels?.() ?? []
+      for (const other of others) {
+        if (other === model || other.destroyed) continue
+        if (!this.app.layerModel.isModelVisible(other.metadata.id)) continue
+        other.setMouthOpening(0)
+      }
     }
     // The dependency emits this event after physics but omits it from its declaration.
     const events = model.internalModel as unknown as {
@@ -154,7 +140,6 @@ export default class TalkSnippet extends BaseSnippet {
       model.actionSignal?.removeEventListener('abort', onDestroyed)
       if (!model.destroyed) {
         model.setMouthOpening(0)
-        this.restoreMouthForm(model)
       }
     }
     model.actionSignal?.addEventListener('abort', onDestroyed, { once: true })

@@ -184,6 +184,11 @@ test('encodeFramesToVideo omits hw_upload, computes duration from frame count, a
   assert.ok(!calls[0].args.some((a) => String(a).includes('hw_upload')))
   assert.ok(!calls[0].args.includes('-vf'), 'identity dimensions skip scale filter')
   assert.equal(calls[1].args[calls[1].args.indexOf('-c:v') + 1], 'libx264')
+  const aq = calls[1].args.indexOf('-x264-params')
+  assert.ok(
+    aq > 0 && String(calls[1].args[aq + 1]).includes('aq-mode=3'),
+    'dark fades need aq-mode=3'
+  )
 })
 
 test('VideoApiServer hardens /api/v1/download and protects active multi-dot sidecars from cleanup', async (t) => {

@@ -98,7 +98,7 @@ Stage 4/5: composeStory + validateAndFixStory + OfficialLinter（编译官方时
    - **`emotion`**：仅在配置了 TTS 情绪标签时启动，低温（`0.2`）按 5~10 句段落输出 `segments`，随后由 `stabilizeEmotions` 强制最短连续段、同说话人抖动贴回、强情绪配额与平静回落。
    - **`staging`（`directStaging`）**：根据完整台词与分幕计划编排具体幕次转场（`fromLineId`）、`AmbientColor`、`Telop` / `PlaceInfo`、`PlaySe`（来自 1,942 条 SE 语义库与精选 cue）、`Move`（`stepCloser` / `stepBack` / `shiftSlot`）、`CameraZoom` / `CameraMove` / `ShakeWindow` / `ShakeScreen`、`hologram` 全息 shader、静默反应与 `bgmCut`。
      - **2 人场景**：强制全程双人同台（`Left` / `Right`），不中途退场切换。
-     - **3~5 人团体场景**：始终保持 **`Normal` 模式（同时最多 2 人同台）**，通过 `stageGroup` 在幕次或对话轮换节点以 `LayoutClear` + `LayoutAppear` **原地交叠淡出/淡入**切换在场角色，匹配 PJSK `pjsk.moe` 官方演出表现。
+     - **3~5 人团体场景**：始终保持 **`Normal` 模式（同时最多 2 人同台）**，通过 `stageGroup` 在幕次或对话轮换节点以成对的 `LayoutClear`（原地淡出）+ `LayoutAppear`（画外滑入）交叠轮换在场角色，匹配 PJSK `pjsk.moe` 官方演出表现。
    - **`translateDialogue`**：台词定稿后立即异步启动，每批 20 条、最多 3 批并发将缺失或非日文的 `ttsText` 翻译为日语。
 
 4. **Stage 3 — `direction`（精细演技导演，`directActing`）**
@@ -111,7 +111,7 @@ Stage 4/5: composeStory + validateAndFixStory + OfficialLinter（编译官方时
    - `validateAndFixStory` 负责路径与模型 id 对齐、云端背景/BGM/服装/SE 名收束（校验器全量覆盖 511 模型、1,401 背景、421 BGM 与 1,942 SE）、动作/表情名称自动纠偏、`sanitizeDisplayText`（30 字宽优先在标点后折行）与超 3 行 `Talk` 拆分。
    - `enforceOfficialStoryInvariants`（`OfficialLinter`）核查并自动修复 **7 项官方演出硬不变量**：
      1. `Talk.delay == 0` 占比 ≥ 85%（清除机械 `0.1/0.15s` 小停顿，保留 `≥0.5s` 刻意留白）。
-     2. 零 `±100px` Slow 滑入/滑出（统一转为 `from == to, offset: 0` 原地淡入/淡出）。
+     2. 零 `±100px` 偏移滑行（自动转为 `from == to, offset: 0` 原地淡入/淡出）；入场默认画外滑入（Left/Right 槽 `from=同侧 LeftOver/RightOver → to=槽位`，Center 槽原地淡入），退场默认原地淡出。
      3. `LayoutAppear` 带入场动作后 `< 0.4s` 内不重复触发同角色 body motion（避免双重抽搐）。
      4. 转场（`BlackOut` / `SideFade Out` / `SekaiOut` / `Telop`）与静默动作前自动设置 `closeWindowOnFinish`。
      5. `FlashbackIn/Out`、`SepiaIn/Out`、`SideFade Out/In`、`SekaiOut/In`、`ShakeScreen/Stop`、Shader、Camera 必须成对闭合。

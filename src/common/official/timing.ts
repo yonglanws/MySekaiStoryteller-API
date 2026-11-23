@@ -205,10 +205,12 @@ export function smoothLipValue(target: number, previous: number): number {
 }
 
 /**
- * `AdvLipSyncPolicy` 的 Fallback（CRI Lips）预设，取自 ournotes-player 对游戏
- * `Live2DAnimation.LipSyncPresets` 的逐字段移植；`minSpeech/speechFloor` 按
- * 本项目 RMS 曲线的实际量程下调（官方预设面向 CRI openY，直接套用会把轻声
- * 全部抬到 0.17，嘴型看起来不动）。attack/release/hold 与官方一致。
+ * `AdvLipSyncPolicy` 的 Fallback（CRI Lips）预设，逐位照抄 ournotes-player
+ * `src/live2d/lipsync.js:28-30` 的官方 fallback 原值（游戏 Live2DAnimation
+ * LipSyncPresets 的默认档）。policy 本体与 ournotes 逐位一致后，preset 也必须
+ * 用同一份原值才能复现同一嘴型观感；喂给 policy 的 raw 已按每句 p95 归一到
+ * 0.78（CRI/MotionSync 输入层天生归一的等效物），落在 CRI openY 量纲内，
+ * 轻声保底归还 policy 的 speechFloor/minSpeech。
  */
 export const MOUTH_SYNC_FALLBACK_PRESET = {
   attack: 0.032,
@@ -216,23 +218,23 @@ export const MOUTH_SYNC_FALLBACK_PRESET = {
   hold: 0.06,
   /** 第一道（细节）平滑时间常数，上行时再乘 0.65。 */
   hfs: 0.022,
-  speakingThr: 0.02,
-  silenceFloor: 0.01,
-  speechFloor: 0.05,
-  minSpeech: 0.1,
+  speakingThr: 0.026,
+  silenceFloor: 0.015,
+  speechFloor: 0.11,
+  minSpeech: 0.17,
   /** 每次开口的第一个输出下限（张嘴起势）。 */
-  onset: 0.12,
+  onset: 0.13,
   openScale: 1.03,
   /** 开度压缩：t = t / (comp × t + 1)，0 表示关闭。 */
   comp: 0.07,
   /** 张幅上限。 */
-  openCap: 0.92,
-  /** 说话时把 ParamMouthForm 按开度向默认值中和的比例。 */
-  formOpenSupp: 0.16
+  openCap: 0.88,
+  /** 元音 delta 的抑制因子；MSST 无元音数据，fallback 源 policy 不消费，仅数据忠实。 */
+  formOpenSupp: 0,
+  /** 与 ournotes fallback 表对齐的数据字段；本 policy 不消费，仅数据忠实。 */
+  formScale: 1,
+  baseToDefault: 0
 } as const
-
-/** RMS 口型包络专用的最小开度：官方 0.2 对 TTS 太高一档，会把轻声与正常音节压成同一档。 */
-export const LIP_RMS_MIN_VALUE = 0.08
 
 /** 语音口型目标值：RMS → 官方 pow 曲线、阈值与限幅。 */
 export function lipTargetFromRms(

@@ -147,6 +147,9 @@ export default class AdvancedModel extends Live2DModel {
   private breathParamId: string | null = null
   private mouthOpenParamIds: string[] = []
   private mouthOpenIndices = new Map<string, number>()
+  /** 本帧要画进网格的开度；null 表示没有口型覆盖。 */
+  private pendingMouthOpen: number | null = null
+  private mouthUpdateHooked = false
   private mouthParamCount = 0
   private mouthFormParamId: string | null = null
   private mouthFormIndex = -1
@@ -461,10 +464,41 @@ export default class AdvancedModel extends Live2DModel {
     return [...this.mouthOpenParamIds]
   }
 
-  /** 0..1 的口型开度写入模型参数的 min..max；Cubism2 参数本身是 0..1。 */
+  /**
+   * 0..1 的口型开度写入模型参数的 min..max；Cubism2 参数本身是 0..1。
+   *
+   * Cubism4 绘制用的网格在 `coreModel.update()` 里定稿，顺序是
+   * updateMotions → saveParameters → beforeModelUpdate → model.update() →
+   * loadParameters()。loadParameters 只把参数还原给下一帧的动作混合，
+   * 写在它后面进不了本帧网格。听者自己的 updateMotions 又会在自己绘制前
+   * 把动作里的张嘴写回来，所以必须挂在这个模型自己的 `model.update()` 之前。
+   */
   public setMouthOpening(value: number): void {
     const open = Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
     if (this.mouthOpenParamIds.length === 0) return
+    const internal = this.internalModel
+    const core = internal?.coreModel as { update?: () => void } | undefined
+    if (!core || typeof core.update !== 'function') {
+      this.writeMouthOpeningNow(open)
+      return
+    }
+    this.pendingMouthOpen = open
+    // 先写一次：没有真实 update 循环的调用方（测试）也能读到开度。
+    // 真正绘制时在 coreModel.update() 之前再用 pending 值覆盖动作张嘴。
+    this.writeMouthOpeningNow(open)
+    if (this.mouthUpdateHooked) return
+    const original = core.update
+    const host = this
+    core.update = function updateMouthThenMesh(this: { update?: () => void }) {
+      if (host.pendingMouthOpen !== null) {
+        host.writeMouthOpeningNow(host.pendingMouthOpen)
+      }
+      return original.call(this)
+    }
+    this.mouthUpdateHooked = true
+  }
+
+  private writeMouthOpeningNow(open: number): void {
     const internal = this.internalModel
     if (internal instanceof Cubism4InternalModel) {
       const core = internal.coreModel as unknown as {
@@ -1542,11 +1576,17 @@ export default class AdvancedModel extends Live2DModel {
     // 官方 FadeOpacityCoroutine 从当前不透明度补间到目标值；退场被新的 Appear
     // 打断时从头算 0 会闪一帧全透明。
     const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
-    await AnimationManager.linear((progress) => {
-      if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
-      const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-      alpha_filter.alpha = startAlpha + (1 - startAlpha) * progress
-    }, time)
+    await AnimationManager.linear(
+      (progress) => {
+        if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+        const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
+        alpha_filter.alpha = startAlpha + (1 - startAlpha) * progress
+      },
+      time,
+      false,
+      // 预览卡顿限幅：单帧 alpha 最多推进 0.25，100ms 渐变至少分 4 帧呈现。
+      { maxProgressPerFrame: 0.25 }
+    )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
     this.lastChangeBlinkTime = performance.now()
@@ -1555,11 +1595,17 @@ export default class AdvancedModel extends Live2DModel {
   public async hide(time: number, generation?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
     const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 1
-    await AnimationManager.linear((progress) => {
-      if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
-      const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-      alpha_filter.alpha = startAlpha * (1 - progress)
-    }, time)
+    await AnimationManager.linear(
+      (progress) => {
+        if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+        const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
+        alpha_filter.alpha = startAlpha * (1 - progress)
+      },
+      time,
+      false,
+      // 预览卡顿限幅：与 show 一致，单帧 alpha 最多推进 0.25。
+      { maxProgressPerFrame: 0.25 }
+    )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
     if (this.inHologram) {

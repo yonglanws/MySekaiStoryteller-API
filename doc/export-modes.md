@@ -44,7 +44,7 @@
 | `idleChainGapSec`    | `0`            | `0`             | 秒；`0` 关闭动作续演（保持末帧姿态），正数以该间隔（±25% 抖动）接同情绪族手势          |
 
 宿主 schema 对多数数值仅检查类型，不统一检查范围；GPU 纹理、显存、浏览器编码能力决定实际可用上限。
-`crf` 对 libx264 是 CRF，对 NVIDIA 是 CQ，对 AMD 是 QP，对 Intel 是 `global_quality`；同一个数字不代表同等画质或体积。
+`crf` 对 libx264 是 CRF，对 NVIDIA 是 CQ，对 AMD 是 QP，对 Intel 是 `global_quality`；同一个数字不代表同等画质或体积。libx264 额外带 `aq-mode=3:deblock=2,2`（暗部自适应量化加偏强去块），减轻片尾淡出至黑时 yuv420 近黑渐变的块状伪影，不改变 CRF 数值。WebCodecs 直编在成片最后约 0.6 秒把关键帧间隔收到每 4 帧一次，同一目的。
 WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率，并将解码器上报的 `colorSpace` 通过 `normalizeDecoderColorSpace` 统一归一化到 BT.709 区间。
 
 常用环境变量映射如下；没有列出的字段不要自行推测 `MSS_*` 名称。

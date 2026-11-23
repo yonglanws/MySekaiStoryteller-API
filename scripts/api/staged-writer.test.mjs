@@ -194,7 +194,12 @@ function stageOf(system) {
   if (system.includes('第二轮')) return 'dialogue'
   if (system.includes('情绪标注员')) return 'emotion'
   if (system.includes('舞台监督') || system.includes('directStaging')) return 'staging'
-  if (system.includes('精细演技导演') || system.includes('directActing') || system.includes('第三轮')) return 'direction'
+  if (
+    system.includes('精细演技导演') ||
+    system.includes('directActing') ||
+    system.includes('第三轮')
+  )
+    return 'direction'
   if (system.includes('中日翻译')) return 'translate'
   return 'unknown'
 }
@@ -855,8 +860,14 @@ test('stabilizeEmotions preserves coherent dramatic arcs without calm quotas and
   )
   const stable = stabilizeEmotions(dialogue, plan, ['平静', '开心', '生气'])
   const values = dialogue.lines.map((line) => stable.get(line.id))
-  assert.deepEqual(values.slice(0, 6), Array.from({ length: 6 }, () => '开心'))
-  assert.deepEqual(values.slice(6, 10), Array.from({ length: 4 }, () => '生气'))
+  assert.deepEqual(
+    values.slice(0, 6),
+    Array.from({ length: 6 }, () => '开心')
+  )
+  assert.deepEqual(
+    values.slice(6, 10),
+    Array.from({ length: 4 }, () => '生气')
+  )
   assert.deepEqual(values.slice(10, 12), ['开心', '开心'])
 
   // 连续高频 1 句锯齿跳变（A - B - C - A）中无强转折标记的单句毛刺会被温和抚平
@@ -876,13 +887,21 @@ test('stabilizeEmotions preserves coherent dramatic arcs without calm quotas and
     ['z5', '平静'],
     ['z6', '平静']
   ])
-  const zigzagStable = stabilizeEmotions(zigzagDialogue, zigzagPlan, ['平静', '开心', '生气', '伤心'])
+  const zigzagStable = stabilizeEmotions(zigzagDialogue, zigzagPlan, [
+    '平静',
+    '开心',
+    '生气',
+    '伤心'
+  ])
   const zigzagValues = zigzagDialogue.lines.map((l) => zigzagStable.get(l.id))
   let runs = 1
   for (let i = 1; i < zigzagValues.length; i++) {
     if (zigzagValues[i] !== zigzagValues[i - 1]) runs += 1
   }
-  assert.ok(runs < 5, `expected anti-whiplash smoothing to reduce 5 runs, got ${runs}: ${zigzagValues.join(',')}`)
+  assert.ok(
+    runs < 5,
+    `expected anti-whiplash smoothing to reduce 5 runs, got ${runs}: ${zigzagValues.join(',')}`
+  )
 })
 
 test('composed staging keeps ambient and second background through validation', () => {
@@ -948,12 +967,26 @@ test('composed staging keeps ambient and second background through validation', 
   assert.ok(
     appears.every(
       (snippet) =>
-        snippet.data.from.side === snippet.data.to.side &&
-        snippet.data.from.offset === snippet.data.to.offset
+        (snippet.data.to.side === 'Left' && snippet.data.from.side === 'LeftOver') ||
+        (snippet.data.to.side === 'Right' && snippet.data.from.side === 'RightOver')
     ),
-    '默认原地淡入'
+    'Left/Right 槽入场默认从同侧画外滑入（from=LeftOver/RightOver）'
   )
-  assert.deepEqual(appears.slice(0, 2).map((snippet) => snippet.data.to.side).sort(), ['Left', 'Right'])
+  assert.ok(
+    appears.every((snippet) => snippet.data.from.offset === 0 && snippet.data.to.offset === 0),
+    '画外滑入起终点 offset 均为 0'
+  )
+  assert.ok(
+    appears.every((snippet) => snippet.data.moveSpeed === 'Normal'),
+    '画外滑入用官方 Normal 时长'
+  )
+  assert.deepEqual(
+    appears
+      .slice(0, 2)
+      .map((snippet) => snippet.data.to.side)
+      .sort(),
+    ['Left', 'Right']
+  )
   const clears = validated.story.snippets.filter((snippet) => snippet.type === 'LayoutClear')
   assert.equal(clears.length, 4, '两场戏转场与片尾各同时退场一次')
   assert.ok(
@@ -970,6 +1003,60 @@ test('composed staging keeps ambient and second background through validation', 
   assert.ok(
     talkActions.every((action) => action.at === 0),
     '动作必须在句首触发'
+  )
+})
+
+test('composed staging keeps solo Center entries in place while duo entries slide from offstage', () => {
+  const view = new CatalogView(catalog.get())
+  const [first] = view.models
+  const plan = {
+    title: '',
+    event: '',
+    logline: '',
+    outline: [],
+    cast: [
+      {
+        modelId: first.id,
+        name: view.shortName(first),
+        fullName: first.name,
+        path: first.path,
+        role: ''
+      }
+    ],
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '',
+    lines: Array.from({ length: 8 }, (_, index) => ({
+      id: `l${index + 1}`,
+      speaker: plan.cast[0].name,
+      content: '独白的一句台词。',
+      emotion: '平静'
+    }))
+  }
+  const direction = normalizeDirection(
+    {
+      background: 'bg_room.jpg',
+      bgm: '',
+      lines: dialogue.lines.map((line) => ({ id: line.id, facial: 'face_normal_01' }))
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const story = composeStory(view, plan, dialogue, direction)
+  const validated = validateAndFixStory(story, view, new Logger({ type: 'hidden' }))
+  const appears = validated.story.snippets.filter((snippet) => snippet.type === 'LayoutAppear')
+  assert.ok(appears.length >= 1, 'solo scene still enters once')
+  assert.ok(
+    appears.every(
+      (snippet) =>
+        snippet.data.from.side === 'Center' &&
+        snippet.data.to.side === 'Center' &&
+        snippet.data.from.offset === 0 &&
+        snippet.data.to.offset === 0
+    ),
+    'Center 槽入场保持原地淡入（from == to, offset: 0）'
   )
 })
 

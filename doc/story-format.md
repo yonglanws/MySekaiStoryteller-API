@@ -192,9 +192,9 @@
 ### 官方进退场与 `Normal` 模式交叉淡化
 
 - `moveSpeed` 对应时长：`Slow` 750ms、`Normal` 500ms、`Fast` 333.33ms、`Immediate` 0ms。
-- **`LayoutAppear`**：支持原地淡入（`from == to, offset: 0`）或滑入。入场动作在 `alpha=0` 时预先启动，淡入仅约 **116.7ms**（1 帧 alpha=0 + 6 帧 100ms 淡入），动作与位移在后台继续播放不阻塞对白；同一角色已在场再次 `LayoutAppear` 时执行 200ms 移动而不重新淡入。
-- **`LayoutClear`**：原地淡出为 0.15s 延迟 + 0.1s 淡出（250ms）；滑动退场为移动时长并在 `move - 0.1s` 时淡出。
-- **AI 生成模式的 `Normal(<=2)` 轮换**：宿主内置 AI 在生成 3~5 人团体剧本时，全片保持 `Normal` 模式（最多 2 人同台），通过成对的 `LayoutClear` + `LayoutAppear` 原地交叠淡出淡入轮换上场，匹配官方 `pjsk.moe` 演出效果。
+- **`LayoutAppear`**：AI 生成剧本默认画外滑入（Left/Right 槽 `from` 写同侧 `LeftOver`/`RightOver` 且 `offset: 0`、`to` 写槽位、`moveSpeed Normal`；Center 槽保持原地淡入），显式原地淡入（`from == to, offset: 0`）保留给飘现/传送类演出（Center 槽滑入方向为待观感确认的后续项）。入场动作在 `alpha=0` 时预先启动，淡入仅约 **116.7ms**（1 帧 alpha=0 + 6 帧 100ms 淡入），动作与位移在后台继续播放不阻塞对白；同一角色已在场再次 `LayoutAppear` 时执行 200ms 移动而不重新淡入。30fps 导出模式下角色淡入平滑到 200ms，与官方 60fps 100ms 渐变逐帧步进等价（每帧 alpha 步进同为 1/6）。注：「预览只等淡入、滑入后台完成」与「官方 FadeOpacity 线性无缓动」两条官方口径转述自早期勘察材料，本仓库未独立核对 sse-web 源码；30fps 与 60fps 逐帧步进等价为算术事实（两侧均 6 帧、每帧 alpha 步进 1/6）。
+- **`LayoutClear`**：退场默认原地淡出（0.15s 延迟 + 0.1s 淡出，共 250ms）；走入/走离才显式滑动退场（移动时长并在 `move - 0.1s` 时淡出）。
+- **AI 生成模式的 `Normal(<=2)` 轮换**：宿主内置 AI 在生成 3~5 人团体剧本时，全片保持 `Normal` 模式（最多 2 人同台），通过成对的 `LayoutClear`（原地淡出）+ `LayoutAppear`（画外滑入）交叠轮换上场，匹配官方 `pjsk.moe` 演出效果。
 
 ## Talk：台词、朗读与听者反应
 

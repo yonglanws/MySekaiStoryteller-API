@@ -935,7 +935,14 @@ export default class VideoExportManager {
 
           const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
           const durationUs = Math.round(1_000_000 / encodeFps)
-          const keyFrame = frameIndex % (encodeFps * 4) === 0
+          // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
+          // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
+          const tailFrames = Math.ceil(encodeFps * 0.6)
+          const inEndingTail =
+            pumpTargetVirtualMs >= 0 &&
+            nextFrameVirtualMs > pumpTargetVirtualMs - 600 &&
+            frameIndex > Math.max(0, Math.ceil(pumpTargetVirtualMs / frameMs) - tailFrames)
+          const keyFrame = inEndingTail ? frameIndex % 4 === 0 : frameIndex % (encodeFps * 4) === 0
 
           const captureStart = virtualClock.realTimeMs()
           if (sinks.encoder) {
@@ -1143,13 +1150,14 @@ export default class VideoExportManager {
 
         const ttsDur = ttsAudioResults.get(i)?.durationMs
         if (isTalk) {
+          // speechOffset 必须在定义处立即捕获：launchedTask 可能跨句 resolve，
+          // 届时 currentTalkStartedAtMs 已被下一句 Talk 覆盖，闭包惰性求值会记错口型起点。
+          const speechOffsetMs =
+            this.app.currentTalkStartedAtMs > 0
+              ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
+              : 0
           const recordEnd = (): void => {
-            timestampRecorder.markSnippetEnd(
-              ttsDur,
-              this.app.currentTalkStartedAtMs > 0
-                ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
-                : 0
-            )
+            timestampRecorder.markSnippetEnd(ttsDur, speechOffsetMs)
           }
           if (launchedTask) {
             pendingTimestampTasks.push(launchedTask.then(recordEnd, () => {}))
@@ -2002,7 +2010,10 @@ export default class VideoExportManager {
       audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
     }
 
-    if ((hasTtsTracks || bgmActive || sePlan.hasChanges) && (ttsEnabled || bgmEnabled || sePlan.hasChanges)) {
+    if (
+      (hasTtsTracks || bgmActive || sePlan.hasChanges) &&
+      (ttsEnabled || bgmEnabled || sePlan.hasChanges)
+    ) {
       if (hasTtsTracks) {
         if (exportStatus)
           exportStatus.textContent = `正在混合音频 (${ttsAudioResults.size} 条音轨)...`

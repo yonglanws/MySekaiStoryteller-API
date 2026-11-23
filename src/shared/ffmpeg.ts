@@ -239,6 +239,15 @@ export async function detectAvailableGpuEncoder(): Promise<'nvidia' | 'amd' | 'i
   return 'cpu'
 }
 
+/**
+ * libx264 暗部渐变：默认 AQ 在淡出至黑时会把近黑色块量化成可见方块。
+ * aq-mode=3（auto-variance with bias to dark）把码率让给暗部，不改 CRF。
+ */
+function libx264Args(crf: number): string[] {
+  // aq-mode=3 把码率让给暗部；deblock 偏强，压淡出至黑时的方块边缘。
+  return ['-crf', String(crf), '-x264-params', 'aq-mode=3:deblock=2,2']
+}
+
 export function getGpuEncoderArgs(
   gpuRenderer: 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu' = 'auto',
   crf: number = 18
@@ -280,7 +289,7 @@ export function getGpuEncoderArgs(
         codec: 'libx264',
         preset: 'fast',
         pixFmt: 'yuv420p',
-        args: ['-crf', String(crf)],
+        args: libx264Args(crf),
         needsQsvInit: false
       }
     case 'auto':
@@ -289,7 +298,7 @@ export function getGpuEncoderArgs(
         codec: 'libx264',
         preset: 'fast',
         pixFmt: 'yuv420p',
-        args: ['-crf', String(crf)],
+        args: libx264Args(crf),
         needsQsvInit: false
       }
   }
@@ -314,7 +323,7 @@ export async function resolveVideoEncoderArgs(
       codec: 'libx264',
       preset: 'medium',
       pixFmt: 'yuv420p',
-      args: ['-crf', String(crf)],
+      args: libx264Args(crf),
       needsQsvInit: false
     }
   }
@@ -522,8 +531,7 @@ export async function apiConvertVideoWithCompression(
         'fast',
         '-pix_fmt',
         'yuv420p',
-        '-crf',
-        String(crf),
+        ...libx264Args(crf),
         '-c:a',
         'aac',
         '-b:a',
@@ -646,8 +654,7 @@ export async function apiMergeVideoAudioWithCompression(
         'fast',
         '-pix_fmt',
         'yuv420p',
-        '-crf',
-        String(crf),
+        ...libx264Args(crf),
         '-c:a',
         'aac',
         '-b:a',
@@ -805,7 +812,17 @@ function targetBitrateVideoArgs(
       'yuv420p'
     ]
   }
-  return ['-c:v', 'libx264', '-preset', 'veryfast', ...rate, '-pix_fmt', 'yuv420p']
+  return [
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    ...rate,
+    '-x264-params',
+    'aq-mode=3:deblock=2,2',
+    '-pix_fmt',
+    'yuv420p'
+  ]
 }
 
 /**
@@ -928,7 +945,10 @@ export async function encodeFramesToVideo(
     const failedGpu = gpuNameFromCodec(encoderArgs.codec)
     if (failedGpu) {
       invalidateGpuEncoder(failedGpu)
-      logger.warn(`Frame encoding failed with ${encoderArgs.codec}, falling back to libx264:`, error)
+      logger.warn(
+        `Frame encoding failed with ${encoderArgs.codec}, falling back to libx264:`,
+        error
+      )
       await encodeFramesToVideo(
         fps,
         framesDir,

@@ -6,8 +6,10 @@
  *   闭眼 0.1s / 全闭 0.05s / 睁眼 0.15s（Timescale=10），间隔 3s±2s；
  *   第一次唤醒后立即开始，全闭相位保证至少 1 帧完全合眼。
  * - 呼吸：3s 周期、影响 0.5，每帧 2°。
- * - 口型：RMS → pow(a+1,1.75)、阈值 0.06、限幅 0.2~1、按当前值加权的平滑；
- *   再走 AdvCalm Fallback 策略（attack/release/hold、轻声保底、onset、张幅上限）。
+ * - 口型：官方 RMS 曲线裸输出（pow(a+1,1.75)、阈值 0.06、上限 1，无下限放宽、
+ *   无 smoothLipValue 低通）+ 每句 p95 响度归一（只放大不衰减、增益 ≤2.4），
+ *   直入 AdvLipSyncPolicy fallback 原值（attack/release/hold、轻声保底 minSpeech
+ *   0.17、onset 0.13、张幅上限 0.88），音频后 450ms 指数释放尾。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -196,9 +198,34 @@ test('official lip curve thresholds, clamps and smoothing', () => {
   assert.equal(timing.lipTargetFromRms(10), 1)
   assert.equal(timing.smoothLipValue(1, 0), 0.6)
   assert.equal(timing.smoothLipValue(0.5, 0.5), 0.5)
-  assert.ok(timing.MOUTH_SYNC_FALLBACK_PRESET.openCap > 0.8)
-  assert.ok(timing.MOUTH_SYNC_FALLBACK_PRESET.onset > 0.1)
-  assert.ok(timing.LIP_RMS_MIN_VALUE < timing.LIP_MIN_VALUE)
+  // ournotes 官方 fallback 原值（lipsync.js:28-30）逐位锁定。
+  // 模块经 vm 加载，对象原型跨 realm，deepStrictEqual 会因原型不同误报；逐字段比较。
+  const expectedPreset = {
+    attack: 0.032,
+    release: 0.1,
+    hold: 0.06,
+    hfs: 0.022,
+    speakingThr: 0.026,
+    silenceFloor: 0.015,
+    speechFloor: 0.11,
+    minSpeech: 0.17,
+    onset: 0.13,
+    openScale: 1.03,
+    comp: 0.07,
+    openCap: 0.88,
+    formOpenSupp: 0,
+    formScale: 1,
+    baseToDefault: 0
+  }
+  for (const [key, value] of Object.entries(expectedPreset)) {
+    assert.equal(timing.MOUTH_SYNC_FALLBACK_PRESET[key], value, `preset.${key}`)
+  }
+  assert.deepEqual(
+    Object.keys(timing.MOUTH_SYNC_FALLBACK_PRESET).sort(),
+    Object.keys(expectedPreset).sort(),
+    'preset 字段集合与官方 fallback 表一致'
+  )
+  assert.equal(timing.LIP_RMS_MIN_VALUE, undefined, 'RMS 下限放宽已删除（minValue 传 0）')
 })
 
 test('voice envelope applies the calm mouth policy, caps the opening and releases after audio', () => {
@@ -210,11 +237,65 @@ test('voice envelope applies the calm mouth policy, caps the opening and release
     samples[i] = Math.sin((i / sampleRate) * 2 * Math.PI * 220) * 0.45
   const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
   assert.ok(envelope.durationMs > envelope.audioDurationMs, 'release tail extends the envelope')
+  assert.ok(
+    envelope.durationMs - envelope.audioDurationMs >= 440,
+    'release tail is the 450ms exponential release'
+  )
   assert.equal(lip.sampleLipSync(envelope, 0) < 0.5, true)
   const peak = Math.max(...envelope.values)
   assert.ok(peak > 0.6, `voice must open the mouth: peak ${peak}`)
-  assert.ok(peak <= 0.92 + 1e-6, `openCap: peak ${peak}`)
+  assert.ok(peak <= 0.88 + 1e-6, `openCap: peak ${peak}`)
   assert.ok(envelope.values.at(-1) < 0.02, `tail must close: ${envelope.values.at(-1)}`)
+})
+
+test('syllable rhythm survives the envelope: gaps reopen and the first syllable rises within 5 frames', () => {
+  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
+  const sampleRate = 48000
+  // 5 个音节：100ms 有声 + 60ms 句内间隙（无 smoothLipValue 低通后节奏不再发黏）。
+  const chunks = []
+  for (let k = 0; k < 5; k++) {
+    chunks.push({ ms: 100, amp: 0.45 })
+    if (k < 4) chunks.push({ ms: 60, amp: 0 })
+  }
+  const totalMs = chunks.reduce((sum, c) => sum + c.ms, 0)
+  const samples = new Float32Array(Math.round((sampleRate * totalMs) / 1000))
+  let at = 0
+  for (const c of chunks) {
+    const n = Math.round((sampleRate * c.ms) / 1000)
+    for (let i = 0; i < n; i++) {
+      samples[at + i] = c.amp ? Math.sin(((at + i) / sampleRate) * 2 * Math.PI * 220) * c.amp : 0
+    }
+    at += n
+  }
+  const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
+  const values = Array.from(
+    envelope.values.slice(0, Math.round(envelope.audioDurationMs / envelope.frameMs))
+  )
+  const peak = Math.max(...values)
+  // 每个句内间隙的最小开度（最坏的谷）；对比度必须与旧链路的 0.05-0.12 拉开。
+  const gapMins = []
+  for (let k = 0; k < 4; k++) {
+    const startF = Math.round((100 * (k + 1) + 60 * k) / envelope.frameMs)
+    const endF = Math.round((100 * (k + 1) + 60 * (k + 1)) / envelope.frameMs)
+    gapMins.push(Math.min(...values.slice(startF, endF)))
+  }
+  const worstTrough = Math.max(...gapMins)
+  assert.ok(
+    peak - worstTrough >= 0.12,
+    `syllable contrast must survive: peak ${peak.toFixed(3)} trough ${worstTrough.toFixed(3)}`
+  )
+  // 首音节 10-90% 上升不超过 5 帧（无低通拖尾，无单帧 pop）。
+  const idx0 = values.findIndex((x) => x > 0.02)
+  assert.ok(idx0 >= 0)
+  const target = 0.9 * peak
+  let rise = 0
+  for (let i = idx0; i < values.length; i++) {
+    if (values[i] >= target) {
+      rise = i - idx0
+      break
+    }
+  }
+  assert.ok(rise <= 5, `first syllable must rise within 5 frames: ${rise}`)
 })
 
 test('a quiet voice is loudness-normalised so the mouth still opens', () => {
@@ -227,7 +308,11 @@ test('a quiet voice is loudness-normalised so the mouth still opens', () => {
   const envelope = lip.buildLipSyncEnvelope([samples], sampleRate)
   const peak = Math.max(...envelope.values)
   assert.ok(peak > 0.15, `quiet voice must still reach a visible opening: peak ${peak}`)
-  assert.ok(peak <= 0.92 + 1e-6)
+  assert.ok(peak <= 0.88 + 1e-6)
+  // 轻语音观感预期：gain 已顶 2.4 上限时，peak 恰好钉在 minSpeech=0.17 保底——
+  // 气声台词的嘴型是恒定保底开度而非随语音起伏（official AdvCalm fallback 的
+  // 行为，ournotes 同值同行为；见 doc/sekai-exporter-parity-plan.md 2026-11 节）。
+  assert.ok(peak <= 0.18, `quiet voice pins at the minSpeech floor: peak ${peak}`)
 })
 
 test('silence keeps the mouth shut and text lip starts with an onset and closes at the end', () => {
@@ -236,6 +321,7 @@ test('silence keeps the mouth shut and text lip starts with an onset and closes 
   assert.equal(Math.max(...envelope.values), 0)
   const text = lip.textLipSequence(12)
   assert.ok(text.length > 12, 'text lip appends a release tail')
-  assert.ok(text[0] >= 0.12 - 1e-6, `onset: ${text[0]}`)
-  assert.equal(text.at(-1), 0)
+  assert.ok(text[0] >= 0.13 - 1e-6, `onset: ${text[0]}`)
+  // 450ms 指数尾按 33.3ms 半字步长收尾，末帧残值 <2%（无 120ms 线性收尾）。
+  assert.ok(text.at(-1) < 0.02, `text tail must close: ${text.at(-1)}`)
 })

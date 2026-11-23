@@ -1,11 +1,9 @@
 import {
   FRAME_MS,
   LIP_LEVELS,
-  LIP_RMS_MIN_VALUE,
   MOUTH_SYNC_FALLBACK_PRESET,
   TALK_DISPLAY_MS_PER_CHAR,
-  lipTargetFromRms,
-  smoothLipValue
+  lipTargetFromRms
 } from '../../../common/official/timing'
 
 export interface LipSyncEnvelope {
@@ -36,6 +34,13 @@ export interface MouthSyncPreset {
   readonly comp: number
   readonly openCap: number
   readonly formOpenSupp: number
+  /**
+   * 与 ournotes fallback 表（lipsync.js:28-30）对齐的数据字段：form 缩放与
+   * base→default 归位比例。本 policy 不消费（fallback 源不写 ParamMouthForm），
+   * 仅为 preset 数据逐位忠实。
+   */
+  readonly formScale?: number
+  readonly baseToDefault?: number
 }
 
 export interface MouthSyncState {
@@ -48,28 +53,19 @@ export interface MouthSyncState {
   speaking: boolean
 }
 
-/** 音频结束后继续采样的释放段：让嘴在语音播完后自然合上，而不是硬切到 0。 */
-export const MOUTH_RELEASE_TAIL_MS = 300
+/**
+ * 音频结束后继续采样的释放段：让嘴在语音播完后自然合上，而不是硬切到 0。
+ * 450ms 的出处：release=0.10 的指数尾在末帧残值 0.76×exp(-4.5)≈0.009（<1%），
+ * 且 < AUTO_WAIT_AFTER_VOICE_MS=0.5s（语音后停留期内合完）。指数尾对应
+ * ournotes 静音回填的离线等价（motionsync.js 无新样本超 silenceFallbackDelay
+ * 后按 dt 补零样本；talk.js 注释 the mouth is not closed——无 120ms 线性收尾）。
+ */
+export const MOUTH_RELEASE_TAIL_MS = 450
 
 /** 每句语音的响度归一目标：95 分位目标值抬到该开度，保证不同 TTS 音量下张嘴幅度一致。 */
 export const MOUTH_LOUDNESS_TARGET = 0.78
 /** 归一增益上限：极轻的语音最多放大 2.4 倍，避免把气声放大成夸张嘴型。 */
 export const MOUTH_LOUDNESS_MAX_GAIN = 2.4
-
-/**
- * 释放段末尾再叠一个 120ms 的线性收尾，保证最后一帧严格回到 0。
- * 只作用于 `start` 之后的尾巴，不碰语音本体。
- */
-function fadeOutTail(values: Float32Array, start: number, frameMs: number): void {
-  const total = values.length
-  if (start >= total) return
-  const rampFrames = Math.max(2, Math.min(total - start, Math.ceil(120 / frameMs)))
-  const rampStart = total - rampFrames
-  const denom = Math.max(1, total - 1 - rampStart)
-  for (let i = rampStart; i < total; i++) {
-    values[i] *= (total - 1 - i) / denom
-  }
-}
 
 export function createMouthSyncState(): MouthSyncState {
   return { filtered: 0, presented: 0, hold: 0, speaking: false }
@@ -140,14 +136,21 @@ export function stepMouthSync(
 }
 
 /**
- * 官方 `Live2DVoice.UpdateParam`：每帧取最近一帧音频的 RMS，
- * 经 `a×scale`、`a×pow(a+1,1.75)`、阈值 0.06、官方限幅（默认 0.2~1，RMS 路径
- * 用 `LIP_RMS_MIN_VALUE` 放宽下限），再用 `smooth(target, prev)` 按当前口型值
- * 选择权重平滑；最后再过一遍 `AdvLipSyncPolicy`（ournotes 的 Fallback 预设），
- * 并补 300ms 释放段。
+ * 口型包络构建：官方 `Live2DVoice` 的 RMS 曲线裸输出，直入逐位一致的
+ * `AdvLipSyncPolicy`（ournotes fallback 预设），不再叠加 smoothLipValue
+ * 三段权重平滑与 RMS 下限放宽——ournotes 两条实时路径（CRI Lips、MotionSync）
+ * 的特征层都是裸值直入 policy，多出的低通层会把 4-8Hz 音节节奏滤平（发黏）。
  *
- * 官方曲线的输入是游戏混音后的语音，TTS 音量参差不齐时张嘴幅度会忽大忽小；
- * 这里按每句的 95 分位目标值做一次只放大不衰减的响度归一。
+ * 逐步：① 每 16.67ms 窗 RMS；② `lipTargetFromRms(rms, 1, 1.75, 0)`
+ * （a×(a+1)^1.75、阈值 0.06、上限 1，无下限放宽）；③ 无平滑直通；
+ * ④ 响度归一（p95→0.78、增益 ≤2.4、只放大不衰减）——ournotes 输入层
+ * （CRI net2 sigmoid、MotionSync viseme clamp）天生归一，此处是等效物；
+ * ⑤ 逐帧 `stepMouthSync`；⑥ 音频结束后喂 0 继续 450ms 指数释放尾。
+ *
+ * 偏差说明：ournotes 有 per-model profile（openScale=1+0.08×口型参数数），
+ * 本包络在导出解码时预计算、与模型解耦，且 MSST 模型典型只有
+ * ParamMouthOpenY（n=0 → profile=1），故不引入；如需支持多口型参数模型，
+ * 应在采样侧按模型缩放。
  */
 export function buildLipSyncEnvelope(
   channels: readonly Float32Array[],
@@ -162,7 +165,6 @@ export function buildLipSyncEnvelope(
   const windowSize = Math.max(1, Math.round((sampleRate * frameMs) / 1000))
   const frames = Math.ceil(samples / windowSize)
   const raw = new Float32Array(frames)
-  let previous = 0
   for (let frame = 0; frame < frames; frame++) {
     const start = frame * windowSize
     const end = Math.min(start + windowSize, samples)
@@ -171,11 +173,8 @@ export function buildLipSyncEnvelope(
       for (let i = start; i < end; i++) energy += channel[i] * channel[i]
     }
     const rms = Math.sqrt(energy / Math.max(1, (end - start) * channels.length))
-    previous = smoothLipValue(
-      lipTargetFromRms(rms, undefined, undefined, LIP_RMS_MIN_VALUE),
-      previous
-    )
-    raw[frame] = previous
+    // 官方曲线裸输出：无下限放宽（minValue=0）、无 smoothLipValue 低通。
+    raw[frame] = lipTargetFromRms(rms, undefined, undefined, 0)
   }
 
   // 响度归一：只在整体偏轻时放大，让不同音色的张嘴幅度稳定。
@@ -195,7 +194,6 @@ export function buildLipSyncEnvelope(
   for (let frame = 0; frame < values.length; frame++) {
     values[frame] = stepMouthSync(state, frame < frames ? raw[frame] : 0, dt)
   }
-  fadeOutTail(values, frames, frameMs)
   const audioDurationMs = (samples / sampleRate) * 1000
   return {
     values,
@@ -231,15 +229,15 @@ export function textLipSequence(
   const dt = stepMs / 1000
   const step = slot ? Math.max(1, slot.total) : 1
   const first = slot ? slot.index + 1 : 0
+  // 释放尾与语音路径一致：MOUTH_RELEASE_TAIL_MS 的指数尾，按半字步长（33.3ms）换算帧数。
   const tail = Math.max(1, Math.ceil(MOUTH_RELEASE_TAIL_MS / stepMs))
   const values = new Float32Array(count + tail)
   const state = createMouthSyncState()
   for (let k = 0; k < values.length; k++) {
-    // 结束前两个字归零（官方 talk window 收尾），策略与尾巴负责平滑合上。
+    // 结束前两个字归零（官方 talk window 收尾），指数尾巴负责平滑合上。
     const closing = k >= count - 2
     const target = closing ? 0 : LIP_LEVELS[(k * step + first) % LIP_LEVELS.length]
     values[k] = stepMouthSync(state, target, dt)
   }
-  fadeOutTail(values, count, stepMs)
   return values
 }
