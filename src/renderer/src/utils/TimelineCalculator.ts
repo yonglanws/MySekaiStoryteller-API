@@ -20,6 +20,7 @@ import {
   MOVE_DURATION_NORMAL_MS,
   MOVE_DURATION_SLOW_MS,
   PLACE_INFO_TRANSITION_MS,
+  SECONDS_DURATION_SNIPPET_TYPES,
   SEKAI_IN_PRE_DELAY_MS,
   SEKAI_OUT_PRE_DELAY_MS,
   SEPIA_DEFAULT_MS,
@@ -379,7 +380,7 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
     case 'CameraMove':
     case 'CameraZoom': {
       const dataDur = getSnippetDataField(snippet, 'duration')
-      if (dataDur === 0 && (snippet.type === 'BlackOut' || snippet.type === 'BlackIn')) {
+      if (dataDur === 0) {
         return {
           durationMs: 0,
           source: 'data_duration',
@@ -688,6 +689,7 @@ export function calculateTimeline(
   const fadeMs = isExport ? resolveCharacterFadeMs(true, options.exportFps) : CHARACTER_FADE_MS
   let cursorMs = 0
   let runningEndMs = 0
+  let runningFenceEndMs = 0
   let activeLayoutEndMs = 0
   let talkSnippetCount = 0
   let ttsSnippetCount = 0
@@ -695,8 +697,9 @@ export function calculateTimeline(
   let validCount = 0
   let warningCount = 0
   let errorCount = 0
-  // TalkWindow 初始关闭；HideTalk / closeWindowOnFinish 关闭；关闭后第一句要等 0.2s 打开动画。
+  // TalkWindow 初始关闭；closeWindowOnFinish 在台词结束 0.2s 后才真正关闭。
   let windowOpen = false
+  let windowClosesAtMs: number | null = null
   // 官方 Appear/Hide 分支依赖角色当前是否在场：已在场 Appear 只滑 0.2s，
   // 未在场 Clear 直接 onFinished。时间线必须和运行时使用同一份在场状态。
   const visibleModels = new Set<number>()
@@ -731,7 +734,7 @@ export function calculateTimeline(
     // 先等所有正在运行的后台任务结束；之后立即推进到下一条（Now 同帧并发）。
     const blocking = snippetBlocksTimeline(snippet)
     if (blocking) {
-      cursorMs = Math.max(cursorMs, runningEndMs)
+      cursorMs = Math.max(cursorMs, runningFenceEndMs)
     }
 
     const delaySeconds = Math.max(0, Number(snippet.delay) || 0)
@@ -742,6 +745,10 @@ export function calculateTimeline(
     const pathA = calculatePathA_ContentBased(snippet)
     const pathB = calculatePathB_DelayBased(snippet)
 
+    if (windowClosesAtMs !== null && windowClosesAtMs <= startTimeMs) {
+      windowOpen = false
+      windowClosesAtMs = null
+    }
     let windowOpenMs = 0
     if (isTalk && !windowOpen) {
       // 官方 TalkWindow.Play：窗口关闭时先 PlayActive(1, 0.2)，OnCompleteOpen 才开始打字。
@@ -749,6 +756,7 @@ export function calculateTimeline(
       windowOpen = true
     } else if (snippet.type === 'HideTalk') {
       windowOpen = false
+      windowClosesAtMs = null
     }
 
     const layoutRunningMs = isTalk ? Math.max(0, activeLayoutEndMs - startTimeMs) : 0
@@ -771,10 +779,6 @@ export function calculateTimeline(
       layoutRunningMs,
       silentHoldMs
     )
-
-    if (isTalk && snippet.data.closeWindowOnFinish) {
-      windowOpen = false
-    }
 
     let ttsDurationMs = 0
     if (hasTTS) {
@@ -861,9 +865,20 @@ export function calculateTimeline(
     }
 
     const baseDurationMs = layoutDurationMs ?? crossResult.finalDurationMs
+    // 秒数驱动的效果/等待按参考 f32 `frames_for` 计时；已帧量化的时长仍走
+    // quantizeMsToFrame，避免 766.667ms 被 f32 累加算成 47 帧。
     const finalDurationMs =
-      baseDurationMs >= 30 ? quantizeMsToFrame(baseDurationMs) : baseDurationMs
+      baseDurationMs > 0 && baseDurationMs < FRAME_MS
+        ? baseDurationMs
+        : SECONDS_DURATION_SNIPPET_TYPES.has(snippet.type)
+          ? framesToMs(framesForSeconds(baseDurationMs / 1000))
+          : baseDurationMs >= 30
+            ? quantizeMsToFrame(baseDurationMs)
+            : baseDurationMs
     const endTimeMs = startTimeMs + finalDurationMs
+    if (isTalk && snippet.data.closeWindowOnFinish === true) {
+      windowClosesAtMs = endTimeMs + TALK_WINDOW_OPEN_CLOSE_MS
+    }
 
     const entry: TimelineEntry = {
       snippetIndex: i,
@@ -903,6 +918,11 @@ export function calculateTimeline(
     })
 
     runningEndMs = Math.max(runningEndMs, endTimeMs)
+    // 参考 PlayCore：任务在 endTime 结束，下一条 WaitFinished 下一帧才启动；
+    // 有 delay 或实际时长的任务都算“跑过”，零等待同步片段可以同帧串行。
+    if (delayMs > 0 || finalDurationMs > 0) {
+      runningFenceEndMs = Math.max(runningFenceEndMs, endTimeMs + FRAME_MS)
+    }
   }
 
   const crossValidationPassed = errorCount === 0

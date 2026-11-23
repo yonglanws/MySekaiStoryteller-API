@@ -77,6 +77,28 @@ export function quantizeSecondsToFrame(seconds: number): number {
   return framesForSeconds(seconds) / STORY_FPS
 }
 
+/**
+ * 剧本以秒为单位给出 `duration` 的效果类型。参考实现直接对秒数调用 f32
+ * `frames_for`（而不是先把秒乘 1000 再按整帧量化），3s/2s/4s/25s 分别是
+ * 181/121/241/1501 帧，比 `msToFrameCount` 多 1 帧。
+ */
+export const SECONDS_DURATION_SNIPPET_TYPES: ReadonlySet<string> = new Set([
+  'BlackOut',
+  'BlackIn',
+  'SideFade',
+  'BlurIn',
+  'BlurOut',
+  'BackgroundBlur',
+  'CameraMove',
+  'CameraZoom',
+  'DollyZoom',
+  'ShakeScreen',
+  'ShakeWindow',
+  'FlashbackIn',
+  'FlashbackOut',
+  'Wait'
+])
+
 // ---- talk window ---------------------------------------------------------------------
 
 /** talk.word_interval = 0.06s；一个半字 2 帧，一个字 4 帧。 */

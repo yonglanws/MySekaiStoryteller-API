@@ -34,10 +34,9 @@ import {
   LIP_LOUD_TARGET_VALUE_SCALE,
   LIP_TARGET_VALUE_SCALE,
   STORY_FPS,
-  framesForSeconds,
   msToFrameCount
 } from '../../../common/official/timing'
-import { evaluateEase } from '../effects/Ease'
+import { interpolatePosition } from '../../../common/official/layoutMotion'
 import { registerClockBaselineResetListener } from '../snippets/stageTiming'
 
 const MODEL_PREFIX_STANDING_RE = /(?:^|-)(?:default|stand|blushed)\d*$/i
@@ -1695,7 +1694,6 @@ export default class AdvancedModel extends Live2DModel {
     )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
 
-
     if (this.inHologram) {
       this.inHologram = false
       this.visualEffectManager.disableAll()
@@ -1914,8 +1912,9 @@ export default class AdvancedModel extends Live2DModel {
         // 退场（尤其是原地 Clear）可以先于上一段 Appear 的滑入完成；
         // 角色已从 layer 移除后继续写位置没有意义，也可能让帧泵 handler 抛错。
         if (this.destroyed || this.parent === null) return
-        this.position.x = (abs_to[0] - abs_from[0]) * progress + abs_from[0]
-        this.position.y = (abs_to[1] - abs_from[1]) * progress + abs_from[1]
+        const [x, y] = interpolatePosition(abs_from, abs_to, progress)
+        this.position.x = x
+        this.position.y = y
       },
       time_ms,
       false,

@@ -11,6 +11,8 @@ export default abstract class BaseSnippet implements Snippet {
   protected data!: SnippetData
   /** 导出时由 SnippetStrategyManager 写入；后台片段记录动作追踪时用它标注来源。 */
   public snippetIndex = -1
+  /** 导出模式：从当前时刻到 plan act 的剩余 delay（启动较晚时缩短，避免 act 漂移）。 */
+  public exportDelayMs?: number
 
   constructor(app: App, data: SnippetData) {
     this.app = app
@@ -24,7 +26,8 @@ export default abstract class BaseSnippet implements Snippet {
   }
 
   async runDelay(): Promise<void> {
-    await AnimationManager.delay(this.data.delay * 1000)
+    const delayMs = this.exportDelayMs ?? this.data.delay * 1000
+    await AnimationManager.delay(delayMs)
   }
 
   protected abstract handleSnippet(): Promise<void>

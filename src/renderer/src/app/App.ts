@@ -13,7 +13,7 @@ import FontFaceObserver from 'fontfaceobserver'
 import { Application, Container, Texture, Ticker, type Filter } from 'pixi.js'
 import SpecialEffectLayer from '../layers/SpecialEffectLayer'
 import EnvironmentLayer from '../layers/EnvironmentLayer'
-import { evaluateEase, runEasedTween } from '../effects/Ease'
+import { runEasedTween } from '../effects/Ease'
 import { preloadCommonInappTextures, resetInappTextureCache } from '../effects/InappTextures'
 import { createMulberry32, DollyZoomFilter } from '../effects/OfficialFilters'
 import { configureCubism4 } from 'pixi-live2d-display-advanced'
@@ -25,6 +25,7 @@ import AnimationManager from '../managers/AnimationManager'
 import { TTSManager } from '../managers/TTSManager'
 import type { LipSyncEnvelope } from '../utils/LipSyncEnvelope'
 import { framesForSeconds } from '../../../common/official/timing'
+import { shakeSegmentCount, shakeSegmentEnds } from '../../../common/official/screenShake'
 
 /** 宿主统一下发的 TTS 配置（config.yaml 的 tts 节） */
 export interface ApiExportTtsConfig {
@@ -446,7 +447,7 @@ export class App {
     const fadeOut = clampedSec < 3600
     // `DOShakePosition(duration, strength, vibrato=16, randomness=90, fadeOut)`：
     // n = max(2, trunc(16×duration)) 段，段内 OutQuad，段末幅度减 strength/n。
-    const segments = Math.max(2, Math.trunc(16 * clampedSec))
+    const segments = shakeSegmentCount(clampedSec)
     const generation = ++this.shakeGeneration
     const rng = createMulberry32((generation * 2654435761) >>> 0)
     const amp =
@@ -468,16 +469,7 @@ export class App {
       }
     }
     // `fadeOut` 时每段时长 (i+1)/n×duration 再按总和归一（后段更长）。
-    const durations = Array.from({ length: segments }, (_, i) =>
-      fadeOut ? ((i + 1) / segments) * clampedSec : clampedSec / segments
-    )
-    const sum = durations.reduce((a, b) => a + b, 0)
-    const ends: number[] = []
-    let acc = 0
-    for (const d of durations) {
-      acc += (d * clampedSec) / sum
-      ends.push(acc)
-    }
+    const ends = shakeSegmentEnds(clampedSec, fadeOut)
     // 有限抖动：父节点 y 从 -8 用 OutQuad 升到 0。
     const baseStart = -8 * scaleY
     const startWall = performance.now()

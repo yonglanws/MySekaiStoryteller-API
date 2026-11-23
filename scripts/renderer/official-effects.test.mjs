@@ -240,7 +240,7 @@ test('new effect snippets take their exact official duration', () => {
   const result = timeline.calculateTimeline(snippets, new Map())
   assert.deepEqual(
     Array.from(result.entries, (entry) => entry.durationMs),
-    [2666.667, 750, 1, 0]
+    [2666.667, 766.667, 1, 0]
   )
   assert.equal(timing.TELOP_ANIM_CLIP_MS, 333.333)
   assert.equal(timing.TELOP_AUTO_HOLD_MS, 2000)

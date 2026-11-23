@@ -3,18 +3,19 @@ import { snippetBlocksTimeline } from './snippetSemantics'
 import { visibleTextLength } from '../official/text'
 import { hasSpeakableSpeechText } from '../tts/speechText'
 import {
-  APPEAR_FADE_TOTAL_FRAMES,
   APPEAR_SHOWN_MOVE_FRAMES,
   CHARACTER_FADE_MS,
   FRAME_MS,
   HIDE_DELAY_IN_PLACE_MS,
   MOVE_SPEED_DURATION_MS,
   PLAYCORE_WARMUP_FRAMES,
+  SECONDS_DURATION_SNIPPET_TYPES,
   SILENT_PUNCTUATION_HOLD_FRAMES,
-  TALK_WINDOW_OPEN_CLOSE_MS,
+  TALK_WINDOW_OPEN_CLOSE_FRAMES,
   framesForSeconds,
   framesToMs,
   msToFrameCount,
+  normalizeEffectDurationMs,
   msToFrames,
   storyEndFrame
 } from '../official/timing'
@@ -117,26 +118,6 @@ function snippetData(snippet: SnippetData): Record<string, unknown> {
   return ((snippet as { data?: unknown }).data ?? {}) as Record<string, unknown>
 }
 
-function deriveWindowOpen(snippets: SnippetData[]): Map<number, number> {
-  const map = new Map<number, number>()
-  let open = false
-  for (let i = 0; i < snippets.length; i++) {
-    if (snippets[i].type === 'Talk') {
-      if (!open) {
-        map.set(i, TALK_WINDOW_OPEN_CLOSE_MS)
-        open = true
-      }
-      const data = snippetData(snippets[i])
-      if (data.closeWindowOnFinish === true) {
-        open = false
-      }
-    } else if (snippets[i].type === 'HideTalk') {
-      open = false
-    }
-  }
-  return map
-}
-
 /** 片段时长（毫秒）→ 故事帧。子帧状态片段（旧时间线的 1ms 标记）不占帧。 */
 function planDurationFrames(ms: number): number {
   if (ms > 0 && ms < FRAME_MS) return 0
@@ -169,13 +150,14 @@ export function bakeStoryPlan(
   // 角色淡入固定 100ms（6 帧），与成片帧率无关。
   const fadeFrames = msToFrameCount(CHARACTER_FADE_MS)
   const appearFadeFrames = 1 + fadeFrames
-  const windowOpen = options.windowOpenMs ?? deriveWindowOpen(snippets)
+  let talkWindowOpen = false
+  let talkWindowClosesAtFrame: number | null = null
+  let runningFenceEndFrame = 0
   const timelineByIndex = new Map(timeline.map((entry) => [entry.snippetIndex, entry]))
   const entries: StoryPlanEntry[] = []
   const visibleModels = new Set<number>()
   // `PlayCore` 前 10 帧不放任何 snippet。
   let cursorFrame = PLAYCORE_WARMUP_FRAMES
-  let runningEndFrame = 0
   let activeLayoutEndFrame = 0
   let lastEndFrame = 0
 
@@ -187,14 +169,33 @@ export function bakeStoryPlan(
 
     // PlayCore 前置栅栏：WaitFinished 在 delay 开始前先等所有在跑任务完成。
     if (blocking) {
-      cursorFrame = Math.max(cursorFrame, runningEndFrame)
+      cursorFrame = Math.max(cursorFrame, runningFenceEndFrame)
     }
 
     const delayStartFrame = cursorFrame
     const delayFrames = framesForSeconds(snippet.delay)
     const startFrame = delayStartFrame + delayFrames
-    const durationFrames = planDurationFrames(timing?.durationMs ?? 0)
-    const endFrame = startFrame + durationFrames
+
+    // 对话框窗口状态与参考实现一致：closeWindowOnFinish 在台词结束 0.2s 后
+    // 才真正关闭；下一句如果在这之前开始，窗口仍算打开。
+    if (talkWindowClosesAtFrame !== null && talkWindowClosesAtFrame <= startFrame) {
+      talkWindowOpen = false
+      talkWindowClosesAtFrame = null
+    }
+    let windowOpenFrames = 0
+    if (snippet.type === 'Talk') {
+      const provided = options.windowOpenMs?.get(i)
+      windowOpenFrames =
+        provided !== undefined
+          ? msToFrames(provided)
+          : talkWindowOpen
+            ? 0
+            : TALK_WINDOW_OPEN_CLOSE_FRAMES
+      talkWindowOpen = true
+    } else if (snippet.type === 'HideTalk') {
+      talkWindowOpen = false
+      talkWindowClosesAtFrame = null
+    }
     const actions: StoryPlanActionCue[] = []
 
     const topMotion = typeof data.motion === 'string' ? data.motion.trim() : ''
@@ -222,7 +223,7 @@ export function bakeStoryPlan(
       if (!actionMotion && !actionFacial) continue
       const at = Math.max(0, Math.min(1, Number(action.at) || 0))
       actions.push({
-        frame: startFrame + Math.round(at * durationFrames),
+        frame: startFrame + Math.round(at * planDurationFrames(timing?.durationMs ?? 0)),
         at,
         modelId: resolveActionModelId(action.modelId),
         ...(actionMotion ? { motion: actionMotion } : {}),
@@ -253,7 +254,7 @@ export function bakeStoryPlan(
         !hasSpeakableSpeechText(ttsText)
       const timingFrames = talkAutoFrameTiming({
         startFrame,
-        windowFrames: msToFrames(windowOpen.get(i) ?? 0),
+        windowFrames: windowOpenFrames,
         length: visibleTextLength(typingText || content),
         voiceSeconds: timingVoiceMs / 1000,
         layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
@@ -267,6 +268,9 @@ export function bakeStoryPlan(
         voiceEndFrame: timingFrames.voiceEndFrame,
         gateEndFrame: timingFrames.gateEndFrame,
         computedEndFrame: timingFrames.endFrame
+      }
+      if (talkData.closeWindowOnFinish === true) {
+        talkWindowClosesAtFrame = timingFrames.endFrame + TALK_WINDOW_OPEN_CLOSE_FRAMES
       }
     }
 
@@ -355,6 +359,34 @@ export function bakeStoryPlan(
       }
     }
 
+    // 参考实现里各片段的实际等待帧数。Talk/布局用各自的逐帧公式；
+    // 剧本秒数驱动的效果与 Wait 用 f32 `frames_for`；其余沿用已量化的时间线值。
+    let waitFrames: number
+    if (talk) {
+      waitFrames = talk.computedEndFrame - startFrame
+    } else if (layout && snippet.type === 'LayoutAppear') {
+      waitFrames =
+        layout.fadeEndFrame !== null ? layout.fadeEndFrame - startFrame : APPEAR_SHOWN_MOVE_FRAMES
+    } else if (layout && snippet.type === 'LayoutClear') {
+      waitFrames = (layout.fadeEndFrame ?? layout.moveEndFrame) - startFrame
+    } else if (layout && snippet.type === 'Move') {
+      waitFrames = layout.moveEndFrame - startFrame
+    } else if (SECONDS_DURATION_SNIPPET_TYPES.has(snippet.type)) {
+      const rawDuration = typeof data.duration === 'number' ? data.duration : 0
+      const durationMs = normalizeEffectDurationMs(rawDuration, 0)
+      waitFrames = framesForSeconds(durationMs / 1000)
+    } else {
+      waitFrames = planDurationFrames(timing?.durationMs ?? 0)
+    }
+    waitFrames = Math.max(0, waitFrames)
+    // 参考 PlayCore 在下一帧才启动下一条（非零等待），所以非末条片段的
+    // 诊断 endFrame 都包含这一帧栅栏；最后一条片段的 cleanup 就在它结束帧。
+    const taskRan = delayFrames > 0 || waitFrames > 0
+    const hasFence = taskRan && i < snippets.length - 1
+    const finishFrame = startFrame + waitFrames
+    const endFrame = finishFrame + (i < snippets.length - 1 ? 1 : 0)
+    const durationFrames = waitFrames
+
     entries.push({
       index: i,
       type: snippet.type,
@@ -368,8 +400,9 @@ export function bakeStoryPlan(
       actions
     })
 
-    runningEndFrame = Math.max(runningEndFrame, endFrame)
-    lastEndFrame = Math.max(lastEndFrame, endFrame)
+    // 前置栅栏等的是所有实际运行任务的结束帧 +1；零等待片段与后续同帧串行。
+    runningFenceEndFrame = Math.max(runningFenceEndFrame, finishFrame + (hasFence ? 1 : 0))
+    lastEndFrame = Math.max(lastEndFrame, finishFrame)
   }
 
   // 成片尾：cleanup 之后 + playedWaitTime + 1 + BGM 淡出 = cleanup + 31。

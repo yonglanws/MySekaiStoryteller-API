@@ -135,7 +135,8 @@ export default class SnippetStrategyManager {
   private async dispatchSnippet(
     data: SnippetData,
     snippetIndex: number,
-    forExport: boolean
+    forExport: boolean,
+    delayOverrideMs?: number
   ): Promise<void> {
     const snippetConstructor = this.snippets[data.type]
     if (!snippetConstructor) {
@@ -146,6 +147,12 @@ export default class SnippetStrategyManager {
 
     const snippet = new snippetConstructor(this.app, data)
     snippet.snippetIndex = snippetIndex
+    if (forExport && delayOverrideMs !== undefined) {
+      ;(snippet as unknown as { exportDelayMs?: number }).exportDelayMs = Math.max(
+        0,
+        delayOverrideMs
+      )
+    }
 
     if (forExport && this.app.lastSnippetActualDurationMs === 0) {
       this.app.lastSnippetActualDurationMs = estimateSnippetDuration(data)
@@ -164,8 +171,12 @@ export default class SnippetStrategyManager {
     await this.dispatchSnippet(data, snippetIndex, false)
   }
 
-  async handleSnippetForExport(data: SnippetData, snippetIndex = -1): Promise<void> {
-    await this.dispatchSnippet(data, snippetIndex, true)
+  async handleSnippetForExport(
+    data: SnippetData,
+    snippetIndex = -1,
+    delayOverrideMs?: number
+  ): Promise<void> {
+    await this.dispatchSnippet(data, snippetIndex, true, delayOverrideMs)
   }
 
   /** 官方 WaitAllFinished：等所有仍在运行的协程结束。 */

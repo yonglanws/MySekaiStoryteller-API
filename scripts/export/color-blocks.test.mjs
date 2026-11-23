@@ -3,12 +3,11 @@
  * 解码回 yuv420p 的 Y/U/V 必须落在参考实现给出的 BT.709 limited-range
  * 常量 ±1 内。
  *
- * 参考侧 export 因本机缺少 Live2DCubismCore.dll 无法产出像素成片，因此
- * 期望值直接取自参考源码的数学定义与单测：
- * - crates/sse-render/src/yuv.rs（矩阵、16/128 偏移、Y 16-235 / C 16-240）
- * - crates/sse-render/src/yuv.rs 的
- *   primaries_white_black_and_grey_have_their_bt709_limited_values
- * - crates/sse-export/src/lib.rs 的 ffmpeg_encodes_bt709_limited_range（±1）
+ * 参考完整 export 需要 Live2DCubismCore.dll，本机没有；但参考仓库自带的
+ * ignored 测试只走 YUV 转换 + ffmpeg 收尾，不依赖 Cubism，已用
+ * `cargo test -p sse-export --lib ffmpeg_encodes_bt709_limited_range -- --ignored`
+ * 跑出参考像素（软件 H.264 与 QSV 硬件均为同一组值）。下面的
+ * REFERENCE_BT709 就是那次运行的软件 H.264 结果，用于和 MSST 做逐色块 ±1 对比。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -31,6 +30,15 @@ const PATCHES = [
   [255, 255, 255],
   [0, 0, 0],
   [128, 128, 128]
+]
+/** 参考 ffmpeg_encodes_bt709_limited_range 的实测 Y/U/V（顺序同 PATCHES）。 */
+const REFERENCE_BT709 = [
+  [63, 102, 240],
+  [173, 42, 26],
+  [32, 240, 118],
+  [235, 128, 128],
+  [16, 128, 128],
+  [126, 128, 128]
 ]
 
 /** 参考实现：BT.709 矩阵 + 有限范围（Y 16-235，Cb/Cr 16-240）。 */
@@ -168,10 +176,17 @@ test('six solid patches stay within ±1 of BT.709 limited-range through the expo
       stdout[width * height + cw * ch + chroma]
     ]
     const want = expectedBt709(PATCHES[n])
-    measured.push({ patch: PATCHES[n], got: [Y, U, V], want })
+    const reference = REFERENCE_BT709[n]
+    measured.push({ patch: PATCHES[n], got: [Y, U, V], want, reference })
     assert.ok(
       Math.abs(Y - want[0]) <= 1 && Math.abs(U - want[1]) <= 1 && Math.abs(V - want[2]) <= 1,
       `patch ${n} ${JSON.stringify(PATCHES[n])}: got [${Y},${U},${V}], want [${want}] (±1)`
+    )
+    assert.ok(
+      Math.abs(Y - reference[0]) <= 1 &&
+        Math.abs(U - reference[1]) <= 1 &&
+        Math.abs(V - reference[2]) <= 1,
+      `patch ${n} ${JSON.stringify(PATCHES[n])}: got [${Y},${U},${V}], reference [${reference}] (±1)`
     )
   }
   if (process.env.MSST_COLOR_BLOCK_VERBOSE) {

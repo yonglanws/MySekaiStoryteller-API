@@ -84,13 +84,13 @@ test('Now snippets overlap at caller cursor while WaitFinished fences prior task
   )
   assert.equal(
     baked.entries[1].endFrame,
-    timing.PLAYCORE_WARMUP_FRAMES + timing.framesForSeconds(0.5) + 7
+    timing.PLAYCORE_WARMUP_FRAMES + timing.framesForSeconds(0.5) + 8
   )
   assert.equal(baked.entries[1].blocking, false)
   assert.equal(
     baked.entries[2].startFrame,
-    talk1EndFrame,
-    '下一个 WaitFinished 片段等前面所有在跑任务完成后才启动'
+    talk1EndFrame + 1,
+    '下一个 WaitFinished 片段等前面所有在跑任务完成后，下一帧才启动'
   )
 
   // 当 Now 片段自身耗时更长（如 1.0s SideFade）时，后续 WaitFinished 必须等到它完成。
@@ -108,8 +108,9 @@ test('Now snippets overlap at caller cursor while WaitFinished fences prior task
   )
   assert.equal(fenced.entries[0].delayStartTimeMs, 0)
   assert.equal(fenced.entries[0].startTimeMs, 200)
-  assert.equal(fenced.entries[0].endTimeMs, 1200)
-  assert.equal(fenced.entries[1].startTimeMs, 1200)
+  // 1.0s 按 f32 frames_for = 61 帧；下一帧栅栏后 Talk 才启动。
+  assert.equal(fenced.entries[0].endTimeMs, 1216.667)
+  assert.equal(Math.round(fenced.entries[1].startTimeMs * 1000) / 1000, 1233.334)
 })
 
 test('Talk follows an explicit ProgressBehavior=Now instead of forcing a pre-fence', () => {

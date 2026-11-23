@@ -11,8 +11,9 @@ import {
   FRAME_MS,
   SEKAI_IN_FADE_DELAY_MS,
   SEKAI_OUT_FADE_DELAY_MS,
-  msToFrameCount
+  framesForSeconds
 } from '../../../common/official/timing'
+import { cameraBlurRatio } from '../../../common/official/cameraBlur'
 
 function isTextureUsable(tex: Texture | null | undefined): tex is Texture {
   return Boolean(tex && tex.valid && tex.baseTexture && tex.baseTexture.valid)
@@ -266,7 +267,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       false,
       {
         startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: msToFrameCount(duration)
+        frames: framesForSeconds(duration / 1000)
       }
     )
     if (gen !== this.fadeGen) return
@@ -301,7 +302,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       false,
       {
         startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: msToFrameCount(duration)
+        frames: framesForSeconds(duration / 1000)
       }
     )
     if (gen !== this.fadeGen) return
@@ -427,8 +428,12 @@ export default class SpecialEffectLayer extends BaseLayer {
     const gen = ++this.sideFadeGen
     const w = this.app.screen.width
     const h = this.app.screen.height
-    const EDGE = 512
-    const PAD = 32
+    // 参考的 64px 内边距与 512px 羽化是 1920×1080 画布像素；导出时 Pixi
+    // 逻辑坐标是 1280×720、resolution=1.5。必须把参考像素换算回逻辑单位，
+    // 否则羽化会变成 768 物理像素、位移变成 2432+256。
+    const referenceScale = w > 0 ? 1920 / w : 1
+    const EDGE = 512 / referenceScale
+    const PAD = 32 / referenceScale
     const rw = w + PAD * 2
     const rh = h + PAD * 2
     const ox = w + EDGE
@@ -442,39 +447,42 @@ export default class SpecialEffectLayer extends BaseLayer {
     let hide = false
     let leading: 'start' | 'end' = 'start'
     if (dir === 'right') {
-      // RightIn: 0 → -ox（向左退场）；RightOut: +ox → 0（向左盖住）。
-      leading = 'start'
+      // RightOut: +ox → 0（向左盖住），前沿是面板左边；RightIn 向左退场，
+      // 前沿是面板右边（羽化边要随 In/Out 换侧）。
       if (normMode === 'in') {
+        leading = 'end'
         to = { x: -PAD - ox, y: -PAD }
         hide = true
       } else {
+        leading = 'start'
         from = { x: -PAD + ox, y: -PAD }
       }
     } else if (dir === 'left') {
-      // LeftIn: 0 → +ox（向右退场）；LeftOut: -ox → 0（向右盖住）。
-      leading = 'end'
       if (normMode === 'in') {
+        leading = 'start'
         to = { x: -PAD + ox, y: -PAD }
         hide = true
       } else {
+        leading = 'end'
         from = { x: -PAD - ox, y: -PAD }
       }
     } else if (dir === 'top') {
-      // 画布 y 向下：TopIn 0 → +oy（向下退场）；TopOut -oy → 0（向下盖住）。
-      leading = 'end'
+      // 画布 y 向下：TopOut 面板向下盖住，前沿是下边；TopIn 向上退场，前沿是上边。
       if (normMode === 'in') {
+        leading = 'start'
         to = { x: -PAD, y: -PAD + oy }
         hide = true
       } else {
+        leading = 'end'
         from = { x: -PAD, y: -PAD - oy }
       }
     } else {
-      // BottomIn 0 → -oy（向上退场）；BottomOut +oy → 0（向上盖住）。
-      leading = 'start'
       if (normMode === 'in') {
+        leading = 'end'
         to = { x: -PAD, y: -PAD - oy }
         hide = true
       } else {
+        leading = 'start'
         from = { x: -PAD, y: -PAD + oy }
       }
     }
@@ -555,10 +563,8 @@ export default class SpecialEffectLayer extends BaseLayer {
     const seconds = Math.max(0, durationMs) / 1000
     // 官方 `Spread = 3 × min(tween / duration, 1)`（Out 为 `3 × (1 − …)`）：
     // tween 值本身是 0..1，所以短于 1 秒的模糊会提前饱和，长于 1 秒的到不了 3。
-    const spreadAt = (progress: number): number => {
-      const k = seconds > 0 ? Math.min(progress / seconds, 1) : 1
-      return 3 * scale * (active ? k : 1 - k)
-    }
+    const spreadAt = (progress: number): number =>
+      3 * scale * cameraBlurRatio(active, seconds, progress)
     if (active) {
       this.filterSyncCallback?.(this.cameraBlurFilter)
     }

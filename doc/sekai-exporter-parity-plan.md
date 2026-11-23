@@ -158,6 +158,84 @@ FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/S
     纹理 alpha（`tex_transition_left/top` 的 128..512 裁剪）重做像素模型。
   - `npm run test:all` **363/363** 通过；`npm run typecheck`、Prettier 通过。
 
+### 逐帧对比第 4 轮修复（2026-11-23）
+
+- **PlayCore 逐帧栅栏**：参考 `sse-timeline/src/lib.rs` 的调度器在非零等待任务
+  结束帧 `finish` 完成协程，PlayCore 的启动循环下一帧才启动下一条
+  WaitFinished 片段。`storyPlan` 的 `durationFrames` 现在表示实际等待帧数，
+  非末条的 `endFrame = finish + 1`，最后一条的 cleanup 仍在 `finish` 帧；
+  delay 本身也算“跑过”。`TimelineCalculator` 的 planned start 用同一规则
+  （`runningFenceEndMs = finish + 1`）。参考 `20268` 帧的离线对照在给定参考
+  motion 收尾时 150/150 个 Talk/layout act 与 finish 全部为 0，plan total 20268。
+- **Talk 窗口**：`closeWindowOnFinish` 在台词 finish 后 0.2s 才关窗；下一句若
+  在这之前开始仍按窗口打开处理。`storyPlan`、`TimelineCalculator` 与导出循环
+  `talkWindowOpenMs` 都改为该状态机。`event_145_08` 测试剧本补齐了从参考 IR
+  丢失的 16 个 close 标志、Move/LayoutAppear/LayoutClear 的 MoveSpeed 名称
+  （参考 `move_duration` 0.33/0.5/0.75 对应 Fast/Normal/Slow）以及
+  FlashbackIn/Out 的 0 时长（原剧本写成 100ms）。
+- **秒数 → 帧**：新增 `SECONDS_DURATION_SNIPPET_TYPES`；BlackOut/BlackIn/
+  SideFade/Blur/Camera/Shake/Flashback/Wait 等剧本以秒给出的 duration 用
+  f32 `frames_for`：3.0s=181、2.0s=121、4.0s=241、25.0s=1501。全屏 fader
+  运行时也改成 `framesForSeconds(duration/1000)`，不再用 `msToFrameCount`
+  （180/120/240/1500）。已量化的角色淡入/Move/Clear 毫秒仍走 `msToFrameCount`。
+- **计划启动对齐**：片段启动晚于 timeline 的 delayStart 时，`BaseSnippet`
+  只补到 plan act 的剩余 delay（`exportDelayMs`），避免开场初始化/上一片段
+  抖动把带 delay 的入场动作整体推后。
+- **SideFade**：参考 64px 内边距/512px 羽化是 1920×1080 画布像素；导出
+  逻辑画布是 1280×720/resolution 1.5，现按 `1920/screen.width` 换算回逻辑
+  单位，修复羽化变成 768 物理像素、位移变成 2432+256 的问题。In 类型的
+  前沿羽化换到面板另一侧（RightIn 用 end、LeftIn 用 start、TopIn 用 start、
+  BottomIn 用 end）；像素探针的 In 模型补上 `+256`（面板右边 + 512px 羽化
+  的 50% 点），此前把 In 前沿错当成面板右边界。
+- **位置/震屏/模糊**：抽出 `interpolatePosition`、`shakeSegmentEnds`、
+  `cameraBlurRatio` 纯函数并由 `AdvancedModel`、`App.shakeScreen`、
+  `SpecialEffectLayer.setCameraBlur` 使用。`effect-math-parity.test.mjs`
+  验证 550px/30 帧的线性步进（每帧误差 <1e-9）、0.5s 震屏 8 段且末段归零、
+  Blur `3·min(t/d,1)`/`3−…`。
+
+验证（2026-11-23）：
+
+- 参考 motion 收尾的离线 plan：150 个 Talk/layout 行 act 与 finish 全部 0，
+  plan total 20268 = 参考 end_frame；证明起止/栅栏约定本身已对齐。
+- 完整主片 `export-1795436845044-bt5l87.mp4`：plan 20271、成片 20261
+  （=plan−10）、337.683s、60fps。plan act 中位 **−3**（−9..+3）、finish
+  中位 −3，仍未归零；最差 −9 集中在带入场 motion 的段落。日志显示这些
+  motion 的 request 在 `video 2000ms`，而参考 LayoutAppear act 是
+  `2016.67ms`，运行时 motion 起点仍受开场/TTS 准备影响，plan 的
+  motionSettle 随之偏移。此残余已定位为运行时 motion 调度，而非 plan 的
+  起止公式。
+- 3s/2s/4s/25s 帧数：plan duration 181/121/241/1501，日志实际
+  `BlackOut`（含 1s delay）4016ms、`BlackIn`（含3s delay）5016ms、
+  25s `BlackOut` 25017ms，均等于 f32 `frames_for` + delay。3s fade
+  像素探针 firstOn=297.0667s、alpha 0.1→0.9 为 2.3667s（0.8×3s=2.4s，
+  受近黑 sRGB/编码偏差）。plan act 17830 vs 参考 17827（+3 帧），像素
+  alpha 阈值 firstOn 折回约 +7 帧；alpha ≤0.01 的逐帧对照仍因起点差
+  未复验。
+- 带 delay 的最小入场 `export-1795437722564-mg6pfv.mp4`：plan act frame101
+  =1516.67ms，motion request 1682.33ms（fake clock，warmup 166.67ms）
+  = video 1515.67ms，误差 −1 帧。`exportDelayMs` 只补到 plan act 的剩余
+  delay；主片因 TTS 准备重复运行时出现一次取消/挂起（无产物），因此该对齐
+  在主片上的效果尚未得到完整成片复验。
+- SideFade：修复 1.5× 物理/逻辑换算与 In 羽化侧；重跑
+  `export-1795436552881-npupyg.mp4`：Out planAligned mean 32.45 / max
+  44.91px，In mean 29.55 / max 43.19px；按时间 t0 最优拟合 Out
+  mean 9.18 / max 14.20px、In mean 7.80 / max 15.39px。仍未达到 ≤1px；
+  剩余误差来自 512px 羽化 50% 边缘与视频 luma 反演，In 探针模型已补
+  `+256`。
+- 位置：`effect-math-parity.test.mjs` 验证 550px/30 帧线性，逐帧误差
+  <1e-9，静态重复求值无漂移；像素位移仍为 563.54px（preStd 5.59，
+  待机呼吸混入），未用像素证明 ≤1px。
+- 震屏：0.5s = 8 段、末段归零的纯函数测试通过；成片尾部 dx 0.007 /
+  dy −0.074px，8 段在 60fps（3.75帧/段）下仍不可像素分辨。
+- Blur：`3·min(t/d,1)`（Out 为 `3−…`）纯函数测试通过；视频只能证明开关
+  时点，spread 仍不可反演。
+- 回归：`node --test scripts/renderer/*.test.mjs` **193/193**；
+  `node --test scripts/export/*.test.mjs scripts/api/ffmpeg-and-security.test.mjs`
+  **29/29**；`npm run typecheck` 通过；Prettier 全部改动文件通过。
+  `scripts/ai/motion-parity-wave4.test.mjs` 的 Cubism4 循环/眨眼失败在
+  HEAD 上同样复现（临时换回 HEAD 的 `AdvancedModel.ts` 验证），与本轮无关。
+  未 commit，保留 LF，无仓库内临时文件。
+
 ## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
 
 本节取代下面「2026-11 口型链路按 ournotes 忠实重构」一节。参考实现回到仓库外的

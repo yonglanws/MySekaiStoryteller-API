@@ -174,8 +174,9 @@ test('timeline opens the talk window once, reopens after HideTalk or closeWindow
   ])
   const durations = Array.from(result.entries, (entry) => entry.durationMs)
   assert.deepEqual(durations, [3550, 3350, 3550, 0, 3550])
-  assert.equal(round(result.entries[2].delayStartTimeMs), round(3550 + 3350))
-  assert.equal(round(result.entries[2].startTimeMs), round(3550 + 3350 + 500))
+  // 每条正等待片段后有一帧栅栏：3550 + 1f + 3350 + 1f = 6933.333ms。
+  assert.equal(round(result.entries[2].delayStartTimeMs), 6933.333)
+  assert.equal(round(result.entries[2].startTimeMs), 7433.333)
   assert.equal(round(result.entries[2].endTimeMs), round(result.entries[2].startTimeMs + 3550))
   assert.equal(timing.OPENING_COVER_FADE_MS, 500)
   assert.equal(timing.PLAYED_WAIT_TIME_MS, 250)

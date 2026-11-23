@@ -323,7 +323,7 @@ test('non-Talk timeline and estimate rules are unchanged', (t) => {
   ]
   assert.deepEqual(
     Array.from(calculator.calculateTimeline(snippets).entries, (e) => e.durationMs),
-    [2666.667, 2000, 40000]
+    [2666.667, 2016.667, 40000]
   )
   assert.equal(calculator.estimateSnippetDuration(snippets[1]), 10000)
 })

@@ -405,21 +405,41 @@ export default class VideoExportManager {
       : base
   }
 
-  /** 首个 Talk（或关闭后第一句）需要 0.2s 打开对话框；连续 Talk 不再加。 */
-  private talkWindowOpenMs(snippets: SnippetData[], index: number): number {
+  /**
+   * 首个 Talk（或真正关闭后第一句）需要 0.2s 打开对话框。
+   * `closeWindowOnFinish` 是台词结束后 0.2s 才关窗；下一句若在这之前开始，
+   * 窗口仍按打开处理（参考 `end_talk` → `window_closes_at`）。
+   */
+  private talkWindowOpenMs(
+    snippets: SnippetData[],
+    index: number,
+    timeline?: SnippetTimelineEntry[]
+  ): number {
     let open = false
+    let closesAtMs: number | null = null
     for (let i = 0; i <= index; i++) {
       const snippet = snippets[i]
+      const entry = timeline?.[i]
+      const startMs = entry?.startTimeMs ?? 0
+      if (closesAtMs !== null && closesAtMs <= startMs) {
+        open = false
+        closesAtMs = null
+      }
       if (snippet.type === 'Talk') {
         if (!open) {
           if (i === index) return TALK_WINDOW_OPEN_CLOSE_MS
           open = true
         }
         if (snippet.data.closeWindowOnFinish) {
-          open = false
+          if (entry) {
+            closesAtMs = entry.endTimeMs + TALK_WINDOW_OPEN_CLOSE_MS
+          } else {
+            open = false
+          }
         }
       } else if (snippet.type === 'HideTalk') {
         open = false
+        closesAtMs = null
       }
     }
     return 0
@@ -1272,7 +1292,7 @@ export default class VideoExportManager {
             this.talkDurationWithMotionGate(
               talkData as unknown as TalkSnippetLike,
               ttsDurationMs,
-              this.talkWindowOpenMs(snippets, i),
+              this.talkWindowOpenMs(snippets, i, timeline),
               i,
               layoutRunningMs,
               existingMotionSettleMs,
@@ -1340,7 +1360,7 @@ export default class VideoExportManager {
             ? this.talkDurationWithMotionGate(
                 snippet.data as unknown as TalkSnippetLike,
                 0,
-                this.talkWindowOpenMs(snippets, i),
+                this.talkWindowOpenMs(snippets, i, timeline),
                 i,
                 layoutRunningMs,
                 existingMotionSettleMs,
@@ -1370,7 +1390,17 @@ export default class VideoExportManager {
         }
 
         const snippetStartedAtMs = performance.now()
-        const snippetSetup = this.app.snippetStrategyManager.handleSnippetForExport(snippet, i)
+        // 启动若晚于 plan 的 delayStart，BaseSnippet 只补到 plan act 的剩余 delay，
+        // 防止开场初始化/上一片段抖动把 act 整体推后。
+        const plannedActMs = timelineEntry?.startTimeMs
+        const currentVideoMs = virtualClock.now() - virtualRenderStartMs
+        const delayOverrideMs =
+          plannedActMs !== undefined ? Math.max(0, plannedActMs - currentVideoMs) : undefined
+        const snippetSetup = this.app.snippetStrategyManager.handleSnippetForExport(
+          snippet,
+          i,
+          delayOverrideMs
+        )
         if (i === 0) {
           // 生产路径由 onSnippetStarted 在 runSnippet() 启动时放行；
           // 这里再等两个微任务，兼容不实现该钩子的测试替身，避免帧泵永远等不到首帧。
@@ -1518,7 +1548,6 @@ export default class VideoExportManager {
         audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
       }
 
-      let audioFilePath: string | undefined
       const audioTask = (async (): Promise<string | undefined> => {
         if (!(hasTtsTracks || bgmActive || sePlan.hasChanges)) return undefined
         if (hasTtsTracks) {
@@ -1602,7 +1631,7 @@ export default class VideoExportManager {
       if (pumpError) throw pumpError
 
       const audioFinishStart = virtualClock.realTimeMs()
-      audioFilePath = await audioTask
+      const audioFilePath = await audioTask
       audioMs = virtualClock.realTimeMs() - audioFinishStart
       sinks.audioFilePath = audioFilePath ?? null
 
@@ -2259,7 +2288,7 @@ export default class VideoExportManager {
             ? this.talkDurationWithMotionGate(
                 snippet.data as unknown as TalkSnippetLike,
                 0,
-                this.talkWindowOpenMs(snippets, i),
+                this.talkWindowOpenMs(snippets, i, timeline),
                 i,
                 Math.max(0, getLayoutRunningEndMs(this.app) - nowMs),
                 Math.max(0, getMotionSettledEndMs(this.app) - nowMs),
