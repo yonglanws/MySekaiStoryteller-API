@@ -306,7 +306,8 @@ test('ConcurrentExportPipeline waitForTTSReady resolves immediately upon abort()
 // 3. VirtualClockController safe install / uninstall rollback
 // ============================================================================
 
-test('VirtualClockController restores context globals and Ticker.shared cleanly on throw and double uninstall', (t) => {
+test('VirtualClockController keeps Ticker.shared stopped and restores it on uninstall', (t) => {
+  const updates = []
   const fakeTicker = {
     started: true,
     autoStart: true,
@@ -315,12 +316,12 @@ test('VirtualClockController restores context globals and Ticker.shared cleanly 
     _lastFrame: 12340,
     startCalls: 0,
     stopCalls: 0,
-    throwOnCall: 0,
+    update(currentTime) {
+      updates.push({ currentTime, lastTime: this.lastTime })
+      this.lastTime = currentTime
+    },
     start() {
       this.startCalls++
-      if (this.throwOnCall > 0 && this.startCalls === this.throwOnCall) {
-        throw new Error('ticker boom')
-      }
       this.started = true
     },
     stop() {
@@ -330,8 +331,13 @@ test('VirtualClockController restores context globals and Ticker.shared cleanly 
   }
 
   let loader
+  let failNextInstall = false
   const scopedFakeTimers = {
     install(cfg) {
+      if (failNextInstall) {
+        failNextInstall = false
+        throw new Error('clock boom')
+      }
       return FakeTimers.withGlobal(loader.context).install(cfg)
     }
   }
@@ -348,24 +354,73 @@ test('VirtualClockController restores context globals and Ticker.shared cleanly 
 
   vc.install()
   assert.notEqual(loader.context.setTimeout, origCtxSetTimeout)
+  assert.equal(fakeTicker.started, false, 'rAF must not drive the ticker during export')
+  assert.equal(fakeTicker.autoStart, false)
   assert.equal(fakeTicker.lastTime, -1)
   vc.uninstall()
   assert.equal(loader.context.setTimeout, origCtxSetTimeout)
-  assert.equal(fakeTicker.started, true)
+  assert.equal(fakeTicker.started, true, 'uninstall restores the previous ticker state')
+  assert.equal(fakeTicker.autoStart, true)
   assert.equal(fakeTicker.lastTime, -1)
   vc.uninstall() // idempotent
 
-  // Install rollback if Ticker.shared.start() throws
-  fakeTicker.startCalls = 0
-  fakeTicker.throwOnCall = 1
+  // Install rollback if FakeTimers.install throws
+  failNextInstall = true
   fakeTicker.started = true
-  assert.throws(() => vc.install(), /ticker boom/)
+  assert.throws(() => vc.install(), /clock boom/)
   assert.equal(
     loader.context.setTimeout,
     origCtxSetTimeout,
     'FakeTimers rolled back on install failure'
   )
-  fakeTicker.throwOnCall = 0
+  assert.equal(fakeTicker.autoStart, true, 'autoStart restored on install failure')
+  assert.equal(fakeTicker.started, true, 'ticker restarted on install failure')
+})
+
+test('VirtualClockController advances exact 1/60 steps with one Ticker.update per step', async (t) => {
+  const updates = []
+  const fakeTicker = {
+    started: false,
+    autoStart: false,
+    count: 0,
+    lastTime: -1,
+    _lastFrame: -1,
+    update(currentTime) {
+      updates.push({ currentTime, elapsed: currentTime - this.lastTime })
+      this.lastTime = currentTime
+    },
+    start() {},
+    stop() {}
+  }
+  let loader
+  const scopedFakeTimers = {
+    install(cfg) {
+      return FakeTimers.withGlobal(loader.context).install(cfg)
+    }
+  }
+  const mocks = new Map([
+    ['pixi.js', { Ticker: { shared: fakeTicker } }],
+    ['@sinonjs/fake-timers', scopedFakeTimers]
+  ])
+  loader = createRendererLoader(mocks, { performance })
+  const { VirtualClockController } = loader.load('managers/video-export/VirtualClockController.ts')
+  const vc = new VirtualClockController()
+  t.after(() => vc.uninstall())
+  vc.install()
+  const stepTimes = []
+  await vc.advanceStorySteps(5, (now) => stepTimes.push(now))
+  assert.equal(updates.length, 5, 'one ticker update per story step')
+  assert.equal(stepTimes.length, 5)
+  for (const update of updates) {
+    assert.ok(
+      Math.abs(update.elapsed - 1000 / 60) < 1e-9,
+      `expected 1/60s elapsed per update, got ${update.elapsed}`
+    )
+  }
+  // 非整除帧率：25fps 每 25 帧 60 步，单帧步数按余量循环 2,2,3,2,3
+  const stepsFor = (frame) => Math.floor((frame * 60) / 25) - Math.floor(((frame - 1) * 60) / 25)
+  assert.deepEqual([1, 2, 3, 4, 5].map(stepsFor), [2, 2, 3, 2, 3])
+  vc.uninstall()
 })
 
 // ============================================================================

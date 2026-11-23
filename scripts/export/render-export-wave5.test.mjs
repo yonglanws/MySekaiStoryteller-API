@@ -293,6 +293,12 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
       realTimeMs = () => performance.now()
       realSleep = (ms) => new Promise((r) => realSetTimeoutFn(r, ms))
       tick = (ms) => virtualClock.tickAsync(ms)
+      advanceStorySteps = async (steps, onStep) => {
+        for (let i = 0; i < Math.floor(steps); i++) {
+          await virtualClock.tickAsync(1000 / 60)
+          onStep?.(virtualClock.now)
+        }
+      }
     }
   })
   mocks.set('./video-export/BgmPlan', {
@@ -559,6 +565,12 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       realTimeMs = () => performance.now()
       realSleep = (ms) => new Promise((r) => realSetTimeoutFn(r, ms))
       tick = (ms) => virtualClock.tickAsync(ms)
+      advanceStorySteps = async (steps, onStep) => {
+        for (let i = 0; i < Math.floor(steps); i++) {
+          await virtualClock.tickAsync(1000 / 60)
+          onStep?.(virtualClock.now)
+        }
+      }
     }
   })
   mocks.set('./video-export/BgmPlan', {

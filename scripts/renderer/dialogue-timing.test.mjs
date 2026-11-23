@@ -873,6 +873,13 @@ function exportFixture(
       onClockTick?.(ms)
       return f.clock.tickAsync(ms)
     }
+    advanceStorySteps = async (steps, onStep) => {
+      for (let i = 0; i < steps; i++) {
+        onClockTick?.(1000 / 60)
+        await f.clock.tickAsync(1000 / 60)
+        onStep?.(f.clock.now)
+      }
+    }
   }
   class JpegSink {
     initialize = async () => {}
@@ -1034,7 +1041,7 @@ for (const mode of ['record', 'fast']) {
   })
 }
 
-test('fast export steps VirtualClockController once per frame (~33.33ms at 30fps) and computes ending envelope accurately', async (t) => {
+test('fast export drives fixed 1/60 story steps (two per 30fps frame) and computes ending envelope accurately', async (t) => {
   const tickDeltas = []
   const mixedDurations = []
   const f = exportFixture(t, {
@@ -1049,15 +1056,15 @@ test('fast export steps VirtualClockController once per frame (~33.33ms at 30fps
   const resNoEnvelope = await f.export('fast')
   assert.equal(resNoEnvelope.success, true)
   assert.ok(tickDeltas.length > 0)
-  // FakeTimers truncates fractional ms per tickAsync(33.33ms), so every 3rd catchup step is ~34.0ms
-  // rather than invoking two <=16.67ms sub-ticks per frame.
+  // 固定 1/60 故事步：30fps 每输出帧 2 步，绝不会出现 33ms 的单步或 16ms rAF 抖动。
   assert.ok(
-    tickDeltas.every((ms) => ms <= 34.01),
-    `Expected single virtual step per frame (~33.33ms, catchup <= 34.01ms) at 30fps, got max=${Math.max(...tickDeltas)}`
+    tickDeltas.every((ms) => Math.abs(ms - 1000 / 60) < 1e-6),
+    `Expected every virtual step to be 1/60s, got ${Math.min(...tickDeltas)}..${Math.max(...tickDeltas)}`
   )
-  assert.ok(
-    tickDeltas.some((ms) => ms >= 33),
-    `Expected >=33ms single-step tick (no 16.67ms split), got max=${Math.max(...tickDeltas)}`
+  assert.equal(
+    tickDeltas.length,
+    2 * resNoEnvelope.frameCount,
+    '30fps must consume exactly 2 story steps per output frame'
   )
   // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
   const snippetDur = Math.round(f.planned[0])

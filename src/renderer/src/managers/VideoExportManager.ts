@@ -885,6 +885,11 @@ export default class VideoExportManager {
     AnimationManager.exportEncodeFPS = encodeFps
     const prevTickerMaxFps = Ticker.shared.maxFPS
     Ticker.shared.maxFPS = 0
+    // 测试里的 AnimationManager 可能被替换成精简 mock；导出步进接口允许缺席
+    const animationSteps = AnimationManager as unknown as {
+      dispatchExportStep?: (ticker: Ticker) => void
+      resetExportStepHandlers?: () => void
+    }
 
     virtualClock.install()
     const virtualRenderStartMs = virtualClock.now()
@@ -935,7 +940,7 @@ export default class VideoExportManager {
     const abortFastWait = (): void => {
       concurrentPipeline.abort()
       markFirstSnippetStarted()
-      AnimationManager.resetExportStepHandlers()
+      animationSteps.resetExportStepHandlers?.()
       setPumpPaused(false)
       pumpDone = true
     }
@@ -958,7 +963,7 @@ export default class VideoExportManager {
       if (target <= storyStep) return
       const tickStart = virtualClock.realTimeMs()
       await virtualClock.advanceStorySteps(target - storyStep, () => {
-        AnimationManager.dispatchExportStep(Ticker.shared)
+        animationSteps.dispatchExportStep?.(Ticker.shared)
       })
       storyStep = target
       tickMs += virtualClock.realTimeMs() - tickStart
@@ -1437,7 +1442,7 @@ export default class VideoExportManager {
     } catch (error) {
       VideoExportManager.warmValidatedApps.delete(this.app)
       markFirstSnippetStarted()
-      AnimationManager.resetExportStepHandlers()
+      animationSteps.resetExportStepHandlers?.()
       setPumpPaused(false)
       pumpDone = true
       sinks.encoder?.dispose()
@@ -1449,7 +1454,7 @@ export default class VideoExportManager {
       throw error
     } finally {
       this.signal?.removeEventListener('abort', abortFastWait)
-      AnimationManager.resetExportStepHandlers()
+      animationSteps.resetExportStepHandlers?.()
       Ticker.shared.maxFPS = prevTickerMaxFps
       try {
         virtualClock.uninstall()
