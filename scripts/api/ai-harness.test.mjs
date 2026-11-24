@@ -523,3 +523,59 @@ test('LlmClient and StoryWriter surface finish_reason=length when output is trun
     }
   )
 })
+
+test('official script invariants stay in both prompt builders', () => {
+  const view = new CatalogView(catalogData)
+  const plan = {
+    title: '测试',
+    event: '房间里聊天',
+    logline: '',
+    outline: [],
+    cast: [
+      {
+        modelId: 1,
+        name: '瑞希',
+        fullName: '晓山瑞希',
+        path: models[0].path,
+        role: '发起'
+      },
+      {
+        modelId: 2,
+        name: '绘名',
+        fullName: '东云绘名',
+        path: models[1].path,
+        role: '回应'
+      }
+    ],
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: Array.from({ length: 8 }, (_, index) => ({
+      id: `l${index + 1}`,
+      speaker: index % 2 === 0 ? '瑞希' : '绘名',
+      content: '一句普通台词。'
+    }))
+  }
+
+  const direction = buildDirectionPrompt(view, plan, dialogue, {
+    scene: '房间里聊天',
+    personas: [],
+    targetMinutes: 3
+  })
+  const stagedText = direction.system + direction.user
+  assert.match(stagedText, /不要主动拆分人工双拍/, 'staged prompt allows exactly one beat')
+  assert.match(stagedText, /0%~5%/, 'listener reactions stay rare')
+  assert.match(stagedText, /约四分之一的句子可以完全没有动作/, 'staged prompt allows still lines')
+
+  const story = buildStoryPrompt(view, {
+    scene: '房间里聊天',
+    personas: [],
+    targetMinutes: 3
+  })
+  const singleText = story.system + story.user
+  assert.match(singleText, /每句台词最多 1 个身体动作/, 'single prompt caps one action per line')
+  assert.match(singleText, /0%~5%/, 'single prompt keeps listener reactions rare')
+  assert.match(singleText, /槽位原地淡入/, 'single prompt fades in at the slot')
+  assert.ok(!singleText.includes('画外滑入'), 'single prompt no longer defaults to sliding in')
+})
