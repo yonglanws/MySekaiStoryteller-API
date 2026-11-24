@@ -348,7 +348,6 @@ function validateActions(
   }
   normalized.sort((a, b) => toNumber(a.at) - toNumber(b.at))
 
-  const speakerId = data.modelId
   const byModel = new Map<number, JsonRecord[]>()
   for (const action of normalized) {
     const modelId = action.modelId as number
@@ -356,9 +355,9 @@ function validateActions(
     byModel.get(modelId)!.push(action)
   }
   const kept: JsonRecord[] = []
-  for (const [actorId, items] of byModel) {
-    const isListener = actorId !== speakerId
-    const cap = isListener ? 1 : 5
+  for (const items of byModel.values()) {
+    // 官方 TalkData.Motions 每句只有 0 或 1 条：说话者与听者都只保留 1 个动作。
+    const cap = 1
     let lastAt: number | null = null
     let count = 0
     for (const action of items) {

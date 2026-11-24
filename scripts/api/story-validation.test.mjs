@@ -184,7 +184,7 @@ test('splits overlong Talk without dropping a single line', () => {
   const actions = talks
     .filter((snippet) => snippet.data.modelId === 1)
     .flatMap((snippet) => snippet.data.actions ?? [])
-  assert.equal(actions.length, 2)
+  assert.equal(actions.length, 1, 'speaker keeps at most one action per line')
   assert.ok(actions.every((action) => action.at >= 0 && action.at <= 1))
 })
 
@@ -261,21 +261,19 @@ test('drops actions that exceed the per-line quota', () => {
       ttsText: '',
       modelId: 1,
       actions: [
-        { at: 0.05, modelId: 1, motion: 'w-normal-nod01' },
-        { at: 0.1, modelId: 1, motion: 'w-normal-greeting01' },
-        { at: 0.35, modelId: 1, motion: 'w-normal-nod01' },
-        { at: 0.6, modelId: 1, motion: 'w-normal-greeting01' },
-        { at: 0.85, modelId: 1, motion: 'w-normal-nod01' },
-        { at: 0.95, modelId: 1, motion: 'w-normal-greeting01' }
+        { at: 0.05, modelId: 1, motion: 'w-normal-greeting01' },
+        { at: 0.1, modelId: 1, motion: 'w-normal-nod01' },
+        { at: 0.35, modelId: 1, motion: 'w-normal-greeting01' },
+        { at: 0.6, modelId: 1, motion: 'w-normal-nod01' },
+        { at: 0.85, modelId: 1, motion: 'w-normal-greeting01' },
+        { at: 0.95, modelId: 1, motion: 'w-normal-nod01' }
       ]
     }
   })
   const { story: fixed } = validateAndFixStory(story, makeView())
   const talk = fixed.snippets.find((snippet) => snippet.type === 'Talk')
-  assert.ok(talk.data.actions.length <= 5)
-  for (let index = 1; index < talk.data.actions.length; index++) {
-    assert.ok(talk.data.actions[index].at - talk.data.actions[index - 1].at >= 0.2 - 1e-9)
-  }
+  assert.equal(talk.data.actions.length, 1, 'speaker keeps at most one action per line')
+  assert.equal(talk.data.actions[0].at, 0.05)
 })
 
 test('sanitizeDisplayText folds blank lines and wraps at 30 CJK cells', () => {
