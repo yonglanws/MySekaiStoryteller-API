@@ -1,154 +1,83 @@
 # 故障排除
 
-[返回 README](../README.md) · [部署指南](host-deployment.md) · [导出模式](export-modes.md)
+[返回 README](../README.md) · [部署指南](host-deployment.md) · [导出模式与提速调参](export-modes.md)
 
-本文导航：[快速定位](#按现象快速定位) · [浏览器](#浏览器无法启动) · [WebGL](#webgl-落到软件渲染) · [端口占用](#端口占用与残留进程) · [配置](#配置修改没有生效) · [TTS](#tts-配音缺失) · [BGM](#bgm-没有声音或音量不对) · [演出](#动作表情或台词表现不对)
-
-先查看宿主日志，再检查健康接口：
+排障先做两件事：看宿主终端日志，再访问一次健康检查：
 
 ```bash
 curl http://127.0.0.1:9881/api/v1/health
 ```
 
-## 浏览器无法启动
+## 常见现象速查
 
-报错 `Failed to launch any browser` 时，检查是否安装系统 Chrome / Edge，或执行：
+| 现象                            | 先看哪里                                                                                                        |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 连不上 9881 端口                | 进程有没有跑起来、监听的 `host` 是不是 `127.0.0.1` 导致局域网连不上                                             |
+| `/health` 返回 200 但导出报 503 | 看 `renderPool.readyWorkers` 是不是 `0`、浏览器有没有拉起来、是不是忘了先 `npm run build`                       |
+| 一直排队不动                    | 看 `GET /api/v1/status` 里的 `activeTaskIds`，或者是不是设了 `minFreeMemoryMb` 导致可用内存不够暂缓派发         |
+| 任务中途突然被取消              | 检查是不是客户端/反代 HTTP 超时断开了连接（`wait: true` 断连会自动取消），建议改用 `wait: false` 轮询           |
+| 导出慢如蜗牛                    | 看 `/health` 里 `webglRenderers` 是不是 `SwiftShader`/`llvmpipe`，以及 `renderScale` 有没有设成 `1.5`           |
+| 有画面没配音                    | 看 `tts.enabled`、`tts.apiBaseUrl` 能不能连通、参考音频路径是不是在 **TTS 服务端**磁盘上                        |
+| 有配音但嘴不动                  | 看这句 `Talk` 的 `modelId` 是不是 `-1`，或者该句音频下载/WAV 解码失败了                                         |
+| 改了配置没反应                  | 看改的是不是 `config.yaml`（别改错成 `config.example.yaml`）、有没有被 `MSS_*` 环境变量覆盖、改完有没有重启宿主 |
+
+---
+
+## 1. 浏览器启动失败（`Failed to launch any browser`）
+
+检查机器上装没装 Chrome / Edge；如果没有，跑一次：
 
 ```bash
 npx playwright install chromium
 ```
 
-宿主默认按 `msedge` → `chrome` → `chromium` 探测。需要指定浏览器时，检查
-`render.browserChannels` 或 `render.browserExecutablePath`。
+想强制指定某个浏览器路径，在 `config.yaml` 里填 `render.browserExecutablePath` 或调整 `render.browserChannels`。
 
-## WebGL 落到软件渲染
+## 2. WebGL 走成了软件渲染（`SwiftShader` / `llvmpipe`）
 
-若 `renderPool.webglRenderers` 出现 `SwiftShader` / `llvmpipe`，说明 WebGL 未使用真实 GPU，导出可能明显变慢。
+这会直接把 GPU 活全扔给 CPU，导出耗时成倍暴涨。
 
-- 确认 GPU 驱动和浏览器可用。
-- Linux NVIDIA 无桌面、无 X 环境不要使用 `--use-angle=gl`；设置 `linuxGpuAngle: false`，再通过 `extraChromeArgs` 指定 `--use-angle=vulkan`。
-- 一次只调整一个参数并重新检查 health，具体平台说明见 [WebGL 硬件加速](host-deployment.md#webgl-硬件加速)。
+- Linux 有 NVIDIA 卡但**没有桌面 / Xorg**：把 `render.linuxGpuAngle` 设为 `false`，`render.extraChromeArgs` 设为 `"--use-angle=vulkan"`。
+- Linux 有 X11 桌面：保持 `linuxGpuAngle: true`。
+- 装完整版 Chrome / Edge，尽量别用阉割的 headless-shell。
 
-`host.ffmpegEncoder` 只是配置值，不是实际使用的编码器；编码侧还需要单独检查日志。
+另外，`health` 里的 `host.ffmpegEncoder` 是你填的配置值，**`host.ffmpegEncoderDetected`** 才是实际探测出来能用的硬件编码器。
 
-## 导出失败、卡住或超时
+## 3. 导出速度慢 / 内存或显存炸了
 
-- 查看宿主日志中的 ffmpeg、渲染页面和资源加载错误，不要仅凭请求超时判断编码器故障。
-- 显存或内存不足时下调 `render.workers`。
-- `video.encoder` 应为 `auto` / `nvidia` / `amd` / `intel` / `libx264`，不要填 `nvenc`。
-  `fast` 模式下 `exportFastEncoder: auto` 会先执行 5 帧 WebCodecs 硬件测速，失败或超过 150ms 自动回落到 `image2pipe`（JPEG 管道 + 宿主 ffmpeg）；`image2pipe` 不可用时再落盘 JPEG 帧序列并在 GPU 编码失败时回退 CPU `libx264`。
-- 导出请求的 `timeout` **包含排队时间**；客户端或反向代理提前断连也会取消任务，见 [API 参考](api.md#超时限流与失败)。
-- 取消后 worker 不立即就绪时，先检查中止与恢复日志。正在执行的页面有取消宽限期，宿主同时会立即回收中断的 `FramesPipeSession` 与临时目录，见 [取消与故障恢复](host-deployment.md#取消与故障恢复)。
+- **降倍率**：`config.example.yaml` 默认 `renderScale: 1`，如果你用内置默认值跑会是 `1.5`（像素数 ×2.25），显式设回 `video.renderScale: 1` 立竿见影。
+- **降编码帧率**：保持 `video.fastFps: 30`（就算 `fps: 60` 也只编 30 帧，流畅度够用且省一半编码时间）。
+- **少开 worker**：每个 worker 吃 300~500 MB 内存和一份 WebGL 显存，小机器把 `render.workers` 设为 `1` 或 `2`。
+- **TTS 抢卡**：如果显卡显存很小且本地同时跑 IrodoriTTS，把 `video.ttsMode` 改成 `serial`（先全合成完语音再画图，不跟 WebGL 抢显存）。
 
-## 导出速度偏慢
+## 4. 画质糊或文件太大
 
-- 检查是否误用软件渲染（`renderPool.webglRenderers` 显示 `SwiftShader` / `llvmpipe`）或未启用硬件编码；查看日志确认当前走的是 WebCodecs 还是 `image2pipe`。
-- 检查分辨率、`fastFps`（默认 `30`）与 `video.renderScale`：若使用 `1.5` 超采样，可先降到 `1` 对比。
-- 如未配置或修改了 `video.ttsMode`，当前默认已为 `concurrent`（边渲染边并发合成最多 3 句）；若与单卡本地 TTS 争抢显存/算力，可尝试切回 `ttsMode: serial` 对比端到端耗时，详见 [导出模式](export-modes.md)。
+- 走 **WebCodecs** 路径时调 `video.exportBitrate`（单位 bps，默认 `12000000`；想文件小改 `8000000`）。
+- 走 **`rawvideo` / `image2pipe`（ffmpeg）** 路径时调 `video.crf`（越小越清晰、文件越大；常用 `23` ~ `28`）。
+- `renderScale` 设小于 `1` 导致的画面发虚，拉高码率是救不回来的，先改回 `1`。
 
-## 画面模糊或文件过大
+## 5. 云端素材下载失败或默认 BGM 没声音
 
-- WebCodecs 路径由 `video.exportBitrate`（默认 `12000000` bps）控制目标码率；`image2pipe` / 帧序列路径由 `video.crf` 控制质量因子（越小越清晰、体积越大）。
-- 检查 `renderScale` 是否低于 `1`：低分辨率渲染后放大造成的模糊不能靠提高码率恢复。
-- 旧的 `exportMode: record`、`recordTargetSizeMb`、`recordBitrate` 等设置已废弃或不再读取，见 [旧配置迁移](export-modes.md#旧配置迁移)。
+- 先看 `/api/v1/resources` 里有没有 `cloud` 字段；没有就检查启动日志里的 `[Cloud]` 报错，网络恢复后调一次 `POST /api/v1/cloud/refresh`。
+- 下载老超时的话，把 `assets.concurrency` 调小到 `1` 或 `2`，或把 `assets.timeoutMs` 调大。
+- 如果手动建了 `resources/audio/bgm/bgm.yaml`，它会**整体替换**主配置与默认 `bgm00003` 兜底；记得检查里面的 `enabled: true`、`volume > 0` 和路径是否正确，改完重启宿主。
 
-## 资源没有出现在清单中或云端下载失败
+## 6. 端口被占用（`EADDRINUSE`）
 
-- **零本地云端模式**：默认开启 `assets.cloudCatalog: true`，空 `resources/` 即可直接运行。如果 `/api/v1/resources` 缺失 `cloud` 字段或条目偏少，先检查日志中 `[Cloud]` 报错，并用 `POST /api/v1/cloud/refresh` 强制刷新；网络不稳时可降低 `assets.concurrency`（如设为 `1`~`2`）或增大 `assets.retries`。
-- **全局默认 BGM 未生效**：当 `resources/audio/bgm/bgm.yaml` 和 `resources/audio/bgm/bg1.mp3` 都不存在时，宿主会自动回落到云端 `bgm00003`；若手动写了 `bgm.yaml`，则完整覆盖主配置与自动回落逻辑。
-- **本地文件覆盖**：需要强制使用本地模型或背景时，按 [资源与音频配置](resources.md) 核对资源根、文件名和 YAML 路径；修改 `bgm.yaml` 或 `config.yaml` 后需重启宿主。
+查一下谁占了 `9881` 端口，别上来就 `killall node` 或乱杀 Chrome（可能误杀正常任务）：
 
-## 按现象快速定位
+- Windows PowerShell：`Get-NetTCPConnection -LocalPort 9881 -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess`
+- Linux：`ss -ltnp 'sport = :9881'`
 
-| 现象                             | 先看什么                           | 不要直接做什么               |
-| -------------------------------- | ---------------------------------- | ---------------------------- |
-| 连接被拒绝                       | 进程是否启动、监听端口和地址       | 不要先改视频参数             |
-| health 可访问但没有 ready worker | 浏览器启动日志、构建产物、桥接连接 | 不要认为 HTTP 200 代表可渲染 |
-| worker ready，但任务一直排队     | 队列、busy worker、可用内存护栏    | 不要只增大 timeout           |
-| 请求突然取消                     | 客户端 / 代理超时、连接中断        | 不要只看宿主任务超时值       |
-| 角色或背景缺失                   | 剧本路径、清单、实际文件、资源请求 | 不要随意更换编码器           |
-| 有画面无配音                     | TTS 开关、角色匹配、服务端参考音频 | 不要用 `voice` 字段代替 TTS  |
-| 有配音但嘴不动                   | 本句音频包络是否解码成功           | 不要重新添加文字模拟口型     |
-| 配置改了没变化                   | 实际配置文件、环境变量、是否重启   | 不要重复覆盖正式配置         |
+## 7. TTS 配音缺句或日文预检报错
 
-## 端口占用与残留进程
+- **路径基准别搞反**：`tts.characters[].refAudioPath` 和 `loraAdapter` 填的是 **TTS 服务那台机器上的路径**。
+- **Irodori 报 400 缺日文 `ttsText`**：Irodori 引擎只能读日语。请确保 `llm.enabled: true` 让宿主自动翻译，或者自己提交的剧本每句 `Talk` 都带上了日文 `ttsText`。
+- **单句静音**：查日志里是不是单句 TTS HTTP 超时了（Irodori 高峰排队久的话，把 `tts.timeoutMs` 适当调大到比如 `300000`）。
 
-出现 `EADDRINUSE` 时，先确认哪个进程占用了监听端口。
+## 8. 动作、表情或台词显示不对
 
-Windows：
-
-```powershell
-Get-NetTCPConnection -LocalPort 9881 -State Listen |
-  Select-Object LocalAddress, LocalPort, OwningProcess
-```
-
-Linux：
-
-```bash
-ss -ltnp 'sport = :9881'
-```
-
-端口上的进程可能是仍在工作的旧宿主，也可能是无关服务。确认命令行、路径和 PID 后，再用它原本的管理方式停止，例如对应的 systemd 服务或前台 Ctrl+C。
-不要批量结束所有 `node`、Chrome 或 Edge；其他程序和导出可能也在使用它们。
-
-如果旧宿主已经退出但有旧浏览器反复重连，先确认浏览器进程属于哪次启动，再清理该次测试或服务的进程树。不要把这些旧连接误当成新 worker 已就绪。
-
-## 配置修改没有生效
-
-按以下顺序检查：
-
-1. 修改的是正式 `config.yaml`，不是仅供复制的 `config.example.yaml`。
-2. 启动的编译产物属于当前仓库，而不是另一份安装目录。
-3. 服务管理器是否注入了同名 `MSS_*` 变量；环境变量优先于主配置。
-4. BGM 是否由资源根下的 `audio/bgm/bgm.yaml` 整体替换了主配置中的 `bgm`。
-5. 是否已重启宿主。配置不是每次导出重新加载的；模型 / 背景目录的缓存刷新不能替代配置重载。
-
-只查看相关环境变量，注意其中可能含本地路径或自定义水印内容；反馈问题时不要贴完整环境变量列表、密钥或私有配置。
-YAML 的布尔值使用 `true` / `false`，数值字段不要误加引号。独立 BGM 文件必须是键值映射，不能写成列表。
-
-## TTS 配音缺失
-
-- `tts.enabled` 是否开启，`tts.apiBaseUrl` 是否指向当前可访问的 GPT-SoVITS 服务。
-- `tts.characters[].characterName` 是否与本句 `speaker` 对应；不同全名、简称或空格可能影响匹配。
-- 参考音频与权重路径是否存在于 **TTS 服务端**，而不是只存在于渲染宿主。
-- `promptText` 是否与参考音频对应，语言设置是否适合朗读文本。
-- 查看单句合成错误，不要只检查全局 TTS 健康状态；一段故事可能同时包含成功和失败的句子。
-
-`content` 决定画面文字，`ttsText` 可指定朗读文本。`voice` 虽保留在故事格式中，但当前 API 导出不会据此混入预录语音。
-无有效本句音频时不模拟说话口型；音频存在但包络解码失败时也可能没有口型，不能仅凭嘴是否运动判断音轨是否存在。
-
-## BGM 没有声音或音量不对
-
-1. 检查独立 `bgm.yaml` 的 `enabled`、`path`、`volume`，确认修改后已重启。
-2. 相对路径从资源根解析，例如 `audio/bgm/bg1.mp3`；不要填渲染宿主的 `C:\\...` 或任意本地磁盘绝对路径。
-3. URL 必须能被实际渲染浏览器访问，不能只在调用 API 的电脑上可访问。
-4. 查看音频加载和混音日志，再检查视频是否存在音轨。
-5. `volume: 0` 会静音；单独关闭 TTS 不会关闭 BGM。
-
-独立文件一旦存在就整体替换主配置的 BGM 设置；遗漏字段使用默认值，而不是继续从主配置继承。详见 [资源与音频配置](resources.md)。
-
-## 动作、表情或台词表现不对
-
-- 动作 / 表情名必须由对应模型提供，不能把另一个角色的名称直接复用。
-- `actions[].at` 是当前台词正文时长的比例，不是秒数。TTS 时长变化时，动作的绝对触发时间也会变化。
-- `delay` 是片段开始前的秒数，黑场 `duration` 是毫秒；混用单位会产生很长或几乎看不见的过渡。
-- `offset` 以 1920 宽度为基准，`-100` 只是短距离偏移，不保证角色从画外开始。
-- `wait: false` 不是导出时的通用并发开关。要在台词中演出动作，应使用 `Talk.data.actions`。
-- 模型动作与 v2 `face_*` 表情在播完后保持末帧定格是默认行为，会在下一条 cue 到来时交叉淡化，不一定是动画卡住；`ParamEyeball*` 与通道 1 表情参数在身体动作期间保持隔离（眼睑隔离时自动眨眼持续生效）；续演由 `idleChainGapSec` 控制。
-- 常驻渲染池在连续导出时会自动重置舞台计时与模型时钟基线（`resetStageTiming` / `resetClockBaselines`），避免虚拟时钟重置引发的冻结或旧计时器串扰。
-
-文字溢出时先检查原始 `content` 的换行和长度。不要假定渲染 API 会自动采用宿主 AI 生成或 AstrBot 插件侧的排版、拆句或舞台约束。
-字段说明和示例见 [故事文件格式](story-format.md)。
-
-## 报告问题时提供什么
-
-建议提供以下最小信息，便于复现而不暴露私有内容：
-
-- 操作系统、Node 版本、代码版本，以及浏览器版本。
-- 导出模式、分辨率、帧率、`renderScale`、worker 数和编码器配置。
-- health 中的 renderer 与 worker 状态，导出响应中的 `timings`。
-- 出错前后的相关日志、错误响应和复现步骤。
-- 不含私密信息的最小剧本；说明是全部句子、某个角色还是单句失败。
-- 如果是视觉问题，提供成片时间点或对应连续帧，不只描述“变快 / 变慢”。
-
-公开反馈前隐藏内网地址、用户名、本地路径、令牌和参考音频文本等敏感信息。完整资源文件、生产配置和大型测试产物不应直接加入仓库。
+- **动作/表情名不能跨角色混用**：去 `/api/v1/resources` 看这个角色真实的 `motions` 和 `facials` 列表。
+- **`actions[].at` 是 `0..1` 的比例**：不是秒数，受本句 TTS 时长影响。
+- **单位别写错**：`delay` 和 `Motion.duration` 是**秒**，黑场/淡入淡出/运镜的 `duration` 是**毫秒**。
+- **动作播完定格是正常设计**：角色动作和 `face_*` 表情播完后默认定格在末帧等下一条动作自然衔接（不是卡死了）；如果想让角色闲着时自己每隔几秒换个小动作，把 `video.idleChainGapSec` 设成正数（比如 `3`）。

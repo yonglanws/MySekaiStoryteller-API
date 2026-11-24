@@ -1,60 +1,58 @@
-# API
+# API 参考
 
-[返回 README](../README.md) · [文档索引](README.md) · [故事文件格式](story-format.md) · [资源与音频配置](resources.md)
+[返回 README](../README.md) · [文档总览](README.md) · [故事文件格式](story-format.md) · [部署指南](host-deployment.md)
 
-本文对应当前宿主的 HTTP API。本机访问地址示例为 `http://127.0.0.1:9881`；默认监听 `0.0.0.0:9881`，可通过宿主配置修改。
-API 支持可选的内置 Bearer 鉴权与 CORS 白名单（见下方通用约定与 [安全提示](host-deployment.md#安全提示)）。下文任务 ID、路径、资源名与统计值均为**示意值**。
+服务默认监听 `0.0.0.0:9881`（可在 `config.yaml` 的 `server` 节修改）。下面示例统一用 `http://127.0.0.1:9881`，任务 ID、路径和耗时均为示意值。
 
-本文导航：[端点一览](#通用约定与端点) · [提交导出](#提交导出post-apiv1export) · [在途任务](#在途任务查询与取消) · [文件分页](#文件分页get-apiv1files) · [资源目录](#资源目录get-apiv1resources) · [健康检查](#健康检查get-apiv1health) · [状态码](#常见状态码速查)
+## 基本约定
 
-## 通用约定与端点
+- **请求格式**：POST 接口使用 `Content-Type: application/json`，请求体上限 `50mb`。
+- **鉴权（可选）**：设置 `server.apiKey` 或环境变量 `MSST_API_KEY` / `MSS_API_KEY` 后，除了 `GET /api/v1/health` 和 `OPTIONS` 预检外，所有 `/api/v1/*` 与 `/apifile/*` 请求都要带请求头：
+  ```text
+  Authorization: Bearer <你的密钥>
+  ```
+  内部接口 `/api/v1/tts/lease` 和 `/api/v1/tts/lease/release` 额外允许同机渲染 worker 通过内部桥接令牌调用。不设密钥则关闭鉴权（仅建议本机回环使用）。
+- **CORS 策略**：默认开启（可用 `server.cors: false` 关闭）。配置了 `server.corsOrigins` 或 `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`（逗号分隔）时按白名单放行；没配时只放行本机回环地址（`localhost`、`127.0.0.1`、`[::1]`）。
+- **路径与脱敏**：`downloadUrl` 是相对服务根的下载路径；`videoPath` / `scriptPath` 是服务端本地磁盘路径。500 报错文本里的输出目录和临时目录路径会自动脱敏成 `[path]`。
 
-- 请求使用 `Content-Type: application/json`，JSON 请求体上限为 `50mb`。
-- 除下载与静态资源外，下面各端点返回 JSON；响应结构随端点不同，不要假定所有响应都带 `success`。
-- **可选鉴权（Bearer Token）**：配置 `server.apiKey` 或环境变量 `MSST_API_KEY` / `MSS_API_KEY`（非空）后，除 `GET /api/v1/health` 与 `OPTIONS` 预检外，所有 `/api/v1/*` 与 `/apifile/*` 请求都必须携带 `Authorization: Bearer <token>`（SHA-256 + `timingSafeEqual` 常量时间比对），未授权返回 HTTP `401`。内部 `/api/v1/tts/lease` 与 `/api/v1/tts/lease/release` 额外接受同机渲染 worker 的内部桥接令牌。未配置密钥时鉴权保持关闭，仅建议用于可信本机回环。
-- **CORS 策略**：默认启用（可用 `server.cors` 关闭）；允许来源由 `server.corsOrigins` 或环境变量 `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`（逗号分隔）指定。未显式配置来源白名单时，仅放行不带 userinfo 的本机回环来源（`localhost`、`127.0.0.1`、`[::1]` 的 `http`/`https`）。响应附带 `Vary: Origin`，允许 `GET, POST, OPTIONS` 与 `Content-Type, Authorization` 请求头；预检返回 HTTP 204。
-- `downloadUrl` 是相对地址，应与服务地址组合；`videoPath` / `scriptPath` 是宿主磁盘路径，不是客户端本地路径（500 报错文本中的宿主本地绝对路径会脱敏为 `<path>`）。
+## 接口一览
 
-| 方法 | 端点                             | 用途                                                                  |
-| ---- | -------------------------------- | --------------------------------------------------------------------- |
-| POST | `/api/v1/export`                 | 提交故事，支持同步等待（默认）或异步入队（`wait: false`）             |
-| GET  | `/api/v1/export/:taskId/status`  | 查询单个在途或近期已完成任务（支持 `completed`/`failed`/`cancelled`） |
-| POST | `/api/v1/export/:taskId/cancel`  | 取消指定在途任务并立即清理关联临时目录                                |
-| GET  | `/api/v1/files`                  | 分页列出导出目录中的文件                                              |
-| GET  | `/api/v1/download/:filename`     | 下载指定文件（校验解析后真实路径不越界）                              |
-| GET  | `/api/v1/resources`              | 获取合并后的模型、动作、表情、背景、BGM 与 SE 目录                    |
-| POST | `/api/v1/script/generate`        | 宿主内置 AI 生成剧本（不导出）                                        |
-| POST | `/api/v1/generate`               | 宿主内置 AI 生成剧本并直接导出 MP4                                    |
-| GET  | `/api/v1/assets/moesekai/models` | 浏览 Moesekai 云端模型索引                                            |
-| GET  | `/api/v1/assets/moesekai/media`  | 浏览 Moesekai 背景 / BGM bundle                                       |
-| POST | `/api/v1/assets/fetch`           | 从 Moesekai 拉取模型、背景或 BGM 到本地                               |
-| POST | `/api/v1/cloud/refresh`          | 强制刷新云端资源目录快照                                              |
-| GET  | `/api/v1/health`                 | 查看宿主、渲染池、TTS、LLM 与清理状态                                 |
-| GET  | `/api/v1/status`                 | 查看队列与近期导出统计                                                |
-| POST | `/api/v1/cleanup`                | 立即执行一次过期导出文件与临时目录清理                                |
-| GET  | `/api/v1/cleanup/stats`          | 查看清理策略与累计统计                                                |
+| 方法   | 路径                             | 作用                                                            |
+| ------ | -------------------------------- | --------------------------------------------------------------- |
+| `POST` | `/api/v1/export`                 | 提交故事 JSON 导出 MP4（支持同步等待或 `wait: false` 异步入队） |
+| `GET`  | `/api/v1/export/:taskId/status`  | 查询单个任务状态（保留期 1 小时，最多 200 条）                  |
+| `POST` | `/api/v1/export/:taskId/cancel`  | 取消排队或渲染中的任务，并立即清理关联临时目录                  |
+| `POST` | `/api/v1/script/generate`        | 内置 AI 生成剧本 JSON（不渲染视频）                             |
+| `POST` | `/api/v1/generate`               | 内置 AI 生成剧本并直接提交导出 MP4                              |
+| `GET`  | `/api/v1/files`                  | 分页列出输出目录里的 `.mp4`、`.json`、`.log`、`.txt` 文件       |
+| `GET`  | `/api/v1/download/:filename`     | 下载输出目录里的指定文件（带防越界校验）                        |
+| `GET`  | `/api/v1/resources`              | 获取合并后的模型、动作、表情、背景、BGM 与 SE 目录              |
+| `POST` | `/api/v1/cloud/refresh`          | 强制重新拉取并刷新云端目录快照                                  |
+| `GET`  | `/api/v1/assets/moesekai/models` | 浏览 Moesekai 远端模型索引（不下载）                            |
+| `GET`  | `/api/v1/assets/moesekai/media`  | 浏览远端背景 / BGM 列表（不下载）                               |
+| `POST` | `/api/v1/assets/fetch`           | 手动拉取模型、背景或 BGM 到本地 `resources/`                    |
+| `GET`  | `/api/v1/health`                 | 健康检查（渲染池、GPU、TTS、LLM、清理统计）                     |
+| `GET`  | `/api/v1/status`                 | 查看当前正在跑的、排队中的和最近 10 次导出记录                  |
+| `POST` | `/api/v1/cleanup`                | 立即清理过期导出文件和过期临时目录                              |
+| `GET`  | `/api/v1/cleanup/stats`          | 查看自动清理策略和累计清理计数                                  |
 
-AI 剧本生成与云端资源拉取的完整请求体示例见 [宿主内置 AI 剧本生成](ai-script.md) 与 [云端资源获取](cloud-assets.md)。
+AI 剧本生成和云端拉取的详细参数看 [宿主内置 AI 剧本生成](ai-script.md) 和 [云端资源获取](cloud-assets.md)。
+
+---
 
 ## 提交导出：`POST /api/v1/export`
 
-支持**同步长连接（默认，`wait: true`）**与**异步入队轮询（`wait: false`）**两种模式。服务端均先完成云端资源按需物化、Irodori 日语 `ttsText` 预检与 Schema 校验，再将任务入队：
+支持**同步等待（默认 `wait: true`）**和**异步入队（`wait: false`）**两种用法。无论哪种模式，收到请求后都会先做尺寸校验、故事 Schema 校验、云端素材按需下载，以及（启用 IrodoriTTS 时）日语 `ttsText` 预检，全部通过才会放进队列。
 
-- **`wait: true`（默认）**：长连接阻塞直至排队与渲染导出完成后返回 HTTP 200；客户端断连会取消该任务。
-- **`wait: false`**：立即返回 **HTTP 202** 与 `taskId` / `statusUrl`，适合经反代、Bot 网关或短超时客户端调用，随后轮询 `GET /api/v1/export/:taskId/status` 获取最终结果（例如 `astrbot_plugin_msst` 默认以 `wait: false` 提交并按 `poll_interval_seconds` 轮询）。
+请求体只认下面三个字段（分辨率、帧率、编码器、TTS 等全部走宿主 `config.yaml`）：
 
-| JSON 字段 | 必填 | 类型与规则                                                                                   |
+| 字段      | 必填 | 说明                                                                                         |
 | --------- | ---- | -------------------------------------------------------------------------------------------- |
-| `story`   | 是   | 完整故事对象，包含 `models`、`images`、`snippets` 数组；详见 [故事文件格式](story-format.md) |
-| `timeout` | 否   | 整数，单位毫秒，范围 `1`～`2147483647`；默认 `1800000`（30 分钟）                            |
-| `wait`    | 否   | 布尔值；默认 `true`（同步等待成片）；传 `false` 时立即返回 HTTP 202 并由调用方轮询 `/status` |
+| `story`   | 是   | 完整故事对象，含 `models`、`images`、`snippets` 三个数组，见 [故事文件格式](story-format.md) |
+| `timeout` | 否   | 正整数，单位毫秒，范围 `1` ~ `2147483647`，默认 `1800000`（30 分钟）。**包含排队时间**       |
+| `wait`    | 否   | 布尔值，默认 `true`。`true` 一直等到出片返回 200；`false` 立刻返回 202 和 `taskId`           |
 
-请求只读取上述三个字段。尺寸、帧率、编码、导出模式、TTS 与 BGM 等由宿主配置决定。
-启用 `assets.cloudCatalog`（默认）时，剧本中引用的云端背景名/id、BGM 曲名/id、SE 与 `cloud/` 模型会在入队前自动物化到 `resources/*/cloud/`。故事中的预录 `voice` 字段当前不进入 API 导出音轨。
-
-### 同步 / 异步调用示例
-
-同步调用示例（长连接直取结果）：
+### 同步调用示例
 
 ```bash
 node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({story: JSON.parse(fs.readFileSync(process.argv[1], "utf8")), timeout: 600000}))' \
@@ -65,18 +63,10 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
     --data-binary @-
 ```
 
-若启用异步入队（`"wait": false`），立即返回 HTTP 202：
+> [!NOTE]
+> 同步模式下如果客户端提前断开连接或超过 `timeout`，宿主会自动取消该任务，避免白占 GPU。
 
-```json
-{
-  "success": true,
-  "taskId": "export-1800000000000-demo01",
-  "status": "queued",
-  "statusUrl": "/api/v1/export/export-1800000000000-demo01/status"
-}
-```
-
-同步成功时返回 HTTP 200：
+成功返回 HTTP 200：
 
 ```json
 {
@@ -84,7 +74,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
   "message": "Video exported successfully",
   "videoPath": "C:\\mss\\apifile\\export-1800000000000-demo01.mp4",
   "fileSize": 5242880,
-  "duration": 41.2,
+  "duration": 21.4,
   "frameCount": 900,
   "timings": {
     "pumpMs": 12400,
@@ -96,7 +86,8 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
     "audioMs": 420,
     "invokeMs": 150,
     "frames": 900,
-    "avgPumpFps": 72.6
+    "avgPumpFps": 72.6,
+    "videoDurationMs": 30000
   },
   "logPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log",
   "logJsonPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log.json",
@@ -105,222 +96,136 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 }
 ```
 
-| 响应字段                                 | 含义                                                                                                                                                  |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `success`、`message`                     | 成功标志与结果说明                                                                                                                                    |
-| `videoPath`                              | 生成视频在宿主上的文件路径                                                                                                                            |
-| `fileSize`                               | 产物文件字节数                                                                                                                                        |
-| `duration`                               | **渲染侧导出耗时（秒），不是视频时长，也不含 API 排队时间**                                                                                           |
-| `frameCount`                             | 渲染结果报告的总帧数                                                                                                                                  |
-| `timings`                                | `fast` 导出阶段耗时与帧率统计（`pumpMs`、`tickMs`、`renderMs`、`snapshotMs`、`ttsWaitMs`、`encodeMs`、`audioMs`、`invokeMs`、`frames`、`avgPumpFps`） |
-| `logPath` / `logJsonPath` / `reportPath` | 与视频同目录的可读诊断日志、结构化 JSON 日志与交付报告路径                                                                                            |
-| `downloadUrl`                            | 视频下载相对地址                                                                                                                                      |
+重点字段说明：
 
-### 超时、限流与失败
+- `duration`：**这次渲染导出一共花了多少秒（墙钟耗时，不含排队时间）**，不是视频本身有多长。
+- `timings.videoDurationMs`：这才是成片视频本身的毫秒时长（`frameCount / encodeFps * 1000`）。
+- `downloadUrl`：拿去拼在服务地址后面下载视频，例如 `http://127.0.0.1:9881/api/v1/download/...`。
+- `logPath` / `logJsonPath` / `reportPath`：同目录下自动生成的诊断日志、结构化 JSON 日志和交付报告。
 
-- `timeout` 从任务提交后计时，**包含排队时间**；`wait: true` 时客户端断连或超时都会取消任务，`wait: false` 时由宿主超时定时器在到期后取消并将状态记为 `failed`。
-- `/api/v1/export`、`/api/v1/script/generate` 与 `/api/v1/generate` 共享按客户端 IP 的速率限制（内存表默认上限 `rateLimitMaxEntries: 10000`）：每个 60 秒窗口最多 10 次请求；超限返回 **HTTP 429**，同时设置 **`Retry-After` 响应头**与响应体 `retryAfterSeconds`。
-- 启用 Bearer 鉴权且令牌缺失/不匹配返回 **HTTP 401**。
-- 故事缺失、Schema 校验失败、非法 `wait`/`timeout` 或导出前 Irodori 日语预检失败返回 HTTP 400（附 `details` 或脱敏错误信息）。
-- 导出失败、超时、取消或产物缺失返回 HTTP 500（错误文本经 `redactPaths` 脱敏）；渲染池尚未就绪返回 HTTP 503。
+### 异步调用（`wait: false`）
 
-## 在途任务：查询与取消
-
-`taskId` 由服务端生成（形如 `export-时间戳-随机后缀`），可在 `GET /api/v1/status` 的 `activeTaskIds` / `queuedTaskIds` 中查看全局在途 ID。已完成/失败/取消的任务记录会保留 **1 小时（最多 200 条）** 供异步轮询读取，超期后淘汰。
-
-### `GET /api/v1/export/:taskId/status`
-
-排队中示例：
+如果你的调用方经过反代、Bot 网关或不能长时间挂着 HTTP 连接，传 `"wait": false` 会立刻返回 HTTP 202：
 
 ```json
 {
   "success": true,
   "taskId": "export-1800000000000-demo01",
   "status": "queued",
-  "elapsedSeconds": 12.5,
-  "queuePosition": 2
+  "statusUrl": "/api/v1/export/export-1800000000000-demo01/status"
 }
 ```
 
-异步已完成示例（可直接取 `result.downloadUrl` 下载成片）：
+然后定时轮询 `GET /api/v1/export/:taskId/status`。异步模式下超出 `timeout` 后宿主也会自动取消任务，并把状态记为 `failed`。
 
-```json
-{
-  "success": true,
-  "taskId": "export-1800000000000-demo01",
-  "status": "completed",
-  "elapsedSeconds": 24.8,
-  "result": {
-    "success": true,
-    "videoPath": "C:\\mss\\apifile\\export-1800000000000-demo01.mp4",
-    "fileSize": 5242880,
-    "duration": 21.4,
-    "frameCount": 900,
-    "downloadUrl": "/api/v1/download/export-1800000000000-demo01.mp4"
-  }
-}
-```
+### 限流规则
 
-- 在途 `status` 为 `processing`、`queued` 或 `pending`；终态记录在保留期内返回 `completed`（附 `result`）、`failed`（附脱敏 `error.message`）或 `cancelled`；未找到或已淘汰返回 `{ "taskId": "...", "status": "unknown" }`。
-- `elapsedSeconds` 为自登记以来的等待+处理秒数；`queuePosition` 非排队时为 `null`（终态记录不含该字段）。
+`/api/v1/export`、`/api/v1/script/generate`、`/api/v1/generate` 三个接口共用按客户端 IP 的限流：**每 60 秒窗口最多 10 次请求**（内存表上限 10,000 个 IP）。超限返回 HTTP `429`，同时带 `Retry-After` 响应头和响应体字段 `retryAfterSeconds`。
+
+---
+
+## 查询与取消任务
+
+### `GET /api/v1/export/:taskId/status`
+
+可能返回的 `status`：
+
+- 进行中：`queued`（排队中，带 `queuePosition`）、`processing`（正在渲染或收尾落盘）、`pending`（刚登记尚未入队或刚退出的过渡态）
+- 已结束（保留 **1 小时**，最多 **200 条**）：`completed`（带完整 `result`，含 `downloadUrl`）、`failed`（带脱敏 `error.message`）、`cancelled`
+- 找不到或已过期淘汰：`{ "taskId": "...", "status": "unknown" }`
+
+`elapsedSeconds` 表示从提交登记算起经过的秒数。
 
 ### `POST /api/v1/export/:taskId/cancel`
 
-无需请求体。接口会先触发并等待 `dispatcher.cancel(taskId)` 完成清理，再返回 HTTP 200：`{"taskId":"export-1800000000000-demo01","cancelled":true}`。正在渲染的任务会立即中止、`BridgeController` 关闭该任务在途文件句柄与帧管道（`FramesPipeSession`）并删除关联临时目录（`mss-export-*`、`mss-hf-*`、`mss-fpipe-*` 等）同时标记防回写，同步长连接返回 HTTP 500 `Export cancelled by user`，异步任务 `/status` 转为 `cancelled`。
-
-## 文件分页：`GET /api/v1/files`
-
-| 查询参数 | 默认值 | 规则                                  |
-| -------- | ------ | ------------------------------------- |
-| `page`   | `1`    | 从 1 开始                             |
-| `limit`  | `20`   | 限制在 1～100                         |
-| `sort`   | `desc` | 仅 `asc` 按修改时间升序，其余均为降序 |
-
-列表筛选输出目录中的 `.mp4` 与 `.json` 文件，返回 `data[]` 与 `pagination`。
-
-## 下载：`GET /api/v1/download/:filename`
-
-路径参数仅传文件名（不含目录、`/`、`\`、`\0` 与 `..`），服务端同时使用 `fs.realpathSync` 校验真实目标严格位于输出目录内（阻断符号链接越界）。HTTP 200 直接返回文件流（附 `Content-Type`、`Content-Length`、`Content-Disposition`；支持 `.mp4`、`.json`、`.log`/`.txt`、`.webm`）；非法文件名返回 400，文件不存在或符号链接越界返回 404。
-
-## 资源目录：`GET /api/v1/resources`
-
-无请求体，最多等待 2 秒让首轮云端刷新完成；返回合并后的完整资源目录（30 秒按需内存缓存）：
+不用传请求体。会立即取消排队或正在渲染的任务，关闭对应的文件句柄和帧管道（`FramesPipeSession`），并删掉本次生成的临时目录，等待清理完成后返回：
 
 ```json
 {
-  "success": true,
-  "models": [
-    {
-      "id": 1020,
-      "name": "晓山瑞希",
-      "shortName": "瑞希",
-      "path": "cloud/20mizuki_normal/20mizuki_normal_3.0_t04/20mizuki_normal_3.0_t04.model3.json",
-      "motions": ["w-normal-nod01"],
-      "facials": ["face_smile_01"],
-      "defaultMotion": "w-normal-nod01",
-      "defaultFacial": "face_smile_01",
-      "source": "cloud",
-      "cloudId": "20mizuki_normal",
-      "characterId": 20,
-      "unit": "25时，Nightcord de.",
-      "outfitCategory": "常服",
-      "outfitLabel": "日常常服",
-      "isDefault": true
-    }
-  ],
-  "images": ["cloud/bg_a000301"],
-  "imageDetails": [
-    {
-      "file": "cloud/bg_a000301",
-      "name": "神山高校 天台",
-      "description": "校园·白天·室外",
-      "id": "bg_a000301",
-      "aliases": ["神山高校 屋上"],
-      "category": "校园",
-      "timeOfDay": "白天",
-      "indoor": "室外",
-      "tags": ["神山高校", "天台"],
-      "source": "cloud"
-    }
-  ],
-  "voices": [],
-  "bgm": ["cloud/bgm00003.mp3"],
-  "bgmDetails": [
-    {
-      "file": "cloud/bgm00003.mp3",
-      "name": "Slapstick!!",
-      "description": "轻快俏皮的日常闹剧曲（剧情 BGM）",
-      "id": "bgm00003",
-      "mood": "元气欢快",
-      "tempo": "中快",
-      "category": "剧情 BGM",
-      "tags": ["日常", "欢快"],
-      "source": "cloud"
-    }
-  ],
-  "seDetails": [
-    {
-      "file": "cloud/se00053_b.mp3",
-      "id": "se00053_b",
-      "name": "se00053_b",
-      "category": "心跳惊觉",
-      "description": "心绪波动 / 回忆白光切入声",
-      "tags": ["flashback", "transition"]
-    }
-  ],
-  "cloud": {
-    "generatedAt": "2026-11-18T00:00:00.000Z",
-    "models": 511,
-    "backgrounds": 1401,
-    "bgm": 421,
-    "se": 1942
-  }
+  "taskId": "export-1800000000000-demo01",
+  "cancelled": true
 }
 ```
 
-- **本地优先且不压制云端**：本地 `models.yaml` 只占对应角色的默认位，不会抑制同一角色的其余服装变体或其他角色；本地已下载的背景/BGM 不新增 `cloud/` 副本，会自动贴上官方名称与语义标签。
-- `models[].id`：云端默认服装从 `1000 + characterId` 分配，其余服装变体与配角从 `2000` 起确定性分配。
+如果任务已经结束或不存在，返回 `cancelled: false`。
 
-## 云端目录刷新：`POST /api/v1/cloud/refresh`
+---
 
-无请求体。强制重新拉取 Moesekai 模型索引、exmeaning 背景与 BGM/SE 列表、Sekai-World 曲名索引，写入 `<assets.cacheDir>/catalog.json` 并返回：
+## 文件列表与下载
 
-```json
-{
-  "success": true,
-  "generatedAt": "2026-11-18T00:00:00.000Z",
-  "models": 511,
-  "backgrounds": 1401,
-  "bgm": 421,
-  "se": 1942
-}
-```
+### `GET /api/v1/files`
 
-`assets.cloudCatalog` 关闭时返回 409；刷新失败且无任何可用快照时返回 502。
+分页列出输出目录（默认 `apifile/`）中的 `.mp4`、`.json`、`.log`、`.txt` 文件。
 
-## 健康检查：`GET /api/v1/health`
+- `page`：页码，从 `1` 开始（默认 `1`）
+- `limit`：每页条数，`1` ~ `100`（默认 `20`）
+- `sort`：`asc` 按修改时间升序，其余全部按降序（默认 `desc`）
 
-返回 HTTP 200（本端点对探活公开，不要求 Bearer 令牌），`status: "ok"` 仅表示 API 进程可响应；请同时检查 `renderPool.readyWorkers` 与 `webglRenderers`。
+### `GET /api/v1/download/:filename`
 
-当配置了 `server.apiKey` / `MSST_API_KEY` / `MSS_API_KEY` 且请求未携带合法 Bearer 令牌时，接口会自动脱敏：`ttsLease` 仅返回 `active`、`waiters`、`hasWeights`（省略 `currentWeights` 文件名），并省略 `tts.apiBaseUrl`、`llm.baseUrl` 与 `assets.indexBase` / `assets.libraryBase`。
+只传文件名，不要带路径斜杠或 `..`。服务端会做字符检查并用 `fs.realpathSync` 校验真实路径没有通过软链接跳出输出目录。支持 `.mp4`、`.json`、`.log`、`.txt`、`.webm`。
 
-| 顶层字段                                           | 含义                                                                                                                                                                              |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`、`version`                                | 当前固定为 `"ok"`、`"2.0.0"`                                                                                                                                                      |
-| `activeExports`、`queuedExports`、`pendingExports` | API 已派发数、排队数、等待结果数                                                                                                                                                  |
-| `cleanup`                                          | 过期产物清理策略与统计                                                                                                                                                            |
-| `videoConfig`                                      | `width`、`height`、`renderScale`、`fps`、`codec`、`crf`、`audioBitrate`、`watermark`、`watermarkText`、`exportMode`、`fastFps`、`exportFastEncoder`、`idleChainGapSec`、`ttsMode` |
-| `renderPool`                                       | `configuredWorkers`、`readyWorkers`、`idleWorkers`、`busyTaskIds`、`bufferedTasks`、`exportsCompleted`、`webglRenderers`                                                          |
-| `ttsLease`                                         | GSV 全局权重租约状态（启用 `apiKey` 且未认证时仅含摘要计数与 `hasWeights`）                                                                                                       |
-| `tts`                                              | `enabled`、`provider`、`emotionLabels`、`characters`（已配置角色数）；认证后含 `apiBaseUrl`                                                                                       |
-| `llm`                                              | `enabled`、`model`、`pipeline`、`apiKeyConfigured`、`activeGenerations`、`maxConcurrent`；认证后含 `baseUrl`                                                                      |
-| `assets`                                           | `source`、`region`、`fetching`；认证后含 `indexBase`、`libraryBase`                                                                                                               |
-| `host`                                             | `platform`、`node`、`ffmpegEncoder`（配置值）、`ffmpegEncoderDetected`（真实探测结果）                                                                                            |
+---
 
-## 队列概览：`GET /api/v1/status`
+## 资源目录与云端刷新
 
-返回 `activeExports`、`queuedExports`、`pendingExports`、`maxConcurrent`、`activeTaskIds`、`queuedTaskIds` 与最多 10 条滚动窗口 `recentExports`（注意 `recentExports[].durationMs` 包含排队时间）。
+### `GET /api/v1/resources`
 
-## 清理：`POST /api/v1/cleanup` 与 `GET /api/v1/cleanup/stats`
+返回本地和云端合并后的完整可用素材目录（内存缓存 30 秒；冷启动无快照时最多等 60 秒首轮拉取，有快照最多等 2 秒刷新）：
 
-`POST /api/v1/cleanup` 会立即执行过期导出与过期临时项清扫并返回 `{ success, filesCleaned, tempEntriesCleaned, totalFilesCleaned, retentionHours }`。
+- `models`：含角色 id、`name`、`shortName`、`path`、`motions`、`facials`、`defaultMotion`、`defaultFacial`、`source`（`local` / `cloud`）以及服装分类、组合标签等。
+- `images` / `imageDetails`：背景列表及中文地点名、别名、`timeOfDay`、室内外标签。
+- `bgm` / `bgmDetails`：BGM 列表及曲名、情绪、节奏描述。
+- `seDetails`：云端 SE 音效列表及场景分类标签。
+- `cloud`：云端目录统计（`generatedAt`、`models`、`backgrounds`、`bgm`、`se`）。
 
-定时周期 60 分钟；清理输出目录中修改时间超过 24 小时的 `.mp4`、`.json`、`.log`、`.txt` 文件（跳过活跃任务产物），输出目录与系统临时目录中的过期临时项（前缀 `mss-fpipe-`、`mss-hf-`、`mss-export-`、`mss-api-audio-`、`mss-audio-`、`mss-fast-` 与孤儿 `.mss-frames-video-*.mp4`）默认保留超过 6 小时后清扫；被取消的导出任务还会由宿主在取消时立即清理本次关联临时目录。
+注意：**本地 `models.yaml` 只占对应角色的默认首选位，不会屏蔽该角色的其他云端服装或别的角色**；本地已下载的背景和 BGM 也会自动贴上官方中文名和标签。
 
-## 常见状态码速查
+### `POST /api/v1/cloud/refresh`
 
-| HTTP 状态 | 典型情况                                                                                                  |
-| --------- | --------------------------------------------------------------------------------------------------------- |
-| 200       | 正常响应（含任务 `unknown`、`cancelled: false`）                                                          |
-| 202       | `POST /api/v1/export` 传入 `wait: false` 异步入队成功                                                     |
-| 204       | CORS `OPTIONS` 预检                                                                                       |
-| 400       | 导出故事/参数校验失败（含非法 `wait`/`timeout`）、Irodori 日语预检失败、下载文件名非法                    |
-| 401       | 已启用 Bearer `apiKey`，请求缺失或携带错误 `Authorization: Bearer <token>`                                |
-| 404       | 下载文件不存在或符号链接越界                                                                              |
-| 409       | `cloudCatalog` 已关闭时刷新目录，或并发执行了第二个 `assets/fetch`                                        |
-| 422       | AI 剧本生成/校验失败或 `llm.enabled=false`                                                                |
-| 429       | `/api/v1/export`、`/api/v1/script/generate`、`/api/v1/generate` IP 限流（附 `Retry-After`）或 AI 并发上限 |
-| 500       | 渲染失败、导出超时/取消（同步模式）、产物缺失或文件读写错误                                               |
-| 502       | 上游 LLM 或云端资源站请求失败                                                                             |
-| 503       | 渲染池尚未绑定，或 TTS 权重租约被中止                                                                     |
-| 504       | AI 剧本生成阶段超时                                                                                       |
+无请求体，强制立刻重新拉取远端索引并更新 `<assets.cacheDir>/catalog.json`。如果 `assets.cloudCatalog` 被关闭则返回 HTTP `409`。
+
+---
+
+## 健康检查与队列状态
+
+### `GET /api/v1/health`
+
+该接口不要求 Bearer 鉴权（方便监控探活）。注意 `status: "ok"` 只代表 HTTP 服务活着，还要重点看 `renderPool.readyWorkers` 和 `renderPool.webglRenderers`。
+
+当服务开启了 `apiKey` 且调用方没带合法 Bearer 令牌时，接口会自动隐藏敏感配置：`tts.apiBaseUrl`、`llm.baseUrl`、`assets.indexBase`、`assets.libraryBase` 不会返回，`ttsLease` 只返回计数与 `hasWeights`。
+
+主要字段：`activeExports`、`queuedExports`、`pendingExports`、`cleanup`、`videoConfig`（含真实的 `codec`：`hevc` 或 `h264`）、`renderPool`、`ttsLease`、`tts`、`llm`、`assets`、`host`（含启动时实测出来的 `ffmpegEncoderDetected`）。
+
+### `GET /api/v1/status`
+
+返回当前队列快照：`activeExports`、`queuedExports`、`pendingExports`、`maxConcurrent`、`activeTaskIds`、`queuedTaskIds` 以及最多 10 条 `recentExports`（里面的 `durationMs` 包含排队时间）。
+
+---
+
+## 自动清理
+
+- **定时清理**：每 60 分钟自动跑一次。
+  - 输出目录（`apifile/`）里修改时间超过 **24 小时** 的 `.mp4`、`.json`、`.log`、`.txt` 会被删除（正在导出的任务产物会跳过）。
+  - 系统临时目录与输出目录里超过 **6 小时** 的残留临时项（`mss-fpipe-*`、`mss-hf-*`、`mss-export-*`、`mss-api-audio-*`、`mss-audio-*`、`mss-fast-*` 和 `.mss-frames-video-*.mp4`）会被清掉。
+- **手动触发**：`POST /api/v1/cleanup` 立即跑一遍清理；`GET /api/v1/cleanup/stats` 查看策略和累计清理数。
+
+---
+
+## 常见状态码
+
+| 状态码 | 常见原因                                                                                                                     |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `200`  | 正常成功（查不到任务时返回 `status: "unknown"` 也是 200）                                                                    |
+| `202`  | `POST /api/v1/export` 传了 `wait: false`，异步入队成功                                                                       |
+| `204`  | CORS `OPTIONS` 预检                                                                                                          |
+| `400`  | 故事格式错、尺寸不是偶数、`timeout` / `exportTimeout` 非正整数、`wait` 非布尔值、缺失日文 `ttsText` 预检失败、下载文件名非法 |
+| `401`  | 开启了 `apiKey` 但未提供或提供了错误的 Bearer 密钥                                                                           |
+| `404`  | 下载文件不存在或软链接越界                                                                                                   |
+| `409`  | `cloudCatalog: false` 时调用 `/cloud/refresh`，或重复并发调用 `/assets/fetch`                                                |
+| `422`  | AI 剧本生成/校验失败，或 `llm.enabled` 为 `false`                                                                            |
+| `429`  | 触发 IP 限流（10 次/60 秒，看 `Retry-After`）或 AI 并发生成数达上限                                                          |
+| `500`  | 导出失败、同步等待超时/被取消、生成成功但导出阶段报错                                                                        |
+| `502`  | 上游 LLM 或云端资源站请求失败                                                                                                |
+| `503`  | 渲染池还没就绪，或 TTS 权重租约被中止                                                                                        |
+| `504`  | AI 剧本生成阶段超时                                                                                                          |
