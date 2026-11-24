@@ -122,3 +122,32 @@ export function selectUnitFewShotExcerpts(
     .map((u) => u.excerpt)
     .join('\n\n')
 }
+
+/**
+ * 组合自适应 RAG 官方语料与静态团体 few-shot：
+ * - 若 Pass B RAG 有命中（`promptBlock` 非空），优先使用动态检索的官方剧情、对白口吻与世界观设定，
+ *   并附带显式反照抄护栏；若没有对白样本（`dialogueVoice` 为空），补一小段团体节奏样例。
+ * - 若 RAG 未启用或无命中，无缝回退到 `selectUnitFewShotExcerpts`。
+ */
+export function buildCanonDialogueReferenceBlock(
+  cast: Array<{ name: string; fullName?: string; path?: string }>,
+  scene: string,
+  ragContext?: {
+    promptBlock?: string
+    sections?: {
+      dialogueVoice?: Array<{ text: string }>
+    }
+  } | null
+): string {
+  const ragBlock = ragContext?.promptBlock?.trim() ?? ''
+  if (!ragBlock) {
+    return selectUnitFewShotExcerpts(cast, scene)
+  }
+  const hasVoiceSamples = (ragContext?.sections?.dialogueVoice?.length ?? 0) > 0
+  const guardrail =
+    '（以上官方参考只用于学习称呼、断句、潜台词与互动节奏，以及核对官方事实，严禁照抄原句或复述原事件。）'
+  if (hasVoiceSamples) {
+    return `${ragBlock}\n\n${guardrail}`
+  }
+  return `${ragBlock}\n\n${guardrail}\n\n${selectUnitFewShotExcerpts(cast, scene)}`
+}

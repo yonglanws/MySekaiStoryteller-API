@@ -1,5 +1,5 @@
 import type { CatalogModel } from '../resources/resourceCatalog'
-import { selectUnitFewShotExcerpts } from './corpusExamples'
+import { buildCanonDialogueReferenceBlock } from './corpusExamples'
 import {
   GENERIC_PROFILE,
   dialoguePersonaPrompt,
@@ -1398,6 +1398,42 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
 // 第二段：只写台词（writeDialogue）
 // ---------------------------------------------------------------------------
 
+function formatUnderstandingBlock(plan: StagedCastPlan): string {
+  const u = plan.understanding
+  if (!u) return ''
+  const parts: string[] = []
+  if (u.explicitRequests.length > 0) parts.push(`- 显性要求：${u.explicitRequests.join('；')}`)
+  if (u.implicitSubtext) parts.push(`- 潜台词：${u.implicitSubtext}`)
+  if (u.relationshipDynamic) parts.push(`- 关系张力：${u.relationshipDynamic}`)
+  if (u.emotionalArc) parts.push(`- 情绪弧光：${u.emotionalArc}`)
+  if (u.canonHooks.length > 0) parts.push(`- 官方呼应点：${u.canonHooks.join('；')}`)
+  if (u.avoidList.length > 0) parts.push(`- 避坑禁忌：${u.avoidList.join('；')}`)
+  return parts.length > 0
+    ? `\n## 导演意图与潜台词（务必落实到对话细节中，不要直白说破）\n${parts.join('\n')}\n`
+    : ''
+}
+
+function formatPairwiseAddressBlock(plan: StagedCastPlan): string {
+  const list = plan.pairwiseAddress
+  if (!list || list.length === 0) return ''
+  const rows = list.map(
+    (entry) =>
+      `- ${entry.from} 称呼 ${entry.to}：中文「${entry.zh}」${entry.ja ? ` / 日文「${entry.ja}」` : ''}`
+  )
+  return `\n## 角色两两称呼表（严格遵守，禁止随意改称呼）\n${rows.join('\n')}\n`
+}
+
+function formatWorldviewCueBlock(ragContext?: RagRetrieveResult | null): string {
+  const lore = ragContext?.sections?.worldviewLore ?? []
+  if (lore.length === 0) return ''
+  const compact = lore
+    .slice(0, 3)
+    .map((item) => item.text.slice(0, 260).trim())
+    .filter(Boolean)
+    .join('\n')
+  return compact ? `\n## 场景与设定补充线索（仅用于核对环境/道具/氛围）\n${compact}\n` : ''
+}
+
 export function buildDialoguePrompt(
   view: CatalogView,
   plan: StagedCastPlan,
@@ -1438,7 +1474,13 @@ export function buildDialoguePrompt(
     ? plan.outline.map((item, index) => `${index + 1}. ${item}`).join('\n')
     : '（自由发挥，但仍要围绕这个小事件）'
 
-  const fewShotExcerpts = selectUnitFewShotExcerpts(plan.cast, options.scene)
+  const fewShotExcerpts = buildCanonDialogueReferenceBlock(
+    plan.cast,
+    options.scene,
+    options.ragContext
+  )
+  const understandingBlock = formatUnderstandingBlock(plan)
+  const addressBlock = formatPairwiseAddressBlock(plan)
   const hasWxs = plan.cast.some((c) =>
     /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`)
   )
@@ -1510,13 +1552,13 @@ ${plan.background ? `开场背景：${plan.background}` : ''}
 出场角色（共 ${plan.cast.length} 名）：
 ${castBlock(plan)}
 
-${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}## 大纲（参考，不必逐条对应）
+${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}${understandingBlock}${addressBlock}## 大纲（参考，不必逐条对应）
 ${outline}
 
 ## 角色（请完整阅读每个人的提示词）
 ${castLines}
 
-## 官方团体语料参考（学习断句、短反应、句中 \\n 位置与语气停顿，勿照抄剧情）
+## 官方剧情与口吻参考（只学习称呼、断句、潜台词与互动节奏，严禁照抄原句或复述原事件）
 ${fewShotExcerpts}
 
 ## 台词要求（按 ${budget} 句的场次计算）
@@ -1531,7 +1573,10 @@ ${fewShotExcerpts}
   - 平均 17~20 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
   - 约 1/6 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
 - 标点：至少 ${Math.max(8, Math.round(budget * 0.5))} 句带省略号或破折号；问句约 1/5；感叹号约 1/6，不要超过 1/4。
-- 只写说出口的话或括号内心独白 \`（……）\`（约一成）；禁止写 \`（笑）\`、\`她转过头\` 之类动作叙述。${termHint}
+- 只写说出口的话或括号内心独白 \`（……）\`（约一成）；禁止写 \`（笑）\`、\`她转过头\` 之类动作叙述。
+- **反套路与官方质感（Show, Don't Tell）**：
+  - 禁止心理咨询式独白和直白情绪总结（如「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「我终于明白了」「内心深处」）。用具体物件、转移话题、打断、迟疑停顿（……、——）来侧面流露情绪。
+  - 结尾最后 2 句严禁升华说教或大团圆总结；像官方剧情一样收在一个安静的动作余韵、日常小约定、轻描淡写的吐槽或未说完的半句话里。${termHint}
 
 ## 写完后自检（不要输出自检过程）
 - 总句数是否在 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句？
@@ -1875,6 +1920,7 @@ export function buildEmotionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
+${plan.understanding?.emotionalArc ? `规划情绪弧光：${plan.understanding.emotionalArc}` : ''}
 角色：
 ${cast}
 
@@ -2401,8 +2447,9 @@ export function buildStagingPrompt(
       .join('\n'),
     user: `## 本场与大纲
 小事件：${plan.event || options.scene}
+${plan.understanding?.emotionalArc ? `情绪弧光参考：${plan.understanding.emotionalArc}` : ''}
 角色（共 ${plan.cast.length} 名）：
-${castList}
+${castList}${formatWorldviewCueBlock(options.ragContext)}
 
 ${plannedScenes ? `## 一阶段分幕参考\n${plannedScenes}\n` : ''}## 定稿台词（仅引用 lineId）
 ${lineList}
@@ -3038,8 +3085,9 @@ export function buildDirectionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
+${plan.understanding?.emotionalArc ? `情绪弧光参考：${plan.understanding.emotionalArc}` : ''}
 出场角色：
-${castLines}
+${castLines}${formatWorldviewCueBlock(options.ragContext)}
 
 ## 台词稿（逐字，只能引用 id，不能改字）
 ${dialogueLines}

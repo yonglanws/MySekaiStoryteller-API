@@ -28,6 +28,7 @@ export interface TtsTranslationItem {
   speaker?: string
   emotion?: string
   ttsCaption?: string
+  addressHint?: string
 }
 
 export interface TtsTarget {

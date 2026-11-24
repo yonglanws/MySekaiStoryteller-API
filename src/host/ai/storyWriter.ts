@@ -35,6 +35,7 @@ import {
   type StagedDialogue,
   type StagedDirection,
   type StagedMessages,
+  type StagedPairwiseAddress,
   type StagedPromptOptions,
   type StagedStaging,
   type StagedVoiceDirectionLine
@@ -846,10 +847,16 @@ export class StoryWriter {
     const [voiceDirectionPlan, staging] = await Promise.all([emotionTask, stagingTask])
     dialogue = applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
 
-    // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、emotion 与 ttsCaption。
+    // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、称呼表、emotion 与 ttsCaption。
     let dialogueTts: Promise<Map<string, string> | null> | null = null
     if (translateForTts) {
-      dialogueTts = this.translateDialogue(dialogue, personas, options.signal).catch((error) => {
+      dialogueTts = this.translateDialogue(
+        dialogue,
+        personas,
+        options.signal,
+        plan.pairwiseAddress,
+        postCastRag
+      ).catch((error) => {
         if (options.signal?.aborted) return null
         this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
         return null
@@ -987,14 +994,16 @@ export class StoryWriter {
   }
 
   /**
-   * 批量翻译一段台词稿（携带说话人、人设口吻、emotion、ttsCaption），返回 lineId → 日文 ttsText。
+   * 批量翻译一段台词稿（携带说话人、人设口吻、日文称呼表、emotion、ttsCaption），返回 lineId → 日文 ttsText。
    *
    * 在语音导演完成后启动，与演技导演（direction）并行，不增加串行尾时间。
    */
   private async translateDialogue(
     dialogue: StagedDialogue,
     personas: PersonaEntry[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    pairwiseAddress?: StagedPairwiseAddress[],
+    ragContext?: RagRetrieveResult | null
   ): Promise<Map<string, string>> {
     const slots = dialogue.lines.map((line) => ({
       line,
@@ -1020,7 +1029,7 @@ export class StoryWriter {
     const startedAt = Date.now()
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal, personas),
+      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext),
       this.logger
     )
     const result = new Map<string, string>()
@@ -1055,16 +1064,34 @@ export class StoryWriter {
 
   private ttsTranslator(
     signal?: AbortSignal,
-    personas: PersonaEntry[] = this.getPersonas()
+    personas: PersonaEntry[] = this.getPersonas(),
+    pairwiseAddress?: StagedPairwiseAddress[],
+    ragContext?: RagRetrieveResult | null
   ): TtsBatchTranslator {
+    const addressLines = (pairwiseAddress ?? [])
+      .map((a) => `${a.from}→${a.to}: ${a.ja || a.zh}`)
+      .slice(0, 10)
+    const jpSamples = [
+      ...(ragContext?.sections?.dialogueVoice ?? []),
+      ...(ragContext?.sections?.canonPlot ?? [])
+    ]
+      .map((ex) => ex.jpText?.trim())
+      .filter((t): t is string => Boolean(t))
+      .slice(0, 2)
+      .map((t) => t.slice(0, 280))
+
     const system = [
       '你是 Project SEKAI 二次元剧情的中日翻译（配音台词专精），为 IrodoriTTS 生成自然、贴合角色人设的日语配音文本。',
       '只输出与输入等长的 JSON 字符串数组，不要解释、不要 markdown。',
       '翻译规则：',
-      '1. 严格结合每句提供的说话人、口吻提示、情绪标签（emotion）与日语声演指令（ttsCaption），翻出地道、口语化、符合角色人称与敬语习惯的日语。',
+      '1. 严格结合每句提供的说话人、口吻提示、日文称呼约定、情绪标签（emotion）与日语声演指令（ttsCaption），翻出地道、口语化、符合角色人称与敬语习惯的日语。',
       '2. 每条译文都必须含假名，不要输出纯汉字（例如「了解」写成「了解だよ」「了解です」）。保留自然的停顿与语气（……、っ、！、？、——）。',
       '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
-      '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。'
+      '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。',
+      ...(addressLines.length > 0 ? [`5. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`] : []),
+      ...(jpSamples.length > 0
+        ? [`6. 官方日文口吻参考（仅学语气与人称，严禁照抄）：\n${jpSamples.join('\n---\n')}`]
+        : [])
     ].join('\n')
 
     return async (texts, items?: TtsTranslationItem[]) => {
