@@ -195,6 +195,56 @@ const LlmPersonaSchema = z.object({
   group: z.string().default('')
 })
 
+const RagAdaptiveSchema = z.object({
+  /** 绝对相似度下限；低于此值直接返回 0 条，避免注入噪声 */
+  minScore: z.number().min(0).max(1).default(0.42),
+  /** 高置信阈值；命中高置信条目时动态放大字符预算 */
+  highScore: z.number().min(0).max(1).default(0.62),
+  /** 相对跌幅截断：丢弃低于 topScore * relativeDropRatio 的候选 */
+  relativeDropRatio: z.number().min(0).max(1).default(0.78),
+  /** 拐点断崖截断：相邻分差 >= elbowDropDelta 且低于 highScore 时停止 */
+  elbowDropDelta: z.number().min(0).max(1).default(0.065),
+  minChunks: z.number().int().min(0).default(0),
+  maxChunks: z.number().int().min(1).default(12),
+  softCharBudget: z.number().int().min(200).default(1800),
+  maxCharBudget: z.number().int().min(400).default(4800),
+  /** 同一 storyId 最多保留的合并场景数 */
+  maxPerStory: z.number().int().min(1).default(2),
+  /** 同 scenarioId 相邻行间距 <= mergeAdjacentGap 时合并为连续场景 */
+  mergeAdjacentGap: z.number().int().min(0).default(4)
+})
+
+const RagSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** 留空时自动继承 llm.baseUrl */
+  baseUrl: z.string().default(''),
+  /** 留空时自动继承 llm.apiKeyEnv */
+  apiKeyEnv: z.string().default(''),
+  /** OpenAI 兼容 /embeddings 模型名（默认 bge-m3） */
+  model: z.string().default('bge-m3'),
+  /** 0 = 由服务端决定维度，仅 >0 时在请求体中发送 dimensions */
+  dimensions: z.number().int().min(0).default(0),
+  /** 查询前缀指令；bge-m3 留空，Qwen3-Embedding 等指令型模型可按需填写 */
+  queryInstruct: z.string().default(''),
+  timeoutMs: z.number().int().positive().default(30_000),
+  batchSize: z.number().int().min(1).max(128).default(32),
+  /** 磁盘向量与增量 chunkHash 缓存目录（相对仓库根） */
+  cacheDir: z.string().default('cache/rag'),
+  /** Embedding API 不可用或关闭时自动回落 BM25+CJK-bigram 词法检索 */
+  fallbackLexical: z.boolean().default(true),
+  /** sekai-story-search 数据集根 URL（留空禁用远程语料） */
+  sekaiStorySearchUrl: z
+    .string()
+    .default('https://assets.pjsk.moe/sekai-extra-assets/sekai-story-search'),
+  /** sekai-story-search 服务器语种 */
+  server: z.enum(['cn', 'jp', 'tw', 'kr', 'en']).default('cn'),
+  /** 本地 PJSK 官方剧情目录（默认扫描 cache/semantic-build） */
+  localDirs: z.array(z.string()).default(['cache/semantic-build']),
+  /** 是否把完整角色人设 Markdown 分节纳入世界观/设定检索 */
+  includePersonas: z.boolean().default(true),
+  adaptive: RagAdaptiveSchema.default(RagAdaptiveSchema.parse({}))
+})
+
 const LlmSchema = z.object({
   enabled: z.boolean().default(true),
   baseUrl: z.string().default('https://api.openai.com/v1'),
@@ -217,6 +267,8 @@ const LlmSchema = z.object({
   jsonMode: z.enum(['auto', 'on', 'off']).default('auto'),
   /** 生成后把中文台词翻译成日文 ttsText（TTS 参考音频通常为日语） */
   translateForTts: z.boolean().default(true),
+  /** 是否启用反套路台词质检与条件润色 */
+  polishDialogue: z.boolean().default(true),
   /** 目标成片时长（分钟），写进提示词，不截断模型输出 */
   targetMinutes: z.number().default(3),
   /** 覆盖内置系统提示词；留空使用内置模板 */
@@ -229,7 +281,9 @@ const LlmSchema = z.object({
   extraBody: z.record(z.string(), z.unknown()).default({}),
   /** 角色人格目录：读取其中的 *.md / *.txt，文件名或 frontmatter name 作为角色名 */
   personaDirs: z.array(z.string()).default([]),
-  personas: z.array(LlmPersonaSchema).default([])
+  personas: z.array(LlmPersonaSchema).default([]),
+  /** 自适应语义 RAG（bge-m3 + SQ8 磁盘缓存 + 词法回退） */
+  rag: RagSchema.default(RagSchema.parse({}))
 })
 
 /**
@@ -292,6 +346,8 @@ export type VideoSettings = z.infer<typeof VideoSchema>
 export type TtsSettings = z.infer<typeof TtsSchema>
 export type BgmSettings = z.infer<typeof BgmSchema>
 export type LlmPersona = z.infer<typeof LlmPersonaSchema>
+export type RagAdaptiveSettings = z.infer<typeof RagAdaptiveSchema>
+export type RagSettings = z.infer<typeof RagSchema>
 export type LlmSettings = z.infer<typeof LlmSchema>
 export type AssetsSettings = z.infer<typeof AssetsSchema>
 
@@ -513,6 +569,15 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
       // 非法 JSON 忽略，保持配置里的值
     }
   }
+  if (env.MSS_RAG_ENABLED !== undefined) {
+    config.llm.rag.enabled = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_RAG_ENABLED.toLowerCase()
+    )
+  }
+  if (env.MSS_RAG_BASE_URL) config.llm.rag.baseUrl = env.MSS_RAG_BASE_URL
+  if (env.MSS_RAG_API_KEY_ENV) config.llm.rag.apiKeyEnv = env.MSS_RAG_API_KEY_ENV
+  if (env.MSS_RAG_MODEL) config.llm.rag.model = env.MSS_RAG_MODEL
+  if (env.MSS_RAG_CACHE_DIR) config.llm.rag.cacheDir = env.MSS_RAG_CACHE_DIR
 
   // assets
   if (env.MSS_ASSETS_REGION) {
@@ -619,6 +684,10 @@ export function loadHostConfig(): HostConfig {
   // 角色人格目录、资源基地址等相对路径以仓库根为基准
   config.llm.personaDirs = config.llm.personaDirs.map((p) => path.resolve(rootDir, p))
   config.llm.baseUrl = config.llm.baseUrl.replace(/\/+$/, '')
+  config.llm.rag.baseUrl = config.llm.rag.baseUrl.replace(/\/+$/, '')
+  config.llm.rag.sekaiStorySearchUrl = config.llm.rag.sekaiStorySearchUrl.replace(/\/+$/, '')
+  config.llm.rag.cacheDir = path.resolve(rootDir, config.llm.rag.cacheDir)
+  config.llm.rag.localDirs = config.llm.rag.localDirs.map((p) => path.resolve(rootDir, p))
   config.assets.cacheDir = path.resolve(rootDir, config.assets.cacheDir)
   if (config.assets.assetBase) {
     config.assets.assetBase = config.assets.assetBase.replace(/\/+$/, '')

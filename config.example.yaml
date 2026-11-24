@@ -192,6 +192,34 @@ llm:
   personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（文件名或 frontmatter name 为角色名）
                                   # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
   personas: []                    # 内联人格：name / prompt / aliases / group
+  polishDialogue: true            # 启用反套路台词质检与条件外科润色
+  # 自适应语义 RAG（bge-m3 + SQ8 向量磁盘缓存 + 零网络词法回退）
+  rag:
+    enabled: true                 # env: MSS_RAG_ENABLED
+    baseUrl: ""                   # 留空自动继承 llm.baseUrl（env: MSS_RAG_BASE_URL）
+    apiKeyEnv: ""                 # 留空自动继承 llm.apiKeyEnv（env: MSS_RAG_API_KEY_ENV）
+    model: bge-m3                 # Embedding 模型名（env: MSS_RAG_MODEL）
+    dimensions: 0                 # 0 = 自动探测维度，仅 >0 时发送给 API
+    queryInstruct: ""             # bge-m3 留空；Qwen3-Embedding 等指令型模型可按需配置
+    timeoutMs: 30000
+    batchSize: 32
+    cacheDir: cache/rag           # 增量 chunkHash SQ8 向量缓存目录（env: MSS_RAG_CACHE_DIR）
+    fallbackLexical: true         # Embedding API 不可用时自动降级 BM25+CJK-bigram 检索
+    sekaiStorySearchUrl: https://assets.pjsk.moe/sekai-extra-assets/sekai-story-search
+    server: cn                    # cn | jp | tw | kr | en
+    localDirs: [cache/semantic-build]
+    includePersonas: true
+    adaptive:
+      minScore: 0.42
+      highScore: 0.62
+      relativeDropRatio: 0.78
+      elbowDropDelta: 0.065
+      minChunks: 0
+      maxChunks: 12
+      softCharBudget: 1800
+      maxCharBudget: 4800
+      maxPerStory: 2
+      mergeAdjacentGap: 4
   # personas:
   #   - name: 晓山瑞希
   #     aliases: [瑞希, mizuki]
