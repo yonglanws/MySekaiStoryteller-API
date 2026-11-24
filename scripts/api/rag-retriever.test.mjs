@@ -7,11 +7,23 @@ import path from 'node:path'
 import { test } from 'node:test'
 import zlib from 'node:zlib'
 import { Logger } from 'tslog'
-import { EmbeddingClient, resolveEmbeddingConfig } from '../../out-host/host/rag/embeddingClient.js'
+import {
+  EmbeddingClient,
+  PJSK_DEFAULT_QUERY_INSTRUCT,
+  resolveEmbeddingConfig
+} from '../../out-host/host/rag/embeddingClient.js'
+import {
+  calibrateRerankScores,
+  parseRerankResponse,
+  RerankClient,
+  resolveRerankConfig
+} from '../../out-host/host/rag/rerankClient.js'
 import { AdaptiveRagRetriever } from '../../out-host/host/rag/retriever.js'
 import {
   chunkPersonasToLore,
   chunkPjskScenario,
+  isForeignOurnotesPayload,
+  loadStoryCorpus,
   parseSekaiJsonlBuffer
 } from '../../out-host/host/rag/storyCorpus.js'
 import {
@@ -70,7 +82,7 @@ async function startMockEmbeddingServer() {
   }
 }
 
-test('resolveEmbeddingConfig inherits llm.baseUrl & llm.apiKeyEnv and defaults to bge-m3 without queryInstruct', () => {
+test('resolveEmbeddingConfig inherits llm.baseUrl & llm.apiKeyEnv, defaults to qwen3-embedding-8b with auto PJSK instruct', () => {
   const resolved = resolveEmbeddingConfig({
     baseUrl: 'https://llm.example/v1/',
     apiKeyEnv: 'CUSTOM_LLM_KEY',
@@ -78,15 +90,263 @@ test('resolveEmbeddingConfig inherits llm.baseUrl & llm.apiKeyEnv and defaults t
   })
   assert.equal(resolved.baseUrl, 'https://llm.example/v1')
   assert.equal(resolved.apiKeyEnv, 'CUSTOM_LLM_KEY')
-  assert.equal(resolved.model, 'bge-m3')
-  assert.equal(resolved.queryInstruct, '')
+  assert.equal(resolved.model, 'qwen3-embedding-8b')
+  assert.equal(resolved.queryInstruct, PJSK_DEFAULT_QUERY_INSTRUCT)
   assert.equal(resolved.dimensions, 0)
 
-  const client = new EmbeddingClient(resolved)
-  assert.equal(client.formatQuery('瑞希 天台'), '瑞希 天台')
+  const qwenClient = new EmbeddingClient(resolved)
+  assert.equal(
+    qwenClient.formatQuery('瑞希 天台'),
+    `Instruct: ${PJSK_DEFAULT_QUERY_INSTRUCT}\nQuery: 瑞希 天台`
+  )
+  // Avoid double-prefixing if already formatted
+  assert.equal(
+    qwenClient.formatQuery(`Instruct: custom\nQuery: 瑞希`),
+    `Instruct: custom\nQuery: 瑞希`
+  )
 
-  const qwenClient = new EmbeddingClient({ ...resolved, model: 'Qwen3-Embedding', queryInstruct: '检索相关剧情' })
-  assert.equal(qwenClient.formatQuery('瑞希 天台'), 'Instruct: 检索相关剧情\nQuery: 瑞希 天台')
+  const bgeResolved = resolveEmbeddingConfig({
+    baseUrl: 'https://llm.example/v1',
+    apiKeyEnv: 'CUSTOM_LLM_KEY',
+    rag: { model: 'bge-m3' }
+  })
+  assert.equal(bgeResolved.queryInstruct, '')
+  assert.equal(new EmbeddingClient(bgeResolved).formatQuery('瑞希 天台'), '瑞希 天台')
+})
+
+test('RerankClient supports logit sigmoid calibration, multi-provider parsing, 422 instruction fallback, and graceful error fallback', async (t) => {
+  const rrCfg = resolveRerankConfig({
+    baseUrl: 'https://llm.example/v1/',
+    apiKeyEnv: 'CUSTOM_KEY',
+    rag: { rerank: {} }
+  })
+  assert.equal(rrCfg.model, 'qwen3-reranker-8b')
+  assert.equal(rrCfg.baseUrl, 'https://llm.example/v1')
+  assert.equal(rrCfg.apiKeyEnv, 'CUSTOM_KEY')
+
+  // Probability scores stay linear; raw logits calibrate via sigmoid
+  const probCal = calibrateRerankScores([
+    { index: 0, rawScore: 0.9 },
+    { index: 1, rawScore: 0.2 }
+  ])
+  assert.equal(probCal[0].score, 0.9)
+  const logitCal = calibrateRerankScores([
+    { index: 0, rawScore: 4.0 },
+    { index: 1, rawScore: -2.0 }
+  ])
+  assert.ok(logitCal[0].score > 0.95 && logitCal[0].score < 1)
+  assert.ok(logitCal[1].score > 0 && logitCal[1].score < 0.2)
+
+  // Multi-provider parsing
+  assert.equal(
+    parseRerankResponse({ output: { results: [{ index: 0, relevance_score: 0.88 }] } }).length,
+    1
+  )
+
+  // Mock rerank server rejecting top-level `instruction` with 422 once, then accepting inline Instruct query with raw logits
+  const seenPayloads = []
+  const server = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    seenPayloads.push(body)
+    if ('instruction' in body) {
+      res.statusCode = 422
+      res.end(JSON.stringify({ error: 'unknown field instruction' }))
+      return
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify({
+        results: [
+          { index: 1, logit: 3.5 },
+          { index: 0, logit: -1.5 }
+        ]
+      })
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  const client = new RerankClient({
+    ...rrCfg,
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`
+  })
+  const res = await client.rerank('瑞希 绘名 天台', ['doc0', 'doc1'])
+  assert.ok(res)
+  assert.equal(seenPayloads.length, 2, 'should retry once without top-level instruction on 422')
+  assert.ok(seenPayloads[1].query.startsWith('Instruct:'))
+  assert.equal(res.items[0].index, 1)
+  assert.ok(res.items[0].score > 0.95)
+})
+
+test('PJSK domain isolation rejects Ournotes schemas/caches and resolves events_cn.json titles', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-domain-iso-'))
+  try {
+    // Write PJSK title map + PJSK event + foreign Ournotes episode.json + foreign domain jsonl
+    fs.writeFileSync(
+      path.join(tmpDir, 'events_cn.json'),
+      JSON.stringify([{ id: 145, name: '荆棘之路', assetbundleName: 'event_mizu5_2024' }]),
+      'utf8'
+    )
+    const eventsDir = path.join(tmpDir, 'cn_events')
+    fs.mkdirSync(eventsDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(eventsDir, 'event_mizu5_2024__event_145_08.json'),
+      JSON.stringify({
+        Snippets: [{ Action: 1, ReferenceIndex: 0 }],
+        TalkData: [{ WindowDisplayName: '瑞希', Body: '对不起……绘绘。' }]
+      }),
+      'utf8'
+    )
+    // Foreign Ournotes episode.json must be rejected
+    fs.writeFileSync(
+      path.join(eventsDir, 'foreign_episode.json'),
+      JSON.stringify({
+        commands: [{ AdvTextID: 't1', TargetName: 'tomori', lines: { simplifiedChinese: '灯' } }]
+      }),
+      'utf8'
+    )
+    // Foreign domain jsonl must be rejected
+    fs.writeFileSync(
+      path.join(tmpDir, 'foreign.jsonl'),
+      JSON.stringify({ domain: 'ournotes', text: '灯: 欢迎来到 RiNG' }) + '\n',
+      'utf8'
+    )
+
+    assert.equal(
+      isForeignOurnotesPayload({ commands: [{ AdvTextID: '1', TargetName: 'anon' }] }),
+      true
+    )
+    const chunks = loadStoryCorpus({ localDirs: [tmpDir], includePersonas: false })
+    assert.equal(chunks.length, 1, 'only PJSK event should load; Ournotes files must be rejected')
+    assert.equal(chunks[0].domain, 'pjsk')
+    assert.equal(chunks[0].story, '荆棘之路', 'events_cn.json title map should resolve human-readable title')
+
+    // Cache dir isolates by domain and rejects mismatched domain metadata
+    const cacheDir = path.join(tmpDir, 'cache')
+    const foreignDir = path.join(cacheDir, 'pjsk-qwen3-embedding-8b-4d')
+    fs.mkdirSync(foreignDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(foreignDir, 'embed-cache.index.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        domain: 'ournotes',
+        model: 'qwen3-embedding-8b',
+        dims: 4,
+        quant: 'sq8_sym',
+        entries: {}
+      }),
+      'utf8'
+    )
+    const v = l2Normalize(Float32Array.from([1, 0, 0, 0]))
+    const q = quantizeSq8Sym(v)
+    fs.writeFileSync(
+      path.join(foreignDir, 'embed-cache.sq8.bin'),
+      encodePjskSq8Buffer({ count: 1, dims: 4, scales: Float32Array.from([q.scale]), data: q.data })
+    )
+    const pjskCache = new IncrementalSq8Cache(cacheDir, 'qwen3-embedding-8b', 4, 'pjsk')
+    assert.equal(pjskCache.load(), false, 'must reject cache tagged with non-pjsk domain')
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})
+
+test('AdaptiveRagRetriever runs two-stage RRF + reranker and expands +/-1 adjacent scenario context', async (t) => {
+  const rerankServer = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify({
+        results: body.documents.map((doc, index) => ({
+          index,
+          relevance_score: doc.includes('关键转折') ? 0.95 : 0.3
+        }))
+      })
+    )
+  })
+  rerankServer.listen(0, '127.0.0.1')
+  await once(rerankServer, 'listening')
+  t.after(() => rerankServer.close())
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-rag-exp-'))
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }))
+
+  const mk = (id, lineStart, lineEnd, text) => ({
+    id,
+    domain: 'pjsk',
+    chunkHash: computeChunkHash(text),
+    sourceKind: 'canon_story',
+    storyId: 'ev_145',
+    story: '荆棘之路',
+    scenarioId: 'ev_145_08',
+    type: 'event',
+    chars: ['瑞希', '绘名'],
+    lineStart,
+    lineEnd,
+    text
+  })
+  const chunks = [
+    mk('p0', 0, 7, '[荆棘之路 | 瑞希, 绘名]\n瑞希: 绘绘，其实今天我有话想说。'),
+    mk('p1', 6, 13, '[荆棘之路 | 瑞希, 绘名]\n瑞希: 这是天台上的关键转折，我一直不敢坦白。'),
+    mk('p2', 12, 19, '[荆棘之路 | 瑞希, 绘名]\n绘名: 瑞希，别逃跑，看着我。')
+  ]
+
+  const rerankClient = new RerankClient({
+    enabled: true,
+    model: 'qwen3-reranker-8b',
+    baseUrl: `http://127.0.0.1:${rerankServer.address().port}/v1`,
+    apiKeyEnv: 'MSS_TEST_RERANK_KEY',
+    endpointPath: '/rerank',
+    candidatePool: 32,
+    topN: 32,
+    timeoutMs: 5000,
+    instruction: ''
+  })
+
+  const retriever = new AdaptiveRagRetriever({
+    chunks,
+    settings: {
+      enabled: true,
+      model: 'qwen3-embedding-8b',
+      cacheDir: tmpDir,
+      fallbackLexical: true,
+      adaptive: {
+        minScore: 0.42,
+        highScore: 0.62,
+        relativeDropRatio: 0.78,
+        elbowDropDelta: 0.065,
+        minChunks: 0,
+        maxChunks: 8,
+        softCharBudget: 1800,
+        maxCharBudget: 4800,
+        maxPerStory: 2,
+        mergeAdjacentGap: 4,
+        expandAdjacentContext: true
+      }
+    },
+    embeddingClient: null,
+    rerankClient
+  })
+
+  const res = await retriever.retrieve({
+    prompt: '瑞希和绘名在天台的关键转折',
+    stage: 'dialogue',
+    cast: [{ name: '瑞希' }, { name: '绘名' }]
+  })
+
+  assert.equal(res.domain, 'pjsk')
+  assert.equal(res.rerankMode, 'reranked')
+  assert.equal(res.rerankModel, 'qwen3-reranker-8b')
+  assert.ok(res.expandedCount >= 1, 'should pull +/-1 adjacent neighbor chunks for high-score hit')
+  assert.equal(res.sections.canonPlot.length, 1, 'neighbors merged into single continuous scene')
+  assert.ok(res.sections.canonPlot[0].text.includes('别逃跑，看着我'))
+  assert.ok(res.sections.canonPlot[0].text.includes('今天我有话想说'))
 })
 
 test('PJSK v1 sq8_sym binary round-trip and IncrementalSq8Cache persist and reuse chunkHash vectors', () => {

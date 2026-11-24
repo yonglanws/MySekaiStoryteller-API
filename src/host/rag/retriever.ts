@@ -1,6 +1,8 @@
 import type { ILogObj, Logger } from 'tslog'
 import type { RagAdaptiveSettings, RagSettings } from '../config'
 import type { EmbeddingClient } from './embeddingClient'
+import type { RerankClient } from './rerankClient'
+import { PJSK_DOMAIN } from './storyCorpus'
 import type {
   RagCastMemberHint,
   RagChunk,
@@ -8,12 +10,16 @@ import type {
   RagMode,
   RagRetrieveRequest,
   RagRetrieveResult,
-  RagSections
+  RagSections,
+  RerankMode
 } from './types'
 import { IncrementalSq8Cache } from './vectorIndex'
 
 const COLD_START_SMALL_CORPUS_LIMIT = 2000
-const LARGE_CORPUS_PREFILTER_TOP_M = 96
+const LARGE_CORPUS_PREFILTER_TOP_M = 160
+const STAGE1_CHANNEL_TOP_K = 64
+const RRF_K = 60
+const DEFAULT_CANDIDATE_POOL = 32
 const LEXICAL_FALLBACK_FLOOR = 0.35
 const JACCARD_DEDUP_THRESHOLD = 0.75
 
@@ -91,7 +97,12 @@ function buildLexicalIndex(chunks: RagChunk[]): LexicalIndex {
   return { docLengths, avgDocLen, idf, postings }
 }
 
-function scoreBm25(index: LexicalIndex, queryTokens: string[], chunks: RagChunk[]): Float32Array {
+function scoreBm25(
+  index: LexicalIndex,
+  queryTokens: string[],
+  rawQueries: string[],
+  chunks: RagChunk[]
+): Float32Array {
   const scores = new Float32Array(chunks.length)
   if (queryTokens.length === 0 || chunks.length === 0) return scores
 
@@ -113,11 +124,27 @@ function scoreBm25(index: LexicalIndex, queryTokens: string[], chunks: RagChunk[
       docHits[idx] += 1
     }
   }
-  // 小语料（如仅 1~3 条 chunk）下 IDF 偏低，叠加查询词覆盖率补偿
-  if (uniqueTokens.length > 0) {
-    for (let i = 0; i < chunks.length; i++) {
-      if (docHits[i] > 0) {
-        scores[i] += (docHits[i] / uniqueTokens.length) * 2.0
+
+  // 提取 2~6 字 CJK 精确短语加分（小语料覆盖率补偿 + 精确命中加权）
+  const phrases = Array.from(
+    new Set(
+      rawQueries
+        .flatMap((q) => q.match(/[\u3040-\u30ff\u3400-\u9fff]{2,6}/gu) ?? [])
+        .filter((p) => p.length >= 2)
+    )
+  ).slice(0, 10)
+
+  for (let i = 0; i < chunks.length; i++) {
+    if (docHits[i] > 0) {
+      scores[i] += (docHits[i] / uniqueTokens.length) * 2.0
+      if (phrases.length > 0) {
+        let phraseHits = 0
+        for (const p of phrases) {
+          if (chunks[i].text.includes(p)) phraseHits += 1
+        }
+        if (phraseHits > 0) {
+          scores[i] += Math.min(1.5, phraseHits * 0.45)
+        }
       }
     }
   }
@@ -149,6 +176,14 @@ function buildQueries(req: RagRetrieveRequest): string[] {
   return queries.slice(0, 4)
 }
 
+function buildPrimaryRerankQuery(req: RagRetrieveRequest): string {
+  const castNames = (req.cast ?? []).map((c) => c.name).filter(Boolean).join('、')
+  return [req.prompt, req.event, castNames ? `角色:${castNames}` : '', req.location]
+    .filter(Boolean)
+    .join(' | ')
+    .slice(0, 400)
+}
+
 function computeCharAffinity(
   chunk: RagChunk,
   cast: RagCastMemberHint[] | undefined,
@@ -170,7 +205,10 @@ function computeCharAffinity(
     else if (matchedCast === 1) score += 0.5
   }
 
-  if (stage === 'cast' && (chunk.sourceKind === 'canon_story' || chunk.sourceKind === 'worldview_lore')) {
+  if (
+    stage === 'cast' &&
+    (chunk.sourceKind === 'canon_story' || chunk.sourceKind === 'worldview_lore')
+  ) {
     score += 0.25
   } else if (stage === 'dialogue' && chunk.sourceKind === 'dialogue_voice') {
     score += 0.25
@@ -189,8 +227,14 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
 }
 
 function mergeSceneTexts(aText: string, bText: string): string {
-  const aLines = aText.split('\n').map((l) => l.trim()).filter(Boolean)
-  const bLines = bText.split('\n').map((l) => l.trim()).filter(Boolean)
+  const aLines = aText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  const bLines = bText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
   if (aLines.length === 0) return bText
   if (bLines.length === 0) return aText
 
@@ -230,7 +274,10 @@ function mergeAdjacentExcerpts(excerpts: RagExcerpt[], maxGap: number): RagExcer
           score: Math.max(current.score, next.score),
           denseScore: Math.max(current.denseScore, next.denseScore),
           lexicalScore: Math.max(current.lexicalScore, next.lexicalScore),
-          charScore: Math.max(current.charScore, next.charScore)
+          charScore: Math.max(current.charScore, next.charScore),
+          ...(current.rerankScore !== undefined || next.rerankScore !== undefined
+            ? { rerankScore: Math.max(current.rerankScore ?? 0, next.rerankScore ?? 0) }
+            : {})
         }
       } else {
         mergedAll.push(current)
@@ -265,8 +312,11 @@ export function formatRagPromptBlock(sections: RagSections): string {
 
 export interface AdaptiveRagRetrieverOptions {
   chunks: RagChunk[]
-  settings: Pick<RagSettings, 'enabled' | 'model' | 'cacheDir' | 'fallbackLexical' | 'adaptive'>
+  settings: Pick<RagSettings, 'enabled' | 'model' | 'cacheDir' | 'fallbackLexical'> & {
+    adaptive?: Partial<RagAdaptiveSettings>
+  }
   embeddingClient?: EmbeddingClient | null
+  rerankClient?: RerankClient | null
   logger?: Pick<Logger<ILogObj>, 'info' | 'warn' | 'debug'>
 }
 
@@ -284,31 +334,57 @@ const DEFAULT_ADAPTIVE: RagAdaptiveSettings = {
   expandAdjacentContext: true
 }
 
+function topIndicesByScore(scores: Float32Array, indices: number[], limit: number): number[] {
+  return [...indices]
+    .filter((i) => scores[i] > 0)
+    .sort((a, b) => scores[b] - scores[a])
+    .slice(0, limit)
+}
+
 /**
- * 自适应多面语义检索器：
- * - 混合打分（Dense + BM25 CJK-bigram + 角色共现加权）；
- * - 两级冷启动保护（<=2000 块全量增量缓存；>2000 块先 BM25 预筛 Top-96 再增量嵌入）；
- * - 自适应可变输出量（绝对下限 + 相对跌幅 + 拐点断崖 + 动态字符预算）；
- * - 相邻滑窗场景合并 + `maxPerStory` 多样性 + Jaccard 近重复抑制；
- * - Embedding 不可用时零报错自动降级为纯词法检索。
+ * 两阶段自适应多面语义检索器（PJSK 领域隔离）：
+ * - Stage 1：宽召回（BM25+CJK+短语 Top-64 + Dense SQ8 Top-64 / 大语料预筛 160 + 角色亲和）+ RRF (k=60) -> Top-32；
+ * - Stage 2：`qwen3-reranker-8b` Cross-Encoder 校准重排（0.65/0.20/0.10/0.05，失败优雅回退）；
+ * - Stage 3：自适应截断 + 高分剧情块 ±1 相邻上下文自动扩展 + 滑窗去重合并 + `maxPerStory` 多样性。
  */
 export class AdaptiveRagRetriever {
   private readonly chunks: RagChunk[]
   private readonly settings: AdaptiveRagRetrieverOptions['settings']
   private readonly adaptive: RagAdaptiveSettings
   private readonly embeddingClient: EmbeddingClient | null
+  private readonly rerankClient: RerankClient | null
   private readonly cache: IncrementalSq8Cache
   private readonly lexical: LexicalIndex
+  private readonly scenarioChunksMap: Map<string, RagChunk[]>
   private readonly logger?: Pick<Logger<ILogObj>, 'info' | 'warn' | 'debug'>
 
   constructor(options: AdaptiveRagRetrieverOptions) {
-    this.chunks = options.chunks
+    // 领域隔离：仅保留 PJSK 块（忽略任何非 'pjsk' 领域块）
+    this.chunks = options.chunks.filter((c) => !c.domain || c.domain === PJSK_DOMAIN)
     this.settings = options.settings
     this.adaptive = { ...DEFAULT_ADAPTIVE, ...(options.settings.adaptive ?? {}) }
     this.embeddingClient = options.embeddingClient ?? null
-    this.cache = new IncrementalSq8Cache(options.settings.cacheDir, options.settings.model)
+    this.rerankClient = options.rerankClient ?? null
+    this.cache = new IncrementalSq8Cache(
+      options.settings.cacheDir,
+      options.settings.model,
+      0,
+      PJSK_DOMAIN
+    )
     this.cache.load()
     this.lexical = buildLexicalIndex(this.chunks)
+    this.scenarioChunksMap = new Map()
+    for (const chunk of this.chunks) {
+      let list = this.scenarioChunksMap.get(chunk.scenarioId)
+      if (!list) {
+        list = []
+        this.scenarioChunksMap.set(chunk.scenarioId, list)
+      }
+      list.push(chunk)
+    }
+    for (const list of this.scenarioChunksMap.values()) {
+      list.sort((a, b) => a.lineStart - b.lineStart)
+    }
     this.logger = options.logger
   }
 
@@ -318,9 +394,20 @@ export class AdaptiveRagRetriever {
 
   async retrieve(req: RagRetrieveRequest): Promise<RagRetrieveResult> {
     const startedAt = Date.now()
-    const empty = (mode: RagMode, queries: string[]): RagRetrieveResult => ({
+    const rerankModel = this.rerankClient?.model ?? ''
+    const empty = (
+      mode: RagMode,
+      queries: string[],
+      rerankMode: RerankMode = this.rerankClient?.enabled ? 'fallback' : 'disabled',
+      rerankLatencyMs = 0
+    ): RagRetrieveResult => ({
+      domain: PJSK_DOMAIN,
       mode,
       model: this.settings.model,
+      rerankMode,
+      rerankModel,
+      rerankLatencyMs,
+      expandedCount: 0,
       queries,
       candidateCount: 0,
       selectedCount: 0,
@@ -333,17 +420,18 @@ export class AdaptiveRagRetriever {
     })
 
     if (!this.settings.enabled || this.chunks.length === 0) {
-      return empty('disabled', [])
+      return empty('disabled', [], 'disabled')
     }
 
     const queries = buildQueries(req)
     if (queries.length === 0) {
-      return empty('disabled', [])
+      return empty('disabled', [], 'disabled')
     }
 
-    // 1. 计算词法 BM25 分数与角色亲和度（始终 <30ms）
+    // ---- Stage 1A：词法 BM25+CJK+精确短语 与 角色亲和打分 ----
+    const allIndices = Array.from({ length: this.chunks.length }, (_, i) => i)
     const combinedQueryTokens = tokenizeHybrid(queries.join(' '))
-    const bm25Raw = scoreBm25(this.lexical, combinedQueryTokens, this.chunks)
+    const bm25Raw = scoreBm25(this.lexical, combinedQueryTokens, queries, this.chunks)
     const lexScores = new Float32Array(this.chunks.length)
     const charScores = new Float32Array(this.chunks.length)
     for (let i = 0; i < this.chunks.length; i++) {
@@ -352,19 +440,19 @@ export class AdaptiveRagRetriever {
       charScores[i] = computeCharAffinity(this.chunks[i], req.cast, req.stage)
     }
 
-    // 2. 决定候选集并尝试混合向量检索
+    // ---- Stage 1B：向量检索（含大语料 160 预筛冷启动保护） ----
     let mode: RagMode = 'lexical_fallback'
     const denseScores = new Float32Array(this.chunks.length)
-    let candidateIndices: number[]
+    let denseIndices: number[] = []
 
     const canUseDense = Boolean(this.embeddingClient?.enabled)
     if (canUseDense && this.embeddingClient) {
       try {
         const queryVectors = await this.embeddingClient.embedQueries(queries, req.signal)
+        let evalIndices: number[]
         if (this.chunks.length <= COLD_START_SMALL_CORPUS_LIMIT) {
-          candidateIndices = Array.from({ length: this.chunks.length }, (_, i) => i)
+          evalIndices = allIndices
         } else {
-          // 大语料两级冷启动保护：若全量缓存已就绪则全扫，否则 BM25+角色预筛 Top-96
           let cachedAll = true
           for (let i = 0; i < this.chunks.length; i++) {
             if (!this.cache.has(this.chunks[i].chunkHash)) {
@@ -373,21 +461,19 @@ export class AdaptiveRagRetriever {
             }
           }
           if (cachedAll) {
-            candidateIndices = Array.from({ length: this.chunks.length }, (_, i) => i)
+            evalIndices = allIndices
           } else {
-            const ranked = Array.from({ length: this.chunks.length }, (_, i) => ({
-              i,
-              pre: 0.85 * lexScores[i] + 0.15 * charScores[i]
-            })).sort((a, b) => b.pre - a.pre)
-            candidateIndices = ranked
+            const ranked = allIndices
+              .map((i) => ({ i, pre: 0.85 * lexScores[i] + 0.15 * charScores[i] }))
+              .sort((a, b) => b.pre - a.pre)
+            evalIndices = ranked
               .slice(0, Math.min(LARGE_CORPUS_PREFILTER_TOP_M, ranked.length))
               .map((item) => item.i)
           }
         }
 
-        // 仅对未命中磁盘 chunkHash 缓存的候选调用 /embeddings
         const uncached: Array<{ idx: number; chunk: RagChunk }> = []
-        for (const idx of candidateIndices) {
+        for (const idx of evalIndices) {
           const chunk = this.chunks[idx]
           if (!this.cache.has(chunk.chunkHash)) {
             uncached.push({ idx, chunk })
@@ -408,7 +494,7 @@ export class AdaptiveRagRetriever {
           }
         }
 
-        for (const idx of candidateIndices) {
+        for (const idx of evalIndices) {
           const hash = this.chunks[idx].chunkHash
           let maxSim = 0
           let sumSim = 0
@@ -420,6 +506,7 @@ export class AdaptiveRagRetriever {
           const meanSim = queryVectors.length > 0 ? sumSim / queryVectors.length : 0
           denseScores[idx] = clamp(0.75 * maxSim + 0.25 * meanSim, 0, 1)
         }
+        denseIndices = evalIndices
         mode = 'hybrid'
       } catch (error) {
         if (!this.settings.fallbackLexical) {
@@ -428,38 +515,99 @@ export class AdaptiveRagRetriever {
               error instanceof Error ? error.message : String(error)
             }`
           )
-          return empty('disabled', queries)
+          return empty('disabled', queries, 'disabled')
         }
         this.logger?.warn?.(
           `[RAG] Embedding 不可用，已自动降级为词法检索：${
             error instanceof Error ? error.message : String(error)
           }`
         )
-        candidateIndices = Array.from({ length: this.chunks.length }, (_, i) => i)
         mode = 'lexical_fallback'
       }
-    } else {
-      if (!this.settings.fallbackLexical) {
-        return empty('disabled', queries)
-      }
-      candidateIndices = Array.from({ length: this.chunks.length }, (_, i) => i)
-      mode = 'lexical_fallback'
+    } else if (!this.settings.fallbackLexical) {
+      return empty('disabled', queries, 'disabled')
     }
 
-    // 3. 融合打分与绝对下限过滤
+    // ---- Stage 1C：多路 Reciprocal Rank Fusion (k = 60) -> Top candidatePool (默认 32) ----
+    const lexTop = topIndicesByScore(lexScores, allIndices, STAGE1_CHANNEL_TOP_K)
+    const charTop = topIndicesByScore(charScores, allIndices, STAGE1_CHANNEL_TOP_K)
+    const denseTop =
+      mode === 'hybrid' ? topIndicesByScore(denseScores, denseIndices, STAGE1_CHANNEL_TOP_K) : []
+
+    const rrfScores = new Map<number, number>()
+    const addRrf = (ranked: number[], weight: number): void => {
+      for (let rank = 0; rank < ranked.length; rank++) {
+        const idx = ranked[rank]
+        rrfScores.set(idx, (rrfScores.get(idx) ?? 0) + weight / (RRF_K + rank + 1))
+      }
+    }
+    if (mode === 'hybrid') {
+      addRrf(denseTop, 1.0)
+      addRrf(lexTop, 0.75)
+      addRrf(charTop, 0.35)
+    } else {
+      addRrf(lexTop, 1.0)
+      addRrf(charTop, 0.45)
+    }
+
+    const candidatePoolLimit = this.rerankClient?.config.candidatePool ?? DEFAULT_CANDIDATE_POOL
+    const poolIndices = Array.from(rrfScores.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, candidatePoolLimit)
+      .map(([idx]) => idx)
+
+    if (poolIndices.length === 0) {
+      return empty(mode, queries, this.rerankClient?.enabled ? 'fallback' : 'disabled')
+    }
+
+    // ---- Stage 2：qwen3-reranker-8b Cross-Encoder 重排与校准融合 ----
+    let rerankMode: RerankMode = this.rerankClient?.enabled ? 'fallback' : 'disabled'
+    let rerankLatencyMs = 0
+    const rerankScoreByChunkIdx = new Map<number, number>()
+
+    if (this.rerankClient?.enabled) {
+      const primaryQuery = buildPrimaryRerankQuery(req)
+      const docs = poolIndices.map((idx) => this.chunks[idx].text)
+      const reranked = await this.rerankClient.rerank(primaryQuery, docs, {
+        topN: Math.min(docs.length, this.rerankClient.config.topN),
+        signal: req.signal
+      })
+      if (reranked && reranked.items.length > 0) {
+        rerankMode = 'reranked'
+        rerankLatencyMs = reranked.latencyMs
+        for (const item of reranked.items) {
+          const chunkIdx = poolIndices[item.index]
+          if (chunkIdx !== undefined) {
+            rerankScoreByChunkIdx.set(chunkIdx, item.score)
+          }
+        }
+      }
+    }
+
     const minScore =
-      mode === 'hybrid'
+      mode === 'hybrid' || rerankMode === 'reranked'
         ? this.adaptive.minScore
         : Math.min(this.adaptive.minScore, LEXICAL_FALLBACK_FLOOR)
 
     const scored: RagExcerpt[] = []
-    for (const idx of candidateIndices) {
+    for (const idx of poolIndices) {
       const chunk = this.chunks[idx]
       const dense = denseScores[idx]
       const lex = lexScores[idx]
       const ch = charScores[idx]
-      const score =
-        mode === 'hybrid' ? 0.72 * dense + 0.2 * lex + 0.08 * ch : 0.85 * lex + 0.15 * ch
+      const rr = rerankScoreByChunkIdx.get(idx)
+
+      let score: number
+      if (mode === 'hybrid' && rerankMode === 'reranked' && rr !== undefined) {
+        score = 0.65 * rr + 0.2 * dense + 0.1 * lex + 0.05 * ch
+      } else if (mode === 'hybrid') {
+        score = 0.72 * dense + 0.2 * lex + 0.08 * ch
+      } else if (rerankMode === 'reranked' && rr !== undefined) {
+        score = 0.72 * rr + 0.2 * lex + 0.08 * ch
+      } else {
+        score = 0.85 * lex + 0.15 * ch
+      }
+
       if (score < minScore) continue
       scored.push({
         id: chunk.id,
@@ -476,18 +624,19 @@ export class AdaptiveRagRetriever {
         score: Number(score.toFixed(4)),
         denseScore: Number(dense.toFixed(4)),
         lexicalScore: Number(lex.toFixed(4)),
-        charScore: Number(ch.toFixed(4))
+        charScore: Number(ch.toFixed(4)),
+        ...(rr !== undefined ? { rerankScore: Number(rr.toFixed(4)) } : {})
       })
     }
 
     if (scored.length === 0) {
-      return empty(mode, queries)
+      return empty(mode, queries, rerankMode, rerankLatencyMs)
     }
 
     scored.sort((a, b) => b.score - a.score)
     const topScore = scored[0].score
 
-    // 4. 自适应动态字符预算与相对跌幅 / 拐点断崖截断
+    // ---- Stage 3：自适应截断 + ±1 相邻上下文自动扩展 + 滑窗合并 + 多样性 ----
     const highScore = this.adaptive.highScore
     const alpha = clamp((topScore - minScore) / Math.max(0.01, highScore - minScore), 0, 1)
     const nHigh = scored.filter((item) => item.score >= highScore).length
@@ -518,7 +667,63 @@ export class AdaptiveRagRetriever {
       if (cutoffCandidates.length >= this.adaptive.maxChunks * 2) break
     }
 
-    // 5. 同 scenarioId 相邻滑窗合并 + maxPerStory 多样性 + Jaccard 近重复抑制
+    // ±1 相邻上下文自动扩展（针对前 2 条高置信非人设命中块）
+    let expandedCount = 0
+    if (this.adaptive.expandAdjacentContext) {
+      const existingIds = new Set(cutoffCandidates.map((c) => c.id))
+      const topExpandable = cutoffCandidates
+        .filter(
+          (item) =>
+            item.sourceKind !== 'worldview_lore' &&
+            item.type !== 'persona' &&
+            (item.score >= highScore || item.score >= topScore * 0.92)
+        )
+        .slice(0, 2)
+
+      let estimatedChars = cutoffCandidates.reduce((sum, item) => sum + item.text.length, 0)
+      const expandedToAdd: RagExcerpt[] = []
+
+      for (const anchor of topExpandable) {
+        const scenarioList = this.scenarioChunksMap.get(anchor.scenarioId)
+        if (!scenarioList || scenarioList.length <= 1) continue
+        const pos = scenarioList.findIndex((c) => c.id === anchor.id)
+        if (pos < 0) continue
+
+        for (const neighborPos of [pos - 1, pos + 1]) {
+          const neighbor = scenarioList[neighborPos]
+          if (!neighbor || existingIds.has(neighbor.id)) continue
+          const gap =
+            neighborPos < pos
+              ? anchor.lineStart - neighbor.lineEnd
+              : neighbor.lineStart - anchor.lineEnd
+          if (gap > this.adaptive.mergeAdjacentGap + 8) continue
+          if (estimatedChars + neighbor.text.length > effectiveMaxBudget) continue
+
+          existingIds.add(neighbor.id)
+          estimatedChars += neighbor.text.length
+          expandedCount += 1
+          expandedToAdd.push({
+            id: neighbor.id,
+            sourceKind: neighbor.sourceKind,
+            storyId: neighbor.storyId,
+            story: neighbor.story,
+            scenarioId: neighbor.scenarioId,
+            type: neighbor.type,
+            chars: neighbor.chars,
+            lineStart: neighbor.lineStart,
+            lineEnd: neighbor.lineEnd,
+            text: neighbor.text,
+            ...(neighbor.jpText ? { jpText: neighbor.jpText } : {}),
+            score: Number((anchor.score * 0.96).toFixed(4)),
+            denseScore: anchor.denseScore,
+            lexicalScore: anchor.lexicalScore,
+            charScore: anchor.charScore
+          })
+        }
+      }
+      cutoffCandidates.push(...expandedToAdd)
+    }
+
     const merged = mergeAdjacentExcerpts(cutoffCandidates, this.adaptive.mergeAdjacentGap)
     const selected: RagExcerpt[] = []
     const perStoryCount = new Map<string, number>()
@@ -531,7 +736,11 @@ export class AdaptiveRagRetriever {
       if (storyCount >= this.adaptive.maxPerStory) continue
 
       const tokenSet = new Set(tokenizeHybrid(item.text))
-      if (selectedTokenSets.some((prev) => jaccardSimilarity(prev, tokenSet) > JACCARD_DEDUP_THRESHOLD)) {
+      if (
+        selectedTokenSets.some(
+          (prev) => jaccardSimilarity(prev, tokenSet) > JACCARD_DEDUP_THRESHOLD
+        )
+      ) {
         continue
       }
 
@@ -552,8 +761,13 @@ export class AdaptiveRagRetriever {
     const promptBlock = formatRagPromptBlock(sections)
 
     return {
+      domain: PJSK_DOMAIN,
       mode,
       model: this.settings.model,
+      rerankMode,
+      rerankModel,
+      rerankLatencyMs,
+      expandedCount,
       queries,
       candidateCount: scored.length,
       selectedCount: selected.length,

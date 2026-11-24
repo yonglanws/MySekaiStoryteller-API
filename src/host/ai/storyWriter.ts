@@ -46,6 +46,7 @@ import { validateAndFixStory, type ValidationResult } from './validate'
 import { lintDialogueFidelity } from './dialogueLinter'
 import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
 import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
+import { RerankClient, resolveRerankConfig } from '../rag/rerankClient'
 import { AdaptiveRagRetriever } from '../rag/retriever'
 import { loadStoryCorpus } from '../rag/storyCorpus'
 import type { RagMetaSummary, RagRetrieveResult } from '../rag/types'
@@ -223,10 +224,13 @@ export class StoryWriter {
     }
     const embedConfig = resolveEmbeddingConfig(this.settings)
     const embeddingClient = embedConfig.enabled ? new EmbeddingClient(embedConfig, this.logger) : null
+    const rerankConfig = resolveRerankConfig(this.settings)
+    const rerankClient = rerankConfig.enabled ? new RerankClient(rerankConfig, this.logger) : null
     this.ragRetriever = new AdaptiveRagRetriever({
       chunks,
       settings: rag,
       embeddingClient,
+      rerankClient,
       logger: this.logger
     })
     return this.ragRetriever
@@ -235,8 +239,13 @@ export class StoryWriter {
   private summarizeRag(result: RagRetrieveResult | null): RagMetaSummary | undefined {
     if (!result || result.mode === 'disabled') return undefined
     return {
+      domain: result.domain ?? 'pjsk',
       mode: result.mode,
       model: result.model,
+      rerankMode: result.rerankMode ?? 'disabled',
+      rerankModel: result.rerankModel ?? '',
+      rerankLatencyMs: result.rerankLatencyMs ?? 0,
+      expandedCount: result.expandedCount ?? 0,
       selectedCount: result.selectedCount,
       totalChars: result.totalChars,
       topScore: result.topScore,
