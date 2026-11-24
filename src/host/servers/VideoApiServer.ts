@@ -75,6 +75,7 @@ interface PendingExport {
   outputPath: string
   startTime: number
   timeoutMs: number
+  finalizing?: boolean
 }
 
 const DEFAULT_EXPORT_TIMEOUT_MS = 1_800_000
@@ -650,7 +651,7 @@ export class VideoApiServer {
           height: this.video.height,
           renderScale: this.video.renderScale,
           fps: this.video.fps,
-          codec: 'h264',
+          codec: this.video.codec ?? 'hevc',
           crf: this.video.crf,
           audioBitrate: this.video.audioBitrate,
           watermark: this.video.watermark,
@@ -686,22 +687,6 @@ export class VideoApiServer {
 
     this.app.get('/api/v1/export/:taskId/status', (req: Request, res: Response) => {
       const taskId = req.params.taskId as string
-      const pending = this.pendingExports.get(taskId)
-      if (pending) {
-        const elapsed = (Date.now() - pending.startTime) / 1000
-        const isActive = this.activeExports.has(taskId)
-        const isQueued = this.exportQueue.some((t) => t.taskId === taskId)
-        res.json({
-          success: true,
-          taskId,
-          status: isActive ? 'processing' : isQueued ? 'queued' : 'pending',
-          elapsedSeconds: elapsed,
-          queuePosition: isQueued
-            ? this.exportQueue.findIndex((t) => t.taskId === taskId) + 1
-            : null
-        })
-        return
-      }
       const recorded = this.taskRecords.get(taskId)
       if (recorded) {
         res.json({
@@ -711,6 +696,22 @@ export class VideoApiServer {
           elapsedSeconds: recorded.elapsedSeconds,
           ...(recorded.result ? { result: recorded.result } : {}),
           ...(recorded.error ? { error: recorded.error } : {})
+        })
+        return
+      }
+      const pending = this.pendingExports.get(taskId)
+      if (pending) {
+        const elapsed = (Date.now() - pending.startTime) / 1000
+        const isActive = this.activeExports.has(taskId)
+        const isQueued = this.exportQueue.some((t) => t.taskId === taskId)
+        res.json({
+          success: true,
+          taskId,
+          status: isActive || pending.finalizing ? 'processing' : isQueued ? 'queued' : 'pending',
+          elapsedSeconds: elapsed,
+          queuePosition: isQueued
+            ? this.exportQueue.findIndex((t) => t.taskId === taskId) + 1
+            : null
         })
         return
       }
@@ -1069,6 +1070,9 @@ export class VideoApiServer {
     } finally {
       if (timeoutId) clearTimeout(timeoutId)
       signal?.removeEventListener('abort', onAbort)
+      this.pendingExports.delete(taskId)
+      this.activeExports.delete(taskId)
+      this.processQueue()
     }
   }
 
@@ -1160,12 +1164,14 @@ export class VideoApiServer {
       void exportPromise
         .then(async (result) => {
           const finalized = await this.finalizeExportResult(result)
-          this.saveTaskRecord(taskId, {
-            status: 'completed',
-            elapsedSeconds: (Date.now() - startedAt) / 1000,
-            finishedAt: Date.now(),
-            result: finalized
-          })
+          if (!this.taskRecords.has(taskId)) {
+            this.saveTaskRecord(taskId, {
+              status: 'completed',
+              elapsedSeconds: (Date.now() - startedAt) / 1000,
+              finishedAt: Date.now(),
+              result: finalized
+            })
+          }
         })
         .catch((error) => {
           if (!this.taskRecords.has(taskId)) {
@@ -1293,43 +1299,45 @@ export class VideoApiServer {
         this.logger.warn(`[API] Cancel cleanup failed for task ${taskId}`, err)
       })
 
+    const recordCancelledPending = (
+      pending: PendingExport | undefined,
+      cleanup: Promise<void>
+    ): { cancelled: boolean; cleanup: Promise<void> } => {
+      if (pending && !this.taskRecords.has(taskId)) {
+        this.saveTaskRecord(taskId, {
+          status: recordStatus,
+          elapsedSeconds: (Date.now() - pending.startTime) / 1000,
+          finishedAt: Date.now(),
+          error: { message: reason }
+        })
+        pending.reject(new Error(reason))
+        this.pendingExports.delete(taskId)
+      }
+      return { cancelled: true, cleanup }
+    }
+
     const queueIndex = this.exportQueue.findIndex((t) => t.taskId === taskId)
     if (queueIndex > -1) {
       this.exportQueue.splice(queueIndex, 1)
       // 必须拒绝等待中的 Promise：只删除 pendingExports 会让 HTTP 请求
       // 挂到超时竞赛结束（最长 30 分钟）才收到响应
-      const pending = this.pendingExports.get(taskId)
-      if (pending) {
-        this.saveTaskRecord(taskId, {
-          status: recordStatus,
-          elapsedSeconds: (Date.now() - pending.startTime) / 1000,
-          finishedAt: Date.now(),
-          error: { message: reason }
-        })
-        pending.reject(new Error(reason))
-        this.pendingExports.delete(taskId)
-      }
-      const cleanup = runDispatcherCancel()
+      const result = recordCancelledPending(this.pendingExports.get(taskId), runDispatcherCancel())
       this.logger.info(`[API] Cancelled queued export: ${taskId}`)
-      return { cancelled: true, cleanup }
+      return result
     }
 
     if (this.activeExports.has(taskId)) {
       this.activeExports.delete(taskId)
-      const cleanup = runDispatcherCancel()
-      const pending = this.pendingExports.get(taskId)
-      if (pending) {
-        this.saveTaskRecord(taskId, {
-          status: recordStatus,
-          elapsedSeconds: (Date.now() - pending.startTime) / 1000,
-          finishedAt: Date.now(),
-          error: { message: reason }
-        })
-        pending.reject(new Error(reason))
-        this.pendingExports.delete(taskId)
-      }
+      const result = recordCancelledPending(this.pendingExports.get(taskId), runDispatcherCancel())
       this.logger.info(`[API] Cancelled active export: ${taskId}`)
-      return { cancelled: true, cleanup }
+      return result
+    }
+
+    const finalizingPending = this.pendingExports.get(taskId)
+    if (finalizingPending && !this.taskRecords.has(taskId)) {
+      const result = recordCancelledPending(finalizingPending, runDispatcherCancel())
+      this.logger.info(`[API] Cancelled finalizing export: ${taskId}`)
+      return result
     }
 
     return { cancelled: false, cleanup: Promise.resolve() }
@@ -1367,6 +1375,7 @@ export class VideoApiServer {
         `[API] Resolving export task: ${taskId}, success=${result.success}, videoPath=${result.videoPath}`
       )
       this.recordRecentExport(taskId, result.success)
+      pending.finalizing = true
       pending.resolve({
         success: result.success,
         message: result.success ? 'Export completed' : 'Export failed',
@@ -1394,6 +1403,7 @@ export class VideoApiServer {
     if (pending) {
       this.logger.error(`[API] Rejecting export task: ${taskId}`, error)
       this.recordRecentExport(taskId, false)
+      pending.finalizing = true
       pending.reject(error)
       this.activeExports.delete(taskId)
       this.processQueue()

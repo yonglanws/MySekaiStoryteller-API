@@ -735,23 +735,27 @@ export async function apiConvertVideoWithCompression(
     outputHeight: height,
     pixFmt: encoderArgs.pixFmt
   })
+  const truncationArgs =
+    frameCount && frameCount > 0 ? ['-t', frameDurationSeconds(frameCount, fps)] : []
 
-  const ffmpegArgs = [
+  const buildArgs = (selection: VideoEncoderArgs, filterChain: string): string[] => [
     '-i',
     inputPath,
-    ...videoEncoderOutputArgs(encoderArgs, filters),
+    ...videoEncoderOutputArgs(selection, filterChain),
     '-c:a',
     'aac',
     '-b:a',
     '192k',
     '-r',
     String(fps),
-    ...(frameCount && frameCount > 0 ? ['-t', frameDurationSeconds(frameCount, fps)] : []),
+    ...truncationArgs,
     '-movflags',
     '+faststart',
     '-y',
     outputPath
   ]
+
+  const ffmpegArgs = buildArgs(encoderArgs, filters)
 
   try {
     await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
@@ -760,30 +764,16 @@ export async function apiConvertVideoWithCompression(
     const fallback = softwareEncoderArgs(fallbackCodec, crf, 'fast')
     if (encoderArgs.codec === fallback.codec) {
       logger.warn('API video conversion failed, trying with fast preset:', error)
-      const fallbackArgs = [
-        '-i',
-        inputPath,
-        ...videoEncoderOutputArgs(
-          fallback,
-          buildVideoFilterChain({
-            inputWidth,
-            inputHeight,
-            outputWidth: width,
-            outputHeight: height,
-            pixFmt: fallback.pixFmt
-          })
-        ),
-        '-c:a',
-        'aac',
-        '-b:a',
-        '192k',
-        '-r',
-        String(fps),
-        '-movflags',
-        '+faststart',
-        '-y',
-        outputPath
-      ]
+      const fallbackArgs = buildArgs(
+        fallback,
+        buildVideoFilterChain({
+          inputWidth,
+          inputHeight,
+          outputWidth: width,
+          outputHeight: height,
+          pixFmt: fallback.pixFmt
+        })
+      )
       await runFfmpegWithProgress(fallbackArgs, estimatedDuration)
     } else {
       const failedGpu = gpuNameFromCodec(encoderArgs.codec)
@@ -803,7 +793,8 @@ export async function apiConvertVideoWithCompression(
         inputWidth,
         inputHeight,
         recordedBitrate,
-        codec
+        codec,
+        frameCount
       )
     }
   }
@@ -1108,7 +1099,7 @@ export async function apiEncodeVideoAudioToBitrate(
     encoder === 'libx264' || encoder === 'cpu'
       ? 'cpu'
       : encoder === 'auto'
-        ? await detectAvailableGpuEncoder()
+        ? await detectAvailableGpuEncoder('h264')
         : encoder === 'nvidia' || encoder === 'amd' || encoder === 'intel'
           ? encoder
           : 'cpu'
@@ -1403,7 +1394,7 @@ export class FramesPipeSession {
   }
 
   private touchIdle(): void {
-    if (this.settled) return
+    if (this.settled || this.eofSent) return
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => {
       void this.abort(new Error('FFmpeg image2pipe idle timeout'))
@@ -1448,6 +1439,10 @@ export class FramesPipeSession {
     await this.queue
     if (this.error) throw this.error
     if (!this.settled) {
+      if (this.idleTimer) {
+        clearTimeout(this.idleTimer)
+        this.idleTimer = null
+      }
       this.eofSent = true
       this.finishTimer = setTimeout(() => {
         void this.abort(new Error('FFmpeg image2pipe finish timeout'))

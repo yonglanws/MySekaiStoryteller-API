@@ -619,19 +619,31 @@ async function bootstrap(): Promise<void> {
 
       app.post('/api/v1/generate', async (req, res) => {
         if (!server.enforceRateLimit(req, res)) return
-        if (!acquireAiSlot(res)) return
         const body = (req.body ?? {}) as Parameters<typeof runGenerate>[0] & {
           scriptTimeout?: unknown
           exportTimeout?: unknown
         }
+        if (
+          body.exportTimeout !== undefined &&
+          (typeof body.exportTimeout !== 'number' ||
+            !Number.isInteger(body.exportTimeout) ||
+            body.exportTimeout < 1 ||
+            body.exportTimeout > 2_147_483_647)
+        ) {
+          res.status(400).json({
+            success: false,
+            message:
+              'Invalid exportTimeout: expected an integer between 1 and 2147483647 milliseconds.'
+          })
+          return
+        }
+        if (!acquireAiSlot(res)) return
         const scriptTimeoutMs =
           typeof body.scriptTimeout === 'number' && Number.isFinite(body.scriptTimeout)
             ? Math.min(Math.max(1, body.scriptTimeout), 1_800_000)
             : 600_000
         const exportTimeoutMs =
-          typeof body.exportTimeout === 'number' && Number.isFinite(body.exportTimeout)
-            ? Math.min(Math.max(1, body.exportTimeout), 2_147_483_647)
-            : 1_800_000
+          typeof body.exportTimeout === 'number' ? body.exportTimeout : 1_800_000
 
         const controller = new AbortController()
         const timer = setTimeout(

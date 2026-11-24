@@ -167,6 +167,15 @@ async function proxyFetch(
 const listeners = new Map<string, Set<IpcListener>>()
 let ws: WebSocket | null = null
 let wsClosed = false
+let wsEverConnected = false
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearWsReconnectTimer(): void {
+  if (wsReconnectTimer !== null) {
+    clearTimeout(wsReconnectTimer)
+    wsReconnectTimer = null
+  }
+}
 
 function wsSend(message: { type: string; args: unknown[] }): void {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -175,6 +184,7 @@ function wsSend(message: { type: string; args: unknown[] }): void {
 }
 
 function connectWs(): Promise<void> {
+  clearWsReconnectTimer()
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     // 渲染池通过页面 URL 的 ?worker=<id>&token=<tok> 标识工作进程，需透传给 WS
@@ -186,8 +196,20 @@ function connectWs(): Promise<void> {
     const queryStr = wsParams.toString()
     const workerQuery = queryStr ? `?${queryStr}` : ''
     const socket = new WebSocket(`${proto}//${location.host}/bridge/ws${workerQuery}`)
+    let opened = false
+    let settled = false
+
+    const failInitial = (err: Error): void => {
+      if (!settled) {
+        settled = true
+        reject(err)
+      }
+    }
 
     socket.onopen = () => {
+      opened = true
+      settled = true
+      wsEverConnected = true
       ws = socket
       resolve()
     }
@@ -210,15 +232,22 @@ function connectWs(): Promise<void> {
       if (ws === socket) {
         ws = null
       }
-      // 页面由宿主管理生命周期；异常断开时退避重连
-      if (!wsClosed) {
-        setTimeout(() => void connectWs().catch(() => undefined), 2000)
+      if (!opened) {
+        failInitial(new Error('Bridge WebSocket connection closed before opening'))
+      }
+      // 仅在曾成功连上过且未被显式关闭时退避重连，避免首次建连失败留下孤立重连循环
+      if (!wsClosed && wsEverConnected) {
+        clearWsReconnectTimer()
+        wsReconnectTimer = setTimeout(() => {
+          wsReconnectTimer = null
+          void connectWs().catch(() => undefined)
+        }, 2000)
       }
     }
 
     socket.onerror = () => {
-      if (ws !== socket) {
-        reject(new Error('Bridge WebSocket connection failed'))
+      if (!opened) {
+        failInitial(new Error('Bridge WebSocket connection failed'))
       }
     }
   })
@@ -273,11 +302,15 @@ export function installBrowserBridge(): Promise<void> {
   }
 
   wsClosed = false
+  wsEverConnected = false
+  clearWsReconnectTimer()
   return connectWs()
 }
 
 export function closeBridge(): void {
   wsClosed = true
+  wsEverConnected = false
+  clearWsReconnectTimer()
   ws?.close()
   ws = null
 }

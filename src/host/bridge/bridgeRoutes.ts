@@ -489,7 +489,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
   function rememberPipeFrameCount(videoPath: string, frameCount: number, fps: number): void {
     if (frameCount <= 0 || !Number.isFinite(fps) || fps <= 0) return
-    const key = path.resolve(videoPath)
+    const key = canonicalComparePath(videoPath)
+    pipeVideoFrameCounts.delete(key)
     pipeVideoFrameCounts.set(key, { frameCount, fps })
     while (pipeVideoFrameCounts.size > MAX_PIPE_FRAME_COUNT_ENTRIES) {
       const oldest = pipeVideoFrameCounts.keys().next().value
@@ -499,7 +500,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   }
 
   function pipeFrameInfoFor(videoPath: string): PipeFrameInfo | undefined {
-    return pipeVideoFrameCounts.get(path.resolve(videoPath))
+    return pipeVideoFrameCounts.get(canonicalComparePath(videoPath))
   }
 
   /**
@@ -537,7 +538,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       return
     }
     framesPipeSessions.delete(id)
-    pipeVideoFrameCounts.delete(path.resolve(entry.videoPath))
+    pipeVideoFrameCounts.delete(canonicalComparePath(entry.videoPath))
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer)
       entry.idleTimer = null
@@ -1256,8 +1257,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             // 输入保留给调用方（失败回退或自行清理）
           } else {
             try {
+              pipeVideoFrameCounts.delete(canonicalComparePath(safeVideoPath))
               await fs.promises.unlink(safeVideoPath)
-              pipeVideoFrameCounts.delete(path.resolve(safeVideoPath))
               const parent = path.dirname(safeVideoPath)
               if (path.basename(parent).startsWith('mss-fpipe-')) {
                 await fs.promises.rmdir(parent).catch(() => {})
@@ -1427,23 +1428,38 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
       case 'electron:write-frame-batch': {
         // 帧捕获回退路径：批量 base64 帧写盘
-        const batch = args[0] as Array<{ path: string; data: string }>
-        const safeBatch = batch.map((item) => ({
-          path: assertContainedPath(item?.path, allowedTempRoots, 'frame path'),
-          data: item.data
-        }))
+        const rawBatch = args[0]
+        if (!Array.isArray(rawBatch)) {
+          throw new BridgeSecurityError('Invalid frame batch: expected an array', 400)
+        }
+        const safeBatch = rawBatch.map((item) => {
+          const entry = item as { path?: unknown; data?: unknown } | null | undefined
+          if (!entry || typeof entry.data !== 'string') {
+            throw new BridgeSecurityError('Invalid frame batch item: expected string data', 400)
+          }
+          return {
+            path: assertContainedPath(entry.path, allowedTempRoots, 'frame path'),
+            data: entry.data
+          }
+        })
         if (safeBatch.some((item) => isUnderTombstonedPath(item.path))) {
           throw new BridgeSecurityError(
             'Temp frame directory was cleaned up after task cancellation',
             499
           )
         }
-        await Promise.allSettled(
+        const results = await Promise.allSettled(
           safeBatch.map(async (item) => {
             const buffer = Buffer.from(item.data, 'base64')
             await fs.promises.writeFile(item.path, buffer)
           })
         )
+        const failed = results.find(
+          (result): result is PromiseRejectedResult => result.status === 'rejected'
+        )
+        if (failed) {
+          throw failed.reason instanceof Error ? failed.reason : new Error(String(failed.reason))
+        }
         return null
       }
 

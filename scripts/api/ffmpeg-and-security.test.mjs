@@ -1365,3 +1365,227 @@ test('electron:write-file-at caches FileHandle across chunks and closes on expli
   }
   assert.equal(closeCount, 2, 'idle timeout must close cached FileHandle')
 })
+
+test('FramesPipeSession.finish clears idle timer so >120s finalization is not aborted', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-pipe-finish-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const outputPath = path.join(dir, 'out.mp4')
+
+  let childRef = null
+  t.mock.method(childProcess, 'spawn', () => {
+    childRef = makeOpenChild()
+    return childRef
+  })
+
+  const clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout'] })
+  t.after(() => clock.uninstall())
+
+  const session = await ffmpeg.createFramesPipeSession({
+    fps: 30,
+    width: 640,
+    height: 360,
+    encoder: 'cpu',
+    codec: 'h264',
+    outputPath
+  })
+  await session.write(Buffer.from('frame'))
+
+  let finished = false
+  const finishPromise = session.finish(300_000).then((p) => {
+    finished = true
+    return p
+  })
+  await Promise.resolve()
+  await clock.tickAsync(150_000)
+  assert.equal(finished, false, 'finish must wait for ffmpeg close past 120s idle window')
+  childRef.emit('close', 0, null)
+  assert.equal(await finishPromise, outputPath)
+  assert.equal(clock.countTimers(), 0)
+})
+
+test('apiConvertVideoWithCompression preserves -t frameCount across fast-preset and GPU->CPU fallbacks', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-convert-fallback-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const inputPath = path.join(dir, 'in.webm')
+  const outputPath = path.join(dir, 'out.mp4')
+  await writeFile(inputPath, Buffer.alloc(1024))
+
+  const calls = []
+  let cpuFirstFails = true
+  t.mock.method(childProcess, 'spawn', (_bin, args) => {
+    calls.push(args)
+    const codec = args[args.indexOf('-c:v') + 1]
+    const preset = args[args.indexOf('-preset') + 1]
+    if (args.includes('null') && codec === 'hevc_nvenc') {
+      return makeFakeChild({ code: 0 })
+    }
+    if (codec === 'hevc_nvenc') {
+      return makeFakeChild({ code: 1, stderrText: 'nvenc fail' })
+    }
+    if (codec === 'libx265' && preset === 'medium' && cpuFirstFails) {
+      cpuFirstFails = false
+      return makeFakeChild({ code: 1, stderrText: 'medium preset fail' })
+    }
+    return makeFakeChild({ code: 0 })
+  })
+
+  await ffmpeg.apiConvertVideoWithCompression(
+    inputPath,
+    outputPath,
+    23,
+    30,
+    'auto',
+    1280,
+    720,
+    1280,
+    720,
+    8_000_000,
+    'hevc',
+    90
+  )
+
+  const encodeCalls = calls.filter((args) => !args.includes('null'))
+  assert.equal(encodeCalls.length, 3, 'nvenc -> cpu medium -> cpu fast')
+  for (const args of encodeCalls) {
+    const tIdx = args.indexOf('-t')
+    assert.ok(tIdx > 0, `expected -t truncation in ${args.join(' ')}`)
+    assert.equal(args[tIdx + 1], '3.000000')
+  }
+})
+
+test('apiEncodeVideoAudioToBitrate probes h264 GPU encoders matching targetBitrateVideoArgs', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-bitrate-probe-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const videoPath = path.join(dir, 'in.mp4')
+  const outputPath = path.join(dir, 'out.mp4')
+  await writeFile(videoPath, 'mp4')
+
+  const calls = []
+  t.mock.method(childProcess, 'spawn', (_bin, args) => {
+    calls.push(args)
+    return makeFakeChild({ code: 0 })
+  })
+
+  await ffmpeg.apiEncodeVideoAudioToBitrate(videoPath, undefined, outputPath, '128k', 'auto', 4_000_000, 10)
+  const probeCall = calls.find((args) => args.includes('null'))
+  assert.ok(probeCall, 'expected GPU smoke probe')
+  assert.equal(probeCall[probeCall.indexOf('-c:v') + 1], 'h264_nvenc')
+})
+
+test('write-frame-batch validates input and propagates disk failures; pipe frame count survives non-canonical paths', async (t) => {
+  const workDir = await mkdtemp(path.join(tmpdir(), 'msst-batch-pipe-'))
+  const outputDir = path.join(workDir, 'out')
+  const audioPath = path.join(workDir, 'audio.wav')
+  await fs.promises.mkdir(outputDir, { recursive: true })
+  await writeFile(audioPath, 'RIFF')
+
+  const app = express()
+  app.use(
+    '/bridge',
+    createBridgeRouter({
+      logger: new Logger({ type: 'hidden' }),
+      config: {
+        paths: { output: outputDir },
+        video: { width: 1280, height: 720, fps: 30, crf: 18, encoder: 'cpu', codec: 'hevc' },
+        render: { workers: 1 },
+        tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+        llm: { enabled: false }
+      },
+      bridgeToken: 'tok',
+      createFramesPipe: async (options) => ({
+        outputPath: options.outputPath,
+        frameCount: 60,
+        async write() {},
+        async finish() {
+          await writeFile(options.outputPath, 'encoded-video')
+          return options.outputPath
+        },
+        async abort() {}
+      })
+    })
+  )
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    server.close()
+    server.closeAllConnections()
+    await closed
+    await rm(workDir, { recursive: true, force: true })
+  })
+
+  const post = (reqPath, body) =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: reqPath,
+          method: 'POST',
+          headers: { 'x-mss-bridge-token': 'tok', 'content-type': 'application/json' }
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) })
+          )
+        }
+      )
+      req.on('error', reject)
+      req.end(JSON.stringify(body))
+    })
+
+  // Invalid batch shape
+  const badShape = await post('/bridge/invoke/electron:write-frame-batch', [{ not: 'array' }])
+  assert.equal(badShape.status, 400)
+  assert.equal(badShape.body.ok, false)
+
+  // Missing parent directory triggers ENOENT, must NOT return ok: true
+  const missingDirFrame = path.join(workDir, 'nonexistent-subdir', 'frame.jpg')
+  const failedWrite = await post('/bridge/invoke/electron:write-frame-batch', [
+    [{ path: missingDirFrame, data: Buffer.from('abc').toString('base64') }]
+  ])
+  assert.equal(failedWrite.status, 500)
+  assert.equal(failedWrite.body.ok, false)
+
+  // Canonical pipe frame count lookup across non-canonical path (dot-segment + case variation)
+  const started = await post('/bridge/invoke/electron:frames-stream-start', [{ fps: 30 }])
+  const finished = await post('/bridge/invoke/electron:frames-stream-finish', [
+    { id: started.body.result.id }
+  ])
+  const canonicalVideoPath = finished.body.result.videoPath
+  const nonCanonicalVideoPath = path.join(
+    path.dirname(canonicalVideoPath),
+    '.',
+    process.platform === 'win32'
+      ? path.basename(canonicalVideoPath).toUpperCase()
+      : path.basename(canonicalVideoPath)
+  )
+  let muxOptions = null
+  t.mock.method(bridgeFfmpeg, 'apiMuxVideoAudioCopy', async (_v, _a, outPath, _b, options) => {
+    muxOptions = options
+    await writeFile(outPath, 'remuxed')
+  })
+  const remux = await post('/bridge/invoke/electron:api-remux-video-from-files', [
+    {
+      videoPath: nonCanonicalVideoPath,
+      audioPath,
+      outputPath: path.join(outputDir, 'canonical.mp4'),
+      audioBitrate: '192k'
+    }
+  ])
+  assert.equal(remux.status, 200)
+  assert.equal(remux.body.result.success, true)
+  assert.deepEqual(muxOptions, { frameCount: 60, fps: 30, startFrame: undefined })
+})

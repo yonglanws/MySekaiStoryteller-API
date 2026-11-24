@@ -507,18 +507,24 @@ export class ResourceCatalog {
       return []
     }
 
-    let manifest: BgmManifest
+    let manifest: BgmManifest | null | undefined
     try {
-      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as BgmManifest
+      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as
+        | BgmManifest
+        | null
+        | undefined
     } catch (err) {
       this.logger.warn('[Catalog] Failed to parse audio/bgm/bgm.yaml', err)
+      return []
+    }
+    if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.bgm)) {
       return []
     }
 
     const soundtracks = this.loadSoundtracks(resourcesDir)
     const known = new Set(bgmFiles)
     const details: CatalogBgm[] = []
-    for (const entry of manifest.bgm ?? []) {
+    for (const entry of manifest.bgm) {
       const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
       if (!file) continue
       if (!known.has(file)) {
@@ -609,17 +615,23 @@ export class ResourceCatalog {
       return []
     }
 
-    let manifest: ImageManifest
+    let manifest: ImageManifest | null | undefined
     try {
-      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as ImageManifest
+      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as
+        | ImageManifest
+        | null
+        | undefined
     } catch (err) {
       this.logger.warn('[Catalog] Failed to parse images.yaml', err)
+      return []
+    }
+    if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.images)) {
       return []
     }
 
     const known = new Set(imageFiles)
     const details: CatalogImage[] = []
-    for (const entry of manifest.images ?? []) {
+    for (const entry of manifest.images) {
       const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
       if (!file) continue
       if (!known.has(file)) {

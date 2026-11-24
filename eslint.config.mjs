@@ -8,6 +8,7 @@ export default tseslint.config([
       '**/dist',
       '**/out',
       '**/out-host',
+      '**/.zcode',
       'apifile/**',
       'src/renderer/public/live2d.min.js',
       'src/renderer/public/live2dcubismcore.min.js'

@@ -12,6 +12,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { Logger } from 'tslog'
 import { loadHostConfig } from '../../out-host/host/config.js'
 import { LlmClient } from '../../out-host/host/ai/llm.js'
@@ -181,11 +182,22 @@ async function startCloudAssetServer() {
   return { server, downloadedUrls, baseUrl: `http://127.0.0.1:${server.address().port}` }
 }
 
-test('loadHostConfig falls back to bgm00003 on empty resourcesDir and respects local bg1.mp3 when present', () => {
+test('loadHostConfig falls back to bgm00003 on empty resourcesDir and respects local bg1.mp3 when present', (t) => {
   const emptyResources = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-empty-cfg-'))
   const localResources = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-local-cfg-'))
   const prevResourceDir = process.env.MSS_RESOURCE_DIR
   const prevCloudCatalog = process.env.MSS_ASSETS_CLOUD_CATALOG
+  const repoConfigPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+    'config.yaml'
+  )
+  const origExistsSync = fs.existsSync
+  t.mock.method(fs, 'existsSync', (target) => {
+    if (path.resolve(String(target)) === repoConfigPath) return false
+    return origExistsSync.call(fs, target)
+  })
 
   try {
     fs.mkdirSync(path.join(localResources, 'audio', 'bgm'), { recursive: true })
@@ -814,5 +826,116 @@ test('CloudCatalogService.waitReady waits for cold refresh when snapshot is null
     await inflight
   } finally {
     fs.rmSync(emptyDir, { recursive: true, force: true })
+  }
+})
+
+test('ResourceCatalog ignores empty or comment-only bgm.yaml and images.yaml without crashing', () => {
+  const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-empty-yaml-'))
+  try {
+    fs.mkdirSync(path.join(resourcesDir, 'audio', 'bgm'), { recursive: true })
+    fs.mkdirSync(path.join(resourcesDir, 'images'), { recursive: true })
+    fs.writeFileSync(path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml'), '# comment only\n', 'utf8')
+    fs.writeFileSync(path.join(resourcesDir, 'images', 'images.yaml'), '\n', 'utf8')
+    fs.writeFileSync(path.join(resourcesDir, 'images', 'bg_local.png'), Buffer.from('PNG'))
+
+    const catalog = new ResourceCatalog(
+      new Logger({ minLevel: 6 }),
+      { paths: { resources: resourcesDir } },
+      () => null
+    )
+    const data = catalog.get()
+    assert.deepEqual(data.images, ['bg_local.png'])
+    assert.deepEqual(data.bgm, [])
+  } finally {
+    fs.rmSync(resourcesDir, { recursive: true, force: true })
+  }
+})
+
+test('concurrent resolveStoryCloudAssets with different resourcesDirs downloads models into both directories', async () => {
+  const resDirA = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-model-lock-a-'))
+  const resDirB = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-model-lock-b-'))
+  const { server, baseUrl } = await startCloudAssetServer()
+
+  const catalog = {
+    format: 'msst.cloud-catalog/1',
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    region: 'jp',
+    sources: {
+      indexUrl: `${baseUrl}/models.json`,
+      libraryRoot: `${baseUrl}/library/`,
+      assetBase: baseUrl,
+      soundtrack: ''
+    },
+    models: [
+      {
+        id: '01ichika_school',
+        characterId: 1,
+        name: '星乃一歌',
+        shortName: '一歌',
+        outfitCategory: '校服',
+        outfitLabel: '星乃一歌 校服',
+        isDefault: false,
+        bundle: 'live2d/model/01ichika_school',
+        motionBundles: ['live2d/motion/01ichika_motion_base'],
+        path: 'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: [],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: ''
+      }
+    ],
+    backgrounds: [],
+    bgm: [],
+    se: []
+  }
+
+  const makeSettings = (dir) => ({
+    region: 'jp',
+    indexBase: '',
+    libraryBase: '',
+    assetBase: baseUrl,
+    soundtrackBase: '',
+    cacheDir: path.join(dir, '.cache'),
+    concurrency: 2,
+    timeoutMs: 5000,
+    retries: 0,
+    cloudCatalog: true,
+    cloudCatalogTtlHours: 24
+  })
+
+  try {
+    const storyA = { models: [{ id: 1, model: '星乃一歌 校服' }], images: [], snippets: [] }
+    const storyB = { models: [{ id: 1, model: '星乃一歌 校服' }], images: [], snippets: [] }
+    const [resA, resB] = await Promise.all([
+      resolveStoryCloudAssets(storyA, {
+        settings: makeSettings(resDirA),
+        resourcesDir: resDirA,
+        catalog,
+        logger
+      }),
+      resolveStoryCloudAssets(storyB, {
+        settings: makeSettings(resDirB),
+        resourcesDir: resDirB,
+        catalog,
+        logger
+      })
+    ])
+    assert.equal(resA.models, 1)
+    assert.equal(resB.models, 1)
+    assert.ok(
+      fs.existsSync(
+        path.join(resDirA, 'models', 'cloud', '01ichika_school', '01ichika_school', '01ichika_school.model3.json')
+      )
+    )
+    assert.ok(
+      fs.existsSync(
+        path.join(resDirB, 'models', 'cloud', '01ichika_school', '01ichika_school', '01ichika_school.model3.json')
+      )
+    )
+  } finally {
+    server.close()
+    fs.rmSync(resDirA, { recursive: true, force: true })
+    fs.rmSync(resDirB, { recursive: true, force: true })
   }
 })

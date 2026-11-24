@@ -514,7 +514,8 @@ async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Prom
   const modelJson = path.join(ctx.resourcesDir, 'models', ...entry.path.split('/'))
   if (fs.existsSync(modelJson)) return entry.path
 
-  const existing = modelLocks.get(entry.id)
+  const lockKey = `${path.resolve(ctx.resourcesDir)}::${entry.id}`
+  const existing = modelLocks.get(lockKey)
   if (existing) return existing
   const task = (async () => {
     if (!ctx.catalog) throw new Error('cloud catalog unavailable')
@@ -543,9 +544,9 @@ async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Prom
     )
     return `cloud/${result.path}`
   })().finally(() => {
-    modelLocks.delete(entry.id)
+    modelLocks.delete(lockKey)
   })
-  modelLocks.set(entry.id, task)
+  modelLocks.set(lockKey, task)
   return task
 }
 

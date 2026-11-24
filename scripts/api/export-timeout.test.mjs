@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -295,4 +295,171 @@ test('exportStory aborts and cancels the queued export when its signal aborts', 
   await assert.rejects(pending, /cancelled/i)
   assert.deepEqual(fixture.cancelled, [task.taskId])
   assert.equal(fixture.clock.countTimers(), 0)
+})
+
+test('/api/v1/health reports configured video codec instead of hardcoded h264', async (t) => {
+  const hevcFixture = await createFixture(t, {
+    video: { width: 1280, height: 720, fps: 30, codec: 'hevc' }
+  })
+  const hevcHealth = await hevcFixture.request('health').response
+  assert.equal(hevcHealth.status, 200)
+  assert.equal(hevcHealth.body.videoConfig.codec, 'hevc')
+
+  const h264Fixture = await createFixture(t, {
+    video: { width: 1280, height: 720, fps: 30, codec: 'h264' }
+  })
+  const h264Health = await h264Fixture.request('health').response
+  assert.equal(h264Health.status, 200)
+  assert.equal(h264Health.body.videoConfig.codec, 'h264')
+})
+
+test('wait:false export stays processing (never pending) during finalizeExportResult and allows cancel before completion', async (t) => {
+  const fixture = await createFixture(t)
+  const diagnostics = {
+    schemaVersion: 1,
+    generatedAt: '2026-11-08T00:00:00.000Z',
+    export: { mode: 'fast', width: 1280, height: 720, fps: 30, frameCount: 1, durationMs: 1 },
+    summary: {
+      models: 0,
+      images: 0,
+      snippets: 1,
+      talks: 0,
+      plannedDurationMs: 1,
+      actualDurationMs: 1,
+      avgAbsDriftMs: 0,
+      ttsLines: 0,
+      ttsTotalMs: 0,
+      motionEvents: 0,
+      motionStarts: 0,
+      motionInterrupts: 0,
+      layoutAppears: 0,
+      layoutClears: 0,
+      logEntries: 0,
+      anomalies: 0
+    },
+    snippets: [],
+    tts: [],
+    motions: [],
+    anomalies: [],
+    logs: []
+  }
+
+  let releaseWrite = null
+  let writeStarted = null
+  const writeStartedPromise = new Promise((resolve) => {
+    writeStarted = resolve
+  })
+  const origWriteFile = fsPromises.writeFile
+  t.mock.method(fsPromises, 'writeFile', async (...args) => {
+    if (String(args[0]).endsWith('.log.json')) {
+      writeStarted()
+      await new Promise((resolve) => {
+        releaseWrite = resolve
+      })
+    }
+    return origWriteFile.apply(fsPromises, args)
+  })
+
+  const accepted = await fixture.request('export', { story, wait: false }).response
+  assert.equal(accepted.status, 202)
+  const taskId = accepted.body.taskId
+  await fixture.waitForStatus((status) => status.activeExports === 1)
+  const [task] = fixture.dispatched
+  writeFileSync(task.outputPath, 'test video')
+
+  fixture.api.resolveExport(taskId, {
+    success: true,
+    videoPath: task.outputPath,
+    diagnostics
+  })
+  await writeStartedPromise
+
+  // During finalizeExportResult, status must remain processing (not pending)
+  const midStatus = await fixture.request(`export/${taskId}/status`).response
+  assert.equal(midStatus.status, 200)
+  assert.equal(midStatus.body.status, 'processing')
+
+  // Completing finalization transitions directly to completed
+  releaseWrite()
+  for (let i = 0; i < 100; i++) {
+    const done = await fixture.request(`export/${taskId}/status`).response
+    if (done.body.status === 'completed') {
+      assert.equal(done.body.result.success, true)
+      return
+    }
+    await new Promise((r) => setImmediate(r))
+  }
+  assert.fail('async export did not reach completed status')
+})
+
+test('wait:false export cancelled during finalizeExportResult reports cancelled:true and preserves cancelled status', async (t) => {
+  const fixture = await createFixture(t)
+  const diagnostics = {
+    schemaVersion: 1,
+    generatedAt: '2026-11-08T00:00:00.000Z',
+    export: { mode: 'fast', width: 1280, height: 720, fps: 30, frameCount: 1, durationMs: 1 },
+    summary: {
+      models: 0,
+      images: 0,
+      snippets: 1,
+      talks: 0,
+      plannedDurationMs: 1,
+      actualDurationMs: 1,
+      avgAbsDriftMs: 0,
+      ttsLines: 0,
+      ttsTotalMs: 0,
+      motionEvents: 0,
+      motionStarts: 0,
+      motionInterrupts: 0,
+      layoutAppears: 0,
+      layoutClears: 0,
+      logEntries: 0,
+      anomalies: 0
+    },
+    snippets: [],
+    tts: [],
+    motions: [],
+    anomalies: [],
+    logs: []
+  }
+
+  let releaseWrite = null
+  let writeStarted = null
+  const writeStartedPromise = new Promise((resolve) => {
+    writeStarted = resolve
+  })
+  const origWriteFile = fsPromises.writeFile
+  t.mock.method(fsPromises, 'writeFile', async (...args) => {
+    if (String(args[0]).endsWith('.log.json')) {
+      writeStarted()
+      await new Promise((resolve) => {
+        releaseWrite = resolve
+      })
+    }
+    return origWriteFile.apply(fsPromises, args)
+  })
+
+  const accepted = await fixture.request('export', { story, wait: false }).response
+  const taskId = accepted.body.taskId
+  await fixture.waitForStatus((status) => status.activeExports === 1)
+  const [task] = fixture.dispatched
+  writeFileSync(task.outputPath, 'test video')
+
+  fixture.api.resolveExport(taskId, {
+    success: true,
+    videoPath: task.outputPath,
+    diagnostics
+  })
+  await writeStartedPromise
+
+  const cancelRes = await fixture.request(`export/${taskId}/cancel`, {}).response
+  assert.equal(cancelRes.status, 200)
+  assert.equal(cancelRes.body.cancelled, true)
+
+  releaseWrite()
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setImmediate(r))
+  }
+  const finalStatus = await fixture.request(`export/${taskId}/status`).response
+  assert.equal(finalStatus.body.status, 'cancelled')
 })
