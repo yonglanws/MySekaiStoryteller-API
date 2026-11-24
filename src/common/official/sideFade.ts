@@ -1,29 +1,153 @@
 /**
- * ScenarioSideFadePlayer 的滑入/滑出位置（SSE `sse-bake` 29~36）。
- * 面板本身覆盖全屏；这里只返回它沿轴的起点/终点。
+ * 官方 `ScenarioSideFadePlayer`（EffectType 29~36）的硬边面板几何。
+ *
+ * `sse-bake/src/lib.rs:2842-2867`：from/to 是根节点 anchoredPosition（+y 向上），
+ * 位移 = contentSize + 512；`sse-render/src/lib.rs:1288-1310`：根面板是
+ * contentSize + 64 的纯黑矩形，画布左上角为 `(-32 + p.x, -32 - p.y)`。
+ * In 类型在 Play 结束时 deactivate，Out 类型保留面板。
  */
+export const SIDE_FADE_EDGE_PX = 512
+export const SIDE_FADE_PANEL_PAD_PX = 32
+
+export type SideFadeEdge = 'left' | 'right' | 'top' | 'bottom'
+export type SideFadeMode = 'in' | 'out'
+export type SideFadeEffectType = 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36
+
+export interface SideFadeTableEntry {
+  effectType: SideFadeEffectType
+  edge: SideFadeEdge
+  mode: SideFadeMode
+  /** anchoredPosition from/to 的方向乘数，实际值再乘 ox / oy。 */
+  from: readonly [number, number]
+  to: readonly [number, number]
+  /** In 类型在 Play 结束时 deactivate。 */
+  hide: boolean
+}
+
+/** 29~36 的官方 from/to 表（`sse-bake/src/lib.rs:2846-2855`）。 */
+const TABLE: readonly SideFadeTableEntry[] = [
+  { effectType: 29, edge: 'left', mode: 'in', from: [0, 0], to: [1, 0], hide: true },
+  { effectType: 30, edge: 'left', mode: 'out', from: [-1, 0], to: [0, 0], hide: false },
+  { effectType: 31, edge: 'right', mode: 'in', from: [0, 0], to: [-1, 0], hide: true },
+  { effectType: 32, edge: 'right', mode: 'out', from: [1, 0], to: [0, 0], hide: false },
+  { effectType: 33, edge: 'top', mode: 'in', from: [0, 0], to: [0, -1], hide: true },
+  { effectType: 34, edge: 'top', mode: 'out', from: [0, 1], to: [0, 0], hide: false },
+  { effectType: 35, edge: 'bottom', mode: 'in', from: [0, 0], to: [0, 1], hide: true },
+  { effectType: 36, edge: 'bottom', mode: 'out', from: [0, -1], to: [0, 0], hide: false }
+]
+
+export function sideFadeEffectType(edge: SideFadeEdge, mode: SideFadeMode): SideFadeEffectType {
+  const entry = TABLE.find((item) => item.edge === edge && item.mode === mode)
+  if (!entry) throw new Error(`Unknown SideFade ${edge} ${mode}`)
+  return entry.effectType
+}
+
+export function sideFadeTableEntry(effectType: number): SideFadeTableEntry | null {
+  return TABLE.find((item) => item.effectType === effectType) ?? null
+}
+
+export interface SideFadePlan {
+  effectType: SideFadeEffectType
+  edge: SideFadeEdge
+  mode: SideFadeMode
+  horizontal: boolean
+  hide: boolean
+  content: { width: number; height: number }
+  unitScale: number
+  pad: number
+  panel: { width: number; height: number }
+  /** anchoredPosition（+y 向上）。 */
+  from: { x: number; y: number }
+  to: { x: number; y: number }
+}
+
+/**
+ * @param unitScale 参考画布像素 → 当前逻辑坐标的缩放；导出画布 1280×720 时为 2/3。
+ */
+export function sideFadePlan(
+  edge: SideFadeEdge,
+  mode: SideFadeMode,
+  contentWidth: number,
+  contentHeight: number,
+  unitScale = 1
+): SideFadePlan {
+  const entry = TABLE.find((item) => item.edge === edge && item.mode === mode)
+  if (!entry) throw new Error(`Unknown SideFade ${edge} ${mode}`)
+  const scale = Number.isFinite(unitScale) && unitScale > 0 ? unitScale : 1
+  const ox = contentWidth + SIDE_FADE_EDGE_PX * scale
+  const oy = contentHeight + SIDE_FADE_EDGE_PX * scale
+  const pad = SIDE_FADE_PANEL_PAD_PX * scale
+  return {
+    effectType: entry.effectType,
+    edge,
+    mode,
+    horizontal: edge === 'left' || edge === 'right',
+    hide: entry.hide,
+    content: { width: contentWidth, height: contentHeight },
+    unitScale: scale,
+    pad,
+    panel: { width: contentWidth + pad * 2, height: contentHeight + pad * 2 },
+    from: { x: entry.from[0] * ox, y: entry.from[1] * oy },
+    to: { x: entry.to[0] * ox, y: entry.to[1] * oy }
+  }
+}
+
+export interface SideFadePanelRect {
+  x: number
+  y: number
+  width: number
+  height: number
+  /** 已覆盖/已露出的前沿（canvas 像素；横向取 x，纵向取 y）。 */
+  leading: number
+}
+
+/** 根面板在画布左上角坐标系里的矩形；`eased` 是 OutQuad 之后的 0..1。 */
+export function sideFadePanelRect(plan: SideFadePlan, eased: number): SideFadePanelRect {
+  const t = Math.max(0, Math.min(1, Number.isFinite(eased) ? eased : 0))
+  const anchorX = plan.from.x + (plan.to.x - plan.from.x) * t
+  const anchorY = plan.from.y + (plan.to.y - plan.from.y) * t
+  // Pixi 的 y 向下；官方 anchoredPosition 的 +y 向上。
+  const x = -plan.pad + anchorX
+  const y = -plan.pad - anchorY
+  let leading: number
+  switch (plan.edge) {
+    case 'left':
+      leading = plan.mode === 'out' ? x + plan.panel.width : x
+      break
+    case 'right':
+      leading = plan.mode === 'out' ? x : x + plan.panel.width
+      break
+    case 'top':
+      leading = plan.mode === 'out' ? y + plan.panel.height : y
+      break
+    default:
+      leading = plan.mode === 'out' ? y : y + plan.panel.height
+  }
+  return { x, y, width: plan.panel.width, height: plan.panel.height, leading }
+}
+
+export function sideFadeLeadingEdgeAt(plan: SideFadePlan, eased: number): number {
+  return sideFadePanelRect(plan, eased).leading
+}
+
 export interface SideFadePositions {
   horizontal: boolean
   start: number
   end: number
 }
 
+/** 兼容旧调用：只返回沿运动轴的 anchoredPosition 起点/终点。 */
 export function sideFadePositions(
-  edge: 'left' | 'right' | 'top' | 'bottom',
-  mode: 'in' | 'out',
+  edge: SideFadeEdge,
+  mode: SideFadeMode,
   width: number,
-  height: number
+  height: number,
+  unitScale = 1
 ): SideFadePositions {
-  const horizontal = edge === 'left' || edge === 'right'
-  // out：从该侧画外滑到 0（覆盖）；in：从 0 滑向该侧画外（露出）。
-  // 官方 ScenarioSideFadePlayer 的位移 = contentSize + 512（`sse-bake/src/lib.rs:2842-2865`）。
-  const ox = width + 512
-  const oy = height + 512
-  const outside = horizontal ? (edge === 'left' ? -ox : ox) : edge === 'top' ? -oy : oy
-  const revealExit = horizontal ? (edge === 'left' ? ox : -ox) : edge === 'top' ? -oy : oy
+  const plan = sideFadePlan(edge, mode, width, height, unitScale)
   return {
-    horizontal,
-    start: mode === 'out' ? outside : 0,
-    end: mode === 'out' ? 0 : revealExit
+    horizontal: plan.horizontal,
+    start: plan.horizontal ? plan.from.x : plan.from.y,
+    end: plan.horizontal ? plan.to.x : plan.to.y
   }
 }

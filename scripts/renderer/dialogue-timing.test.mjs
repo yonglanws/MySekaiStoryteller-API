@@ -1319,6 +1319,83 @@ test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade colli
   assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'Second BlackOut must end fully opaque')
 })
 
+test('SideFade hard-edge panel uses content+64, reference from/to and In deactivates', async (t) => {
+  const f = fixture(t)
+  class Sprite {
+    constructor() {
+      this.anchor = { set: noop }
+      this.position = { set: noop }
+      this.visible = true
+      this.alpha = 1
+      this.width = 0
+      this.height = 0
+      this.x = 0
+      this.y = 0
+    }
+  }
+  class Container {
+    children = []
+    addChild(...items) {
+      this.children.push(...items)
+    }
+    removeChild() {}
+  }
+  f.mocks.set('pixi.js', {
+    Application: class {},
+    Container,
+    Sprite,
+    Texture: {
+      from: () => ({ valid: true, baseTexture: { valid: true } }),
+      WHITE: { valid: true, baseTexture: { valid: true } },
+      EMPTY: {}
+    },
+    Ticker: { shared: { add: noop, elapsedMS: 16 } }
+  })
+  f.mocks.set('../../assets/ui/ui_se_black.svg', 'ui_se_black.svg')
+  f.mocks.set('../components/SEBlack', { default: Sprite })
+  f.mocks.set('../effects/Ease', {
+    runEasedTween: async (_duration, _ease, onProgress) => {
+      onProgress(0, 0)
+      onProgress(1, 1)
+    }
+  })
+  f.mocks.set('../effects/InappTextures', {
+    inappUrl: (p) => p,
+    loadInappTexture: async () => null
+  })
+  f.mocks.set('../effects/OfficialFilters', {
+    CameraBlurFilter: class {
+      spread = 0
+    }
+  })
+  f.mocks.set('../effects/TriangleParticleEffect', {
+    ScenarioEffectOverlay: class {},
+    SekaiTransitionParticles: class {}
+  })
+
+  const SpecialEffectLayer = f.load('layers/SpecialEffectLayer.ts').default
+  const layer = new SpecialEffectLayer({
+    stage: new Container(),
+    screen: { width: 1280, height: 720 }
+  })
+  const scale = 1280 / 1920
+  const pad = 32 * scale
+  const panelWidth = 1280 + pad * 2
+  const ox = 1280 + 512 * scale
+
+  await layer.playSideFade('Out', 'Left', 500)
+  assert.equal(layer.wipeSprite.visible, true, 'Out keeps the panel')
+  assert.ok(Math.abs(layer.wipeSprite.width - panelWidth) < 1e-6)
+  assert.ok(Math.abs(layer.wipeSprite.height - (720 + pad * 2)) < 1e-6)
+  assert.ok(Math.abs(layer.wipeSprite.x - -pad) < 1e-6, 'Out ends covering at -pad')
+  assert.ok(Math.abs(layer.wipeSprite.y - -pad) < 1e-6)
+
+  await layer.playSideFade('In', 'Left', 500)
+  assert.equal(layer.wipeSprite.visible, false, 'In deactivates at the end')
+  assert.ok(Math.abs(layer.wipeSprite.x - (-pad + ox)) < 1e-6, 'In ends at content+512')
+  assert.ok(Math.abs(layer.wipeSprite.y - -pad) < 1e-6)
+})
+
 test('AdvancedModel channel 0 skips duplicate active body cues without false interrupted or motion-refused errors', async (t) => {
   const f = fixture(t)
   f.mocks.set('pixi.js', {

@@ -13,7 +13,13 @@ import {
   SEKAI_OUT_FADE_DELAY_MS,
   framesForSeconds
 } from '../../../common/official/timing'
-import { cameraBlurRatio } from '../../../common/official/cameraBlur'
+import { cameraBlurSpread } from '../../../common/official/cameraBlur'
+import {
+  sideFadePlan,
+  sideFadePanelRect,
+  type SideFadeEdge
+} from '../../../common/official/sideFade'
+import { recordEffectProbe } from '../utils/EffectProbe'
 
 function isTextureUsable(tex: Texture | null | undefined): tex is Texture {
   return Boolean(tex && tex.valid && tex.baseTexture && tex.baseTexture.valid)
@@ -44,77 +50,17 @@ export type SideFadeDirection =
   | 'top'
   | 'bottom'
 
-function buildFeatheredSideFadeTexture(
-  w: number,
-  h: number,
-  feather: number,
-  horizontal: boolean,
-  featherSide: 'start' | 'end'
-): Texture {
-  if (typeof document === 'undefined') {
-    return Texture.from(ui_se_black)
-  }
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(2, Math.round(horizontal ? w + feather : w))
-  canvas.height = Math.max(2, Math.round(horizontal ? h : h + feather))
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return Texture.from(ui_se_black)
-
-  if (horizontal) {
-    const grad =
-      featherSide === 'end'
-        ? ctx.createLinearGradient(w, 0, w + feather, 0)
-        : ctx.createLinearGradient(0, 0, feather, 0)
-    if (featherSide === 'end') {
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(0, 0, w, h)
-      grad.addColorStop(0, 'rgba(0,0,0,1)')
-      grad.addColorStop(1, 'rgba(0,0,0,0)')
-      ctx.fillStyle = grad
-      ctx.fillRect(w, 0, feather, h)
-    } else {
-      grad.addColorStop(0, 'rgba(0,0,0,0)')
-      grad.addColorStop(1, 'rgba(0,0,0,1)')
-      ctx.fillStyle = grad
-      ctx.fillRect(0, 0, feather, h)
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(feather, 0, w, h)
-    }
-  } else {
-    const grad =
-      featherSide === 'end'
-        ? ctx.createLinearGradient(0, h, 0, h + feather)
-        : ctx.createLinearGradient(0, 0, 0, feather)
-    if (featherSide === 'end') {
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(0, 0, w, h)
-      grad.addColorStop(0, 'rgba(0,0,0,1)')
-      grad.addColorStop(1, 'rgba(0,0,0,0)')
-      ctx.fillStyle = grad
-      ctx.fillRect(0, h, w, feather)
-    } else {
-      grad.addColorStop(0, 'rgba(0,0,0,0)')
-      grad.addColorStop(1, 'rgba(0,0,0,1)')
-      ctx.fillStyle = grad
-      ctx.fillRect(0, 0, w, feather)
-      ctx.fillStyle = '#000000'
-      ctx.fillRect(0, feather, w, h)
-    }
-  }
-  return Texture.from(canvas)
-}
-
-/** 全屏转场、SideFade 羽化遮罩、SekaiTransition、相机模糊、剧情粒子与视频播放层。 */
+/** 全屏转场、SideFade 硬边面板、SekaiTransition、相机模糊、剧情粒子与视频播放层。 */
 export default class SpecialEffectLayer extends BaseLayer {
   private readonly seBlackSprite: SEBlack
   private readonly seWhiteSprite: SEBlack
   private readonly wipeSprite: Sprite
+  private readonly wipeBlackTexture: Texture
   private readonly fxContainer: Container
   private readonly movieSprite: Sprite
   private readonly cameraBlurFilter = new CameraBlurFilter(0)
   private readonly activeTransitions = new Set<SekaiTransitionParticles>()
   private readonly activeScenarioEffects: ScenarioEffectOverlay[] = []
-  private readonly sideFadeTextures = new Map<string, Texture>()
   private tickerAttached = false
   private cameraBlurGen = 0
   private fadeGen = 0
@@ -135,7 +81,8 @@ export default class SpecialEffectLayer extends BaseLayer {
     this.seWhiteSprite = new SEBlack(whiteTexture, this.app.screen.width, this.app.screen.height)
     this.seWhiteSprite.visible = false
 
-    this.wipeSprite = new Sprite(sfBlackTexture)
+    this.wipeBlackTexture = sfBlackTexture
+    this.wipeSprite = new Sprite(this.wipeBlackTexture)
     this.wipeSprite.anchor.set(0)
     this.wipeSprite.width = this.app.screen.width
     this.wipeSprite.height = this.app.screen.height
@@ -396,29 +343,11 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
   }
 
-  private getSideFadeTexture(
-    horizontal: boolean,
-    featherSide: 'start' | 'end',
-    w: number,
-    h: number,
-    feather: number
-  ): Texture {
-    const key = `${horizontal ? 'h' : 'v'}:${featherSide}:${Math.round(w)}x${Math.round(h)}:${feather}`
-    const cached = this.sideFadeTextures.get(key)
-    if (isTextureUsable(cached)) return cached
-    const tex = buildFeatheredSideFadeTexture(w, h, feather, horizontal, featherSide)
-    this.sideFadeTextures.set(key, tex)
-    return tex
-  }
-
   /**
-   * 官方 `ScenarioSideFadePlayer` (`EffectType 29~36`):
-   * - 根节点是 `contentSize + 64` 的纯黑面板（四周各留 32px）；
-   * - 面板外四条边各铺 512px 的 `tex_transition_*` 渐变（靠面板全黑、向外透明）；
-   * - `Play` 把 anchoredPosition 从 from 移到 to（OutQuad），屏幕上的前沿是
-   *   `面板边 − 512`（向左右移动）或 `面板边 − 512`（向上下移动）。
-   * 旧实现用一块硬边黑布从 `w+512` 直接滑入，前沿比参考晚 544px，边缘检测拟合
-   * 残差 ~19px；这里按参考的 64px 内边距 + 512px 羽化重建。
+   * 官方 `ScenarioSideFadePlayer` (`EffectType 29~36`)：根节点是
+   * `contentSize + 64` 的纯黑硬边面板，`anchoredPosition` 按参考表 from→to
+   * （OutQuad）移动 `contentSize + 512`；In 类型在结束时 deactivate。
+   * 前沿就是面板边（`sse-render/src/lib.rs:1288-1310`），不再额外铺羽化条。
    */
   public async playSideFade(
     mode: 'In' | 'Out' | 'in' | 'out',
@@ -428,99 +357,52 @@ export default class SpecialEffectLayer extends BaseLayer {
     const gen = ++this.sideFadeGen
     const w = this.app.screen.width
     const h = this.app.screen.height
-    // 参考的 64px 内边距与 512px 羽化是 1920×1080 画布像素；导出时 Pixi
-    // 逻辑坐标是 1280×720、resolution=1.5。必须把参考像素换算回逻辑单位，
-    // 否则羽化会变成 768 物理像素、位移变成 2432+256。
-    const referenceScale = w > 0 ? 1920 / w : 1
-    const EDGE = 512 / referenceScale
-    const PAD = 32 / referenceScale
-    const rw = w + PAD * 2
-    const rh = h + PAD * 2
-    const ox = w + EDGE
-    const oy = h + EDGE
+    // 512/32 是 1920×1080 参考画布像素；导出逻辑画布 1280×720、resolution=1.5。
     const normMode = String(mode).toLowerCase() === 'in' ? 'in' : 'out'
-    const dir = String(direction).toLowerCase() as 'left' | 'right' | 'top' | 'bottom'
-    const horizontal = dir === 'left' || dir === 'right'
-    // root = 黑色面板左上角；leading = 运动方向上的前沿边（带 512px 羽化）。
-    let from = { x: -PAD, y: -PAD }
-    let to = { x: -PAD, y: -PAD }
-    let hide = false
-    let leading: 'start' | 'end' = 'start'
-    if (dir === 'right') {
-      // RightOut: +ox → 0（向左盖住），前沿是面板左边；RightIn 向左退场，
-      // 前沿是面板右边（羽化边要随 In/Out 换侧）。
-      if (normMode === 'in') {
-        leading = 'end'
-        to = { x: -PAD - ox, y: -PAD }
-        hide = true
-      } else {
-        leading = 'start'
-        from = { x: -PAD + ox, y: -PAD }
-      }
-    } else if (dir === 'left') {
-      if (normMode === 'in') {
-        leading = 'start'
-        to = { x: -PAD + ox, y: -PAD }
-        hide = true
-      } else {
-        leading = 'end'
-        from = { x: -PAD - ox, y: -PAD }
-      }
-    } else if (dir === 'top') {
-      // 画布 y 向下：TopOut 面板向下盖住，前沿是下边；TopIn 向上退场，前沿是上边。
-      if (normMode === 'in') {
-        leading = 'start'
-        to = { x: -PAD, y: -PAD + oy }
-        hide = true
-      } else {
-        leading = 'end'
-        from = { x: -PAD, y: -PAD - oy }
-      }
-    } else {
-      if (normMode === 'in') {
-        leading = 'end'
-        to = { x: -PAD, y: -PAD - oy }
-        hide = true
-      } else {
-        leading = 'start'
-        from = { x: -PAD, y: -PAD + oy }
-      }
-    }
+    const edge = String(direction).toLowerCase() as SideFadeEdge
+    const plan = sideFadePlan(edge, normMode, w, h, w > 0 ? w / 1920 : 1)
+    const start = sideFadePanelRect(plan, 0)
+    const end = sideFadePanelRect(plan, 1)
 
-    const texture = this.getSideFadeTexture(horizontal, leading, rw, rh, EDGE)
-    this.wipeSprite.texture = texture
-    this.wipeSprite.width = horizontal ? rw + EDGE : rw
-    this.wipeSprite.height = horizontal ? rh : rh + EDGE
+    this.wipeSprite.texture = this.wipeBlackTexture
+    this.wipeSprite.width = plan.panel.width
+    this.wipeSprite.height = plan.panel.height
+    this.wipeSprite.x = start.x
+    this.wipeSprite.y = start.y
     this.wipeSprite.visible = true
-    // 前沿羽化从面板边向外 512px：横向 start 把 sprite 放到 root.x−512；
-    // 纵向 start 放到 root.y−512；end 侧 sprite 从 root 开始。
-    const spriteFrom = {
-      x: from.x - (horizontal && leading === 'start' ? EDGE : 0),
-      y: from.y - (!horizontal && leading === 'start' ? EDGE : 0)
-    }
-    const spriteTo = {
-      x: to.x - (horizontal && leading === 'start' ? EDGE : 0),
-      y: to.y - (!horizontal && leading === 'start' ? EDGE : 0)
-    }
-    this.wipeSprite.x = spriteFrom.x
-    this.wipeSprite.y = spriteFrom.y
+    recordEffectProbe('sidefade', {
+      effectType: plan.effectType,
+      edge: plan.edge,
+      mode: plan.mode,
+      hide: plan.hide,
+      content: plan.content,
+      unitScale: plan.unitScale,
+      resolution: this.app.renderer?.resolution ?? 1,
+      pad: plan.pad,
+      panel: plan.panel,
+      from: plan.from,
+      to: plan.to,
+      startLeading: start.leading,
+      endLeading: end.leading
+    })
 
     await runEasedTween(
       durationMs,
       'OutQuad',
       (p) => {
         if (gen !== this.sideFadeGen) return
-        this.wipeSprite.x = spriteFrom.x + (spriteTo.x - spriteFrom.x) * p
-        this.wipeSprite.y = spriteFrom.y + (spriteTo.y - spriteFrom.y) * p
+        const rect = sideFadePanelRect(plan, p)
+        this.wipeSprite.x = rect.x
+        this.wipeSprite.y = rect.y
       },
       () => gen !== this.sideFadeGen
     )
 
     if (gen !== this.sideFadeGen) return
-    this.wipeSprite.x = spriteTo.x
-    this.wipeSprite.y = spriteTo.y
+    this.wipeSprite.x = end.x
+    this.wipeSprite.y = end.y
     // In 类型在结束时 deactivate；Out 类型保留面板盖住画面。
-    this.wipeSprite.visible = !hide
+    this.wipeSprite.visible = !plan.hide
   }
 
   /** 向后兼容旧签名 `(edge, mode, duration)`。 */
@@ -560,20 +442,32 @@ export default class SpecialEffectLayer extends BaseLayer {
   public async setCameraBlur(active: boolean, durationMs: number): Promise<void> {
     const gen = ++this.cameraBlurGen
     const scale = this.app.screen.width / 1920
+    const resolution = this.app.renderer?.resolution ?? 1
     const seconds = Math.max(0, durationMs) / 1000
     // 官方 `Spread = 3 × min(tween / duration, 1)`（Out 为 `3 × (1 − …)`）：
     // tween 值本身是 0..1，所以短于 1 秒的模糊会提前饱和，长于 1 秒的到不了 3。
-    const spreadAt = (progress: number): number =>
-      3 * scale * cameraBlurRatio(active, seconds, progress)
+    const spreadAt = (tweenValue: number): number =>
+      scale * cameraBlurSpread(active, seconds, tweenValue)
     if (active) {
       this.filterSyncCallback?.(this.cameraBlurFilter)
     }
     await runEasedTween(
       durationMs,
       'OutQuad',
-      (p) => {
+      (p, raw) => {
         if (gen !== this.cameraBlurGen) return
-        this.cameraBlurFilter.spread = spreadAt(p)
+        const spread = spreadAt(p)
+        this.cameraBlurFilter.spread = spread
+        // 逐帧写进导出日志：spread 与 tween 值成对，可反演公式与缓动。
+        recordEffectProbe('blur-spread', {
+          active,
+          durationSec: seconds,
+          tweenValue: p,
+          raw,
+          spread,
+          scale,
+          resolution
+        })
         this.filterSyncCallback?.(
           this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null
         )
@@ -581,7 +475,15 @@ export default class SpecialEffectLayer extends BaseLayer {
       () => gen !== this.cameraBlurGen
     )
     if (gen !== this.cameraBlurGen) return
-    this.cameraBlurFilter.spread = active ? 3 * scale * Math.min(1 / Math.max(seconds, 1e-6), 1) : 0
+    const finalSpread = active ? spreadAt(1) : 0
+    this.cameraBlurFilter.spread = finalSpread
+    recordEffectProbe('blur-final', {
+      active,
+      durationSec: seconds,
+      spread: finalSpread,
+      scale,
+      resolution
+    })
     this.filterSyncCallback?.(this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null)
   }
 
@@ -652,9 +554,5 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
     this.filterSyncCallback = null
     this.cameraBlurFilter.destroy()
-    for (const tex of this.sideFadeTextures.values()) {
-      tex.destroy(true)
-    }
-    this.sideFadeTextures.clear()
   }
 }

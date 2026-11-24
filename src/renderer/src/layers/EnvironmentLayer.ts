@@ -1,6 +1,6 @@
 import { Application, Container, type Filter } from 'pixi.js'
 import { FlashbackFilter, SepiaFilter } from '../effects/OfficialFilters'
-import AnimationManager from '../managers/AnimationManager'
+import { runEasedTween } from '../effects/Ease'
 import BaseLayer from './BaseLayer'
 
 /**
@@ -53,10 +53,15 @@ export default class EnvironmentLayer extends BaseLayer {
     this.notifyFiltersChanged()
 
     if (durationMs > 0) {
-      await AnimationManager.linear((progress) => {
-        if (generation !== this.flashbackGen) return
-        this.flashbackFilter.intensity = from + (to - from) * progress
-      }, durationMs)
+      await runEasedTween(
+        durationMs,
+        'Linear',
+        (_eased, raw) => {
+          if (generation !== this.flashbackGen) return
+          this.flashbackFilter.intensity = from + (to - from) * raw
+        },
+        () => generation !== this.flashbackGen
+      )
     }
     if (generation !== this.flashbackGen) return
     this.flashbackFilter.intensity = to
@@ -71,10 +76,15 @@ export default class EnvironmentLayer extends BaseLayer {
     this.notifyFiltersChanged()
 
     if (durationMs > 0) {
-      await AnimationManager.linear((progress) => {
-        if (generation !== this.sepiaGen) return
-        this.sepiaFilter.intensity = from + (to - from) * progress
-      }, durationMs)
+      await runEasedTween(
+        durationMs,
+        'Linear',
+        (_eased, raw) => {
+          if (generation !== this.sepiaGen) return
+          this.sepiaFilter.intensity = from + (to - from) * raw
+        },
+        () => generation !== this.sepiaGen
+      )
     }
     if (generation !== this.sepiaGen) return
     this.sepiaFilter.intensity = to

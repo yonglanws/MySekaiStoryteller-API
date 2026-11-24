@@ -25,7 +25,14 @@ import AnimationManager from '../managers/AnimationManager'
 import { TTSManager } from '../managers/TTSManager'
 import type { LipSyncEnvelope } from '../utils/LipSyncEnvelope'
 import { framesForSeconds } from '../../../common/official/timing'
-import { shakeSegmentCount, shakeSegmentEnds } from '../../../common/official/screenShake'
+import {
+  SHAKE_RANDOMNESS,
+  SHAKE_VIBRATO,
+  buildShakePlan,
+  shakeOffsetAt
+} from '../../../common/official/screenShake'
+import { nextPostEffectOwner, type PostEffectOwner } from '../effects/PostEffectSlot'
+import { recordEffectProbe } from '../utils/EffectProbe'
 
 /** 宿主统一下发的 TTS 配置（config.yaml 的 tts 节） */
 export interface ApiExportTtsConfig {
@@ -122,6 +129,8 @@ export class App {
   private readonly dollyZoomFilter = new DollyZoomFilter(0, 0)
   private envFilters: Filter[] = []
   private cameraBlurFilter: Filter | null = null
+  /** 官方单个 PostEffectType 槽：color / blur 互斥，blur 活动时每帧胜出。 */
+  private postEffectOwner: PostEffectOwner = 'none'
 
   private models: Live2DModelMap[] = []
   private textures: TextureMap[] = []
@@ -276,8 +285,11 @@ export class App {
 
   private syncScenarioFilters(): void {
     if (!this.scenarioContainer) return
-    const list: Filter[] = [...this.envFilters]
-    if (this.cameraBlurFilter) list.push(this.cameraBlurFilter)
+    const list: Filter[] = []
+    if (this.postEffectOwner === 'color') list.push(...this.envFilters)
+    if (this.postEffectOwner === 'blur' && this.cameraBlurFilter) {
+      list.push(this.cameraBlurFilter)
+    }
     if (
       Math.abs(this.dollyZoomFilter.distortion) > 0.0001 ||
       this.dollyZoomFilter.samplingDistance > 0.001
@@ -301,6 +313,7 @@ export class App {
     this.shakeOffsetY = 0
     this.envFilters = []
     this.cameraBlurFilter = null
+    this.postEffectOwner = 'none'
     this.dollyZoomFilter.distortion = 0
     this.dollyZoomFilter.samplingDistance = 0
     this.syncScenarioFilters()
@@ -327,10 +340,20 @@ export class App {
 
     this.layerEnvironment.setFilterSyncCallback((filters) => {
       this.envFilters = filters
+      this.postEffectOwner = nextPostEffectOwner(
+        this.postEffectOwner,
+        filters.length > 0 ? 'color-filters' : 'no-color-filters',
+        this.cameraBlurFilter !== null
+      )
       this.syncScenarioFilters()
     })
     this.layerSpecialEffect.setCameraBlurCallback((filter) => {
       this.cameraBlurFilter = filter
+      this.postEffectOwner = nextPostEffectOwner(
+        this.postEffectOwner,
+        filter ? 'blur-filter' : 'no-blur-filter',
+        filter !== null
+      )
       this.syncScenarioFilters()
     })
     this.layerModel.setOnModelReplaced((modelId, model) => {
@@ -447,47 +470,40 @@ export class App {
     const fadeOut = clampedSec < 3600
     // `DOShakePosition(duration, strength, vibrato=16, randomness=90, fadeOut)`：
     // n = max(2, trunc(16×duration)) 段，段内 OutQuad，段末幅度减 strength/n。
-    const segments = shakeSegmentCount(clampedSec)
     const generation = ++this.shakeGeneration
     const rng = createMulberry32((generation * 2654435761) >>> 0)
     const amp =
       (intensity > 0 && intensity < 1 ? intensity * height : Math.max(0, intensity)) * scaleY
-    const decay = amp / segments
-    let magnitude = amp
-    let angle = rng() * 360
-    const tos: Array<[number, number]> = []
-    for (let i = 0; i < segments; i++) {
-      if (i + 1 < segments) {
-        if (i > 0) angle = angle - 180 + (rng() * 2 - 1) * 90
-        const rad = (angle * Math.PI) / 180
-        const x = magnitude * Math.cos(rad) * Math.cos(((rng() * 2 - 1) * 90 * Math.PI) / 180)
-        const y = magnitude * Math.sin(rad)
-        tos.push([x, y])
-        if (fadeOut) magnitude -= decay
-      } else {
-        tos.push([0, 0])
-      }
-    }
+    const plan = buildShakePlan({
+      durationSeconds: clampedSec,
+      strength: amp,
+      rng,
+      vibrato: SHAKE_VIBRATO,
+      randomness: SHAKE_RANDOMNESS,
+      ignoreZAxis: false,
+      fadeOut
+    })
     // `fadeOut` 时每段时长 (i+1)/n×duration 再按总和归一（后段更长）。
-    const ends = shakeSegmentEnds(clampedSec, fadeOut)
     // 有限抖动：父节点 y 从 -8 用 OutQuad 升到 0。
     const baseStart = -8 * scaleY
     const startWall = performance.now()
+    recordEffectProbe('shake-screen', {
+      durationSec: clampedSec,
+      fadeOut,
+      segments: plan.segments,
+      strength: amp,
+      baseY: baseStart,
+      resolution: this.pixiApplication.renderer?.resolution ?? 1,
+      // 8 段（0.5s）时完整落盘，便于逐段反演；无限抖动只报段数。
+      ...(plan.segments <= 64 ? { ends: plan.ends, offsets: plan.offsets } : {})
+    })
 
     await AnimationManager.linear(
       (progress) => {
         if (generation !== this.shakeGeneration) return
-        const t = progress * clampedSec
-        let index = ends.findIndex((e) => e >= t)
-        if (index < 0) index = segments - 1
-        const segStart = index === 0 ? 0 : ends[index - 1]
-        const segLen = ends[index] - segStart
-        let p = segLen > 0 ? (t - segStart) / segLen : 1
-        p = -p * (p - 2)
-        const from = index === 0 ? [0, 0] : tos[index - 1]
-        const to = tos[index]
-        this.shakeOffsetX = from[0] + (to[0] - from[0]) * p
-        this.shakeOffsetY = from[1] + (to[1] - from[1]) * p
+        const [offsetX, offsetY] = shakeOffsetAt(plan, progress * clampedSec)
+        this.shakeOffsetX = offsetX
+        this.shakeOffsetY = offsetY
         if (fadeOut) {
           // 父节点基线：从 -8 用 OutQuad 升到 0（与持续时间的进度同步）。
           const eased = -progress * (progress - 2)
@@ -507,7 +523,6 @@ export class App {
       this.shakeOffsetY = 0
       this.applyViewTransform()
     }
-    void startWall
   }
 
   /** 官方 EffectType 25：StopShakeScreen。 */

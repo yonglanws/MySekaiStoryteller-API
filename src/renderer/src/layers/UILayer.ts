@@ -13,13 +13,20 @@ import UIPlaceInfo from '../components/UIPlaceInfo'
 import UIFullScreenText from '../components/UIFullScreenText'
 import UIChoiceDialog from '../components/UIChoiceDialog'
 import AnimationManager from '../managers/AnimationManager'
-import { evaluateEase } from '../effects/Ease'
 import { createMulberry32 } from '../effects/OfficialFilters'
+import {
+  SHAKE_RANDOMNESS,
+  SHAKE_VIBRATO,
+  buildShakePlan,
+  shakeOffsetAt
+} from '../../../common/official/screenShake'
+import { recordEffectProbe } from '../utils/EffectProbe'
 import {
   PLACE_INFO_TRANSITION_MS,
   TALK_WINDOW_OPEN_CLOSE_MS,
   TELOP_ANIM_CLIP_MS,
-  TELOP_AUTO_HOLD_MS
+  TELOP_AUTO_HOLD_MS,
+  framesForSeconds
 } from '../../../common/official/timing'
 
 export default class UILayer extends BaseLayer {
@@ -170,6 +177,8 @@ export default class UILayer extends BaseLayer {
   /**
    * 官方 `EffectType 6 ShakeWindow`: 只抖动对话框内 `Words` 正文容器，
    * 对话框底板、名字底线、姓名文本均静止不动。
+   * `DOShakeAnchorPos(Duration, 10, 16, 90, ignoreZ=true, fadeOut=true)`，
+   * 与震屏共用 DOTween 分段，但按绝对帧求值（导出时钟单源）。
    */
   public async shakeWindow(durationSec: number, intensity = 10): Promise<void> {
     const gen = ++this.windowShakeGen
@@ -177,25 +186,33 @@ export default class UILayer extends BaseLayer {
     const durationMs = clampedSec * 1000
     const amp =
       (intensity > 0 && intensity < 1 ? intensity * this.app.screen.height : intensity) * this.k
-    const fadeOut = clampedSec < 3600
-    const vibrato = Math.max(8, Math.round(16 * Math.max(0.5, Math.min(60, clampedSec))))
-    const rng = createMulberry32((gen * 2654435761) >>> 0)
-    const dirs = Array.from({ length: vibrato + 1 }, () => {
-      const a = rng() * Math.PI * 2
-      return [Math.cos(a), Math.sin(a)] as const
+    const plan = buildShakePlan({
+      durationSeconds: clampedSec,
+      strength: amp,
+      rng: createMulberry32((gen * 2654435761) >>> 0),
+      vibrato: SHAKE_VIBRATO,
+      randomness: SHAKE_RANDOMNESS,
+      ignoreZAxis: true,
+      fadeOut: true
+    })
+    const startWall = performance.now()
+    recordEffectProbe('shake-window', {
+      durationSec: clampedSec,
+      segments: plan.segments,
+      strength: amp,
+      resolution: this.app.renderer?.resolution ?? 1,
+      ...(plan.segments <= 64 ? { ends: plan.ends, offsets: plan.offsets } : {})
     })
 
     await AnimationManager.linear(
       (progress) => {
         if (gen !== this.windowShakeGen) return
-        const decay = fadeOut ? 1 - evaluateEase('OutQuad', progress) : 1
-        const segFloat = progress * vibrato
-        const seg = Math.min(vibrato - 1, Math.floor(segFloat))
-        const env = Math.sin((segFloat - seg) * Math.PI)
-        const [dx, dy] = dirs[seg]
-        this.wordsContainer.position.set(dx * amp * env * decay, dy * amp * env * decay)
+        const [x, y] = shakeOffsetAt(plan, progress * clampedSec)
+        this.wordsContainer.position.set(x, y)
       },
-      Math.max(1, durationMs)
+      Math.max(1, durationMs),
+      false,
+      { startMs: startWall, frames: framesForSeconds(clampedSec) }
     )
 
     if (gen === this.windowShakeGen) {

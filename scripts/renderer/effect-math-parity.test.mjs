@@ -65,6 +65,86 @@ test('Blur spread ratio matches 3*min(t/d,1) / 3-3*min(t/d,1)', () => {
   assert.equal(blur.cameraBlurRatio(true, 2, 1), 0.5)
   assert.equal(blur.cameraBlurRatio(false, 0.5, 0.25), 0.5)
   assert.equal(blur.cameraBlurRatio(false, 0.5, 1), 0)
+  // 参考像素单位的 Spread 与反函数。
+  assert.equal(blur.cameraBlurSpread(true, 0.5, 0.25), 1.5)
+  assert.equal(blur.cameraBlurSpread(true, 0.5, 1), 3)
+  assert.equal(blur.cameraBlurSpread(true, 2, 1), 1.5)
+  assert.equal(blur.cameraBlurSpread(false, 0.5, 0.25), 1.5)
+  assert.equal(blur.cameraBlurSpread(false, 0.5, 0), 3)
+  assert.ok(close(blur.cameraBlurTweenValue(true, 1, 1.2), 0.4))
+  assert.ok(close(blur.cameraBlurTweenValue(false, 1, 1.8), 0.4))
+  // 短于 1s 的 In 在 tweenValue=d 时饱和；反演只能回到饱和点。
+  assert.ok(close(blur.cameraBlurTweenValue(true, 0.5, 3), 0.5))
+})
+
+test('shake plan reproduces DOTween 8-segment decay, angle walk and rest offset', () => {
+  const shake = load()('src/common/official/screenShake.ts')
+  const rng = () => 0.25
+  const plan = shake.buildShakePlan({
+    durationSeconds: 0.5,
+    strength: 10,
+    rng,
+    vibrato: 16,
+    randomness: 90,
+    ignoreZAxis: true,
+    fadeOut: true
+  })
+  assert.equal(plan.segments, 8)
+  assert.equal(plan.ends.length, 8)
+  assert.equal(plan.offsets.length, 8)
+  assert.ok(close(plan.ends.at(-1), 0.5, 1e-12))
+  // randomness=0.25 → 游走量 0；初角 90°，每段幅度 10 - i*10/8。
+  for (let i = 0; i < 7; i++) {
+    const [x, y] = plan.offsets[i]
+    assert.ok(close(Math.hypot(x, y), 10 - i * 1.25, 1e-9), `segment ${i} magnitude`)
+  }
+  const atRest = (value) => close(value[0], 0) && close(value[1], 0)
+  assert.ok(atRest(plan.offsets[7]))
+  assert.ok(atRest(shake.shakeOffsetAt(plan, 0)))
+  assert.ok(atRest(shake.shakeOffsetAt(plan, 0.5)))
+  for (const t of [0.03, 0.1, 0.25, 0.37, 0.49]) {
+    const sampled = shake.shakeOffsetAt(plan, t)
+    const direct = shake.shakeSegmentOffset(plan.ends, plan.offsets, t)
+    assert.ok(close(sampled[0], direct[0]) && close(sampled[1], direct[1]))
+  }
+})
+
+test('shake plan keeps z-axis scaling only when ignoreZAxis=false', () => {
+  const shake = load()('src/common/official/screenShake.ts')
+  const base = { durationSeconds: 0.5, strength: 10, rng: () => 0.1 }
+  const withZ = shake.buildShakePlan({ ...base, ignoreZAxis: false })
+  const noZ = shake.buildShakePlan({ ...base, ignoreZAxis: true })
+  // 第三个 RNG 值 0.1 → z 角 -72°，cos=0.309；x 被压到 30.9%。
+  assert.ok(Math.abs(withZ.offsets[0][0]) < Math.abs(noZ.offsets[0][0]) * 0.4)
+  assert.ok(close(withZ.offsets[0][1], noZ.offsets[0][1]))
+  // fadeOut=false 时每段保持原幅度，最后一段仍然归零。
+  const hold = shake.buildShakePlan({ ...base, fadeOut: false, ignoreZAxis: true })
+  for (let i = 0; i < 7; i++) {
+    assert.ok(close(Math.hypot(hold.offsets[i][0], hold.offsets[i][1]), 10, 1e-9))
+  }
+  assert.ok(close(hold.offsets[7][0], 0) && close(hold.offsets[7][1], 0))
+})
+
+test('post effect slot is single-owner: blur wins while active, off clears it', () => {
+  const slot = load()('src/renderer/src/effects/PostEffectSlot.ts')
+  let owner = 'none'
+  owner = slot.nextPostEffectOwner(owner, 'color-filters', false)
+  assert.equal(owner, 'color')
+  owner = slot.nextPostEffectOwner(owner, 'blur-filter', true)
+  assert.equal(owner, 'blur')
+  // blur tween 期间 Sepia/Flashback 的 setter 不能叠到 blur 上。
+  owner = slot.nextPostEffectOwner(owner, 'color-filters', true)
+  assert.equal(owner, 'blur')
+  owner = slot.nextPostEffectOwner(owner, 'no-blur-filter', false)
+  assert.equal(owner, 'none')
+  // 下一次 color 事件重新取得槽位；color off 清空。
+  owner = slot.nextPostEffectOwner(owner, 'color-filters', false)
+  assert.equal(owner, 'color')
+  owner = slot.nextPostEffectOwner(owner, 'no-color-filters', false)
+  assert.equal(owner, 'none')
+  // CameraColorOff 无条件清空：残留的 blur 也一起结束（下一帧 blur setter 可重写）。
+  owner = slot.nextPostEffectOwner('blur', 'no-color-filters', true)
+  assert.equal(owner, 'none')
 })
 
 test('seconds-based fade/effect frame counts use f32 frames_for', () => {

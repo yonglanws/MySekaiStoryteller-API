@@ -219,10 +219,100 @@ test('SideFade positions cover from the edge and reveal toward the opposite side
     { ...sideFadePositions('bottom', 'out', 1920, 1080) },
     {
       horizontal: false,
+      start: -1592,
+      end: 0
+    }
+  )
+  assert.deepEqual(
+    { ...sideFadePositions('top', 'out', 1920, 1080) },
+    {
+      horizontal: false,
       start: 1592,
       end: 0
     }
   )
+  assert.deepEqual(
+    { ...sideFadePositions('bottom', 'in', 1920, 1080) },
+    {
+      horizontal: false,
+      start: 0,
+      end: 1592
+    }
+  )
+})
+
+test('SideFade hard-edge panel matches the 29~36 from/to table within 1px', () => {
+  const { sideFadePlan, sideFadePanelRect, sideFadeEffectType } = runtime.sideFade
+  // [effectType, edge, mode, from 方向乘数, to 方向乘数, hide]
+  const table = [
+    [29, 'left', 'in', [0, 0], [1, 0], true],
+    [30, 'left', 'out', [-1, 0], [0, 0], false],
+    [31, 'right', 'in', [0, 0], [-1, 0], true],
+    [32, 'right', 'out', [1, 0], [0, 0], false],
+    [33, 'top', 'in', [0, 0], [0, -1], true],
+    [34, 'top', 'out', [0, 1], [0, 0], false],
+    [35, 'bottom', 'in', [0, 0], [0, 1], true],
+    [36, 'bottom', 'out', [0, -1], [0, 0], false]
+  ]
+  const ox = 1920 + 512
+  const oy = 1080 + 512
+  for (const [effectType, edge, mode, fromDir, toDir, hide] of table) {
+    const plan = sideFadePlan(edge, mode, 1920, 1080)
+    assert.equal(plan.effectType, effectType, `${edge} ${mode} effect type`)
+    assert.equal(sideFadeEffectType(edge, mode), effectType)
+    assert.equal(plan.hide, hide, `${edge} ${mode} hide`)
+    // 硬边：面板就是 contentSize+64，不再额外铺 512px 羽化条。
+    assert.equal(plan.pad, 32)
+    assert.equal(plan.panel.width, 1984)
+    assert.equal(plan.panel.height, 1144)
+    assert.deepEqual({ ...plan.from }, { x: fromDir[0] * ox, y: fromDir[1] * oy })
+    assert.deepEqual({ ...plan.to }, { x: toDir[0] * ox, y: toDir[1] * oy })
+
+    let maxResidual = 0
+    for (let step = 0; step <= 20; step++) {
+      const eased = step / 20
+      const rect = sideFadePanelRect(plan, eased)
+      // 独立按 `sse-render/src/lib.rs:1288-1310` 重算 root rect：
+      // x0 = -32 + p.x, y0 = -32 - p.y, rw = cw+64, rh = ch+64。
+      const anchorX = fromDir[0] * ox + (toDir[0] - fromDir[0]) * ox * eased
+      const anchorY = fromDir[1] * oy + (toDir[1] - fromDir[1]) * oy * eased
+      const refX = -32 + anchorX
+      const refY = -32 - anchorY
+      const refW = 1920 + 64
+      const refH = 1080 + 64
+      assert.ok(Math.abs(rect.x - refX) <= 1, `${edge} ${mode} e=${eased} x`)
+      assert.ok(Math.abs(rect.y - refY) <= 1, `${edge} ${mode} e=${eased} y`)
+      assert.ok(Math.abs(rect.width - refW) <= 1, `${edge} ${mode} e=${eased} w`)
+      assert.ok(Math.abs(rect.height - refH) <= 1, `${edge} ${mode} e=${eased} h`)
+      let refLeading
+      if (edge === 'left') refLeading = mode === 'out' ? refX + refW : refX
+      else if (edge === 'right') refLeading = mode === 'out' ? refX : refX + refW
+      else if (edge === 'top') refLeading = mode === 'out' ? refY + refH : refY
+      else refLeading = mode === 'out' ? refY : refY + refH
+      maxResidual = Math.max(maxResidual, Math.abs(rect.leading - refLeading))
+      assert.ok(
+        Math.abs(rect.leading - refLeading) <= 1,
+        `${edge} ${mode} e=${eased} leading ${rect.leading} vs ${refLeading}`
+      )
+    }
+    assert.ok(maxResidual <= 1, `${edge} ${mode} max residual ${maxResidual}px`)
+  }
+})
+
+test('SideFade panel converts 512/32 reference pixels to the 1280x720 export canvas', () => {
+  const { sideFadePlan, sideFadePanelRect } = runtime.sideFade
+  const scale = 1280 / 1920
+  const plan = sideFadePlan('left', 'out', 1280, 720, scale)
+  // 逻辑 1280×720、resolution=1.5 → 物理 1920×1080；32/512 按同一比例换算。
+  assert.ok(Math.abs(plan.pad * 1.5 - 32) < 1e-9)
+  assert.ok(Math.abs(plan.panel.width * 1.5 - 1984) < 1e-9)
+  assert.ok(Math.abs(plan.panel.height * 1.5 - 1144) < 1e-9)
+  assert.ok(Math.abs(plan.from.x * 1.5 - -2432) < 1e-9)
+  const start = sideFadePanelRect(plan, 0)
+  assert.ok(Math.abs(start.x * 1.5 - -2464) < 1e-9)
+  const vertical = sideFadePlan('top', 'out', 1280, 720, scale)
+  assert.ok(Math.abs(vertical.from.y * 1.5 - 1592) < 1e-9)
+  assert.ok(Math.abs(vertical.panel.height * 1.5 - 1144) < 1e-9)
 })
 
 test('new effect snippets take their exact official duration', () => {
