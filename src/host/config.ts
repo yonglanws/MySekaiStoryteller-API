@@ -303,7 +303,7 @@ const LlmSchema = z.object({
   /** 角色人格目录：读取其中的 *.md / *.txt，文件名或 frontmatter name 作为角色名 */
   personaDirs: z.array(z.string()).default([]),
   personas: z.array(LlmPersonaSchema).default([]),
-  /** 自适应语义 RAG（bge-m3 + SQ8 磁盘缓存 + 词法回退） */
+  /** 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b 重排 + SQ8 磁盘缓存 + 词法回退） */
   rag: RagSchema.default(RagSchema.parse({}))
 })
 

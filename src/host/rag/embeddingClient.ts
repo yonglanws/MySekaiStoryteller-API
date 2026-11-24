@@ -60,10 +60,10 @@ export function resolveEmbeddingConfig(
 }
 
 /**
- * OpenAI 兼容 `/embeddings` 客户端（默认 `bge-m3`，无原生依赖）。
+ * OpenAI 兼容 `/embeddings` 客户端（默认 `qwen3-embedding-8b`，无原生依赖）。
  *
  * - 文档直接送原文；
- * - 查询仅在 `queryInstruct` 非空时拼接 `Instruct: ...\nQuery: ...`（`bge-m3` 默认空串不加前缀）；
+ * - 查询仅在 `queryInstruct` 非空时拼接 `Instruct: ...\nQuery: ...`（非 Qwen3 模型如 `bge-m3` 默认空串不加前缀）；
  * - 所有输出向量自动 L2 归一化为 `Float32Array`，可直接做余弦点积或 SQ8 量化；
  * - 内置查询 LRU 缓存，避免同一次生成或相邻请求重复嵌入相同查询。
  */
