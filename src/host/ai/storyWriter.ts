@@ -613,6 +613,9 @@ export class StoryWriter {
     if (plan.cast.length === 0) {
       throw new StoryGenerationError('资源目录没有可用于生成的角色', details)
     }
+    if (!plan.understanding) {
+      this.logger.warn('[AI] cast 阶段没有返回深度理解，台词阶段将只依赖用户原文与官方参考')
+    }
 
     // ---- 1.5 Pass B：选角后多面自适应检索（结合入选角色、微事件与 Stage 1 retrievalQueries） -------------------
     let postCastRag: RagRetrieveResult | null = preCastRag

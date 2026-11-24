@@ -1,5 +1,5 @@
 import type { CatalogModel } from '../resources/resourceCatalog'
-import { buildCanonDialogueReferenceBlock } from './corpusExamples'
+import { selectUnitFewShotExcerpts } from './corpusExamples'
 import {
   GENERIC_PROFILE,
   dialoguePersonaPrompt,
@@ -74,11 +74,28 @@ export interface StagedCastMember {
   isVirtualSinger?: boolean
 }
 
+export interface StagedCharacterGoal {
+  /** 角色短名（与 cast.name 对应；模型省略时为空） */
+  cast: string
+  /** 这个角色表面想得到/想确认的东西 */
+  wants: string
+  /** 这个角色真正隐瞒、没说出口的顾虑 */
+  hides: string
+}
+
 export interface StagedPromptUnderstanding {
   explicitRequests: string[]
   implicitSubtext: string
   relationshipDynamic: string
   emotionalArc: string
+  /** 中段情绪温度发生转折的那一拍及其动因（可选，向后兼容） */
+  turningPoint?: string
+  /** 开场 1~4 句引入的具体日常意象/物件（可选，向后兼容） */
+  openingMotif?: string
+  /** 结尾 2~3 句轻描淡写回扣开场意象的方式（可选，向后兼容） */
+  closingCallback?: string
+  /** 各角色表面目的与内心隐瞒，用来驱动潜台词（可选，向后兼容） */
+  characterGoals?: StagedCharacterGoal[]
   canonHooks: string[]
   avoidList: string[]
 }
@@ -1023,6 +1040,19 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
       implicitSubtext: '潜台词与角色真正想说却没直接出口的情绪',
       relationshipDynamic: '所选角色之间当下的关系张力与相处模式',
       emotionalArc: '从起手到高潮再到余韵收尾的情绪弧光',
+      turningPoint: '中段某一拍情绪温度转向的原因（如看见对方留下的笔记，语气从拘谨转为坦白）',
+      openingMotif: '开场 1~4 句里出现的具体日常物件或感官细节',
+      closingCallback: '结尾 2~3 句怎样轻描淡写地回扣这个意象，而不是总结道理',
+      characterGoals:
+        exampleCast.length > 0
+          ? [
+              {
+                cast: exampleCast[0].name,
+                wants: '表面上想达成的事',
+                hides: '没说出口的担心或私心'
+              }
+            ]
+          : [],
       canonHooks: ['可自然呼应的官方设定、地点或过往事件'],
       avoidList: ['避免 OOC、说教式总结或套路化抒情']
     },
@@ -1044,9 +1074,11 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
     }
   }
 
-  const preCastRagBlock = options.ragContext?.promptBlock
-    ? `\n\n${options.ragContext.promptBlock.slice(0, 1500)}`
-    : ''
+  const preCastRagBlock = formatCanonGroundingBrief({
+    ragContext: options.ragContext,
+    stage: 'cast',
+    maxChars: 1500
+  })
 
   const castRule =
     view.models.length <= 2
@@ -1086,7 +1118,7 @@ ${bgmList || '（可使用 keep 或 silence）'}
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
   - 善用 BGM 弧光：在情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
 - title 是短标题（不超过 12 个字），logline 一句话，outline 4~6 条写“发生什么”。
-- **深度意图拆解（understanding）**：提炼显性要求（explicitRequests）、潜台词（implicitSubtext）、角色关系张力（relationshipDynamic）、情绪弧光（emotionalArc）、官方连续性钩子（canonHooks）与禁忌避坑清单（avoidList）。
+- **深度意图拆解（understanding）**：提炼显性要求（explicitRequests）、潜台词（implicitSubtext）、角色关系张力（relationshipDynamic）、情绪弧光（emotionalArc）、中段转折点（turningPoint：情绪温度在哪一拍转向及动因）、开场日常意象（openingMotif：前 1~4 句出现的具体物件或感官细节）、收尾回扣（closingCallback：结尾 2~3 句怎样轻巧呼应开场意象，替代说教总结）、各角色表里动机（characterGoals：想得到什么 vs 隐瞒什么）、官方连续性钩子（canonHooks）与禁忌避坑清单（avoidList）。
 - **两两称呼表（pairwiseAddress）**：列出入选角色彼此的准确官方中文称呼与日文称呼/敬语（如 zh/ja），供后续对白与日文配音翻译严格遵守。
 - **多面检索查询（retrievalQueries）**：给出 2~3 条简短精准的检索短语（plot 剧情事件、voice 角色互动口吻、worldview 地点/设定），用于下一阶段检索官方参考语料。
 
@@ -1288,6 +1320,10 @@ export function normalizeCastPlan(
       implicitSubtext: oneLine(u.implicitSubtext, 200),
       relationshipDynamic: oneLine(u.relationshipDynamic, 200),
       emotionalArc: oneLine(u.emotionalArc, 200),
+      turningPoint: oneLine(u.turningPoint, 200),
+      openingMotif: oneLine(u.openingMotif, 140),
+      closingCallback: oneLine(u.closingCallback, 160),
+      characterGoals: normalizeCharacterGoals(u.characterGoals),
       canonHooks: parseStringList(u.canonHooks),
       avoidList: parseStringList(u.avoidList)
     }
@@ -1296,6 +1332,10 @@ export function normalizeCastPlan(
       parsed.implicitSubtext ||
       parsed.relationshipDynamic ||
       parsed.emotionalArc ||
+      parsed.turningPoint ||
+      parsed.openingMotif ||
+      parsed.closingCallback ||
+      (parsed.characterGoals?.length ?? 0) > 0 ||
       parsed.canonHooks.length > 0 ||
       parsed.avoidList.length > 0
     ) {
@@ -1399,6 +1439,25 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
 // 第二段：只写台词（writeDialogue）
 // ---------------------------------------------------------------------------
 
+/** 解析 Stage 1 输出的角色表里动机；容忍字符串条目与不同字段别名。 */
+function normalizeCharacterGoals(raw: unknown): StagedCharacterGoal[] {
+  if (!Array.isArray(raw)) return []
+  const goals: StagedCharacterGoal[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const wants = oneLine(item, 120)
+      if (wants) goals.push({ cast: '', wants, hides: '' })
+    } else if (isRecord(item)) {
+      const cast = oneLine(item.cast ?? item.name ?? item.id ?? item.speaker, 24)
+      const wants = oneLine(item.wants ?? item.goal ?? item.desire, 120)
+      const hides = oneLine(item.hides ?? item.secret ?? item.conceals, 120)
+      if (wants || hides) goals.push({ cast, wants, hides })
+    }
+    if (goals.length >= 6) break
+  }
+  return goals
+}
+
 function formatUnderstandingBlock(plan: StagedCastPlan): string {
   const u = plan.understanding
   if (!u) return ''
@@ -1407,10 +1466,24 @@ function formatUnderstandingBlock(plan: StagedCastPlan): string {
   if (u.implicitSubtext) parts.push(`- 潜台词：${u.implicitSubtext}`)
   if (u.relationshipDynamic) parts.push(`- 关系张力：${u.relationshipDynamic}`)
   if (u.emotionalArc) parts.push(`- 情绪弧光：${u.emotionalArc}`)
+  if (u.turningPoint) parts.push(`- 中段转折点：${u.turningPoint}`)
+  if (u.openingMotif || u.closingCallback) {
+    parts.push(
+      `- 意象与收尾回扣：开场「${u.openingMotif || '日常小物件'}」→ 结尾「${u.closingCallback || '轻巧呼应，不作总结'}」`
+    )
+  }
+  const goals = u.characterGoals ?? []
+  if (goals.length > 0) {
+    const rows = goals.map((goal) => {
+      const who = goal.cast || '角色'
+      return `${who}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`
+    })
+    parts.push(`- 角色表里动机：${rows.join('；')}`)
+  }
   if (u.canonHooks.length > 0) parts.push(`- 官方呼应点：${u.canonHooks.join('；')}`)
   if (u.avoidList.length > 0) parts.push(`- 避坑禁忌：${u.avoidList.join('；')}`)
   return parts.length > 0
-    ? `\n## 导演意图与潜台词（务必落实到对话细节中，不要直白说破）\n${parts.join('\n')}\n`
+    ? `\n## 导演意图、中段转折与意象呼应（务必落实到对话细节中，不要直白说破）\n${parts.join('\n')}\n`
     : ''
 }
 
@@ -1422,6 +1495,112 @@ function formatPairwiseAddressBlock(plan: StagedCastPlan): string {
       `- ${entry.from} 称呼 ${entry.to}：中文「${entry.zh}」${entry.ja ? ` / 日文「${entry.ja}」` : ''}`
   )
   return `\n## 角色两两称呼表（严格遵守，禁止随意改称呼）\n${rows.join('\n')}\n`
+}
+
+/**
+ * 按整段/整行边界装箱 RAG 摘录：宁可少给一条，也不在句子中间硬切，
+ * 避免旧实现 `promptBlock.slice(0, 1500)` 把最后一条参考拦腰截断。
+ */
+function packExcerptsCleanly(
+  items: ReadonlyArray<string | { text?: string }> | undefined,
+  budget: number
+): string {
+  if (!items || items.length === 0 || budget <= 0) return ''
+  const kept: string[] = []
+  let used = 0
+  for (const item of items) {
+    const text = (typeof item === 'string' ? item : (item.text ?? '')).trim()
+    if (!text) continue
+    if (kept.length > 0 && used + text.length + 2 > budget) break
+    if (kept.length === 0 && text.length > budget) {
+      const lines = text.split('\n')
+      const acc: string[] = []
+      let length = 0
+      for (const line of lines) {
+        if (acc.length > 0 && length + line.length + 1 > budget) break
+        acc.push(line)
+        length += line.length + 1
+      }
+      if (acc.length > 0) kept.push(acc.join('\n'))
+      break
+    }
+    kept.push(text)
+    used += text.length + 2
+  }
+  return kept.join('\n\n')
+}
+
+export interface CanonGroundingBriefOptions {
+  /** 用户原始提示词：dialogue 之后的阶段原样复述，避免被 Stage 1 的概括吃掉细节 */
+  scene?: string
+  plan?: StagedCastPlan | null
+  ragContext?: RagRetrieveResult | null
+  /** cast 阶段只给事实，不给对白样本 */
+  stage?: 'cast' | 'single' | 'dialogue' | 'polish' | 'staging' | 'direction' | 'voice'
+  maxChars?: number
+}
+
+/**
+ * 结构化 Canon & Prompt Grounding Brief：
+ * ① 用户原始需求全文 → ② 导演意图/转折/意象（plan.understanding）→ ③ 官方剧情事实与世界观 → ④ 官方对白口吻样本 + 防照抄声明。
+ * 全程按分段边界装箱，不做字符级硬截断。
+ */
+export function formatCanonGroundingBrief(options: CanonGroundingBriefOptions = {}): string {
+  const { scene = '', plan = null, ragContext = null, stage = 'dialogue', maxChars = 2400 } = options
+  const blocks: string[] = []
+
+  const prompt = scene.trim()
+  if (stage !== 'cast' && prompt) {
+    blocks.push(`## 用户原始需求（逐条核对，不要遗漏具体要求）\n${prompt}`)
+  }
+
+  const understanding = plan ? formatUnderstandingBlock(plan).trim() : ''
+  if (understanding) blocks.push(understanding)
+
+  const ragParts: string[] = []
+  let remaining = maxChars
+  if (ragContext) {
+    const sections = ragContext.sections
+    if (sections) {
+      const plotText = packExcerptsCleanly(
+        sections.canonPlot,
+        Math.min(remaining, Math.round(maxChars * 0.45))
+      )
+      if (plotText) {
+        ragParts.push(
+          `### 相关官方剧情与事件参考（尊重事实与连续性，不要当成背景解说背诵）\n${plotText}`
+        )
+        remaining -= plotText.length
+      }
+      const loreText = packExcerptsCleanly(
+        sections.worldviewLore,
+        Math.min(remaining, Math.round(maxChars * 0.35))
+      )
+      if (loreText) {
+        ragParts.push(`### 世界观、地点与角色补充设定\n${loreText}`)
+        remaining -= loreText.length
+      }
+      if (stage !== 'cast' && remaining > 120) {
+        const voiceText = packExcerptsCleanly(sections.dialogueVoice, remaining)
+        if (voiceText) {
+          ragParts.push(
+            `### 官方对白口吻样本（只学称呼、断句、停顿与互动节奏，严禁照抄原句或复述原事件）\n${voiceText}`
+          )
+        }
+      }
+    } else if (ragContext.promptBlock.trim()) {
+      // 兜底：只填了 promptBlock 的旧/测试检索结果
+      const legacy = packExcerptsCleanly([ragContext.promptBlock], maxChars)
+      if (legacy) ragParts.push(legacy)
+    }
+  }
+  if (ragParts.length > 0) {
+    blocks.push(
+      `## 官方剧情与设定参考（仅作事实、关系与口吻参考，严禁照抄原句或复述原剧情）\n${ragParts.join('\n\n')}`
+    )
+  }
+
+  return blocks.length > 0 ? `\n${blocks.join('\n\n')}\n` : ''
 }
 
 function formatWorldviewCueBlock(ragContext?: RagRetrieveResult | null): string {
@@ -1475,12 +1654,15 @@ export function buildDialoguePrompt(
     ? plan.outline.map((item, index) => `${index + 1}. ${item}`).join('\n')
     : '（自由发挥，但仍要围绕这个小事件）'
 
-  const fewShotExcerpts = buildCanonDialogueReferenceBlock(
-    plan.cast,
-    options.scene,
-    options.ragContext
-  )
-  const understandingBlock = formatUnderstandingBlock(plan)
+  const hasRagVoice = (options.ragContext?.sections?.dialogueVoice?.length ?? 0) > 0
+  const fewShotExcerpts = hasRagVoice ? '' : selectUnitFewShotExcerpts(plan.cast, options.scene)
+  const groundingBrief = formatCanonGroundingBrief({
+    scene: options.scene,
+    plan,
+    ragContext: options.ragContext,
+    stage: 'dialogue',
+    maxChars: 2600
+  })
   const addressBlock = formatPairwiseAddressBlock(plan)
   const hasWxs = plan.cast.some((c) =>
     /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`)
@@ -1553,15 +1735,19 @@ ${plan.background ? `开场背景：${plan.background}` : ''}
 出场角色（共 ${plan.cast.length} 名）：
 ${castBlock(plan)}
 
-${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}${understandingBlock}${addressBlock}## 大纲（参考，不必逐条对应）
+${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}${groundingBrief}${addressBlock}## 大纲（参考，不必逐条对应）
 ${outline}
 
 ## 角色（请完整阅读每个人的提示词）
 ${castLines}
-
-## 官方剧情与口吻参考（只学习称呼、断句、潜台词与互动节奏，严禁照抄原句或复述原事件）
+${
+  fewShotExcerpts
+    ? `
+## 官方对白节奏样例（只学习称呼、断句、停顿、换行与互动节奏，严禁照抄原句或复述原事件）
 ${fewShotExcerpts}
-
+`
+    : ''
+}
 ## 台词要求（按 ${budget} 句的场次计算）
 - 语言：中文；总共 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句（目标约 ${budget} 句）；
   少于 ${Math.max(12, Math.round(budget * 0.88))} 句或超过 ${Math.round(budget * 1.08)} 句都视为不合格。
