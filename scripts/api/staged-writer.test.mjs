@@ -261,12 +261,11 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
     ['瑞希', '绘名', '瑞希']
   )
   // 双人戏整场两人同场：l1 紧跟在 LayoutAppear 后（<0.4s），入场动作已由 LayoutAppear 承担，
-  // 因此 l1 自动去重说话者起手 body motion，但保留表情与听者反应，避免开场 0.2s 连续抽搐两次。
-  assert.equal(talks[0].data.actions.length, 2)
+  // 因此 l1 自动去重说话者起手 body motion，只保留表情；3 句短戏的听者反应预算为 0，listener 被裁掉。
+  assert.equal(talks[0].data.actions.length, 1)
   assert.equal(talks[0].data.actions[0].modelId, 1)
   assert.equal(talks[0].data.actions[0].motion, undefined)
   assert.equal(talks[0].data.actions[0].facial, 'face_smile_01')
-  assert.equal(talks[0].data.actions[1].modelId, 2)
   // 第二句超过入场冷却期，保留说话者动作
   assert.equal(talks[1].data.actions.length, 1)
   assert.equal(talks[1].data.actions[0].modelId, 2)
