@@ -2728,8 +2728,8 @@ ${
 
 ## 表演要求
 - **官方单拍节奏（at=0）与动作密度**：
-  - 官方 PJSK 剧本中约 80% 台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
-  - 只有极少数真正平稳承接且刚演过动作的过渡句可只换表情，避免角色连续多句静止像木桩。
+  - 官方 PJSK 剧本中约四分之三的台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
+  - 约四分之一的句子可以完全没有动作（官方样本里无动作句子占 8%~46%）：平稳承接、情绪延续或刚演过动作的过渡句只换表情、只给 listener 或留空都可以，静止是正常的，不必为每句硬补动作。
 - **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
 - **静默反应**：需要留白感叹或沉默回应时，可加 \`silentMotion: true\`。
@@ -3219,7 +3219,6 @@ export function composeStory(
     lastFacial: string
     lastSpeakingFacial: string
     lastSpeakingWasShortWithMotion: boolean
-    linesSinceFacialChange: number
     recentBodyMotions: string[]
     speakingCountSinceAppear: number
     linesSinceLastBodyMotion: number
@@ -3547,7 +3546,6 @@ export function composeStory(
         lastFacial: entryFacial,
         lastSpeakingFacial: '',
         lastSpeakingWasShortWithMotion: false,
-        linesSinceFacialChange: 0,
         recentBodyMotions: entryMotion ? [entryMotion] : [],
         speakingCountSinceAppear: 0,
         linesSinceLastBodyMotion: 0
@@ -4085,7 +4083,7 @@ export function composeStory(
       }
     }
 
-    // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸，或紧张/沉默拍误配 smile）
+    // 防止说话人连续多句卡死在 face_normal_01，或紧张/沉默拍误配 smile
     const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
     if (actorState) {
       const speakerZeroAct = actions.find((a) => a.modelId === member.modelId && a.at === 0)
@@ -4096,16 +4094,12 @@ export function composeStory(
         allowStaleCheck &&
         Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
         /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
-      const missingFacialStale =
-        allowStaleCheck &&
-        !currentSpeakerFacial &&
-        (actorState.linesSinceFacialChange >= 2 || /^face_normal/i.test(actorState.lastFacial))
       const incongruousSmile = shouldAvoidIncongruousSmile(
         currentSpeakerFacial,
         line,
         precededByTense
       )
-      if (stuckOnNormal || missingFacialStale || incongruousSmile) {
+      if (stuckOnNormal || incongruousSmile) {
         const varied = pickSpeakerSubtleFacial(
           view,
           member.modelId,
@@ -4120,49 +4114,6 @@ export function composeStory(
           } else {
             actions.unshift({ at: 0, modelId: member.modelId, facial: varied })
           }
-        }
-      }
-    }
-
-    // 防止说话人连续多句没有 body motion 导致站桩；仅在完整对话（>=12句且已有导演结果）启用。
-    const hasSpeakerMotionInLine = actions.some(
-      (a) => a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.length > 0
-    )
-    if (
-      dialogue.lines.length >= 12 &&
-      direction.lines.length > 0 &&
-      !skipImmediateBodyMotion &&
-      !hasSpeakerMotionInLine &&
-      actorState &&
-      actorState.linesSinceLastBodyMotion >= 2
-    ) {
-      const rescueMotion = pickFollowupMotion(
-        view,
-        member.modelId,
-        actorState.lastBodyMotion,
-        new Set(actorState.recentBodyMotions)
-      )
-      if (rescueMotion) {
-        const existingSpeakerAction = actions.find(
-          (a) => a.modelId === member.modelId && a.at === 0
-        )
-        if (existingSpeakerAction) {
-          existingSpeakerAction.motion = rescueMotion
-        } else {
-          const fallbackFacial = pickSpeakerSubtleFacial(
-            view,
-            member.modelId,
-            line,
-            actorState.lastFacial,
-            member.role,
-            { precededByTense }
-          )
-          actions.unshift({
-            at: 0,
-            modelId: member.modelId,
-            motion: rescueMotion,
-            ...(fallbackFacial ? { facial: fallbackFacial } : {})
-          })
         }
       }
     }
@@ -4353,7 +4304,6 @@ export function composeStory(
     }
 
     const actedBodyThisLine = new Set<number>()
-    let speakerChangedFacial = false
     for (const act of actions) {
       const aid = typeof act.modelId === 'number' ? act.modelId : member.modelId
       const ast = onStage.get(aid)
@@ -4364,7 +4314,6 @@ export function composeStory(
       }
       if (typeof act.facial === 'string' && act.facial.length > 0) {
         if (aid === member.modelId) {
-          if (act.facial !== ast.lastSpeakingFacial) speakerChangedFacial = true
           ast.lastSpeakingFacial = act.facial
         }
         ast.lastFacial = act.facial
@@ -4375,9 +4324,6 @@ export function composeStory(
       actorState.lastSpeakingWasShortWithMotion =
         actedBodyThisLine.has(member.modelId) &&
         (!hasTranslationContent(line.content) || visibleLen <= 5)
-      actorState.linesSinceFacialChange = speakerChangedFacial
-        ? 0
-        : actorState.linesSinceFacialChange + 1
     }
     for (const [aid, ast] of onStage) {
       if (!actedBodyThisLine.has(aid)) {
