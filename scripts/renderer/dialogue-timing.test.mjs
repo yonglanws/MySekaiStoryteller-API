@@ -176,9 +176,8 @@ function fixture(t, { driveExportSteps = true } = {}) {
         write('ParamMouthOpenY', value)
         if (this.mouthUpdateHooked) return
         const original = core.update
-        const host = this
         core.update = function updateMouthThenMesh() {
-          if (host.pendingMouthOpen !== null) write('ParamMouthOpenY', host.pendingMouthOpen)
+          if (result.pendingMouthOpen !== null) write('ParamMouthOpenY', result.pendingMouthOpen)
           return original.call(this)
         }
         this.mouthUpdateHooked = true

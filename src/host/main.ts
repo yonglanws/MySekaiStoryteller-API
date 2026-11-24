@@ -484,6 +484,7 @@ async function bootstrap(): Promise<void> {
           history?: unknown
           translateForTts?: unknown
           pipeline?: unknown
+          agentic?: unknown
         },
         signal: AbortSignal
       ): Promise<GenerateStoryResult> => {
@@ -524,13 +525,14 @@ async function bootstrap(): Promise<void> {
           typeof body.targetMinutes === 'number' && body.targetMinutes > 0
             ? body.targetMinutes
             : config.llm.targetMinutes
-        let pipeline: 'single' | 'staged' | undefined
+        let pipeline: 'single' | 'staged' | 'agent' | undefined
         if (body.pipeline !== undefined) {
-          if (body.pipeline !== 'single' && body.pipeline !== 'staged') {
-            throw new StoryGenerationError('pipeline 必须是 "single" 或 "staged"', [])
+          if (body.pipeline !== 'single' && body.pipeline !== 'staged' && body.pipeline !== 'agent') {
+            throw new StoryGenerationError('pipeline 必须是 "single"、"staged" 或 "agent"', [])
           }
           pipeline = body.pipeline
         }
+        const agentic = typeof body.agentic === 'boolean' ? body.agentic : undefined
         return storyWriter.generate({
           prompt: body.prompt,
           mode,
@@ -540,6 +542,7 @@ async function bootstrap(): Promise<void> {
           translateForTts:
             typeof body.translateForTts === 'boolean' ? body.translateForTts : undefined,
           pipeline,
+          agentic,
           signal
         })
       }

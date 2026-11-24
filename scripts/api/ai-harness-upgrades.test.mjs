@@ -24,8 +24,7 @@ import {
   composeStory,
   normalizeDirection,
   normalizeStaging,
-  normalizeVoiceDirectionPlan,
-  planPresence
+  normalizeVoiceDirectionPlan
 } from '../../out-host/host/ai/staged.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 import { validateAndFixStory } from '../../out-host/host/ai/validate.js'

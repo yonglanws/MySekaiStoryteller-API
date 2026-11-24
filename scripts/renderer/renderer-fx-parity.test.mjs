@@ -27,7 +27,7 @@ function createLoader(extraMocks = new Map()) {
   }
   const context = vm.createContext({
     console,
-    performance: { now: () => 0 },
+    performance,
     setTimeout,
     clearTimeout,
     AbortController,
@@ -337,11 +337,12 @@ test('applyCharacterAction applies body motions immediately without 800ms deferr
   )
 
   // With talkDurationMs > 0 (TalkSnippet), early body interrupt deferral still triggers cleanly.
+  model.currentBodyStartedAt = performance.now()
   await model.applyCharacterAction({ motion: 'w-happy-glad02' }, undefined, undefined, undefined, {
     talkDurationMs: 2500
   })
   assert.equal(delayCalls.length, 1)
-  assert.equal(delayCalls[0], 800)
+  assert.ok(delayCalls[0] >= 750 && delayCalls[0] <= 800)
 })
 
 test('MotionSnippet uses isModelShown during alpha=0 LayoutAppear and MoveSnippet does not drop body motions', async () => {
@@ -363,6 +364,7 @@ test('MotionSnippet uses isModelShown during alpha=0 LayoutAppear and MoveSnippe
       startMotionCalls.push({ motion, facial, facialFirst, opts })
     },
     setPositionRel: () => {},
+    move: async () => {},
     moveRel: async () => {}
   }
 

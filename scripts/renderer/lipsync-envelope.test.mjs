@@ -55,7 +55,6 @@ function loadRendererModule(entry) {
 }
 
 const sampleRate = 48000
-const STEP_MS = 1000 / 60
 
 function loadTiming() {
   return loadRendererModule(path.join(root, 'src/common/official/timing.ts'))

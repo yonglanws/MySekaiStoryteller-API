@@ -280,10 +280,11 @@ const LlmSchema = z.object({
   /**
    * 剧本生成流水线：
    * - staged（默认）：选角 → 只写台词（完整人设）→ 单独设计动作/表情/背景
+   * - agent：带工具调用的 Agent 导演/编剧循环（失败时自动回退 staged）
    * - single：一次调用直接写完整剧本，省调用次数
    * chat 模式始终走 single。
    */
-  pipeline: z.enum(['single', 'staged']).default('staged'),
+  pipeline: z.enum(['single', 'staged', 'agent']).default('staged'),
   /** response_format=json_object：auto = 先带后回退，on = 必须，off = 不发送 */
   jsonMode: z.enum(['auto', 'on', 'off']).default('auto'),
   /** 生成后把中文台词翻译成日文 ttsText（TTS 参考音频通常为日语） */
@@ -565,7 +566,7 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   }
   if (env.MSS_LLM_PIPELINE) {
     const v = env.MSS_LLM_PIPELINE.toLowerCase()
-    if (v === 'single' || v === 'staged') config.llm.pipeline = v
+    if (v === 'single' || v === 'staged' || v === 'agent') config.llm.pipeline = v
   }
   if (env.MSS_LLM_JSON_MODE) {
     const v = env.MSS_LLM_JSON_MODE.toLowerCase()
