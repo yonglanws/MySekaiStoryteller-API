@@ -320,7 +320,8 @@ function validateActions(
   data: JsonRecord,
   view: CatalogView,
   modelIds: Set<number>,
-  label: string
+  label: string,
+  speakerCap = 5
 ): void {
   if (!('actions' in data) || data.actions === undefined) return
   const actions = data.actions
@@ -349,7 +350,6 @@ function validateActions(
   }
   normalized.sort((a, b) => toNumber(a.at) - toNumber(b.at))
 
-  const speakerId = data.modelId
   const byModel = new Map<number, JsonRecord[]>()
   for (const action of normalized) {
     const modelId = action.modelId as number
@@ -357,9 +357,11 @@ function validateActions(
     byModel.get(modelId)!.push(action)
   }
   const kept: JsonRecord[] = []
+  const speakerId = data.modelId
   for (const [actorId, items] of byModel) {
-    const isListener = actorId !== speakerId
-    const cap = isListener ? 1 : 5
+    // 官方 TalkData.Motions 每句只有 0 或 1 条：Talk 说话者与听者各保留 1 个动作。
+    // Motion 片段（静默动作序列）不属于 Talk，保留多拍。
+    const cap = actorId === speakerId ? speakerCap : 1
     let lastAt: number | null = null
     let count = 0
     for (const action of items) {
@@ -372,6 +374,12 @@ function validateActions(
     }
   }
   kept.sort((a, b) => toNumber(a.at) - toNumber(b.at))
+  if (speakerCap === 1 && kept.length > 1) {
+    // Talk 整句也只留 1 条动作：说话者优先，听者动作让位。
+    const speakerAction = kept.find((action) => action.modelId === speakerId)
+    data.actions = [speakerAction ?? kept[0]]
+    return
+  }
   data.actions = kept
 }
 
@@ -801,7 +809,7 @@ export function validateAndFixStory(
             isRecord(action) ? { ...action, modelId: remapId(action.modelId) } : action
           )
         }
-        validateActions(data, view, modelIds, `snippets[${index}]`)
+        validateActions(data, view, modelIds, `snippets[${index}]`, kind === 'Talk' ? 1 : 5)
       }
     }
 

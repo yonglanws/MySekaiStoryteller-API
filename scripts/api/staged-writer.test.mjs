@@ -268,12 +268,11 @@ test('staged pipeline keeps dialogue verbatim and applies direction', async (t) 
     ['瑞希', '绘名', '瑞希']
   )
   // 双人戏整场两人同场：l1 紧跟在 LayoutAppear 后（<0.4s），入场动作已由 LayoutAppear 承担，
-  // 因此 l1 自动去重说话者起手 body motion，但保留表情与听者反应，避免开场 0.2s 连续抽搐两次。
-  assert.equal(talks[0].data.actions.length, 2)
+  // 因此 l1 自动去重说话者起手 body motion，只保留表情；3 句短戏的听者反应预算为 0，listener 被裁掉。
+  assert.equal(talks[0].data.actions.length, 1)
   assert.equal(talks[0].data.actions[0].modelId, 1)
   assert.equal(talks[0].data.actions[0].motion, undefined)
   assert.equal(talks[0].data.actions[0].facial, 'face_smile_01')
-  assert.equal(talks[0].data.actions[1].modelId, 2)
   // 第二句超过入场冷却期，保留说话者动作
   assert.equal(talks[1].data.actions.length, 1)
   assert.equal(talks[1].data.actions[0].modelId, 2)
@@ -974,18 +973,18 @@ test('composed staging keeps ambient and second background through validation', 
   assert.ok(
     appears.every(
       (snippet) =>
-        (snippet.data.to.side === 'Left' && snippet.data.from.side === 'LeftOver') ||
-        (snippet.data.to.side === 'Right' && snippet.data.from.side === 'RightOver')
+        (snippet.data.to.side === 'Left' && snippet.data.from.side === 'Left') ||
+        (snippet.data.to.side === 'Right' && snippet.data.from.side === 'Right')
     ),
-    'Left/Right 槽入场默认从同侧画外滑入（from=LeftOver/RightOver）'
+    'Left/Right 槽入场默认原地淡入（from == to）'
   )
   assert.ok(
     appears.every((snippet) => snippet.data.from.offset === 0 && snippet.data.to.offset === 0),
-    '画外滑入起终点 offset 均为 0'
+    '原地淡入起终点 offset 均为 0'
   )
   assert.ok(
     appears.every((snippet) => snippet.data.moveSpeed === 'Normal'),
-    '画外滑入用官方 Normal 时长'
+    '原地淡入用官方 Normal 时长'
   )
   assert.deepEqual(
     appears
@@ -1013,7 +1012,7 @@ test('composed staging keeps ambient and second background through validation', 
   )
 })
 
-test('composed staging keeps solo Center entries in place while duo entries slide from offstage', () => {
+test('composed staging keeps solo Center entries in place', () => {
   const view = new CatalogView(catalog.get())
   const [first] = view.models
   const plan = {
@@ -1065,6 +1064,70 @@ test('composed staging keeps solo Center entries in place while duo entries slid
     ),
     'Center 槽入场保持原地淡入（from == to, offset: 0）'
   )
+})
+
+test('keeps the silent scene cast on stage when no listener actions remain', () => {
+  const view = new CatalogView(catalog.get())
+  const [first, second] = view.models
+  const plan = {
+    title: '',
+    event: '',
+    logline: '',
+    outline: [],
+    cast: [first, second].map((model) => ({
+      modelId: model.id,
+      name: view.shortName(model),
+      fullName: model.name,
+      path: model.path,
+      role: ''
+    })),
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '',
+    lines: Array.from({ length: 12 }, (_, index) => ({
+      id: `l${index + 1}`,
+      speaker: plan.cast[0].name,
+      content: '独白的一句台词。',
+      emotion: '平静'
+    }))
+  }
+  const direction = normalizeDirection(
+    {
+      background: 'bg_room.jpg',
+      bgm: '',
+      lines: dialogue.lines.map((line) => ({ id: line.id, facial: 'face_normal_01' }))
+    },
+    view,
+    plan,
+    dialogue
+  )
+  // 12 句独白的听者反应预算为 0；第二个人仍然按分幕 activeCast 留在台上。
+  const staging = {
+    scenes: [
+      {
+        id: 's1',
+        fromLineId: 'l1',
+        fromIndex: 0,
+        background: 'bg_room.jpg',
+        ambient: 'normal',
+        transitionIn: 'black',
+        activeCast: [first.id, second.id]
+      }
+    ],
+    events: []
+  }
+  const story = composeStory(view, plan, dialogue, direction, staging)
+  assert.deepEqual(
+    story.models.map((model) => model.id).sort((a, b) => a - b),
+    [first.id, second.id].sort((a, b) => a - b),
+    'the planned scene cast keeps both models even without listener actions'
+  )
+  const validated = validateAndFixStory(story, view, new Logger({ type: 'hidden' }))
+  const appeared = validated.story.snippets
+    .filter((snippet) => snippet.type === 'LayoutAppear')
+    .map((snippet) => snippet.data.modelId)
+  assert.ok(appeared.includes(first.id) && appeared.includes(second.id), 'both planned actors appear')
 })
 
 test('staged pipeline expands a too-short dialogue once', async (t) => {
@@ -1222,4 +1285,82 @@ test('staged prompts carry the original user request, motif anchors, and the tig
     assert.ok(prompt.user.includes('中段转折点'))
     assert.ok(prompt.user.includes('瑞希把伞借给绘名'), 'explicit request reaches every down-stream stage')
   }
+})
+
+test('composeStory backfills a facial when a speaker motion has none', () => {
+  const view = new CatalogView(catalog.get())
+  const [first, second] = view.models
+  const plan = {
+    title: '测试',
+    event: '两个人聊下次练习',
+    logline: '',
+    outline: [],
+    cast: [first, second].map((model) => ({
+      modelId: model.id,
+      name: view.shortName(model),
+      fullName: model.name,
+      path: model.path,
+      role: ''
+    })),
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: [
+      {
+        id: 'l1',
+        speaker: plan.cast[0].name,
+        content: '今天也一起练习吧，先从基础开始。',
+        emotion: '开心'
+      },
+      {
+        id: 'l2',
+        speaker: plan.cast[0].name,
+        content: '刚才那一段再来一次怎么样。',
+        emotion: '平静'
+      },
+      {
+        id: 'l3',
+        speaker: plan.cast[1].name,
+        content: '嗯，不过我想先休息一下。',
+        emotion: '平静'
+      }
+    ]
+  }
+  // 直接构造 direction，绕过 normalizeDirection 的听者配额，专门验证 composeStory 的落盘规则。
+  const direction = {
+    background: 'bg_room.jpg',
+    ambient: 'normal',
+    bgm: '',
+    bgmStop: false,
+    lines: [
+      { id: 'l1', facial: 'face_normal_01' },
+      { id: 'l2', motion: 'w-normal-nod01' },
+      {
+        id: 'l3',
+        motion: 'e-normal-sigh01',
+        facial: 'face_sad_01',
+        listener: { modelId: first.id, motion: 'w-normal-smile01' }
+      }
+    ]
+  }
+  const story = composeStory(view, plan, dialogue, direction)
+  const talks = story.snippets.filter((snippet) => snippet.type === 'Talk')
+  assert.equal(talks.length, 3)
+
+  // l1 显式表情，作为说话者「上一个 facial」。
+  assert.equal(talks[0].data.actions[0].facial, 'face_normal_01')
+
+  // l2 说话者只有 motion：补上该角色上一个 facial，motion 名不变。
+  const filled = talks[1].data.actions.find((action) => action.modelId === first.id)
+  assert.equal(filled.motion, 'w-normal-nod01')
+  assert.equal(filled.facial, 'face_normal_01')
+
+  // l3 说话者已有表情不改；听者只给了 motion 时保持为空。
+  const explicit = talks[2].data.actions.find((action) => action.modelId === second.id)
+  assert.equal(explicit.motion, 'e-normal-sigh01')
+  assert.equal(explicit.facial, 'face_sad_01')
+  const listener = talks[2].data.actions.find((action) => action.modelId === first.id)
+  assert.equal(listener.motion, 'w-normal-smile01')
+  assert.equal(listener.facial, undefined)
 })

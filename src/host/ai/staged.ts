@@ -3491,12 +3491,12 @@ ${
 
 ## 表演要求
 - **官方单拍节奏（at=0）与动作密度**：
-  - 官方 PJSK 剧本中约 80% 台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
-  - 只有极少数真正平稳承接且刚演过动作的过渡句可只换表情，避免角色连续多句静止像木桩。
+  - 官方 PJSK 剧本中约四分之三的台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
+  - 约 22% 的句子可以完全没有动作（全量官方剧本 22.2%，多数集在 10%~35%）：平稳承接、情绪延续或刚演过动作的过渡句只换表情、只给 listener 或留空都可以，静止是正常的，不必为每句硬补动作。
 - **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
-- **静默反应**：需要留白感叹或沉默回应时，可加 \`silentMotion: true\`。
-- **听者反应（listener）**：约 15%~20% 的句子给同台另一位角色 1 个 \`listener\`（表情或轻微动作），优先放在长独白中段或话题转折处，防止在场听者长时间静止。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上。
+- **静默反应**：官方全量剧本里，台词之外的独立 Motion 约每 2 句 1 个；本场每 3~5 句安排 1 个 \`silentMotion\`（听者反应、环境小动作或停顿），不要每句都加。
+- **听者反应（listener）**：同句听者动作在官方全量剧本里只占约 0.5%，绝大多数句子不给；只有长独白中段或话题转折处才考虑给同台另一位角色 1 个 \`listener\`（表情或轻微动作），防止在场听者长时间静止。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上。
 - **表情细腻切换与语境贴合**：${
       hasEmotionTags
         ? '〔情绪〕只代表 TTS 语音基调，**严禁把〔平静〕死板锁死在 face_normal_01**！即使在〔平静〕段内，也要根据每句台词的实际语气细腻切换微表情：温和/寒暄/赞同/调侃用 smile / wink / smug；认真/思索/倾听用 serious / closeeye / smallmouth / notice；无奈/窘迫/犹豫用 trouble / lookaway / worry / baffling；只有毫无波澜的平铺陈述才用 normal。开心用 smile / sparkling；伤心用 sad / cry / worry；生气用 angry / serious；惊讶用 surprise / shock；害羞用 shy / blushed。'
@@ -3694,8 +3694,8 @@ export function normalizeDirection(
 
   const bgm = matchBgm(view, doc.bgm ?? doc.music ?? doc.bgmFile)
 
-  // 听者反应预算：约 20%，把主要动作留给说话者，听者只在换人/情绪转折处反应。
-  const maxListeners = Math.max(1, Math.ceil(dialogue.lines.length * 0.2))
+  // 听者反应预算：不超过 5%（官方样本同句听者反应约 0.9%），把主要动作留给说话者。
+  const maxListeners = Math.floor(dialogue.lines.length * 0.05)
   let listenerCount = 0
   let previousSpeakerForListener = ''
   for (const line of dialogue.lines) {
@@ -3824,16 +3824,25 @@ export function fallbackDirection(view: CatalogView, plan: StagedCastPlan): Stag
 function activeCast(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
-  direction: StagedDirection
+  direction: StagedDirection,
+  staging?: StagedStaging
 ): StagedCastMember[] {
   const listeners = new Set(
     direction.lines
       .map((line) => line.listener?.modelId)
       .filter((id): id is number => typeof id === 'number')
   )
+  // 听者动作被预算裁掉后，人仍按分幕 activeCast 留在台上安静倾听；
+  // 出场名单以分幕为准，不能因为少了一个 listener 动作就把同台演员从画面里拿掉。
+  const staged = new Set<number>()
+  for (const scene of staging?.scenes ?? []) {
+    for (const id of scene.activeCast) staged.add(id)
+  }
   return plan.cast.filter(
     (member) =>
-      listeners.has(member.modelId) || dialogue.lines.some((line) => line.speaker === member.name)
+      staged.has(member.modelId) ||
+      listeners.has(member.modelId) ||
+      dialogue.lines.some((line) => line.speaker === member.name)
   )
 }
 
@@ -3911,11 +3920,10 @@ export function composeStory(
   direction: StagedDirection,
   staging?: StagedStaging
 ): JsonRecord {
-  const cast = activeCast(plan, dialogue, direction)
-  if (cast.length === 0) throw new Error('台词稿没有可用的出场角色')
-
   const effectiveStaging =
     staging && staging.scenes.length > 0 ? staging : fallbackStaging(view, plan, dialogue)
+  const cast = activeCast(plan, dialogue, direction, effectiveStaging)
+  if (cast.length === 0) throw new Error('台词稿没有可用的出场角色')
 
   // 如果 direction 指定了 background2 / ambient / bgm2（旧单测或 3 段路径），合并入分幕表
   if (!staging) {
@@ -3982,7 +3990,6 @@ export function composeStory(
     lastFacial: string
     lastSpeakingFacial: string
     lastSpeakingWasShortWithMotion: boolean
-    linesSinceFacialChange: number
     recentBodyMotions: string[]
     speakingCountSinceAppear: number
     linesSinceLastBodyMotion: number
@@ -4205,15 +4212,12 @@ export function composeStory(
     incoming.forEach((id, idx) => {
       const slot = desiredSlotFor.get(id)!
       const isWalk = walkInSet.has(id)
-      // 入场默认画外滑入（官方 Appear 观感）：Left/Right 槽 from=同侧画外
-      // （Left→LeftOver、Right→RightOver），Center 特写保持原地淡入（横穿
-      // 全屏约 1870px 易喧宾，且方向确定性差；Center 滑入方向待观感确认）。
-      // 仅飘现/传送类演出由 prompt 显式指定原地淡入；isWalk 本就来自画外，语义不变。
+      // 官方 LayoutData 的 Type=2 入场全部 SideFrom==SideTo（Left/Center/Right
+      // 槽位原地淡入，没有画外起点）。默认 from 与 to 同槽位（offset 0）；
+      // 仅 walkInCast 显式“走入”保留 LeftOver/RightOver 画外起点。
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
-        : slot === 'Center'
-          ? { side: slot, offset: 0 }
-          : { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
+        : { side: slot, offset: 0 }
       const member = cast.find((c) => c.modelId === id)
       const memberName = member?.name
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
@@ -4310,7 +4314,6 @@ export function composeStory(
         lastFacial: entryFacial,
         lastSpeakingFacial: '',
         lastSpeakingWasShortWithMotion: false,
-        linesSinceFacialChange: 0,
         recentBodyMotions: entryMotion ? [entryMotion] : [],
         speakingCountSinceAppear: 0,
         linesSinceLastBodyMotion: 0
@@ -4848,7 +4851,7 @@ export function composeStory(
       }
     }
 
-    // 防止说话人连续多句卡死在 face_normal_01（或长句缺失 facial 导致静态脸，或紧张/沉默拍误配 smile）
+    // 防止说话人连续多句卡死在 face_normal_01，或紧张/沉默拍误配 smile
     const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
     if (actorState) {
       const speakerZeroAct = actions.find((a) => a.modelId === member.modelId && a.at === 0)
@@ -4859,16 +4862,12 @@ export function composeStory(
         allowStaleCheck &&
         Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
         /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
-      const missingFacialStale =
-        allowStaleCheck &&
-        !currentSpeakerFacial &&
-        (actorState.linesSinceFacialChange >= 2 || /^face_normal/i.test(actorState.lastFacial))
       const incongruousSmile = shouldAvoidIncongruousSmile(
         currentSpeakerFacial,
         line,
         precededByTense
       )
-      if (stuckOnNormal || missingFacialStale || incongruousSmile) {
+      if (stuckOnNormal || incongruousSmile) {
         const varied = pickSpeakerSubtleFacial(
           view,
           member.modelId,
@@ -4883,49 +4882,6 @@ export function composeStory(
           } else {
             actions.unshift({ at: 0, modelId: member.modelId, facial: varied })
           }
-        }
-      }
-    }
-
-    // 防止说话人连续多句没有 body motion 导致站桩；仅在完整对话（>=12句且已有导演结果）启用。
-    const hasSpeakerMotionInLine = actions.some(
-      (a) => a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.length > 0
-    )
-    if (
-      dialogue.lines.length >= 12 &&
-      direction.lines.length > 0 &&
-      !skipImmediateBodyMotion &&
-      !hasSpeakerMotionInLine &&
-      actorState &&
-      actorState.linesSinceLastBodyMotion >= 2
-    ) {
-      const rescueMotion = pickFollowupMotion(
-        view,
-        member.modelId,
-        actorState.lastBodyMotion,
-        new Set(actorState.recentBodyMotions)
-      )
-      if (rescueMotion) {
-        const existingSpeakerAction = actions.find(
-          (a) => a.modelId === member.modelId && a.at === 0
-        )
-        if (existingSpeakerAction) {
-          existingSpeakerAction.motion = rescueMotion
-        } else {
-          const fallbackFacial = pickSpeakerSubtleFacial(
-            view,
-            member.modelId,
-            line,
-            actorState.lastFacial,
-            member.role,
-            { precededByTense }
-          )
-          actions.unshift({
-            at: 0,
-            modelId: member.modelId,
-            motion: rescueMotion,
-            ...(fallbackFacial ? { facial: fallbackFacial } : {})
-          })
         }
       }
     }
@@ -4969,40 +4925,6 @@ export function composeStory(
           ...(listenerMotion ? { motion: listenerMotion } : {}),
           ...(listenerFacial ? { facial: listenerFacial } : {})
         })
-      }
-    }
-
-    // 防止同台听者长时间（>=3句）一动不动站桩；派生符合「倾听者视角」的反应表情。
-    if (dialogue.lines.length >= 12 && direction.lines.length > 0) {
-      for (const [partnerId, partnerState] of onStage) {
-        if (partnerId === member.modelId) continue
-        if (index <= partnerState.appearedAtLine) continue
-        if (partnerState.linesSinceLastBodyMotion < 3) continue
-        const alreadyHasPartner = actions.some((a) => a.modelId === partnerId)
-        if (alreadyHasPartner) continue
-        const partnerMember = cast.find((c) => c.modelId === partnerId)
-        const partnerMotion = pickFollowupMotion(
-          view,
-          partnerId,
-          partnerState.lastBodyMotion,
-          new Set(partnerState.recentBodyMotions)
-        )
-        const partnerFacial = pickListenerReactionFacial(
-          view,
-          partnerId,
-          line,
-          partnerMember?.role,
-          partnerState.lastFacial,
-          { precededByTense }
-        )
-        if (partnerMotion || partnerFacial) {
-          actions.push({
-            at: 0,
-            modelId: partnerId,
-            ...(partnerMotion ? { motion: partnerMotion } : {}),
-            ...(partnerFacial ? { facial: partnerFacial } : {})
-          })
-        }
       }
     }
 
@@ -5054,6 +4976,26 @@ export function composeStory(
 
     const hasSilentAfter = explicitSilentReaction || autoSilentTargetId !== null
     const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter || hasSilentAfter)
+
+    // 官方 TalkData.Motions 每条动作都同时带 MotionName 与 FacialName。说话者动作只给了
+    // motion 时，沿用该角色上一个 facial（没有就用目录默认表情）；已有表情、听者动作与
+    // motion 名都不动。
+    let speakerFacial = actorState?.lastFacial || ''
+    const speakerActs = actions
+      .filter((action) => action.modelId === member.modelId)
+      .sort((a, b) => num(a.at) - num(b.at))
+    for (const action of speakerActs) {
+      const facial = typeof action.facial === 'string' ? action.facial.trim() : ''
+      if (facial) {
+        speakerFacial = facial
+        continue
+      }
+      const motion = typeof action.motion === 'string' ? action.motion.trim() : ''
+      if (!motion) continue
+      const filled = speakerFacial || view.defaultFacial(member.modelId)
+      action.facial = filled
+      speakerFacial = filled
+    }
 
     snippets.push({
       type: 'Talk',
@@ -5119,7 +5061,6 @@ export function composeStory(
     }
 
     const actedBodyThisLine = new Set<number>()
-    let speakerChangedFacial = false
     for (const act of actions) {
       const aid = typeof act.modelId === 'number' ? act.modelId : member.modelId
       const ast = onStage.get(aid)
@@ -5130,7 +5071,6 @@ export function composeStory(
       }
       if (typeof act.facial === 'string' && act.facial.length > 0) {
         if (aid === member.modelId) {
-          if (act.facial !== ast.lastSpeakingFacial) speakerChangedFacial = true
           ast.lastSpeakingFacial = act.facial
         }
         ast.lastFacial = act.facial
@@ -5141,9 +5081,6 @@ export function composeStory(
       actorState.lastSpeakingWasShortWithMotion =
         actedBodyThisLine.has(member.modelId) &&
         (!hasTranslationContent(line.content) || visibleLen <= 5)
-      actorState.linesSinceFacialChange = speakerChangedFacial
-        ? 0
-        : actorState.linesSinceFacialChange + 1
     }
     for (const [aid, ast] of onStage) {
       if (!actedBodyThisLine.has(aid)) {
