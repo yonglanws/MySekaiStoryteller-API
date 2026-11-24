@@ -215,6 +215,14 @@ test('buildIrodoriSpeechRequest forwards speaker_kv_* and boosts cfg_scale_capti
   assert.ok(irodori.caption.includes('泣き出しそうに震えながら叫ぶ。'))
 })
 
+test('buildIrodoriSpeechRequest never falls back to raw input when normalized text is skipped', () => {
+  const silent = buildIrodoriSpeechRequest('……', { refAudioPath: '/main.wav' }, defaults)
+  assert.equal(silent.input, '')
+
+  const unsafeOnly = buildIrodoriSpeechRequest('🥵💋', { refAudioPath: '/main.wav' }, defaults)
+  assert.equal(unsafeOnly.input, '')
+})
+
 test('collects unique emotion labels in configuration order', () => {
   const labels = collectEmotionLabels(
     ['平静', '开心', '平静'],

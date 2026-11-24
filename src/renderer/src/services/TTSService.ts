@@ -471,6 +471,14 @@ export class TTSService {
       speedFactor ?? this.config.speedFactor,
       lineOverride
     )
+    if (!String(payload.input ?? '').trim()) {
+      return {
+        audioBuffer: new ArrayBuffer(0),
+        duration: 0,
+        success: false,
+        error: 'Skipped empty or non-verbal Irodori TTS input'
+      }
+    }
     try {
       const audioBuffer = await this.fetchAudio(`${baseUrl}/v1/audio/speech`, payload)
       if (!audioBuffer || audioBuffer.byteLength === 0) {

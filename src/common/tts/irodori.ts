@@ -455,7 +455,7 @@ export function buildIrodoriSpeechRequest(
   const isSpecialScene = Boolean(lineOverride?.ttsSpecialScene)
   const rawCaption = lineOverride?.ttsCaption?.trim() ? lineOverride.ttsCaption : voice.caption
   const normalized = normalizeIrodoriSpeechText(input, rawCaption)
-  const finalInput = normalized.text || input
+  const finalInput = normalized.skip ? '' : normalized.text
   const finalCaption = normalized.caption ?? sanitizeIrodoriCaption(rawCaption ?? '')
 
   const payload: Record<string, unknown> = {
