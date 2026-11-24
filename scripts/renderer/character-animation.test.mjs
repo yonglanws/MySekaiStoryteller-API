@@ -150,6 +150,34 @@ function makeModel(loader) {
   return { model, alpha, positions }
 }
 
+test('drawable multiply/screen colours are neutralized to match the reference shader', () => {
+  const { AdvancedModel } = loadAdvancedModel()
+  const model = Object.create(AdvancedModel.prototype)
+  model.logger = { info() {} }
+  model._metadata = { id: 21 }
+  const rawMultiply = [
+    { R: 0.9, G: 0.9, B: 0.9, A: 1 },
+    { R: 1, G: 1, B: 1, A: 1 }
+  ]
+  const rawScreen = [
+    { R: 0, G: 0, B: 0, A: 0 },
+    { R: 0.1, G: 0.2, B: 0.3, A: 1 }
+  ]
+  const core = {
+    getDrawableCount: () => 2,
+    getDrawableMultiplyColor: (i) => rawMultiply[i],
+    getDrawableScreenColor: (i) => rawScreen[i],
+    getMultiplyColor: (i) => rawMultiply[i],
+    getScreenColor: (i) => rawScreen[i]
+  }
+  model.internalModel = { coreModel: core }
+  model.neutralizeDrawableColors()
+  const multiply = core.getMultiplyColor(0)
+  assert.equal([multiply.R, multiply.G, multiply.B, multiply.A].join(','), '1,1,1,1')
+  const screen = core.getScreenColor(1)
+  assert.equal([screen.R, screen.G, screen.B, screen.A].join(','), '0,0,0,0')
+})
+
 test('move lands exactly on the destination in both axes', async () => {
   const loader = loadAdvancedModel()
   const { model } = makeModel(loader)

@@ -136,7 +136,8 @@ export default class SnippetStrategyManager {
     data: SnippetData,
     snippetIndex: number,
     forExport: boolean,
-    delayOverrideMs?: number
+    delayOverrideMs?: number,
+    actWallMs?: number
   ): Promise<void> {
     const snippetConstructor = this.snippets[data.type]
     if (!snippetConstructor) {
@@ -152,6 +153,9 @@ export default class SnippetStrategyManager {
         0,
         delayOverrideMs
       )
+    }
+    if (forExport && actWallMs !== undefined && Number.isFinite(actWallMs)) {
+      ;(snippet as unknown as { exportActWallMs?: number }).exportActWallMs = actWallMs
     }
 
     if (forExport && this.app.lastSnippetActualDurationMs === 0) {
@@ -174,9 +178,10 @@ export default class SnippetStrategyManager {
   async handleSnippetForExport(
     data: SnippetData,
     snippetIndex = -1,
-    delayOverrideMs?: number
+    delayOverrideMs?: number,
+    actWallMs?: number
   ): Promise<void> {
-    await this.dispatchSnippet(data, snippetIndex, true, delayOverrideMs)
+    await this.dispatchSnippet(data, snippetIndex, true, delayOverrideMs, actWallMs)
   }
 
   /** 官方 WaitAllFinished：等所有仍在运行的协程结束。 */

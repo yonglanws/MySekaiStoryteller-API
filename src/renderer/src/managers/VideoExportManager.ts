@@ -1597,10 +1597,15 @@ export default class VideoExportManager {
         const currentTimelineMs = virtualClock.now() - timelineStartMs
         const delayOverrideMs =
           plannedActMs !== undefined ? Math.max(0, plannedActMs - currentTimelineMs) : undefined
+        // 绝对 act 墙钟：handleSnippetForExport 内部还要过 WaitFinished 前置栅栏，
+        // 若栅栏耗时一帧，delayOverride 的起点会整体后移。BaseSnippet 用绝对时刻
+        // 重算剩余 delay，保证 fade/sidefade 等从 plan act 帧起步。
+        const actWallMs = plannedActMs !== undefined ? timelineStartMs + plannedActMs : undefined
         const snippetSetup = this.app.snippetStrategyManager.handleSnippetForExport(
           snippet,
           i,
-          delayOverrideMs
+          delayOverrideMs,
+          actWallMs
         )
         await snippetSetup
         const hasAsyncTaskTracker =

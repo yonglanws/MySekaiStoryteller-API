@@ -218,6 +218,7 @@ export default class AdvancedModel extends Live2DModel {
     this.visible = true
     AdvancedModel.liveInstances.add(this)
     this.internalModel.extendParallelMotionManager(2)
+    this.neutralizeDrawableColors()
     this.modelParamIds = this.resolveCoreParameterIds()
     this.resolveMouthParams()
     this.installMotionIdNormalization()
@@ -269,6 +270,52 @@ export default class AdvancedModel extends Live2DModel {
     this.installNaturalMotion()
 
     this.logger = getSubLogger(`AdvancedModel(${this._metadata.id})`)
+  }
+
+  /**
+   * 参考 `sse-live2d-render/src/live2d.wgsl:cubism_fs` 明确不应用 per-drawable
+   * multiply / screen 色（JP 7.0.0 客户端的 CubismRenderer 没有这两个通道）。
+   * pixi-live2d 的 Cubism4 渲染器会读取 moc3 里的颜色，未来模型/服装可能因此
+   * 多压一层暗部；这里把两个通道钉成中性，只保留普通 baseColor/opacity/mask。
+   * 本话 model 21 的 272 个 drawable 实测均为中性（nonNeutral=0），
+   * 所以这项不改变 3400 的像素，属于参考对齐兜底，而不是本轮色差的原因。
+   */
+  private neutralizeDrawableColors(): void {
+    const core = this.internalModel?.coreModel as unknown as {
+      getDrawableCount?: () => number
+      getDrawableMultiplyColor?: (index: number) => { R: number; G: number; B: number; A: number }
+      getDrawableScreenColor?: (index: number) => { R: number; G: number; B: number; A: number }
+      getMultiplyColor?: (index: number) => unknown
+      getScreenColor?: (index: number) => unknown
+    }
+    if (!core || typeof core.getMultiplyColor !== 'function') return
+
+    const count = Math.max(0, core.getDrawableCount?.() ?? 0)
+    let nonNeutral = 0
+    for (let index = 0; index < count; index++) {
+      const multiply = core.getDrawableMultiplyColor?.(index)
+      const screen = core.getDrawableScreenColor?.(index)
+      if (
+        (multiply &&
+          (Math.abs(multiply.R - 1) > 1e-4 ||
+            Math.abs(multiply.G - 1) > 1e-4 ||
+            Math.abs(multiply.B - 1) > 1e-4)) ||
+        (screen &&
+          (Math.abs(screen.R) > 1e-4 || Math.abs(screen.G) > 1e-4 || Math.abs(screen.B) > 1e-4))
+      ) {
+        nonNeutral++
+      }
+    }
+    this.logger.info('Drawable multiply/screen colours neutralized', {
+      modelId: this._metadata?.id,
+      drawableCount: count,
+      nonNeutral
+    })
+
+    const neutralMultiply = { R: 1, G: 1, B: 1, A: 1 }
+    const neutralScreen = { R: 0, G: 0, B: 0, A: 0 }
+    core.getMultiplyColor = () => neutralMultiply
+    core.getScreenColor = () => neutralScreen
   }
 
   /**

@@ -14,9 +14,12 @@ import ts from 'typescript'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const renderer = path.join(root, 'src/renderer/src')
+const roundForTest = (value) => Math.round(value * 1000) / 1000
 
 function loadEffect() {
-  const context = vm.createContext({ console })
+  let now = 0
+  const delays = []
+  const context = vm.createContext({ console, performance: { now: () => now } })
   class Logger {
     info() {}
     error() {}
@@ -30,7 +33,14 @@ function loadEffect() {
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new Logger() }],
     [
       path.join(renderer, 'managers/AnimationManager.ts'),
-      { default: { delay: async () => {}, linear: async () => {} } }
+      {
+        default: {
+          delay: async (ms) => {
+            delays.push(ms)
+          },
+          linear: async () => {}
+        }
+      }
     ]
   ])
   const modules = new Map()
@@ -62,6 +72,10 @@ function loadEffect() {
     }
     compiled.get(filename).runInContext(context)(exports, require)
     return exports
+  }
+  load.delays = delays
+  load.setNow = (value) => {
+    now = value
   }
   return load
 }
@@ -123,6 +137,24 @@ test('BlackOut/BlackIn accept official seconds and project milliseconds', async 
   }).runSnippet()
 
   assert.deepEqual(record, [500, 500, 100, 100, 250, 250])
+})
+
+test('exportActWallMs waits to the absolute act instead of replaying the full delay after a fence', async () => {
+  const load = loadEffect()
+  const BlackOut = load('snippets/BlackOutSnippet.ts').default
+  load.setNow(2500)
+  const snippet = new BlackOut(appWith([]), {
+    type: 'BlackOut',
+    wait: true,
+    delay: 1,
+    data: { duration: 3, color: 'black' }
+  })
+  // 片段在 actWall 前 2500ms 才拿到执行权；前置栅栏此时已经消耗了 1s，
+  // 若仍按 data.delay=1000 等，就会比 plan act 晚 1s。
+  snippet.exportActWallMs = 5000
+  await snippet.runSnippet()
+  assert.equal(load.delays.length, 1)
+  assert.equal(roundForTest(load.delays[0]), 2499.999)
 })
 
 test('TimelineCalculator preserves duration=0 for instant BlackOut/BlackIn instead of 600ms default', () => {

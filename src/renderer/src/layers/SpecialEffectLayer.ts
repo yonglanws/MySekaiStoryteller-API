@@ -219,6 +219,15 @@ export default class SpecialEffectLayer extends BaseLayer {
       return
     }
 
+    const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+    const frames = framesForSeconds(duration / 1000)
+    recordEffectProbe('fade-start', {
+      direction: 'out',
+      color,
+      durationMs: duration,
+      frames,
+      startMs
+    })
     this.setSpriteAlpha(sprite, startAlpha)
     await AnimationManager.linear(
       (progress) => {
@@ -227,10 +236,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       },
       duration,
       false,
-      {
-        startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: framesForSeconds(duration / 1000)
-      }
+      { startMs, frames }
     )
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 1)
@@ -254,6 +260,15 @@ export default class SpecialEffectLayer extends BaseLayer {
       sprite.visible = false
       return
     }
+    const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+    const frames = framesForSeconds(duration / 1000)
+    recordEffectProbe('fade-start', {
+      direction: 'in',
+      color,
+      durationMs: duration,
+      frames,
+      startMs
+    })
     this.setSpriteAlpha(sprite, startAlpha)
     await AnimationManager.linear(
       (progress) => {
@@ -262,10 +277,7 @@ export default class SpecialEffectLayer extends BaseLayer {
       },
       duration,
       false,
-      {
-        startMs: typeof performance !== 'undefined' ? performance.now() : 0,
-        frames: framesForSeconds(duration / 1000)
-      }
+      { startMs, frames }
     )
     if (gen !== this.fadeGen) return
     this.setSpriteAlpha(sprite, 0)
