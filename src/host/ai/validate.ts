@@ -2,6 +2,7 @@ import { ILogObj, Logger } from 'tslog'
 import { DEFAULT_BGM_FADE_MS, MAX_BGM_FADE_MS } from '../../common/audio/bgm'
 import { StorySchema, type StoryData } from '../../common/types/Story'
 import { enforceOfficialStoryInvariants, type OfficialLintReport } from './officialLinter'
+import { repairSpokenStageDirections } from './dialogueLinter'
 import { normalizePjskTerminology } from './personas'
 import { isStandingMotion, type CatalogView } from './prompt'
 import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
@@ -375,9 +376,19 @@ function validateActions(
   }
   kept.sort((a, b) => toNumber(a.at) - toNumber(b.at))
   if (speakerCap === 1 && kept.length > 1) {
-    // Talk 整句也只留 1 条动作：说话者优先，听者动作让位。
-    const speakerAction = kept.find((action) => action.modelId === speakerId)
-    data.actions = [speakerAction ?? kept[0]]
+    // 禁止同一瞬间双人同时做动作（说话者优先）；错峰（>=0.25）的反应动作保留。
+    const deduped: JsonRecord[] = []
+    for (const action of kept) {
+      const conflictIdx = deduped.findIndex(
+        (existing) => Math.abs(toNumber(existing.at) - toNumber(action.at)) < 0.25 - 1e-9
+      )
+      if (conflictIdx < 0) {
+        deduped.push(action)
+      } else if (action.modelId === speakerId && deduped[conflictIdx].modelId !== speakerId) {
+        deduped[conflictIdx] = action
+      }
+    }
+    data.actions = deduped.slice(0, 2)
     return
   }
   data.actions = kept
@@ -824,7 +835,9 @@ export function validateAndFixStory(
       } else {
         data.speaker = speakerRaw || (model ? view.shortName(model) : '')
       }
-      const content = normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
+      const content = repairSpokenStageDirections(
+        normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
+      )
       data.content = sanitizeDisplayText(content) || '...'
       data.voice = toStr(data.voice, '')
       const rawTtsText = typeof data.ttsText === 'string' ? data.ttsText.trim() : ''
@@ -894,7 +907,8 @@ export function validateAndFixStory(
           data[field] = view.defaultMotion(modelId)
         } else {
           warn(`snippets[${index}] facial '${current}' 不可用，已回退默认表情`)
-          data[field] = view.defaultFacial(modelId)
+          const tenseEmo = ['生气', '伤心', '害怕', '惊讶'].includes(String(data.emotion ?? ''))
+          data[field] = tenseEmo ? view.neutralFacial(modelId) : view.defaultFacial(modelId)
         }
       }
       snippet.data = data

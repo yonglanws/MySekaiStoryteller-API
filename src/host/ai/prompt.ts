@@ -6,6 +6,7 @@ import type {
 } from '../resources/resourceCatalog'
 import { normalizeBgmFile } from '../../common/audio/bgm'
 import { GENERIC_PROFILE, dialoguePersonaPrompt, personaFor, type PersonaEntry } from './personas'
+import { annotateFacialName, pickNeutralFacial } from './facialSemantics'
 import { CURATED_SCENARIO_SES, resolveScenarioSe, sePromptList } from './scenarioCues'
 
 // 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
@@ -43,28 +44,41 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['default', 1]
 ]
 const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
-  ['face_smile', 3],
-  ['face_closeeye', 2],
-  ['face_serious', 2],
-  ['face_trouble', 2],
-  ['face_sad', 2],
-  ['face_angry', 2],
   ['face_normal', 1],
   ['face_smallmouth', 1],
+  ['face_smile', 2],
+  ['face_closeeye', 1],
+  ['face_serious', 1],
+  ['face_trouble', 1],
+  ['face_sad', 1],
+  ['face_angry', 1],
   ['face_lookaway', 1],
   ['face_worry', 1],
-  ['face_smug', 1],
-  ['face_wink', 1],
-  ['face_sparkling', 1],
   ['face_surprise', 1],
   ['face_shy', 1],
   ['face_cry', 1],
-  ['face_notice', 1],
   ['face_shock', 1],
+  ['face_notice', 1],
   ['face_scared', 1],
+  ['face_smug', 1],
+  ['face_wink', 1],
+  ['face_sparkling', 1],
   ['face_disgust', 1],
-  ['face_sleepy', 1],
   ['face_blushed', 1],
+  ['face_sleepy', 1],
+  ['face_darknormal', 1],
+  ['face_darksad', 1],
+  ['face_darkangry', 1],
+  ['face_darkcloseeye', 1],
+  ['face_darktrouble', 1],
+  ['face_darksmallmouth', 1],
+  ['face_sharp', 1],
+  ['face_coldeyes', 1],
+  ['face_emptiness', 1],
+  ['face_lookdown', 1],
+  ['face_sigh', 1],
+  ['face_doya', 1],
+  ['face_hawawa', 1],
   ['face_tired', 1],
   ['face_baffling', 1],
   ['face_play', 1],
@@ -556,7 +570,9 @@ export class CatalogView {
    * 全部情绪族，优先贴合当前场景关键词与核心经典曲目；校验用的 canonicalBgm 仍接受全部 ~421 首。
    */
   bgmPromptChoices(limit = 0, query = ''): CatalogBgm[] {
-    const choices = this.bgmDetailsList().filter((detail) => detail.description.trim().length > 0)
+    const choices = this.bgmDetailsList().filter(
+      (detail) => (detail.description ?? '').trim().length > 0
+    )
     if (limit <= 0 || choices.length <= limit) return choices
 
     const keywords = extractQueryKeywords(query)
@@ -774,6 +790,13 @@ export class CatalogView {
     return model?.defaultFacial || 'face_smile_01'
   }
 
+  /** 不带明显笑意的默认中性表情，供严肃/负向情绪兜底。 */
+  neutralFacial(modelId: number): string {
+    const model = this.modelById(modelId)
+    const facials = model ? this.promptFacials(model) : []
+    return pickNeutralFacial(facials, model?.defaultFacial, model?.path)
+  }
+
   animationChoices(modelId: number, field: 'motion' | 'facial'): Set<string> {
     return field === 'motion' ? this.validMotions(modelId) : this.validFacials(modelId)
   }
@@ -923,6 +946,20 @@ export class CatalogView {
       .map((model) => {
         const names = this.promptFacials(model)
         return `${this.shortName(model)}(${model.id})：${names.length ? names.join('，') : '（目录暂未提供）'}`
+      })
+      .join('\n')
+  }
+
+  /** 带本地 motion3 参数/语义简注的表情清单，帮助模型分清苦笑/真笑/闭眼/阴暗表情。 */
+  annotatedFacialList(modelIds?: number[]): string {
+    const scope = modelIds?.length
+      ? this.promptScopeModels().filter((model) => modelIds.includes(model.id))
+      : this.promptScopeModels()
+    return scope
+      .map((model) => {
+        const names = this.promptFacials(model)
+        const annotated = names.map((name) => annotateFacialName(model.path, name))
+        return `${this.shortName(model)}(${model.id})：${annotated.length ? annotated.join('，') : '（目录暂未提供）'}`
       })
       .join('\n')
   }
@@ -1270,7 +1307,7 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 
 - ChangeLayoutMode.data.mode：固定为 "Normal"（Left / Right 双人或单人 Center）；严禁 3 人及以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
-- **双人全片同场与多人轮换原则**：当整场只有 2 名角色时，保持两人在场（Left/Right），不要每句来回切人淡入淡出。当整场 >=3 名角色时，保持每次最多 2 人在场，按幕次或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
+- **双人主同框与单人思考留白原则**：当整场只有 2 名角色时，日常对话保持两人在场（Left/Right），不要无故每句切人；但遇到角色内心独白、独自思考或特写反应时，允许用 LayoutClear + LayoutAppear(Center)（或 Move 到 Center）切出自然单人画面，思索结束后再切回 Left/Right 同框。当整场 >=3 名角色时，保持每次最多 2 人在场，按场景或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
 - **入场/退场动画规则**：
   - 入场默认槽位原地淡入：LayoutAppear 的 from 写目标槽位（from == to, offset=0），moveSpeed="Normal"；只有明确“走入”镜头才用 LeftOver/RightOver 作画外起点（offset=0）。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
   - 仅在明确“走入/走离”镜头时，才用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
@@ -1287,11 +1324,11 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 
 ## 对话与表演规范
 
-- **每句台词最多 1 个身体动作**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。常规句动作在 at=0 触发；一句最多一个动作，motion 可以带 facial，不要再补第 2 拍。
-- **短促反应句不要剥夺表情**：哪怕只有两三个字的短反应（如「……嗯？」「啊。」）也应保留 facial 表情变化；只把约 22%（多数集 10%~35%）的承接句或刚入场首句设为无动作。
-- **听者反应**：同句听者动作在官方全量剧本里只占约 0.5%，绝大多数句子不给；只有长独白中段才考虑听者反应（以 facial 为主，或轻微动作），听者大多数时候安静在台上倾听。
-- **动作要有语义、幅度克制**：动作与表情同向；同一角色连续多句换不同动作；**朝比奈真冬 / 真冬**保持克制表情与动作。
-- **停顿节奏**：93% 的 Talk 设 \`delay: 0\`；仅在重大沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
+- **每句台词最多 1 个身体动作**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。常规句动作在 at=0 触发；禁止同句里让说话者和听者在同一瞬间一起做身体动作。
+- **双人动作轮替与短促反应**：哪怕只有两三个字的短反应（如「……嗯？」「啊。」）也应保持 facial 表情贴合语境；只把约 20%~25% 的承接句或刚入场首句设为无动作。**务必让在场双方各自都有自然的动作切换**，避免一个人全程僵立；可在对方说话前的间隙用独立 Motion 片段或对方无动作的接话句安排回应动作。
+- **表情严格贴合剧情情绪**：仔细核对表情括号语义（例如分清真笑、苦笑、闭眼微笑、闭眼隐忍、阴沉冷脸），悲伤/生气/紧张/道歉语境严禁误选开心笑脸。**朝比奈真冬 / 真冬**保持克制神情。
+- **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
+- **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
 - 站内固定译名：凤笑梦口号写 **Wonderhoy**，草薙宁宁机器人写 **宁宁号**。
 
@@ -1505,7 +1542,7 @@ export function buildStoryPrompt(
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),
     '{motion_list}': view.motionList(),
-    '{facial_list}': view.facialList(),
+    '{facial_list}': view.annotatedFacialList(),
     '{image_list}': view.imageList(80, options.scene),
     '{bgm_list}': view.bgmList(36, options.scene),
     '{se_list}': view.seList(options.scene),
@@ -1540,7 +1577,7 @@ export function buildChatPrompt(
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),
     '{motion_list}': view.motionList(),
-    '{facial_list}': view.facialList(),
+    '{facial_list}': view.annotatedFacialList(),
     '{image_list}': view.imageList(60, options.scene),
     '{bgm_list}': view.bgmList(30, options.scene),
     '{chat_history}': history || '（首次对话）',

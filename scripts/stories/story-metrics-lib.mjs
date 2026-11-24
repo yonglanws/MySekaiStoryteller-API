@@ -215,7 +215,7 @@ export function storyToLines(story) {
   let background = ''
   let ambient = 'normal'
   let bgm = ''
-  const pending = { se: [], effects: [], layout: [], bg: 0, bgm: 0, ambient: 0 }
+  const pending = { se: [], effects: [], layout: [], motions: [], bg: 0, bgm: 0, ambient: 0 }
   const lines = []
 
   for (const snippet of snippets) {
@@ -235,6 +235,16 @@ export function storyToLines(story) {
       }
       case 'Move': {
         pending.layout.push({ kind: 'move', modelId: Number(data.modelId) })
+        break
+      }
+      case 'Motion': {
+        if (String(data.motion || '').trim() || String(data.facial || '').trim()) {
+          pending.motions.push({
+            modelId: Number(data.modelId),
+            motion: String(data.motion || ''),
+            facial: String(data.facial || '')
+          })
+        }
         break
       }
       case 'ChangeBackgroundImage': {
@@ -292,7 +302,7 @@ export function storyToLines(story) {
           facial: speakerActions.find((action) => action.facial)?.facial ?? '',
           speakerActions,
           listenerActions,
-          preMotions: [],
+          preMotions: pending.motions.splice(0),
           stageIds: [...stage],
           background,
           ambient,

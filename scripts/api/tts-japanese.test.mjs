@@ -7,7 +7,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -76,12 +76,14 @@ test('collectTtsTargets finds empty and Chinese ttsText but keeps Japanese', () 
 })
 
 test('official corpus with kanji-only ttsText passes the preflight unchanged', async () => {
-  const story = JSON.parse(
-    readFileSync(
-      new URL('../../resources/stories/event_145_08.sekai-story.json', import.meta.url),
-      'utf8'
-    )
-  )
+  const localFile = new URL('../../resources/stories/event_145_08.sekai-story.json', import.meta.url)
+  const fallbackRoot = process.env.MSS_RESOURCE_DIR?.trim()
+  const filePath = existsSync(localFile)
+    ? localFile
+    : fallbackRoot
+      ? `${fallbackRoot.replace(/[\\/]+$/, '')}/stories/event_145_08.sekai-story.json`
+      : localFile
+  const story = JSON.parse(readFileSync(filePath, 'utf8'))
   assert.deepEqual(
     collectTtsTargets(story).map((target) => target.snippetIndex),
     [],

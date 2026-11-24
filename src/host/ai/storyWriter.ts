@@ -43,7 +43,8 @@ import {
   type StagedVoiceDirectionLine
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
-import { lintDialogueFidelity } from './dialogueLinter'
+import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
+import { runAgenticStoryGeneration } from './agentTools'
 import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
 import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
 import { RerankClient, resolveRerankConfig } from '../rag/rerankClient'
@@ -68,6 +69,8 @@ export interface GenerateStoryOptions {
   translateForTts?: boolean
   /** 覆盖 llm.pipeline；chat 模式始终 single */
   pipeline?: LlmPipeline
+  /** 启用工具调用 Agentic Harness（不设时仅在 pipeline === 'agent' 启用） */
+  agentic?: boolean
   signal?: AbortSignal
 }
 
@@ -98,6 +101,9 @@ export interface GenerateStoryMeta {
   stages?: StoryStageMeta[]
   /** 自适应语义 RAG 检索诊断摘要（仅启用 RAG 时出现） */
   rag?: RagMetaSummary
+  /** Agentic 模式下调用的工具名称与运行模式（native / react-json / staged-fallback） */
+  toolCalls?: string[]
+  agentMode?: 'native' | 'react-json' | 'staged-fallback'
 }
 
 export interface GenerateStoryResult {
@@ -360,7 +366,11 @@ export class StoryWriter {
     const personas = this.getPersonas()
     const targetMinutes = options.targetMinutes ?? this.settings.targetMinutes
     const pipeline: LlmPipeline =
-      mode === 'chat' ? 'single' : (options.pipeline ?? this.settings.pipeline ?? 'single')
+      mode === 'chat'
+        ? 'single'
+        : options.agentic === true
+          ? 'agent'
+          : (options.pipeline ?? this.settings.pipeline ?? 'single')
 
     // staged 自带选角段；single/chat 先做一次很短的选角，避免主提示词装入全部人设。
     if (mode === 'chat' || pipeline === 'single') {
@@ -368,9 +378,11 @@ export class StoryWriter {
     }
 
     const result =
-      pipeline === 'staged'
-        ? await this.generateStaged({ prompt, view, personas, targetMinutes, options })
-        : await this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
+      pipeline === 'agent'
+        ? await this.generateAgentic({ prompt, view, personas, targetMinutes, options })
+        : pipeline === 'staged'
+          ? await this.generateStaged({ prompt, view, personas, targetMinutes, options })
+          : await this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
     result.meta.durationMs = Date.now() - startedAt
     return result
   }
@@ -502,6 +514,63 @@ export class StoryWriter {
     }
 
     throw new StoryGenerationError(`AI 剧本生成失败（已尝试 ${rounds + 1} 轮）`, details, raw)
+  }
+
+  /**
+   * Agentic Tool-Calling 模式：允许模型自主调用人设、motion3 表情语义、官方语料与双重校验工具。
+   * 当模型/网关不支持原生 tool calling 时自动切至 ReAct JSON 信封；若仍受阻则安全回退 staged 流水线。
+   */
+  private async generateAgentic(args: {
+    prompt: string
+    view: CatalogView
+    personas: PersonaEntry[]
+    targetMinutes: number
+    options: GenerateStoryOptions
+  }): Promise<GenerateStoryResult> {
+    const { prompt, view, personas, targetMinutes, options } = args
+    const retriever = this.getRagRetriever()
+    try {
+      const agentRes = await runAgenticStoryGeneration({
+        llm: this.llm,
+        view,
+        personas,
+        scene: prompt,
+        targetMinutes,
+        emotionLabels: this.emotionLabels,
+        ragRetriever: retriever,
+        logger: this.logger,
+        signal: options.signal
+      })
+      let ttsTranslated = 0
+      if (options.translateForTts ?? this.settings.translateForTts) {
+        ttsTranslated = await this.translateTtsText(agentRes.story, options.signal)
+      }
+      return {
+        story: agentRes.story,
+        meta: {
+          mode: 'story',
+          pipeline: 'agent',
+          model: agentRes.model,
+          rounds: agentRes.rounds,
+          warnings: agentRes.warnings,
+          usage: agentRes.usage,
+          latencyMs: agentRes.latencyMs,
+          durationMs: 0,
+          ttsTranslated,
+          cast: agentRes.story.models.map((m) => view.shortName(view.modelById(m.id) ?? m as never) || String(m.id)),
+          toolCalls: agentRes.toolCallsUsed,
+          agentMode: agentRes.modeUsed
+        }
+      }
+    } catch (error) {
+      if (options.signal?.aborted) throw error
+      this.logger.warn(
+        `[AI] Agentic 模式回退至 staged 流水线：${errorMessage(error)}`
+      )
+      const fallback = await this.generateStaged({ prompt, view, personas, targetMinutes, options })
+      fallback.meta.agentMode = 'staged-fallback'
+      return fallback
+    }
   }
 
   /**
@@ -823,6 +892,16 @@ export class StoryWriter {
         }
       }
     }
+
+    // 确定性兜底清理台词中残留的括号动作描写（保留真正的心里话）
+    const cleanedDialogue: StagedDialogue = {
+      ...dialogue,
+      lines: dialogue.lines.map((line) => ({
+        ...line,
+        content: repairSpokenStageDirections(line.content)
+      }))
+    }
+    dialogue = cleanedDialogue
 
     // ---- 2.5 语音导演（Voice Direction）与舞台调度并行 -------------------------------------------------------
     const finalDialogue = enforceDialogueLength ? softenPunctuation(dialogue) : dialogue
@@ -1148,9 +1227,10 @@ export class StoryWriter {
       '2. 每条译文都必须含假名，不要输出纯汉字（例如「了解」写成「了解だよ」「了解です」）。保留自然的停顿与语气（……、っ、！、？、——）。',
       '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
       '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。',
-      ...(addressLines.length > 0 ? [`5. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`] : []),
+      '5. 只输出说出口或内心独白的台词正文，严禁插入「(笑)」「（ため息）」等括号动作提示。',
+      ...(addressLines.length > 0 ? [`6. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`] : []),
       ...(jpSamples.length > 0
-        ? [`6. 官方日文口吻参考（仅学语气与人称，严禁照抄）：\n${jpSamples.join('\n---\n')}`]
+        ? [`7. 官方日文口吻参考（仅学语气与人称，严禁照抄）：\n${jpSamples.join('\n---\n')}`]
         : [])
     ].join('\n')
 

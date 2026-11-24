@@ -285,7 +285,7 @@ export function lintOfficialStory(
       const checkActionTime = (modelId: number, motionName: string, atFrac: number): void => {
         if (!motionName) return
         const appearInfo = lastAppearMotion.get(modelId)
-        if (!appearInfo || appearInfo.motion !== motionName) return
+        if (!appearInfo || !appearInfo.motion) return
         const actionTime = startSec + atFrac * durSec
         if (actionTime - appearInfo.timeSec < 0.4 - 1e-6) {
           appearMotionClashCount += 1
@@ -311,7 +311,7 @@ export function lintOfficialStory(
         const appearInfo = lastAppearMotion.get(mid)
         if (
           appearInfo &&
-          appearInfo.motion === str(data.motion).trim() &&
+          appearInfo.motion &&
           startSec - appearInfo.timeSec < 0.4 - 1e-6
         ) {
           appearMotionClashCount += 1
@@ -525,7 +525,7 @@ export function enforceOfficialStoryInvariants(
         const appearInfo = lastAppearMotion.get(speakerId)
         if (
           appearInfo &&
-          appearInfo.motion === str(data.motion).trim() &&
+          appearInfo.motion &&
           startSec - appearInfo.timeSec < 0.4 - 1e-6
         ) {
           data.motion = ''
@@ -543,7 +543,7 @@ export function enforceOfficialStoryInvariants(
           if (
             str(rawAction.motion).trim() &&
             appearInfo &&
-            appearInfo.motion === str(rawAction.motion).trim() &&
+            appearInfo.motion &&
             actionTime - appearInfo.timeSec < 0.4 - 1e-6
           ) {
             const { motion: _dropped, ...rest } = rawAction

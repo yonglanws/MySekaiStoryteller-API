@@ -254,7 +254,7 @@ test('drops actions that exceed the per-line quota', () => {
   story.snippets.splice(3, 0, {
     type: 'Talk',
     wait: false,
-    delay: 0,
+    delay: 0.5,
     data: {
       speaker: '瑞希',
       content: '一。',
