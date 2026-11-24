@@ -1603,6 +1603,28 @@ export function formatCanonGroundingBrief(options: CanonGroundingBriefOptions = 
   return blocks.length > 0 ? `\n${blocks.join('\n\n')}\n` : ''
 }
 
+/**
+ * 导演/表演/配音阶段共用的 Stage 1 锚点：中段转折点、开场意象、收尾回扣与用户显性诉求。
+ * 让镜头、BGM 停顿、动作与声演峰值精准落在计划转折点上，而不是平均铺满全篇。
+ */
+function formatDirectingAnchorBlock(plan: StagedCastPlan): string {
+  const u = plan.understanding
+  if (!u) return ''
+  const lines: string[] = []
+  if (u.turningPoint) {
+    lines.push(`- 中段转折点（镜头/BGM/停顿/动作与声演峰值优先落在这里）：${u.turningPoint}`)
+  }
+  if (u.openingMotif) lines.push(`- 开场日常意象（前 1~4 句具体出现）：${u.openingMotif}`)
+  if (u.closingCallback) {
+    lines.push(`- 收尾回扣（结尾 2~3 句轻巧呼应，不要升华说教）：${u.closingCallback}`)
+  }
+  if (u.explicitRequests.length > 0) {
+    lines.push(`- 用户显性诉求（必须演到位）：${u.explicitRequests.join('；')}`)
+  }
+  if (u.emotionalArc) lines.push(`- 整体情绪弧光：${u.emotionalArc}`)
+  return lines.length > 0 ? `\n## 导演锚点（Stage 1 已规划，务必对齐）\n${lines.join('\n')}\n` : ''
+}
+
 function formatWorldviewCueBlock(ragContext?: RagRetrieveResult | null): string {
   const lore = ragContext?.sections?.worldviewLore ?? []
   if (lore.length === 0) return ''
@@ -1655,6 +1677,26 @@ export function buildDialoguePrompt(
     : '（自由发挥，但仍要围绕这个小事件）'
 
   const hasRagVoice = (options.ragContext?.sections?.dialogueVoice?.length ?? 0) > 0
+  const u = plan.understanding
+  const craftAnchors = [
+    u?.openingMotif
+      ? `  - 开场意象：前 1~4 句让「${u.openingMotif}」以具体的动作、声音或触感出现，让这个物件先替角色承载情绪，不要用台词解释它。`
+      : '',
+    u?.turningPoint
+      ? `  - 中段转折：在「${u.turningPoint}」这一拍让语气或话题真正拐弯（抢话、突然安静、答非所问、说出真心话又马上岔开），转折前后各留一句短反应。`
+      : '',
+    u?.closingCallback
+      ? `  - 收尾回扣：结尾 2~3 句用「${u.closingCallback}」轻巧呼应开场意象，说完就收，不做总结陈词。`
+      : '',
+    (u?.characterGoals?.length ?? 0) > 0
+      ? `  - 表里动机：${(u?.characterGoals ?? [])
+          .map((goal) => `${goal.cast || '角色'}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`)
+          .join('；')}。隐瞒的部分只能从停顿、改口、转移话题里漏出来。`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
+
   const fewShotExcerpts = hasRagVoice ? '' : selectUnitFewShotExcerpts(plan.cast, options.scene)
   const groundingBrief = formatCanonGroundingBrief({
     scene: options.scene,
@@ -1755,7 +1797,7 @@ ${fewShotExcerpts}
   lines 元素优先直接写字符串；需要刻意沉默/转场收窗时可写成对象 \`{"content":"...","pauseBefore":1.0,"closeWindowAfter":true}\`（pauseBefore 仅在重大停顿或反应前用 \`1.0\` 或 \`1.5\`，其余句留空即 \`0\`）。
   整场约 ${Math.max(8, Math.round(budget / 2.1))} 个 turns，长短要有明显起伏（官方一半以上是单句）：
   约 45% 的 turn 只放 1 条（短反应、抢话、被打断），至少 ${Math.max(10, Math.round(budget * 0.4))} 个；
-  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~6 条，其中至少 2 个 turn 放 6 条以上（情绪最重、回忆或解释处）。
+  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~5 条，只有情绪最重或回忆处才允许写成 5~6 条的稍长一段（全片 1~2 处即可，禁止连排长独白）。
 - 句长与排版（对应官方 30 字宽文本框）：
   - 平均 17~20 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
   - 约 1/6 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
@@ -1763,7 +1805,9 @@ ${fewShotExcerpts}
 - 只写说出口的话或括号内心独白 \`（……）\`（约一成）；禁止写 \`（笑）\`、\`她转过头\` 之类动作叙述。
 - **反套路与官方质感（Show, Don't Tell）**：
   - 禁止心理咨询式独白和直白情绪总结（如「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「我终于明白了」「内心深处」）。用具体物件、转移话题、打断、迟疑停顿（……、——）来侧面流露情绪。
-  - 结尾最后 2 句严禁升华说教或大团圆总结；像官方剧情一样收在一个安静的动作余韵、日常小约定、轻描淡写的吐槽或未说完的半句话里。${termHint}
+  - 结尾最后 2 句严禁升华说教或大团圆总结；像官方剧情一样收在一个安静的动作余韵、日常小约定、轻描淡写的吐槽或未说完的半句话里。
+  - 角色化学反应：允许抢话、听错、各说各的再重新对上、用口头禅或小名互怼；不要每句都接得严丝合缝像在念对白稿。
+  - 欲言又止：全片至少 3~4 处把话说到一半改成破折号或省略号，或先答非所问再绕回来。${craftAnchors ? `\n${craftAnchors}` : ''}${termHint}
 
 ## 写完后自检（不要输出自检过程）
 - 总句数是否在 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句？
@@ -2107,7 +2151,7 @@ export function buildEmotionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
-${plan.understanding?.emotionalArc ? `规划情绪弧光：${plan.understanding.emotionalArc}` : ''}
+${formatDirectingAnchorBlock(plan)}
 角色：
 ${cast}
 
@@ -2136,6 +2180,7 @@ ${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、
 - **ttsSpecialScene（布尔值，默认 false）**：
   - 仅在真正极端高潮（痛哭/哽咽崩溃、撕裂喊叫、极近距离耳语、关键回忆爆发）时设为 true。
   - 整场最多允许 **${maxSpecialCount}** 句设为 true（严格 <= 15%）。
+- **对齐 Stage 1 转折点**：语速最慢、气息最不稳、\`ttsSpecialScene=true\` 的句子优先落在中段转折点附近；开场意象句与收尾回扣句保持克制（普通语速、平静或轻微情绪），不要提前把情绪拉满。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -2733,7 +2778,7 @@ export function buildStagingPrompt(
       .join('\n'),
     user: `## 本场与大纲
 小事件：${plan.event || options.scene}
-${plan.understanding?.emotionalArc ? `情绪弧光参考：${plan.understanding.emotionalArc}` : ''}
+${formatDirectingAnchorBlock(plan)}
 角色（共 ${plan.cast.length} 名）：
 ${castList}${formatWorldviewCueBlock(options.ragContext)}
 
@@ -2759,6 +2804,7 @@ ${presenceRule}
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与场景**：可选 \`Telop\`（开场/跳时间小标题）、\`PlaceInfo\`（地点条）、\`SideFade\`（\`transitionIn: "sideFade"\`）、回忆（\`transitionIn: "flashback"\`, \`isFlashback: true\`）、出入 SEKAI（\`sekaiIn\`/\`sekaiOut\`）、天气/氛围粒子（${CURATED_SCENARIO_EFFECTS.join('/')}）。
 - **BGM 与停顿节奏**：大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
+- **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -3371,7 +3417,7 @@ export function buildDirectionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
-${plan.understanding?.emotionalArc ? `情绪弧光参考：${plan.understanding.emotionalArc}` : ''}
+${formatDirectingAnchorBlock(plan)}
 出场角色：
 ${castLines}${formatWorldviewCueBlock(options.ragContext)}
 

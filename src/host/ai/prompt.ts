@@ -1465,6 +1465,32 @@ function emotionInstruction(labels: string[] | undefined): string {
 这个字段只影响配音音色，不要因为写标签而改变台词内容。`
 }
 
+/**
+ * 单轮模式的官方质感约束：与三段式台词轮保持同一套反 AI 套话口径，
+ * 避免一次成稿时退回心理咨询式独白与升华结尾。
+ */
+const SINGLE_MODE_FIDELITY_RULES = `
+
+## 官方质感与反 AI 套话（Show, Don't Tell）
+- 用具体物件、转移话题、打断与迟疑停顿（……、——）侧面流露情绪；禁止心理咨询式独白与直白情绪总结（「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「内心深处」「温柔地包容」）。
+- 结尾最后 1~2 句不要升华说教或大团圆总结，收在安静的日常余韵、小约定、轻描淡写的吐槽或未说完的半句话里。
+- 允许抢话、听错、答非所问、各说各的再重新对上；不要每句都接得严丝合缝像在念对白稿。
+- 若下方提供了官方参考，只用于核对事实、关系与口吻，严禁照抄原句或复述原事件。`
+
+/**
+ * 结构化官方参考块：独立分节 + 显式防照抄声明，避免参考语料被当成可复述的正文。
+ */
+function canonGroundingBlock(ragContext: string | undefined): string {
+  const text = ragContext?.trim()
+  if (!text) return ''
+  return `
+
+## 官方剧情与设定参考（仅用于核对事实、关系与口吻，严禁照抄原句或复述原剧情）
+${text}
+
+（以上官方参考只用于学习称呼、断句、潜台词与互动节奏，严禁照抄原句或复述原事件。）`
+}
+
 export function buildStoryPrompt(
   view: CatalogView,
   options: PromptOptions
@@ -1485,10 +1511,13 @@ export function buildStoryPrompt(
     '{se_list}': view.seList(options.scene),
     '{scene}': options.scene
   })
-  const ragBlock = options.ragContext?.trim() ? `\n\n${options.ragContext.trim()}` : ''
   return {
     system: options.systemPrompt?.trim() || STORY_SYSTEM_PROMPT,
-    user: user + ragBlock + emotionInstruction(options.emotionLabels)
+    user:
+      user +
+      canonGroundingBlock(options.ragContext) +
+      SINGLE_MODE_FIDELITY_RULES +
+      emotionInstruction(options.emotionLabels)
   }
 }
 
