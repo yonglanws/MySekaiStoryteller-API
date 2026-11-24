@@ -4206,6 +4206,26 @@ export function composeStory(
     const hasSilentAfter = explicitSilentReaction || autoSilentTargetId !== null
     const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter || hasSilentAfter)
 
+    // 官方 TalkData.Motions 每条动作都同时带 MotionName 与 FacialName。说话者动作只给了
+    // motion 时，沿用该角色上一个 facial（没有就用目录默认表情）；已有表情、听者动作与
+    // motion 名都不动。
+    let speakerFacial = actorState?.lastFacial || ''
+    const speakerActs = actions
+      .filter((action) => action.modelId === member.modelId)
+      .sort((a, b) => num(a.at) - num(b.at))
+    for (const action of speakerActs) {
+      const facial = typeof action.facial === 'string' ? action.facial.trim() : ''
+      if (facial) {
+        speakerFacial = facial
+        continue
+      }
+      const motion = typeof action.motion === 'string' ? action.motion.trim() : ''
+      if (!motion) continue
+      const filled = speakerFacial || view.defaultFacial(member.modelId)
+      action.facial = filled
+      speakerFacial = filled
+    }
+
     snippets.push({
       type: 'Talk',
       wait: true,

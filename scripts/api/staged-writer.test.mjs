@@ -1123,3 +1123,81 @@ test('softenPunctuation turns some full stops into ellipses without touching wor
     )
   }
 })
+
+test('composeStory backfills a facial when a speaker motion has none', () => {
+  const view = new CatalogView(catalog.get())
+  const [first, second] = view.models
+  const plan = {
+    title: '测试',
+    event: '两个人聊下次练习',
+    logline: '',
+    outline: [],
+    cast: [first, second].map((model) => ({
+      modelId: model.id,
+      name: view.shortName(model),
+      fullName: model.name,
+      path: model.path,
+      role: ''
+    })),
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: [
+      {
+        id: 'l1',
+        speaker: plan.cast[0].name,
+        content: '今天也一起练习吧，先从基础开始。',
+        emotion: '开心'
+      },
+      {
+        id: 'l2',
+        speaker: plan.cast[0].name,
+        content: '刚才那一段再来一次怎么样。',
+        emotion: '平静'
+      },
+      {
+        id: 'l3',
+        speaker: plan.cast[1].name,
+        content: '嗯，不过我想先休息一下。',
+        emotion: '平静'
+      }
+    ]
+  }
+  // 直接构造 direction，绕过 normalizeDirection 的听者配额，专门验证 composeStory 的落盘规则。
+  const direction = {
+    background: 'bg_room.jpg',
+    ambient: 'normal',
+    bgm: '',
+    bgmStop: false,
+    lines: [
+      { id: 'l1', facial: 'face_normal_01' },
+      { id: 'l2', motion: 'w-normal-nod01' },
+      {
+        id: 'l3',
+        motion: 'e-normal-sigh01',
+        facial: 'face_sad_01',
+        listener: { modelId: first.id, motion: 'w-normal-smile01' }
+      }
+    ]
+  }
+  const story = composeStory(view, plan, dialogue, direction)
+  const talks = story.snippets.filter((snippet) => snippet.type === 'Talk')
+  assert.equal(talks.length, 3)
+
+  // l1 显式表情，作为说话者「上一个 facial」。
+  assert.equal(talks[0].data.actions[0].facial, 'face_normal_01')
+
+  // l2 说话者只有 motion：补上该角色上一个 facial，motion 名不变。
+  const filled = talks[1].data.actions.find((action) => action.modelId === first.id)
+  assert.equal(filled.motion, 'w-normal-nod01')
+  assert.equal(filled.facial, 'face_normal_01')
+
+  // l3 说话者已有表情不改；听者只给了 motion 时保持为空。
+  const explicit = talks[2].data.actions.find((action) => action.modelId === second.id)
+  assert.equal(explicit.motion, 'e-normal-sigh01')
+  assert.equal(explicit.facial, 'face_sad_01')
+  const listener = talks[2].data.actions.find((action) => action.modelId === first.id)
+  assert.equal(listener.motion, 'w-normal-smile01')
+  assert.equal(listener.facial, undefined)
+})
