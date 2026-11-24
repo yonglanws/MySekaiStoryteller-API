@@ -18,15 +18,29 @@ export class SnippetTimestampRecorder {
   private timestamps: SnippetTimestamp[] = []
   private timestampIndex: Map<number, SnippetTimestamp> = new Map()
   private renderStartWallMs: number = 0
+  /** TimelineCalculator 的 0 点（故事帧 10）；诊断漂移相对它计算。 */
+  private timelineStartWallMs: number = 0
   private currentSnippetStartWallMs: number = 0
   private currentSnippetIndex: number = -1
   private currentSnippetType: string = ''
   private currentSnippetData: { speaker?: string; content?: string } = {}
 
-  markRenderStart(): void {
-    this.renderStartWallMs = performance.now()
+  /**
+   * @param renderStartWallMs 成片帧 0（故事帧 0）的时刻；音频 placement 相对它。
+   * @param timelineStartWallMs TimelineCalculator 的 0 点（故事帧 10）；
+   *   诊断里的 planned/actual 漂移相对它，二者相差 PlayCore 预热帧。
+   */
+  markRenderStart(
+    renderStartWallMs: number = performance.now(),
+    timelineStartWallMs: number = renderStartWallMs
+  ): void {
+    this.renderStartWallMs = renderStartWallMs
+    this.timelineStartWallMs = timelineStartWallMs
     this.timestamps = []
-    this.logger.info(`Render start marked at wall time ${this.renderStartWallMs.toFixed(0)}ms`)
+    this.logger.info(
+      `Render start marked at wall time ${this.renderStartWallMs.toFixed(0)}ms ` +
+        `(timeline origin ${this.timelineStartWallMs.toFixed(0)}ms)`
+    )
   }
 
   markSnippetStart(
@@ -122,6 +136,11 @@ export class SnippetTimestampRecorder {
 
   getRenderStartWallMs(): number {
     return this.renderStartWallMs
+  }
+
+  /** TimelineCalculator 的 0 点（故事帧 10）的墙钟时刻；诊断漂移相对它。 */
+  getTimelineStartWallMs(): number {
+    return this.timelineStartWallMs
   }
 
   getAllTimestamps(): SnippetTimestamp[] {
@@ -227,6 +246,7 @@ export class SnippetTimestampRecorder {
     this.timestamps = []
     this.timestampIndex.clear()
     this.renderStartWallMs = 0
+    this.timelineStartWallMs = 0
     this.currentSnippetIndex = -1
     this.currentSnippetStartWallMs = 0
   }

@@ -1084,14 +1084,17 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   )
   assert.equal(
     tickDeltas.length,
-    10 + 2 * (resNoEnvelope.timings.encodedFrames - 1),
-    'warmup + 30fps must consume 2 story steps per frame transition'
+    2 * (resNoEnvelope.timings.encodedFrames - 1),
+    'frame n is story frame floor(n×60/30): 2 steps per frame transition, no warmup offset'
   )
   // Without setEndingEnvelope, audio mix duration must NOT add a hardcoded +500ms tail.
+  // 成片帧 0 是故事帧 0，PlayCore 前 10 帧（166.667ms）也在成片里，所以音频至少多出这段。
   const snippetDur = Math.round(f.planned[0])
+  const warmupMs = (10 * 1000) / 60
   assert.ok(
-    mixedDurations[0] >= snippetDur && mixedDurations[0] < snippetDur + 100,
-    `Expected no hardcoded +500ms tail when setEndingEnvelope is absent, got mix=${mixedDurations[0]} vs snippet=${snippetDur}`
+    mixedDurations[0] >= snippetDur + warmupMs - 1 &&
+      mixedDurations[0] < snippetDur + warmupMs + 100,
+    `Expected no hardcoded +500ms tail when setEndingEnvelope is absent, got mix=${mixedDurations[0]} vs snippet=${snippetDur}+${warmupMs}`
   )
 
   // Now with setEndingEnvelope present, tail equals PLAYED_WAIT_TIME_MS + SCENARIO_EXIT_BGM_FADE_MS (500ms).
@@ -1107,7 +1110,7 @@ test('fast export drives fixed 1/60 story steps (two per 30fps frame) and comput
   )
 })
 
-test('frame n renders at first_frame + n/fps; warmup happens before any story step', async (t) => {
+test('video frame n renders story frame n: frame 0 at 0ms, two 1/60 steps per 30fps frame', async (t) => {
   const renderTimes = []
   const f = exportFixture(t, {
     snippets: [talk('あ'.repeat(4))],
@@ -1120,15 +1123,14 @@ test('frame n renders at first_frame + n/fps; warmup happens before any story st
   assert.equal(res.success, true)
   const pumpRenders = renderTimes.slice(-res.timings.encodedFrames)
   assert.equal(pumpRenders.length, res.timings.encodedFrames)
-  const warmupMs = (10 * 1000) / 60
   assert.ok(
-    Math.abs(pumpRenders[0] - warmupMs) < 2,
-    'frame 0 must render after the official 10-frame playcore warmup'
+    Math.abs(pumpRenders[0]) < 2,
+    `frame 0 must render at story frame 0 (video frame n = story frame n), got ${pumpRenders[0]}ms`
   )
   for (const n of [1, 15, 30]) {
     assert.ok(
-      Math.abs(pumpRenders[n] - (warmupMs + (n * 1000) / 30)) < 2,
-      `frame ${n} must render at ${warmupMs + (n * 1000) / 30}ms, got ${pumpRenders[n]}`
+      Math.abs(pumpRenders[n] - (n * 1000) / 30) < 2,
+      `frame ${n} must render at ${(n * 1000) / 30}ms, got ${pumpRenders[n]}`
     )
   }
 })
@@ -1147,9 +1149,9 @@ test('25fps consumes 2,2,3,2,3 story steps per frame (no ceil), every step exact
   const res = await f.export('fast')
   assert.equal(res.success, true)
   assert.deepEqual(
-    stepCalls.slice(0, 6),
-    [10, 2, 2, 3, 2, 3],
-    'warmup then 25fps must distribute 60 steps over 25 frames by remainder, never ceil'
+    stepCalls.slice(0, 5),
+    [2, 2, 3, 2, 3],
+    '25fps must distribute 60 steps over 25 frames by remainder, never ceil'
   )
   assert.ok(
     tickDeltas.every((ms) => Math.abs(ms - 1000 / 60) < 1e-6),
@@ -1157,8 +1159,37 @@ test('25fps consumes 2,2,3,2,3 story steps per frame (no ceil), every step exact
   )
   assert.equal(
     tickDeltas.length,
-    10 + Math.floor(((res.timings.encodedFrames - 1) * 60) / 25),
-    'warmup + frame n maps to floor(n×60/25) story steps'
+    Math.floor(((res.timings.encodedFrames - 1) * 60) / 25),
+    'frame n maps to floor(n×60/25) story steps'
+  )
+})
+
+test('24fps consumes 2,3,2,3 story steps per frame (no ceil), every step exactly 1/60', async (t) => {
+  const tickDeltas = []
+  const stepCalls = []
+  const f = exportFixture(t, {
+    snippets: [talk('あ'.repeat(4))],
+    enabled: false,
+    fps: 24,
+    fastFps: 24,
+    onClockTick: (ms) => tickDeltas.push(ms),
+    onStorySteps: (steps) => stepCalls.push(steps)
+  })
+  const res = await f.export('fast')
+  assert.equal(res.success, true)
+  assert.deepEqual(
+    stepCalls.slice(0, 5),
+    [2, 3, 2, 3, 2],
+    '24fps must distribute 60 steps over 24 frames by remainder (2,3,…), never ceil'
+  )
+  assert.ok(
+    tickDeltas.every((ms) => Math.abs(ms - 1000 / 60) < 1e-6),
+    `every story step must be 1/60s, got ${Math.min(...tickDeltas)}..${Math.max(...tickDeltas)}`
+  )
+  assert.equal(
+    tickDeltas.length,
+    Math.floor(((res.timings.encodedFrames - 1) * 60) / 24),
+    'frame n maps to floor(n×60/24) story steps'
   )
 })
 

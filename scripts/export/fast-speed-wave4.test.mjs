@@ -880,7 +880,14 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
   })
   mocks.set(path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveBgmUrl: (p) => p })
   mocks.set(path.join(rendererRoot, 'managers/AnimationManager.ts'), {
-    default: { setExportMode: () => {}, exportSpeedMultiplier: 1, exportTargetFPS: 30 }
+    default: {
+      setExportMode: () => {},
+      exportSpeedMultiplier: 1,
+      exportTargetFPS: 30,
+      // 帧泵在首个片段前等 timeline 0 点（PlayCore 10 帧 = 166.667ms）；
+      // 这个测试替身不驱动假时钟，直接放行，片段照旧按自己的 setTimeout 结束。
+      delay: async () => {}
+    }
   })
   mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {
     getLayoutRunningEndMs: () => 0,

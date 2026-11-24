@@ -46,6 +46,61 @@ export function framesToMs(frames: number): number {
   return Math.round(frames * FRAME_MS * 1000) / 1000
 }
 
+// ---- video frame <-> story frame ------------------------------------------------------
+
+/**
+ * 成片帧 `videoFrame` 对应的故事帧（含该帧本身的模拟结果）。
+ *
+ * 移植 `sse-export/src/lib.rs:513-545` 的 `Clock::base`：`table.frames[frame*table/video]`。
+ * 60fps 时成片帧 n 就是故事帧 n（PlayCore 前 10 帧也拍进成片，与参考 `--from 0` 一致）；
+ * 24/25/30fps 时故事时间 n/fps 落在两个故事帧之间，余量交给 `storyFrameTweenForVideoFrame`。
+ *
+ * 整数用「商×60 + 余数×60/fps」两段计算，避免 n×60 在极大帧号上损失精度。
+ */
+export function storyFrameForVideoFrame(videoFrame: number, encodeFps: number = STORY_FPS): number {
+  if (!Number.isFinite(videoFrame) || videoFrame <= 0) return 0
+  const fps = Number.isFinite(encodeFps) && encodeFps > 0 ? Math.floor(encodeFps) : STORY_FPS
+  const frame = Math.floor(videoFrame)
+  const whole = Math.floor(frame / fps)
+  const rest = frame - whole * fps
+  return whole * STORY_FPS + Math.floor((rest * STORY_FPS) / fps)
+}
+
+/**
+ * 输出帧 `videoFrame` 到 `videoFrame+1` 之间要推进的故事步数：
+ * `floor((k+1)×60/fps) − floor(k×60/fps)`。
+ *
+ * 非整除帧率按余量分配（25fps 为 2,2,3,2,3…，24fps 为 2,3,2,3…），
+ * 不再用 `ceil(60/fps)` 把剧情整体加速 20%~25%。
+ */
+export function storyStepsForVideoFrame(videoFrame: number, encodeFps: number = STORY_FPS): number {
+  const frame = Number.isFinite(videoFrame) && videoFrame > 0 ? Math.floor(videoFrame) : 0
+  return storyFrameForVideoFrame(frame + 1, encodeFps) - storyFrameForVideoFrame(frame, encodeFps)
+}
+
+/** 成片帧的故事时间落在 base 与 base+1 之间的余量（0..1，供 FrameInterpolator 用）。 */
+export function storyFrameTweenForVideoFrame(
+  videoFrame: number,
+  encodeFps: number = STORY_FPS
+): number {
+  const fps = Number.isFinite(encodeFps) && encodeFps > 0 ? Math.floor(encodeFps) : STORY_FPS
+  const frame = Number.isFinite(videoFrame) && videoFrame > 0 ? videoFrame : 0
+  return (frame * STORY_FPS) / fps - storyFrameForVideoFrame(frame, fps)
+}
+
+/**
+ * 故事帧数 -> 编码帧数：成片帧 n 覆盖故事帧 n，所以 `ceil(storyFrames × fps / 60)`。
+ * 60fps 时就是 storyFrames（`Clock::frames` 的 `(frame*video).div_ceil(table)`）。
+ */
+export function videoFrameCountForStoryFrames(
+  storyFrames: number,
+  encodeFps: number = STORY_FPS
+): number {
+  const fps = Number.isFinite(encodeFps) && encodeFps > 0 ? Math.floor(encodeFps) : STORY_FPS
+  if (!Number.isFinite(storyFrames) || storyFrames <= 0) return 1
+  return Math.max(1, Math.ceil((Math.floor(storyFrames) * fps) / STORY_FPS))
+}
+
 export function secondsToFrames(seconds: number): number {
   return framesForSeconds(seconds)
 }

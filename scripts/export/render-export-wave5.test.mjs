@@ -250,7 +250,9 @@ test('VideoExportManager pre-covers opening curtain when BlackOut opens story an
       setExportMode: noop,
       exportSpeedMultiplier: 1,
       exportTargetFPS: 30,
-      exportEncodeFPS: 30
+      exportEncodeFPS: 30,
+      // 帧泵会先等 timeline 0 点（PlayCore 10 帧 = 166.667ms）；测试替身直接放行。
+      delay: async () => {}
     }
   })
   mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {
@@ -659,7 +661,9 @@ test('VideoExportManager mounts model/stage probe for validateModelRendering on 
       setExportMode: noop,
       exportSpeedMultiplier: 1,
       exportTargetFPS: 30,
-      exportEncodeFPS: 30
+      exportEncodeFPS: 30,
+      // 帧泵会先等 timeline 0 点（PlayCore 10 帧 = 166.667ms）；测试替身直接放行。
+      delay: async () => {}
     }
   })
   mocks.set(path.join(rendererRoot, 'snippets/stageTiming.ts'), {

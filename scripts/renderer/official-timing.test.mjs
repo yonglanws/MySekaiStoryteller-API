@@ -113,6 +113,54 @@ test('framesForSeconds follows Unity f32 accumulation, not a 1e-3 ceil', () => {
   assert.equal(round(timing.quantizeMsToFrame(timing.APPEAR_FADE_TOTAL_MS)), 116.667)
 })
 
+test('video frame n maps to story frame floor(n×60/fps) and steps by floor difference', () => {
+  const { load } = fixture()
+  const timing = load(path.join(root, 'src/common/official/timing.ts'))
+  // 60fps：成片帧 n 就是故事帧 n（含 PlayCore 前 10 帧）。
+  for (const n of [0, 1, 9, 10, 11, 20266, 20267]) {
+    assert.equal(timing.storyFrameForVideoFrame(n, 60), n)
+    assert.equal(timing.storyFrameTweenForVideoFrame(n, 60), 0)
+  }
+  // 30fps：成片帧 n = 故事帧 2n。
+  assert.equal(timing.storyFrameForVideoFrame(0, 30), 0)
+  assert.equal(timing.storyFrameForVideoFrame(1, 30), 2)
+  assert.equal(timing.storyFrameForVideoFrame(10133, 30), 20266)
+  // 25fps：floor(n×60/25) = 2,4,7,9,12；步数差 2,2,3,2,3，绝不是 ceil(60/25)=3。
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map((n) => timing.storyFrameForVideoFrame(n, 25)),
+    [0, 2, 4, 7, 9, 12]
+  )
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map((n) => timing.storyStepsForVideoFrame(n, 25)),
+    [2, 2, 3, 2, 3, 2]
+  )
+  // 24fps：floor(n×2.5) = 0,2,5,7,10；步数差 2,3,2,3，不是 ceil(2.5)=3。
+  assert.deepEqual(
+    [0, 1, 2, 3, 4].map((n) => timing.storyFrameForVideoFrame(n, 24)),
+    [0, 2, 5, 7, 10]
+  )
+  assert.deepEqual(
+    [0, 1, 2, 3].map((n) => timing.storyStepsForVideoFrame(n, 24)),
+    [2, 3, 2, 3]
+  )
+  // 25fps 第 1 帧的故事时间落在故事帧 2 与 3 之间 0.4；第 5 帧正好落在故事帧 12。
+  assert.equal(round(timing.storyFrameTweenForVideoFrame(1, 25)), 0.4)
+  assert.equal(round(timing.storyFrameTweenForVideoFrame(2, 25)), 0.8)
+  assert.equal(timing.storyFrameTweenForVideoFrame(5, 25), 0)
+  // 24fps 每 2 帧半帧：0.5 / 0 交替。
+  assert.equal(timing.storyFrameTweenForVideoFrame(1, 24), 0.5)
+  assert.equal(timing.storyFrameTweenForVideoFrame(2, 24), 0)
+  // 故事帧数 -> 成片帧数：ceil(storyFrames×fps/60)，60fps 原样。
+  assert.equal(timing.videoFrameCountForStoryFrames(20267, 60), 20267)
+  assert.equal(timing.videoFrameCountForStoryFrames(20267, 30), 10134)
+  assert.equal(timing.videoFrameCountForStoryFrames(20267, 25), 8445)
+  assert.equal(timing.videoFrameCountForStoryFrames(20267, 24), 8107)
+  // 无穷/NaN/负数都退化成 0 帧，不产生负索引。
+  assert.equal(timing.storyFrameForVideoFrame(-5, 24), 0)
+  assert.equal(timing.storyFrameForVideoFrame(Number.NaN, 24), 0)
+  assert.equal(timing.storyStepsForVideoFrame(Number.NaN, 24), 2)
+})
+
 test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion gate', () => {
   const { load } = fixture()
   const talk = load('utils/TalkTiming.ts')

@@ -48,9 +48,19 @@ export function formatDiagnosticsText(report: ExportDiagnostics): string {
   lines.push('=== MySekaiStoryteller export diagnostics ===')
   lines.push(`generated: ${report.generatedAt}`)
   lines.push(
-    `mode=${meta.mode} ${meta.width}x${meta.height} ${meta.fps}fps frames=${meta.frameCount} ` +
+    `mode=${meta.mode} ${meta.width}x${meta.height} ${meta.fps}fps ` +
+      `video=${meta.videoFps ?? meta.fps}fps frames=${meta.frameCount} ` +
       `duration=${Math.round(meta.durationMs)}ms outputSize=${meta.outputSize ?? 'n/a'}`
   )
+  if (report.frameMap) {
+    const map = report.frameMap
+    lines.push(
+      `frame map: video frame n = story frame ${map.videoFrameToStoryFrame} ` +
+        `(${map.storyFps}Hz story, ${map.videoFps}fps video, ${map.storyFrames} story frames -> ` +
+        `${map.videoFrames} video frames; PlayCore warmup ${map.playcoreWarmupStoryFrames} frames ` +
+        `are part of the video, timeline 0 = story frame ${map.timelineOriginStoryFrame})`
+    )
+  }
   if (meta.timings) {
     lines.push(
       `timings: ${Object.entries(meta.timings)

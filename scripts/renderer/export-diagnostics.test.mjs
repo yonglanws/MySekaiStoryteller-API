@@ -231,6 +231,35 @@ test('buildExportDiagnostics records per-line timing, tts and action cues', () =
   )
 })
 
+test('diagnostics carries the video-frame -> story-frame map', () => {
+  const { buildExportDiagnostics } = loadDiagnostics()
+  const report = buildExportDiagnostics(input())
+  assert.ok(
+    report.frameMap,
+    'frameMap must be present so video frames can be compared to plan frames'
+  )
+  assert.equal(report.frameMap.storyFps, 60)
+  assert.equal(report.frameMap.videoFps, 30)
+  assert.equal(report.frameMap.storyFrames, report.plan.totalFrames)
+  assert.equal(report.frameMap.videoFrames, 120)
+  assert.equal(report.frameMap.videoFrameToStoryFrame, 'floor(n*60/30)')
+  assert.equal(report.frameMap.playcoreWarmupStoryFrames, 10)
+  assert.equal(
+    report.frameMap.timelineOriginStoryFrame,
+    10,
+    'plannedStartMs/actualStartMs are 0-based at story frame 10'
+  )
+
+  // 60fps 时成片帧 n 就是故事帧 n；公式退化成 n。
+  const sixty = buildExportDiagnostics({
+    ...input(),
+    exportMeta: { ...input().exportMeta, fps: 60, frameCount: 240 }
+  })
+  assert.equal(sixty.frameMap.videoFps, 60)
+  assert.equal(sixty.frameMap.videoFrameToStoryFrame, 'n')
+  assert.equal(sixty.frameMap.videoFrames, 240)
+})
+
 test('disabled TTS does not report Irodori text/duration anomalies', () => {
   const { buildExportDiagnostics } = loadDiagnostics()
   const disabled = {
@@ -337,6 +366,10 @@ test('formatDiagnosticsText produces a readable per-snippet log', () => {
   const { buildExportDiagnostics, formatDiagnosticsText } = loadDiagnostics()
   const text = formatDiagnosticsText(buildExportDiagnostics(input()))
   assert.match(text, /=== MySekaiStoryteller export diagnostics ===/)
+  assert.match(
+    text,
+    /frame map: video frame n = story frame floor\(n\*60\/30\).*PlayCore warmup 10 frames are part of the video/
+  )
   assert.match(text, /--- snippets ---/)
   assert.match(text, /\[001\] Talk/)
   assert.match(text, /action at=0\.5 cue=1500ms model=1 motion=w-normal-nod01/)
@@ -350,7 +383,13 @@ test('buildExportDiagnostics aligns real pre-fenced delays & Now durations witho
   const { buildExportDiagnostics } = loadDiagnostics()
   const report = buildExportDiagnostics({
     snippets: [
-      { type: 'SideFade', progressBehavior: 'Now', wait: false, delay: 0.2, data: { direction: 'Left', mode: 'In', duration: 0.5 } },
+      {
+        type: 'SideFade',
+        progressBehavior: 'Now',
+        wait: false,
+        delay: 0.2,
+        data: { direction: 'Left', mode: 'In', duration: 0.5 }
+      },
       {
         type: 'Talk',
         progressBehavior: 'WaitFinished',
@@ -385,13 +424,32 @@ test('buildExportDiagnostics aligns real pre-fenced delays & Now durations witho
       getRenderStartWallMs: () => 5000,
       getSnippetTimestamp: (idx) =>
         idx === 0
-          ? { snippetIndex: 0, snippetType: 'SideFade', wallStartMs: 5000, wallEndMs: 5700, wallDurationMs: 700 }
-          : { snippetIndex: 1, snippetType: 'Talk', wallStartMs: 5700, wallEndMs: 8967, wallDurationMs: 3267 }
+          ? {
+              snippetIndex: 0,
+              snippetType: 'SideFade',
+              wallStartMs: 5000,
+              wallEndMs: 5700,
+              wallDurationMs: 700
+            }
+          : {
+              snippetIndex: 1,
+              snippetType: 'Talk',
+              wallStartMs: 5700,
+              wallEndMs: 8967,
+              wallDurationMs: 3267
+            }
     },
     ttsResults: new Map(),
     motion: [],
     logs: [],
-    exportMeta: { mode: 'fast', width: 1280, height: 720, fps: 60, frameCount: 240, durationMs: 3967 },
+    exportMeta: {
+      mode: 'fast',
+      width: 1280,
+      height: 720,
+      fps: 60,
+      frameCount: 240,
+      durationMs: 3967
+    },
     ttsEnabled: false
   })
 

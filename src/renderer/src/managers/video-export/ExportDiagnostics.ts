@@ -5,6 +5,7 @@ import type { MotionTraceEvent } from './MotionTraceCollector'
 import type { ExportLogRecord } from './ExportLogBus'
 import { isJapaneseSpeechText } from '../../../../common/tts/speechText'
 import { bakeStoryPlan } from '../../../../common/export/storyPlan'
+import { PLAYCORE_WARMUP_FRAMES } from '../../../../common/official/timing'
 import type {
   DiagnosticAction,
   DiagnosticSnippet,
@@ -91,8 +92,14 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
         ? rawDelayStart
         : Math.max(0, (planned?.startTimeMs ?? 0) - delayMs)
     const plannedDuration = (planned?.durationMs ?? 0) + delayMs
+    // 诊断的 0 点是 timeline 的 0（故事帧 10）；成片帧 0 比它早 PlayCore 预热帧，
+    // 音频 placement 仍用成片原点（getVideoRelativeStartTimeMs）。
+    const timelineStartWallMs =
+      typeof input.timestamps.getTimelineStartWallMs === 'function'
+        ? input.timestamps.getTimelineStartWallMs()
+        : input.timestamps.getRenderStartWallMs()
     const actualStartMs = actual
-      ? Math.round(Math.max(0, actual.wallStartMs - input.timestamps.getRenderStartWallMs()))
+      ? Math.round(Math.max(0, actual.wallStartMs - timelineStartWallMs))
       : null
     const actualDuration = actual ? Math.round(Math.max(0, actual.wallDurationMs)) : null
     const driftMs = actualStartMs === null ? null : Math.round(actualStartMs - plannedStartMs)
@@ -247,10 +254,22 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     anomalies: anomalies.length
   }
 
+  const videoFps = input.exportMeta.videoFps ?? input.exportMeta.fps
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     export: input.exportMeta,
+    // 成片帧 n 显示故事帧 floor(n×60/videoFps)；60fps 时为 n。
+    // PlayCore 预热帧（0..9）也在成片里，参考导出默认 --from 0。
+    frameMap: {
+      storyFps: plan.fps,
+      videoFps,
+      storyFrames: plan.totalFrames,
+      videoFrames: input.exportMeta.frameCount,
+      videoFrameToStoryFrame: videoFps === plan.fps ? 'n' : `floor(n*${plan.fps}/${videoFps})`,
+      playcoreWarmupStoryFrames: PLAYCORE_WARMUP_FRAMES,
+      timelineOriginStoryFrame: PLAYCORE_WARMUP_FRAMES
+    },
     summary,
     snippets: diagnostics,
     tts,

@@ -721,3 +721,25 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
   - 首轮失败与修复对照：`export-1794149760101-mrsbgp.*`（Talk-only 模型未声明，
     `Model with id 1 not found`）、`export-1794150464053-trsu3r.*`（黑屏假阳性）、
     `export-1794150551037-ys19yk.*`（修复前的 `event_79_05`，204 条漂移噪音）。
+
+### 帧语义与导出时钟（第 5 轮，2026-11-24）
+
+- 成片帧 n = 故事帧 n（`sse-export/src/lib.rs:513-545` 的 `Clock::base`；参考
+  `sse export` 默认 `--from 0`，PlayCore 前 10 个故事帧也在成片里）。上一轮
+  「成片 = `plan.totalFrames − 10`」会把整段画面相对参考提前 10 帧，已移除；
+  60fps 成片帧数 = `plan.totalFrames`。
+- 帧泵不再在成片帧 0 之前空跑 10 个故事步。TimelineCalculator 的 0 点仍在故事帧 10
+  （`timelineStartMs`），`waitForPlannedStartMs` / `delayOverrideMs` 按 timeline 坐标
+  计算；`SnippetTimestampRecorder` 记双原点：音频 placement/总时长用成片帧 0，
+  诊断漂移仍用 timeline 0（`getTimelineStartWallMs`）。
+- 诊断新增 `export.videoFps` 与 `frameMap`（`floor(n×60/videoFps)` 公式、story/video
+  帧数、PlayCore 预热帧、timeline 0 所在故事帧），文本日志打印 `frame map:` 行。
+- 非整除帧率按 `floor((k+1)×60/fps) − floor(k×60/fps)` 推进（25fps 2,2,3,2,3；
+  24fps 2,3,2,3），成片帧数 `ceil(storyFrames×fps/60)`；helper 在
+  `src/common/official/timing.ts`（`storyFrameForVideoFrame` 等）。
+- 帧泵拍完 end_frame 前 1 帧后继续推进模拟到 end_frame（不再渲染/采集），
+  让片尾封包在 end_frame 时刻的定时器落地；否则假时钟下帧泵先停会把
+  `setEndingEnvelope` 永久挂起（本轮真实导出曾因此卡住）。
+- 验证（2026-11-24，60fps）：`scenario-min-empty` 95 帧 / 1.583s = plan 95；
+  `scenario-effects` 858 帧 / 14.3s = plan 858，16 条 snippet 的 drift 均 ≤2ms、
+  anomalies 0；`npm run test:all` 370/370。逐帧 alpha/像素对照未重跑。
