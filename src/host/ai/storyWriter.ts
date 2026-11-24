@@ -6,7 +6,7 @@ import { extractJson, LlmClient, type ChatMessage, type ChatResult, type ChatUsa
 import { loadPersonas, type PersonaEntry } from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
-  applyEmotionPlan,
+  applyVoiceDirectionPlan,
   buildCastPrompt,
   buildDialoguePrompt,
   buildDialogueRepairPrompt,
@@ -27,20 +27,20 @@ import {
   normalizeCastPlan,
   normalizeDialogue,
   normalizeDirection,
-  normalizeEmotionPlan,
+  normalizeVoiceDirectionPlan,
   normalizeStaging,
   softenPunctuation,
-  stabilizeEmotions,
   type LlmPipeline,
   type StagedCastPlan,
   type StagedDialogue,
   type StagedDirection,
   type StagedMessages,
   type StagedPromptOptions,
-  type StagedStaging
+  type StagedStaging,
+  type StagedVoiceDirectionLine
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
-import { ensureJapaneseTtsText, type TtsBatchTranslator } from './ttsText'
+import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
 
 export type StoryMode = 'story' | 'chat'
 
@@ -652,49 +652,39 @@ export class StoryWriter {
       }
     }
 
-    // ---- 2.5 情绪分段与日文翻译（与表演设计并行） ------------------------------------------------------------
-    // 情绪标签只影响 TTS 音色，表演设计按台词文本自行判断语气；两段 LLM 调用并行，
-    // 合成前再把情绪标签回填。翻译只依赖台词文本，也在同一时间启动。
+    // ---- 2.5 语音导演（Voice Direction）与舞台调度并行 -------------------------------------------------------
     const finalDialogue = enforceDialogueLength ? softenPunctuation(dialogue) : dialogue
     const translateForTts = options.translateForTts ?? this.settings.translateForTts
-    let dialogueTts: Promise<Map<string, string> | null> | null = null
-    if (translateForTts) {
-      dialogueTts = this.translateDialogue(finalDialogue, options.signal).catch((error) => {
-        if (options.signal?.aborted) return null
-        this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
-        return null
-      })
-    }
-    const emotionTask: Promise<Map<string, string> | null> = (async () => {
+    const emotionTask: Promise<Map<string, StagedVoiceDirectionLine> | null> = (async () => {
       if (this.emotionLabels.length === 0) return null
-      let emotionPlan: Map<string, string> | null = null
+      let voicePlan: Map<string, StagedVoiceDirectionLine> | null = null
       let emotionRaw = ''
       try {
         const result = await runStage(
           'emotion',
           buildEmotionPrompt(plan, dialogue, promptOptions),
-          { temperature: 0.2 }
+          { temperature: 0.25 }
         )
         emotionRaw = result.content
-        emotionPlan = normalizeEmotionPlan(
+        voicePlan = normalizeVoiceDirectionPlan(
           parseStageJson(result),
           dialogue,
           this.emotionLabels
         )
-        if (!emotionPlan) {
-          markStageFailed('没有返回可用的情绪段', 'emotion')
-          warnings.push('情绪标注不可用，整场使用默认情绪')
+        if (!voicePlan) {
+          markStageFailed('没有返回可用的语音导演指令', 'emotion')
+          warnings.push('语音导演标注不可用，整场使用默认情绪')
         }
       } catch (error) {
         if (options.signal?.aborted) throw error
         const message = errorMessage(error)
-        details.push(`情绪标注：${message}`)
-        warnings.push(`情绪标注失败，整场使用默认情绪：${message}`)
+        details.push(`语音导演：${message}`)
+        warnings.push(`语音导演失败，整场使用默认情绪：${message}`)
       }
 
       // 只有较长剧本完全锁死单一情绪（只有 1 段）时才低温重标一次；不再机械要求 3~4 段来回切。
-      if (emotionPlan && this.emotionLabels.length > 1 && dialogue.lines.length >= 16) {
-        const runs = countEmotionRuns(emotionPlan, dialogue)
+      if (voicePlan && this.emotionLabels.length > 1 && dialogue.lines.length >= 16) {
+        const runs = countEmotionRuns(voicePlan, dialogue)
         if (runs < 2) {
           markStageFailed(`情绪分段过于单一（仅 ${runs} 段）`, 'emotion')
           warnings.push(`长剧本情绪只有 ${runs} 段，已请求按起承转合重标`)
@@ -702,25 +692,25 @@ export class StoryWriter {
             const repaired = await runStage(
               'emotion-repair',
               buildEmotionRepairPrompt(plan, dialogue, promptOptions, emotionRaw, runs),
-              { temperature: 0.2 }
+              { temperature: 0.25 }
             )
-            const repairedPlan = normalizeEmotionPlan(
+            const repairedPlan = normalizeVoiceDirectionPlan(
               parseStageJson(repaired),
               dialogue,
               this.emotionLabels
             )
             if (repairedPlan && countEmotionRuns(repairedPlan, dialogue) > runs) {
-              emotionPlan = repairedPlan
+              voicePlan = repairedPlan
             }
           } catch (error) {
             if (options.signal?.aborted) throw error
-            details.push(`情绪重标：${errorMessage(error)}`)
+            details.push(`语音导演重标：${errorMessage(error)}`)
           }
         }
       }
-      return emotionPlan
+      return voicePlan
     })()
-    // 舞台调度/摄影策划与情绪标注、日文翻译同时启动；等待情绪回填后，再交给精细演技导演（directActing）。
+    // 舞台调度/摄影策划与语音导演同时启动；等待语音导演回填后，再并行启动精细演技导演（direction）与上下文感知日文翻译（translateDialogue）。
     const stagingTask: Promise<StagedStaging> = (async () => {
       try {
         const result = await runStage(
@@ -740,13 +730,19 @@ export class StoryWriter {
     void emotionTask.catch(() => undefined)
     void stagingTask.catch(() => undefined)
 
-    // ---- 3. 等待情绪分段与舞台调度完成，并回填情绪 -------------------------------------------------------
-    const [emotionPlan, staging] = await Promise.all([emotionTask, stagingTask])
-    dialogue = applyEmotionPlan(
-      finalDialogue,
-      emotionPlan ? stabilizeEmotions(dialogue, emotionPlan, this.emotionLabels) : null,
-      this.emotionLabels
-    )
+    // ---- 3. 等待语音导演与舞台调度完成，并回填情绪与逐句韵律指令 --------------------------------------------
+    const [voiceDirectionPlan, staging] = await Promise.all([emotionTask, stagingTask])
+    dialogue = applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
+
+    // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、emotion 与 ttsCaption。
+    let dialogueTts: Promise<Map<string, string> | null> | null = null
+    if (translateForTts) {
+      dialogueTts = this.translateDialogue(dialogue, personas, options.signal).catch((error) => {
+        if (options.signal?.aborted) return null
+        this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
+        return null
+      })
+    }
 
     // ---- 4. 精细演技导演（带完整情绪段与舞台/分镜上下文） -------------------------------------------------
     let direction: StagedDirection = fallbackDirection(view, plan)
@@ -878,18 +874,24 @@ export class StoryWriter {
   }
 
   /**
-   * 提前批量翻译一段台词稿，返回 lineId → 日文 ttsText。
+   * 批量翻译一段台词稿（携带说话人、人设口吻、emotion、ttsCaption），返回 lineId → 日文 ttsText。
    *
-   * 只翻译、不校验；合成后还会走一次 ensureJapaneseTtsText 兜底（正常情况没有待翻条目）。
-   * 在情绪/表演段之前启动，让翻译和两段 LLM 调用并行，不占串行尾时间。
+   * 在语音导演完成后启动，与演技导演（direction）并行，不增加串行尾时间。
    */
   private async translateDialogue(
     dialogue: StagedDialogue,
+    personas: PersonaEntry[],
     signal?: AbortSignal
   ): Promise<Map<string, string>> {
     const slots = dialogue.lines.map((line) => ({
       line,
-      data: { content: line.content, ttsText: '' }
+      data: {
+        speaker: line.speaker,
+        content: line.content,
+        emotion: line.emotion ?? '',
+        ttsCaption: line.ttsCaption ?? '',
+        ttsText: ''
+      }
     }))
     // 走与剧本相同的一套规则：纯标点跳过、非日文结果丢弃、失败留空。
     const story = {
@@ -905,7 +907,7 @@ export class StoryWriter {
     const startedAt = Date.now()
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal),
+      this.ttsTranslator(signal, personas),
       this.logger
     )
     const result = new Map<string, string>()
@@ -919,17 +921,62 @@ export class StoryWriter {
     return result
   }
 
-  private ttsTranslator(signal?: AbortSignal): TtsBatchTranslator {
-    const system =
-      '你是中日翻译。只输出 JSON 字符串数组，不要解释、不要 markdown。把每条中文台词翻译成自然、口语化的日语，适合角色配音；保留原文换行位置和语气。每条译文都必须含假名，不要输出纯汉字（例如「了解」要写成「了解です」）；标点和符号可以保留。'
-    return async (texts) => {
+  private speakerStyleHint(speaker: string | undefined, personas: PersonaEntry[]): string {
+    const name = speaker?.trim()
+    if (!name) return ''
+    const lower = name.toLowerCase()
+    const matched = personas.find(
+      (entry) =>
+        entry.name.toLowerCase() === lower ||
+        entry.aliases.some((alias) => alias.toLowerCase() === lower) ||
+        entry.name.includes(name) ||
+        name.includes(entry.name)
+    )
+    if (!matched?.prompt) return ''
+    const firstLine = matched.prompt
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^#+\s*/, '').trim())
+      .find((line) => line.length >= 6)
+    return firstLine ? firstLine.slice(0, 60) : ''
+  }
+
+  private ttsTranslator(
+    signal?: AbortSignal,
+    personas: PersonaEntry[] = this.getPersonas()
+  ): TtsBatchTranslator {
+    const system = [
+      '你是 Project SEKAI 二次元剧情的中日翻译（配音台词专精），为 IrodoriTTS 生成自然、贴合角色人设的日语配音文本。',
+      '只输出与输入等长的 JSON 字符串数组，不要解释、不要 markdown。',
+      '翻译规则：',
+      '1. 严格结合每句提供的说话人、口吻提示、情绪标签（emotion）与日语声演指令（ttsCaption），翻出地道、口语化、符合角色人称与敬语习惯的日语。',
+      '2. 每条译文都必须含假名，不要输出纯汉字（例如「了解」写成「了解だよ」「了解です」）。保留自然的停顿与语气（……、っ、！、？、——）。',
+      '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
+      '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。'
+    ].join('\n')
+
+    return async (texts, items?: TtsTranslationItem[]) => {
+      const hasContext = Boolean(
+        items?.some((item) => item.speaker || item.emotion || item.ttsCaption)
+      )
+      const userContent = hasContext && items
+        ? `把下面 ${items.length} 条台词结合角色与声演指令翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(
+            items.map((item) => {
+              const style = this.speakerStyleHint(item.speaker, personas)
+              return {
+                text: item.text,
+                ...(item.speaker ? { speaker: item.speaker } : {}),
+                ...(style ? { style } : {}),
+                ...(item.emotion ? { emotion: item.emotion } : {}),
+                ...(item.ttsCaption ? { ttsCaption: item.ttsCaption } : {})
+              }
+            })
+          )}`
+        : `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
+
       const { data } = await this.llm.chatJson<string[]>(
         [
           { role: 'system', content: system },
-          {
-            role: 'user',
-            content: `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
-          }
+          { role: 'user', content: userContent }
         ],
         { temperature: 0.3, signal }
       )

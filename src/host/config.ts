@@ -137,6 +137,16 @@ const IrodoriSchema = z.object({
   defaultLoraAdapter: z.string().default(''),
   /** 全局默认 caption（角色未填时使用） */
   defaultCaption: z.string().default(''),
+  /** 早期去噪步说话人 K/V 缩放（>1.0 锁住角色底色，留出后续步给 caption/emoji 表达情绪） */
+  speakerKvScale: z.number().positive().default(1.15),
+  /** speakerKvScale 生效的最小时间步（默认 0.9，仅作用于早期音色形成阶段） */
+  speakerKvMinT: z.number().min(0).max(1).default(0.9),
+  /** 可选：限制 speakerKvScale 作用的最多层数 */
+  speakerKvMaxLayers: z.number().int().positive().optional(),
+  /** 音色锁策略：normal=普通句锁定基础参考音频，仅 ttsSpecialScene 解锁；off=允许按 emotion 切换 */
+  timbreLockMode: z.enum(['normal', 'off']).default('normal'),
+  /** 特殊场景（ttsSpecialScene=true）时的 cfg_scale_caption 引导强度 */
+  specialSceneCfgScaleCaption: z.number().positive().default(3.6),
   /** 内置 AI 提示词可用的情绪标签；角色 emotions 里的标签也会自动并入 */
   emotionLabels: z.array(z.string()).default([])
 })

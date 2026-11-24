@@ -1,6 +1,7 @@
 import type { ILogObj, Logger } from 'tslog'
 import type { StoryData } from '../../common/types/Story'
 import { isJapaneseSpeechText } from '../../common/tts/speechText'
+import { enforceIrodoriEmojiBudget } from '../../common/tts/irodori'
 
 /**
  * IrodoriTTS 只接受日文。宿主在导出前必须把每条 Talk 的 ttsText 补成日文，
@@ -22,9 +23,19 @@ export function hasTranslationContent(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text)
 }
 
+export interface TtsTranslationItem {
+  text: string
+  speaker?: string
+  emotion?: string
+  ttsCaption?: string
+}
+
 export interface TtsTarget {
   snippetIndex: number
   content: string
+  speaker?: string
+  emotion?: string
+  ttsCaption?: string
   data: { ttsText: string; content: string }
 }
 
@@ -33,16 +44,32 @@ export function collectTtsTargets(story: StoryData): TtsTarget[] {
   const targets: TtsTarget[] = []
   story.snippets.forEach((snippet, snippetIndex) => {
     if (snippet.type !== 'Talk') return
-    const data = snippet.data as { ttsText?: string; content: string }
+    const data = snippet.data as {
+      ttsText?: string
+      content: string
+      speaker?: string
+      emotion?: string
+      ttsCaption?: string
+    }
     if (!data.content?.trim()) return
     if (!hasTranslationContent(data.content)) return
     if (isJapaneseText(data.ttsText ?? '')) return
-    targets.push({ snippetIndex, content: data.content, data: data as TtsTarget['data'] })
+    targets.push({
+      snippetIndex,
+      content: data.content,
+      speaker: data.speaker?.trim() || undefined,
+      emotion: data.emotion?.trim() || undefined,
+      ttsCaption: data.ttsCaption?.trim() || undefined,
+      data: data as TtsTarget['data']
+    })
   })
   return targets
 }
 
-export type TtsBatchTranslator = (texts: string[]) => Promise<string[]>
+export type TtsBatchTranslator = (
+  texts: string[],
+  items?: TtsTranslationItem[]
+) => Promise<string[]>
 
 export interface EnsureJapaneseTtsResult {
   translated: number
@@ -125,8 +152,14 @@ export async function ensureJapaneseTtsText(
     // 各批次互不依赖，并发发送；长台词分 3 批时翻译时间和单批持平。
     await runWithConcurrency(chunks, concurrency, async (chunk) => {
       const input = chunk.map((target) => target.content)
+      const items: TtsTranslationItem[] = chunk.map((target) => ({
+        text: target.content,
+        ...(target.speaker ? { speaker: target.speaker } : {}),
+        ...(target.emotion ? { emotion: target.emotion } : {}),
+        ...(target.ttsCaption ? { ttsCaption: target.ttsCaption } : {})
+      }))
       try {
-        const output = await translate(input)
+        const output = await translate(input, items)
         if (!Array.isArray(output) || output.length !== input.length) {
           logger.warn(
             `[TTS] 日文翻译数量不匹配（期望 ${input.length}，收到 ${
@@ -136,12 +169,13 @@ export async function ensureJapaneseTtsText(
           return
         }
         for (let index = 0; index < chunk.length; index++) {
-          const value = output[index]
-          if (typeof value !== 'string' || !value.trim() || !isJapaneseText(value)) {
+          const rawValue = output[index]
+          const value = typeof rawValue === 'string' ? enforceIrodoriEmojiBudget(rawValue, 2) : ''
+          if (!value || !isJapaneseText(value)) {
             logger.warn(`[TTS] snippets[${chunk[index].snippetIndex}] 翻译结果不是日文，已忽略`)
             continue
           }
-          chunk[index].data.ttsText = value.trim()
+          chunk[index].data.ttsText = value
           translated += 1
         }
       } catch (error) {

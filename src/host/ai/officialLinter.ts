@@ -27,6 +27,7 @@ import {
 } from '../../common/official/timing'
 import type { StoryData } from '../../common/types/Story'
 import type { CatalogView } from './prompt'
+import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
 
 type JsonRecord = Record<string, unknown>
 
@@ -668,6 +669,41 @@ export function enforceOfficialStoryInvariants(
   if (closers.length > 0) {
     snippets.splice(lastBlackOutIndex, 0, ...closers)
     warn(`[Linter] 已在片尾自动补全 ${closers.length} 条未闭合特效/镜头复位指令`)
+  }
+
+  // 后置清洗 Irodori 逐句语音导演字段（caption 去身份词、语速钳制、emoji 预算、specialScene <= 15%）
+  {
+    const talkDatas: JsonRecord[] = []
+    for (const s of snippets) {
+      if (!isRecord(s) || str(s.type) !== 'Talk' || !isRecord(s.data)) continue
+      const data = s.data
+      talkDatas.push(data)
+      if (typeof data.ttsCaption === 'string' && data.ttsCaption) {
+        data.ttsCaption = sanitizeIrodoriCaption(data.ttsCaption)
+      }
+      if (typeof data.ttsText === 'string' && data.ttsText) {
+        data.ttsText = enforceIrodoriEmojiBudget(data.ttsText, 2)
+      }
+      if (typeof data.ttsSpeed === 'number' && Number.isFinite(data.ttsSpeed)) {
+        const special = data.ttsSpecialScene === true
+        data.ttsSpeed = Number(
+          Math.min(special ? 1.18 : 1.08, Math.max(special ? 0.85 : 0.92, data.ttsSpeed)).toFixed(2)
+        )
+      }
+    }
+    const maxSpecial = Math.floor(talkDatas.length * 0.15)
+    let keptSpecial = 0
+    for (const data of talkDatas) {
+      if (data.ttsSpecialScene !== true) continue
+      if (keptSpecial < maxSpecial) {
+        keptSpecial += 1
+      } else {
+        delete data.ttsSpecialScene
+        if (typeof data.ttsSpeed === 'number' && Number.isFinite(data.ttsSpeed)) {
+          data.ttsSpeed = Number(Math.min(1.08, Math.max(0.92, data.ttsSpeed)).toFixed(2))
+        }
+      }
+    }
   }
 
   const report = lintOfficialStory(story, view)

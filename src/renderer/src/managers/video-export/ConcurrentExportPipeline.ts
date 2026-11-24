@@ -142,24 +142,47 @@ export class ConcurrentExportPipeline {
       content: string
       ttsText: string
       emotion: string
+      ttsCaption?: string
+      ttsSpeed?: number
+      ttsSpecialScene?: boolean
     }[] = []
 
     for (let i = 0; i < snippets.length; i++) {
       if (snippets[i].type === 'Talk') {
         const snippet = snippets[i] as SnippetData & {
-          data?: { speaker: string; content: string; ttsText?: string; emotion?: string }
+          data?: {
+            speaker: string
+            content: string
+            ttsText?: string
+            emotion?: string
+            ttsCaption?: string
+            ttsSpeed?: number
+            ttsSpecialScene?: boolean
+          }
         }
         const data =
           snippet.data ||
           ((snippet as Record<string, unknown>).data as
-            | { speaker: string; content: string; ttsText?: string; emotion?: string }
+            | {
+                speaker: string
+                content: string
+                ttsText?: string
+                emotion?: string
+                ttsCaption?: string
+                ttsSpeed?: number
+                ttsSpecialScene?: boolean
+              }
             | undefined)
         talkSnippets.push({
           index: i,
           speaker: data?.speaker || '',
           content: data?.content || '',
           ttsText: data?.ttsText || '',
-          emotion: data?.emotion || ''
+          emotion: data?.emotion || '',
+          ttsCaption: data?.ttsCaption || undefined,
+          ttsSpeed: typeof data?.ttsSpeed === 'number' ? data.ttsSpeed : undefined,
+          ttsSpecialScene:
+            typeof data?.ttsSpecialScene === 'boolean' ? data.ttsSpecialScene : undefined
         })
       }
     }
@@ -206,15 +229,31 @@ export class ConcurrentExportPipeline {
         } else {
           let result: { success: boolean; duration: number }
 
+          const lineOverride =
+            talk.ttsCaption || talk.ttsSpeed !== undefined || talk.ttsSpecialScene !== undefined
+              ? {
+                  ttsCaption: talk.ttsCaption,
+                  ttsSpeed: talk.ttsSpeed,
+                  ttsSpecialScene: talk.ttsSpecialScene
+                }
+              : undefined
+
           if (hasSpeakableTts) {
             result = await ttsManager.synthesizeWithText(
               talk.ttsText,
               talk.speaker,
               talk.index,
-              talk.emotion
+              talk.emotion,
+              lineOverride
             )
           } else {
-            result = await ttsManager.translateAndSynthesize(talk.content, talk.speaker, talk.index)
+            result = await ttsManager.translateAndSynthesize(
+              talk.content,
+              talk.speaker,
+              talk.index,
+              talk.emotion,
+              lineOverride
+            )
           }
 
           const latency = this.now() - startTime

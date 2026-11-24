@@ -116,6 +116,11 @@ tts:
     seed: -1                      # -1 = 每次随机
     defaultLoraAdapter: ""        # 角色未填 loraAdapter 时的全局默认
     defaultCaption: ""            # 角色未填 caption 时的全局默认
+    speakerKvScale: 1.15          # 早期去噪步说话人 K/V 缩放（锁住角色底色，避免情绪导致音色漂移）
+    speakerKvMinT: 0.9            # speakerKvScale 生效的最小时间步（默认 0.9）
+    # speakerKvMaxLayers: 12      # 可选：限制 speakerKvScale 作用的最大层数
+    timbreLockMode: normal        # normal = 普通句锁定基础参考音频，仅特殊高潮句解锁；off = 按 emotion 切参考音频
+    specialSceneCfgScaleCaption: 3.6  # 特殊场景（哭喊/耳语/爆发）时的 cfg_scale_caption 引导强度
     emotionLabels: [平静, 开心, 生气, 伤心, 害羞, 惊讶]
   # 角色专属声音（未列出的角色使用上方默认值）
   characters: []

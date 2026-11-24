@@ -5,6 +5,7 @@ import {
   resolveIrodoriVoice,
   type IrodoriDefaults,
   type IrodoriEmotionConfig,
+  type IrodoriLineOverride,
   type IrodoriVoiceConfig
 } from '../../../common/tts/irodori'
 import { isJapaneseSpeechText } from '../../../common/tts/speechText'
@@ -121,7 +122,11 @@ export const DEFAULT_TTS_CONFIG: TTSConfig = {
     chunkMinChars: 80,
     seed: -1,
     defaultLoraAdapter: '',
-    defaultCaption: ''
+    defaultCaption: '',
+    speakerKvScale: 1.15,
+    speakerKvMinT: 0.9,
+    timbreLockMode: 'normal',
+    specialSceneCfgScaleCaption: 3.6
   }
 }
 
@@ -244,7 +249,8 @@ export class TTSService {
     text: string,
     characterName: string,
     speedFactor?: number,
-    emotion = ''
+    emotion = '',
+    lineOverride?: IrodoriLineOverride
   ): Promise<TTSResult> {
     this.cleanupExpiredCache()
 
@@ -266,7 +272,14 @@ export class TTSService {
 
     const charConfig = this.getCharacterVoice(characterName)
     if (this.config.provider === 'irodori') {
-      return this.synthesizeIrodori(text, characterName, charConfig, speedFactor, emotion)
+      return this.synthesizeIrodori(
+        text,
+        characterName,
+        charConfig,
+        speedFactor,
+        emotion,
+        lineOverride
+      )
     }
     const refAudioPath = charConfig?.refAudioPath || this.config.defaultRefAudioPath
     const promptText = charConfig?.promptText || this.config.defaultPromptText
@@ -392,7 +405,8 @@ export class TTSService {
     characterName: string,
     charConfig: CharacterVoiceConfig | undefined,
     speedFactor: number | undefined,
-    emotion: string
+    emotion: string,
+    lineOverride?: IrodoriLineOverride
   ): Promise<TTSResult> {
     const base: IrodoriVoiceConfig = {
       refAudioPath: charConfig?.refAudioPath || this.config.defaultRefAudioPath,
@@ -402,7 +416,11 @@ export class TTSService {
       speed: charConfig?.speed,
       numSteps: charConfig?.numSteps
     }
-    const voice = resolveIrodoriVoice(base, charConfig?.emotions, emotion)
+    const timbreLockMode = this.config.irodori.timbreLockMode ?? 'normal'
+    const voice = resolveIrodoriVoice(base, charConfig?.emotions, emotion, {
+      timbreLockMode,
+      lineOverride
+    })
     const refs = (voice.refAudioPaths ?? []).map((item) => item.trim()).filter(Boolean)
     if (!refs.length && !voice.refAudioPath?.trim()) {
       return {
@@ -417,6 +435,11 @@ export class TTSService {
       'irodori',
       characterName,
       emotion,
+      timbreLockMode,
+      lineOverride?.ttsCaption ?? '',
+      lineOverride?.ttsSpeed ?? '',
+      lineOverride?.ttsSpecialScene ? '1' : '0',
+      lineOverride?.cfgScaleCaption ?? '',
       speedFactor ?? this.config.speedFactor,
       voice.refAudioPath ?? '',
       refs.join(','),
@@ -445,7 +468,8 @@ export class TTSService {
       text,
       voice,
       this.config.irodori,
-      speedFactor ?? this.config.speedFactor
+      speedFactor ?? this.config.speedFactor,
+      lineOverride
     )
     try {
       const audioBuffer = await this.fetchAudio(`${baseUrl}/v1/audio/speech`, payload)

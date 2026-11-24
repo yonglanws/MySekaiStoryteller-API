@@ -3,7 +3,10 @@ import { test } from 'node:test'
 import {
   buildIrodoriSpeechRequest,
   collectEmotionLabels,
-  resolveIrodoriVoice
+  enforceIrodoriEmojiBudget,
+  normalizeIrodoriSpeechText,
+  resolveIrodoriVoice,
+  sanitizeIrodoriCaption
 } from '../../out-host/common/tts/irodori.js'
 
 const defaults = {
@@ -72,11 +75,60 @@ test('prefers ref_wavs and omits blank or random parameters', () => {
   assert.equal(irodori.seed, 123)
 })
 
-test('emotion entry overrides only non-empty voice fields', () => {
+test('sanitizeIrodoriCaption strips identity/timbre-conflict words while preserving prosody', () => {
+  const cleaned = sanitizeIrodoriCaption(
+    '若い女性の低い声で、少し照れながら早口で慌てたように話している。'
+  )
+  assert.ok(!cleaned.includes('若い女性'))
+  assert.ok(!cleaned.includes('低い声'))
+  assert.ok(cleaned.includes('少し照れながら早口で慌てたように話している。'))
+
+  const animeCleaned = sanitizeIrodoriCaption(
+    '少女のようなアニメ声・幼い声、震える口調で泣き出しそうに訴える。'
+  )
+  assert.ok(!/少女|アニメ声|幼い声/.test(animeCleaned))
+  assert.ok(animeCleaned.includes('震える口調で泣き出しそうに訴える。'))
+
+  const longCaption = '柔らかく温かい口調で、'.repeat(20)
+  const capped = sanitizeIrodoriCaption(longCaption)
+  assert.ok(capped.length <= 120)
+})
+
+test('normalizeIrodoriSpeechText guards bare punctuation/sokuon and enforces emoji budget', () => {
+  // Bare sokuon (the #10 hallucination trigger) must never be sent raw
+  const gasp = normalizeIrodoriSpeechText('……っ', '思わず息をのむ。', '惊讶')
+  assert.equal(gasp.skip, false)
+  assert.equal(gasp.text, '😮')
+
+  const sob = normalizeIrodoriSpeechText('…………っ！！', '今にも泣き出しそう。', '伤心')
+  assert.equal(sob.skip, false)
+  assert.equal(sob.text, '😭')
+
+  const pant = normalizeIrodoriSpeechText('……！', '息切れしながら呼吸する。', '')
+  assert.equal(pant.skip, false)
+  assert.equal(pant.text, '🌬️')
+
+  const sigh = normalizeIrodoriSpeechText('……', '小さくため息をつく。', '平静')
+  assert.equal(sigh.skip, false)
+  assert.equal(sigh.text, '😮‍💨')
+
+  const emptySilent = normalizeIrodoriSpeechText('……', '', '平静')
+  assert.equal(emptySilent.skip, true)
+  assert.equal(emptySilent.text, '')
+
+  // Unsafe ASMR emojis stripped and max 2 safe emojis kept
+  const budgeted = normalizeIrodoriSpeechText('あははっ🤭🥵、本当に👅？😮‍💨それでね😆😊！')
+  assert.equal(budgeted.skip, false)
+  assert.ok(!/[🥵👅💋😴🥤🥴👃]/u.test(budgeted.text))
+  assert.equal(budgeted.text, 'あははっ🤭、本当に？😮‍💨それでね！')
+  assert.equal(enforceIrodoriEmojiBudget('🤭😮‍💨😆😊', 2), '🤭😮‍💨')
+})
+
+test('resolveIrodoriVoice locks base ref audio in normal timbre-lock mode and clamps speed', () => {
   const base = {
     refAudioPath: '/main.wav',
     loraAdapter: '/lora',
-    caption: '普通',
+    caption: '落ち着いた口調。',
     speed: 1.0
   }
   const emotions = [
@@ -89,19 +141,78 @@ test('emotion entry overrides only non-empty voice fields', () => {
     { emotion: '平静', refAudioPath: '', caption: '', speed: 0.95 }
   ]
 
-  const happy = resolveIrodoriVoice(base, emotions, '开心')
-  assert.equal(happy.refAudioPath, '/happy.wav')
-  assert.equal(happy.caption, '嬉しそうに話している。')
-  assert.equal(happy.speed, 1.15)
-  assert.equal(happy.loraAdapter, '/lora')
+  // Normal timbre-lock mode: base refAudioPath stays LOCKED, speed clamped to [0.92, 1.08]
+  const happyLocked = resolveIrodoriVoice(base, emotions, '开心', {
+    timbreLockMode: 'normal',
+    lineOverride: { ttsCaption: '若い女性、少し照れながら笑って話す。', ttsSpeed: 1.25 }
+  })
+  assert.equal(happyLocked.refAudioPath, '/main.wav')
+  assert.equal(happyLocked.caption, '少し照れながら笑って話す。')
+  assert.equal(happyLocked.speed, 1.08)
+  assert.equal(happyLocked.loraAdapter, '/lora')
 
-  const calm = resolveIrodoriVoice(base, emotions, '平静')
+  // Special scene unlocks emotion refAudioPath and wider speed [0.85, 1.18]
+  const happySpecial = resolveIrodoriVoice(base, emotions, '开心', {
+    timbreLockMode: 'normal',
+    lineOverride: { ttsSpecialScene: true, ttsSpeed: 1.15 }
+  })
+  assert.equal(happySpecial.refAudioPath, '/happy.wav')
+  assert.equal(happySpecial.caption, '嬉しそうに話している。')
+  assert.equal(happySpecial.speed, 1.15)
+
+  // timbreLockMode='off' preserves legacy emotion refAudioPath + unclamped speed behavior
+  const happyLegacy = resolveIrodoriVoice(base, emotions, '开心', { timbreLockMode: 'off' })
+  assert.equal(happyLegacy.refAudioPath, '/happy.wav')
+  assert.equal(happyLegacy.caption, '嬉しそうに話している。')
+  assert.equal(happyLegacy.speed, 1.15)
+  assert.equal(happyLegacy.loraAdapter, '/lora')
+
+  const calm = resolveIrodoriVoice(base, emotions, '平静', { timbreLockMode: 'off' })
   assert.equal(calm.refAudioPath, '/main.wav')
-  assert.equal(calm.caption, '普通')
+  assert.equal(calm.caption, '落ち着いた口調。')
   assert.equal(calm.speed, 0.95)
 
   assert.deepEqual(resolveIrodoriVoice(base, emotions, '未知'), base)
   assert.deepEqual(resolveIrodoriVoice(base, emotions, ''), base)
+})
+
+test('buildIrodoriSpeechRequest forwards speaker_kv_* and boosts cfg_scale_caption on specialScene', () => {
+  const payload = buildIrodoriSpeechRequest(
+    '……っ',
+    {
+      refAudioPath: '/models/mizuki/sad.wav',
+      loraAdapter: '/models/mizuki/lora_adapter',
+      caption: '少女の低い声で、泣き出しそうに震えながら叫ぶ。'
+    },
+    {
+      ...defaults,
+      cfgScaleSpeaker: 4.0,
+      speakerKvScale: 1.15,
+      speakerKvMinT: 0.9,
+      speakerKvMaxLayers: 12,
+      timbreLockMode: 'normal',
+      specialSceneCfgScaleCaption: 3.6
+    },
+    1.0,
+    {
+      ttsSpecialScene: true,
+      ttsSpeed: 0.8
+    }
+  )
+
+  // Bare sokuon guarded into paralinguistic cue (not raw '……っ')
+  assert.equal(payload.input, '😭')
+  // Speed clamped to specialScene floor 0.85
+  assert.equal(payload.speed, 0.85)
+  const irodori = payload.irodori
+  assert.equal(irodori.speaker_kv_scale, 1.15)
+  assert.equal(irodori.speaker_kv_min_t, 0.9)
+  assert.equal(irodori.speaker_kv_max_layers, 12)
+  assert.equal(irodori.cfg_scale_caption, 3.6)
+  // cfg_scale_speaker protected >= 4.5 on special scenes
+  assert.equal(irodori.cfg_scale_speaker, 4.5)
+  assert.ok(!/少女|低い声/.test(irodori.caption))
+  assert.ok(irodori.caption.includes('泣き出しそうに震えながら叫ぶ。'))
 })
 
 test('collects unique emotion labels in configuration order', () => {

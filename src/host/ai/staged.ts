@@ -21,6 +21,7 @@ import {
   resolveScenarioSe
 } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
+import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -87,7 +88,13 @@ export interface StagedDialogueLine {
   content: string
   /** TTS 情绪标签；未配置情绪时为空 */
   emotion?: string
-  /** 日文配音文本；翻译段提前并行填写，合成时写入 Talk */
+  /** IrodoriTTS 逐句日语表演/韵律描述（仅描述语气/呼吸/停顿/节奏，不含年龄性别底色词） */
+  ttsCaption?: string
+  /** IrodoriTTS 逐句语速微调（常规 0.92~1.08，特殊高潮 0.85~1.18） */
+  ttsSpeed?: number
+  /** 是否为特殊戏剧高潮/崩溃/耳语场景（整场 <= 15%，仅 true 时解锁 emotion 参考音频） */
+  ttsSpecialScene?: boolean
+  /** 日文配音文本；翻译段在语音导演后与动作导演并行填写，合成时写入 Talk */
   ttsText?: string
   /** 所属幕次 ID（s1 / s2 / s3） */
   sceneId?: string
@@ -1642,7 +1649,8 @@ export function condenseDialogue(dialogue: StagedDialogue, targetLines: number):
 }
 
 // ---------------------------------------------------------------------------
-// 第二段半：情绪分段（保留 5~10 句低频切段，守护 Irodori 音色一致性）
+// ---------------------------------------------------------------------------
+// 第二段半：语音导演（双层情绪控制：常规音色锁 + 逐句日语韵律描述 + 特殊高潮解锁）
 // ---------------------------------------------------------------------------
 
 export interface StagedEmotionSegment {
@@ -1651,13 +1659,32 @@ export interface StagedEmotionSegment {
   emotion: string
 }
 
+export interface StagedVoiceDirectionLine {
+  emotion: string
+  ttsCaption?: string
+  ttsSpeed?: number
+  ttsSpecialScene?: boolean
+}
+
+const VOICE_NORMAL_SPEED_MIN = 0.92
+const VOICE_NORMAL_SPEED_MAX = 1.08
+const VOICE_SPECIAL_SPEED_MIN = 0.85
+const VOICE_SPECIAL_SPEED_MAX = 1.18
+const VOICE_SPECIAL_SCENE_MAX_RATIO = 0.15
+
+const clampVoiceSpeed = (value: number, special: boolean): number =>
+  Math.min(
+    special ? VOICE_SPECIAL_SPEED_MAX : VOICE_NORMAL_SPEED_MAX,
+    Math.max(special ? VOICE_SPECIAL_SPEED_MIN : VOICE_NORMAL_SPEED_MIN, value)
+  )
+
 export function buildEmotionPrompt(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
   options: StagedPromptOptions
 ): StagedMessages {
   const labels = (options.emotionLabels ?? []).map((label) => label.trim()).filter(Boolean)
-  const defaultEmotion = labels.includes('平静') ? '平静' : labels[0]
+  const defaultEmotion = labels.includes('平静') ? '平静' : (labels[0] ?? '平静')
   const strongLabels = labels.filter((label) => label !== defaultEmotion)
   const lineLines = dialogue.lines
     .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
@@ -1667,26 +1694,39 @@ export function buildEmotionPrompt(
     .map((member) => `- ${member.name}：${member.role || '出场角色'}`)
     .join('\n')
 
-  const mid = Math.max(2, Math.floor(dialogue.lines.length * 0.45))
-  const late = Math.max(
-    mid + 1,
-    Math.min(dialogue.lines.length, Math.floor(dialogue.lines.length * 0.78))
-  )
-  const endId = dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'
+  const firstId = dialogue.lines[0]?.id ?? 'l1'
+  const secondId = dialogue.lines[1]?.id ?? firstId
+  const lastId = dialogue.lines[dialogue.lines.length - 1]?.id ?? firstId
+  const maxSpecialCount = Math.floor(dialogue.lines.length * VOICE_SPECIAL_SCENE_MAX_RATIO)
+
   const example = {
-    segments: [
-      { from: 'l1', to: `l${Math.max(1, mid - 1)}`, emotion: defaultEmotion },
+    lines: [
       {
-        from: `l${mid}`,
-        to: `l${Math.max(mid, late - 1)}`,
-        emotion: strongLabels[0] ?? defaultEmotion
+        id: firstId,
+        emotion: defaultEmotion,
+        ttsCaption: '少し落ち着かない様子で、柔らかい口調ながら控えめに話している。',
+        ttsSpeed: 0.98,
+        ttsSpecialScene: false
       },
-      ...(dialogue.lines.length >= 6
+      ...(secondId !== firstId
         ? [
             {
-              from: `l${late}`,
-              to: endId,
-              emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion
+              id: secondId,
+              emotion: strongLabels[0] ?? defaultEmotion,
+              ttsCaption: '少し照れながら、早口で慌てたように話している。',
+              ttsSpeed: 1.05,
+              ttsSpecialScene: false
+            }
+          ]
+        : []),
+      ...(dialogue.lines.length >= 7
+        ? [
+            {
+              id: lastId,
+              emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion,
+              ttsCaption: '声を震わせながら、今にも泣き出しそうな切実なトーンで訴えかける。',
+              ttsSpeed: 0.9,
+              ttsSpecialScene: true
             }
           ]
         : [])
@@ -1695,9 +1735,13 @@ export function buildEmotionPrompt(
 
   return {
     system: [
-      '你是 Project SEKAI 官方剧情的配音情绪标注员。',
-      '台词已经定稿，你只做一件事：顺着剧情起承转合把整场台词划成情绪段，每段给一个最贴合语境的 TTS 情绪标签。',
-      'TTS 切换情绪会切换参考音频，因此同一情绪拍内保持连贯，不要每句乱跳；但遇到真正的情感转折、哭诉或释怀收尾时，必须忠实标出对应情绪。只输出一个 JSON 对象。',
+      '你是 Project SEKAI 官方剧情的配音导演兼情绪标注员（Voice Director），负责为 IrodoriTTS 生成逐句情绪标签与日语表演韵律指令。',
+      '台词已经定稿，你必须为每一句台词输出 { id, emotion, ttsCaption, ttsSpeed, ttsSpecialScene }。',
+      '核心原则（双层音色保护）：',
+      '1. 普通台词保持角色基础参考音频锁定，靠精细的日语 ttsCaption（语气、呼吸、语速、停顿、情感张力）与轻微语速变化表达细腻表演，绝不改变角色音色底色。',
+      '2. ttsCaption 必须严格只写表演与韵律（2~4 个简短日语短语），严禁出现任何年龄/性别/基础声线词（如「若い女性」「少女」「少年」「低い声」「高い声」「幼い声」「アニメ声」「ロリ」等），否则会与角色 LoRA/参考音频冲突。',
+      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；遇到情绪高潮、哭诉、喊叫、耳语或崩溃时忠实标注真实情绪。',
+      '4. ttsSpecialScene 仅用于全片真正的高潮爆发/哭喊/哽咽/耳语/回忆转折（占比严格 <= 15%）。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
       .filter(Boolean)
@@ -1708,24 +1752,31 @@ ${plan.logline ? `一句话：${plan.logline}` : ''}
 角色：
 ${cast}
 
-## 台词稿（逐字，只用来判断情绪）
+## 台词稿（共 ${dialogue.lines.length} 句，请逐句给出语音导演指令）
 ${lineLines}
 
-## 情绪标签（只能从中选）
-${labels.join('、')}
+## 粗情绪标签（emotion 字段只能从中选）
+${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、害羞、惊讶'}
 
-## 标注规则
-- **按戏剧节拍（起承转合）划分**：通常同一情绪拍连续覆盖 3~10 句，避免逐句 A/B 来回震荡；但**绝不**强凑段数或硬塞配额。
-- **忠实贴合真情实感（不要被机械配额扭曲）**：
-  - 平静：日常寒暄、温和叙述、冷静思考；不必强行凑够固定比例，如果结尾已经是释怀/欢快（如带「～♪」、互相打趣、和好约定），末尾完全可以用「开心」，不要硬压回「平静」。
-  - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾。
-  - 伤心：失落、脆弱倾诉、愧疚、带泪恳求（例如吵架后的含泪挽留「别再把我推开了」应转入「伤心」，不要锁死在「生气」里）。
-  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问。
+## 逐句语音导演规则
+- **覆盖全部台词**：从 ${firstId} 到 ${lastId} 每一句都给出一项，不要漏句。
+- **emotion（粗情绪族）**：
+  - 平静：仅用于日常寒暄、温和叙述、冷静思考。**绝不要**把喊人（「瑞希っ！」）、含泪道歉（「对不起」「ごめんね」）、哽咽（「可是……可是……！」）或激动呐喊错标为「平静」。
+  - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
+  - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求。
+  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊。
   - 害羞：被夸、慌张掩饰、不好意思。
-  - 惊讶：突然的揭示、意外或惊呼。
-- **冲突场景允许不同情绪交接**：当两人情绪明显不同步（例如一人质问「生气」，另一人退缩或恳求「伤心」），可以按节拍或关键转折切段，只要同一说话人不出现无意义的逐句反复横跳。
-- **高潮/尾声短转折保留**：关键的 2~3 句含泪恳求或 2~4 句欢快尾声可以独立成段，不必强行拉长或吞并。
-- 情绪段必须从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${endId}，不重叠、不遗漏。
+  - 惊讶：突然的揭示、意外、倒吸一口气或惊呼。
+  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动；遇到真正的情感转折、哭诉或欢快收尾时忠实切换。
+- **ttsCaption（日语表演/韵律描述，必填）**：
+  - 用 2~4 个自然日语短语描述**语气、呼吸感、语速、停顿、强弱与情绪层次**（例如：「安堵して、柔らかく温かい口調でゆっくり話している。」「息を切らしながら、切羽詰まった様子で必死に呼びかける。」）。
+  - **严禁描述说话人的年龄、性别或基础音色**（禁止出现 若い女性/大人の女性/少女/少年/男の子/女の子/低い声/高い声/幼い声/アニメ声 等词）。
+- **ttsSpeed（可选语速微调）**：
+  - 普通句（ttsSpecialScene=false）：范围 **0.92 ~ 1.08**（犹豫/温柔/沉重略慢 0.92~0.97，轻快/慌张/急促略快 1.03~1.08）。
+  - 特殊高潮句（ttsSpecialScene=true）：范围 **0.85 ~ 1.18**。
+- **ttsSpecialScene（布尔值，默认 false）**：
+  - 仅在真正极端高潮（痛哭/哽咽崩溃、撕裂喊叫、极近距离耳语、关键回忆爆发）时设为 true。
+  - 整场最多允许 **${maxSpecialCount}** 句设为 true（严格 <= 15%）。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -1742,50 +1793,151 @@ const emotionIndex = (value: unknown, lines: StagedDialogueLine[]): number => {
   return lines.findIndex((line) => line.id === text)
 }
 
-export function normalizeEmotionPlan(
+function specialScenePriority(line: StagedDialogueLine, entry: StagedVoiceDirectionLine): number {
+  let score = 0
+  if (entry.emotion && entry.emotion !== '平静') score += 2
+  if (entry.emotion === '伤心' || entry.emotion === '生气') score += 2
+  if (/！！|!!|？！|\?!/.test(line.content)) score += 3
+  if (/对不起|别.*推开|不要.*走|求你|眼泪|哭|ごめん|ダメ|やめて/.test(line.content)) score += 3
+  const caption = entry.ttsCaption ?? ''
+  if (/泣|嗚咽|叫|囁|震え|切実|必死|崩|絶叫|息を切ら/.test(caption)) score += 3
+  return score
+}
+
+/**
+ * 解析并规范化 Stage 2.5 语音导演输出。
+ * 同时兼容新版逐句格式（`lines: [{ id, emotion, ttsCaption, ttsSpeed, ttsSpecialScene }]`）
+ * 与旧版分段格式（`segments: [{ from, to, emotion }]`）。
+ * 确定性执行：caption 清洗、语速钳制、`ttsSpecialScene <= 15%` 上限。
+ */
+export function normalizeVoiceDirectionPlan(
   raw: unknown,
   dialogue: StagedDialogue,
   labels: string[]
-): Map<string, string> | null {
+): Map<string, StagedVoiceDirectionLine> | null {
   const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
-  if (allowed.size === 0) return null
   const doc = isRecord(raw) ? raw : {}
-  const segmentsRaw = Array.isArray(raw)
+  const itemsRaw = Array.isArray(raw)
     ? raw
-    : Array.isArray(doc.segments)
-      ? doc.segments
-      : Array.isArray(doc.emotions)
-        ? doc.emotions
-        : []
+    : Array.isArray(doc.lines)
+      ? doc.lines
+      : Array.isArray(doc.voiceDirection)
+        ? doc.voiceDirection
+        : Array.isArray(doc.segments)
+          ? doc.segments
+          : Array.isArray(doc.emotions)
+            ? doc.emotions
+            : []
 
-  const result = new Map<string, string>()
-  for (const item of segmentsRaw) {
+  const result = new Map<string, StagedVoiceDirectionLine>()
+  const putEntry = (
+    line: StagedDialogueLine,
+    item: Record<string, unknown>,
+    emotion: string
+  ): void => {
+    const rawCaption = str(item.ttsCaption ?? item.caption ?? item.delivery).trim()
+    const ttsCaption = sanitizeIrodoriCaption(rawCaption) || undefined
+    const ttsSpecialScene =
+      typeof item.ttsSpecialScene === 'boolean'
+        ? item.ttsSpecialScene
+        : typeof item.specialScene === 'boolean'
+          ? item.specialScene
+          : false
+    const rawSpeed = item.ttsSpeed ?? item.speed
+    const parsedSpeed =
+      typeof rawSpeed === 'number' && Number.isFinite(rawSpeed)
+        ? rawSpeed
+        : typeof rawSpeed === 'string' && rawSpeed.trim() && Number.isFinite(Number(rawSpeed))
+          ? Number(rawSpeed)
+          : undefined
+    const ttsSpeed =
+      parsedSpeed !== undefined ? Number(clampVoiceSpeed(parsedSpeed, ttsSpecialScene).toFixed(2)) : undefined
+
+    result.set(line.id, {
+      emotion,
+      ...(ttsCaption ? { ttsCaption } : {}),
+      ...(ttsSpeed !== undefined ? { ttsSpeed } : {}),
+      ...(ttsSpecialScene ? { ttsSpecialScene: true } : {})
+    })
+  }
+
+  for (const item of itemsRaw) {
     if (typeof item === 'string') continue
     if (!isRecord(item)) continue
-    const emotion = str(item.emotion ?? item.label ?? item.tone).trim()
-    if (!allowed.has(emotion)) continue
+    const rawEmotion = str(item.emotion ?? item.label ?? item.tone).trim()
+    const validEmotion = allowed.size === 0 ? rawEmotion : allowed.has(rawEmotion) ? rawEmotion : ''
+    const hasRichFields = Boolean(str(item.ttsCaption ?? item.caption ?? item.delivery).trim())
+    if (!validEmotion && !hasRichFields) continue
+
     if (item.from !== undefined || item.to !== undefined) {
       const from = emotionIndex(item.from, dialogue.lines)
       const to = emotionIndex(item.to, dialogue.lines)
       if (from < 0 || to < 0 || to < from) continue
       for (let index = from; index <= Math.min(to, dialogue.lines.length - 1); index++) {
-        result.set(dialogue.lines[index].id, emotion)
+        putEntry(dialogue.lines[index], item, validEmotion)
       }
       continue
     }
     const id = str(item.id ?? item.lineId ?? item.line).trim()
     const index = emotionIndex(id, dialogue.lines)
-    if (index >= 0) result.set(dialogue.lines[index].id, emotion)
+    if (index >= 0) {
+      putEntry(dialogue.lines[index], item, validEmotion)
+    }
+  }
+
+  if (result.size < Math.ceil(dialogue.lines.length * 0.6)) return null
+
+  // 确定性限制 ttsSpecialScene 比例 <= 15%
+  const maxSpecial = Math.floor(dialogue.lines.length * VOICE_SPECIAL_SCENE_MAX_RATIO)
+  const specialCandidates: Array<{ id: string; priority: number; index: number }> = []
+  dialogue.lines.forEach((line, index) => {
+    const entry = result.get(line.id)
+    if (entry?.ttsSpecialScene) {
+      specialCandidates.push({ id: line.id, priority: specialScenePriority(line, entry), index })
+    }
+  })
+  if (specialCandidates.length > maxSpecial) {
+    specialCandidates.sort((a, b) => b.priority - a.priority || a.index - b.index)
+    const keepIds = new Set(specialCandidates.slice(0, maxSpecial).map((c) => c.id))
+    for (const candidate of specialCandidates) {
+      if (keepIds.has(candidate.id)) continue
+      const entry = result.get(candidate.id)
+      if (!entry) continue
+      delete entry.ttsSpecialScene
+      if (entry.ttsSpeed !== undefined) {
+        entry.ttsSpeed = Number(clampVoiceSpeed(entry.ttsSpeed, false).toFixed(2))
+      }
+    }
+  }
+
+  return result
+}
+
+export function normalizeEmotionPlan(
+  raw: unknown,
+  dialogue: StagedDialogue,
+  labels: string[]
+): Map<string, string> | null {
+  if (labels.map((label) => label.trim()).filter(Boolean).length === 0) return null
+  const voicePlan = normalizeVoiceDirectionPlan(raw, dialogue, labels)
+  if (!voicePlan) return null
+  const result = new Map<string, string>()
+  for (const [id, entry] of voicePlan) {
+    if (entry.emotion) result.set(id, entry.emotion)
   }
   if (result.size < Math.ceil(dialogue.lines.length * 0.6)) return null
   return result
 }
 
-export function countEmotionRuns(plan: Map<string, string>, dialogue: StagedDialogue): number {
+export function countEmotionRuns(
+  plan: Map<string, string> | Map<string, StagedVoiceDirectionLine>,
+  dialogue: StagedDialogue
+): number {
   let runs = 0
   let previous = ''
   for (const line of dialogue.lines) {
-    const emotion = plan.get(line.id) ?? ''
+    const value = plan.get(line.id)
+    const emotion = typeof value === 'string' ? value : (value?.emotion ?? '')
     if (emotion && emotion !== previous) {
       runs += 1
       previous = emotion
@@ -1806,7 +1958,7 @@ export function buildEmotionRepairPrompt(
   return {
     system: base.system,
     user: `${base.user}\n\n## 上一轮的问题
-上一轮整场只给了 ${actualSegments} 个单一情绪标签，长剧本完全没有情绪推进。请按剧情起承转合划分成自然的 2~5 个连续情绪段（保留关键转折、哭诉或欢快收尾，不要逐句跳变），并从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
+上一轮整场只给了 ${actualSegments} 个单一情绪标签，长剧本完全没有情绪推进。请按剧情起承转合给出逐句语音导演指令（emotion 体现自然的情绪起承转合，保留关键转折、哭诉或欢快收尾，同时每句都提供贴合的日语 ttsCaption），并从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
 上一轮的输出开头如下：
 ${raw.slice(0, 3000)}
 
@@ -1815,9 +1967,10 @@ ${raw.slice(0, 3000)}
 }
 
 const isEmotionPivotCue = (text: string, emotion: string): boolean => {
-  if (emotion === '开心') return /♪|～♪|哈哈|太好了/.test(text)
-  if (emotion === '伤心') return /对不起|别.*推开|不要.*走|求你|眼泪|哭/.test(text)
-  if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然/.test(text)
+  if (emotion === '开心') return /♪|～♪|哈哈|太好了|よかった/.test(text)
+  if (emotion === '伤心') return /对不起|ごめん|别.*推开|不要.*走|求你|眼泪|哭|ダメ|呜/.test(text)
+  if (emotion === '生气') return /！！|!!|住口|够了|混蛋|やめろ|ふざけ/.test(text)
+  if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然|っ！|……！/.test(text)
   return false
 }
 
@@ -1908,16 +2061,69 @@ export function stabilizeEmotions(
   return result
 }
 
-export function applyEmotionPlan(
+export function applyVoiceDirectionPlan(
   dialogue: StagedDialogue,
-  plan: Map<string, string> | null,
+  plan: Map<string, StagedVoiceDirectionLine> | null,
   labels: string[]
 ): StagedDialogue {
   const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
+  const rawEmotions = new Map<string, string>()
+  if (plan) {
+    for (const [id, entry] of plan) {
+      if (entry.emotion) rawEmotions.set(id, entry.emotion)
+    }
+  }
+  const stableEmotions =
+    plan && allowed.size > 0 ? stabilizeEmotions(dialogue, rawEmotions, labels) : null
+
   return {
     ...dialogue,
     lines: dialogue.lines.map((line) => {
-      const emotion = plan?.get(line.id) ?? ''
+      const entry = plan?.get(line.id)
+      const emotion = stableEmotions?.get(line.id) ?? entry?.emotion ?? ''
+      const finalEmotion = allowed.size === 0 ? emotion : allowed.has(emotion) ? emotion : ''
+      const ttsCaption = entry?.ttsCaption ? sanitizeIrodoriCaption(entry.ttsCaption) : ''
+      const ttsSpecialScene = Boolean(entry?.ttsSpecialScene)
+      const ttsSpeed =
+        typeof entry?.ttsSpeed === 'number' && Number.isFinite(entry.ttsSpeed)
+          ? Number(clampVoiceSpeed(entry.ttsSpeed, ttsSpecialScene).toFixed(2))
+          : undefined
+      return {
+        ...line,
+        emotion: finalEmotion,
+        ...(ttsCaption ? { ttsCaption } : {}),
+        ...(ttsSpeed !== undefined ? { ttsSpeed } : {}),
+        ...(ttsSpecialScene ? { ttsSpecialScene: true } : {})
+      }
+    })
+  }
+}
+
+export function applyEmotionPlan(
+  dialogue: StagedDialogue,
+  plan: Map<string, string> | Map<string, StagedVoiceDirectionLine> | null,
+  labels: string[]
+): StagedDialogue {
+  if (!plan) {
+    return {
+      ...dialogue,
+      lines: dialogue.lines.map((line) => ({ ...line, emotion: '' }))
+    }
+  }
+  const firstValue = plan.values().next().value
+  if (firstValue && typeof firstValue === 'object') {
+    return applyVoiceDirectionPlan(
+      dialogue,
+      plan as Map<string, StagedVoiceDirectionLine>,
+      labels
+    )
+  }
+  const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
+  const strPlan = plan as Map<string, string>
+  return {
+    ...dialogue,
+    lines: dialogue.lines.map((line) => {
+      const emotion = strPlan.get(line.id) ?? ''
       return allowed.has(emotion) ? { ...line, emotion } : { ...line, emotion: '' }
     })
   }
@@ -2615,6 +2821,8 @@ export function buildDirectionPrompt(
       appearedBefore.add(line.speaker)
       const ctxTags = [
         line.emotion ? `〔${line.emotion}〕` : '',
+        line.ttsCaption ? `[声演:${line.ttsCaption}]` : '',
+        line.ttsSpecialScene ? '[高潮]' : '',
         scene
           ? `[${scene.id}${scene.isFlashback ? '/回忆' : ''}${scene.ambient !== 'normal' ? `/${scene.ambient}` : ''}]`
           : '',
@@ -4302,6 +4510,9 @@ export function composeStory(
         content: line.content,
         ttsText: line.ttsText ?? '',
         emotion: line.emotion ?? '',
+        ...(line.ttsCaption ? { ttsCaption: line.ttsCaption } : {}),
+        ...(typeof line.ttsSpeed === 'number' ? { ttsSpeed: line.ttsSpeed } : {}),
+        ...(line.ttsSpecialScene ? { ttsSpecialScene: true } : {}),
         modelId: member.modelId,
         ...(closeAfter ? { closeWindowOnFinish: true } : {}),
         ...(actions.length > 0 ? { actions } : {})

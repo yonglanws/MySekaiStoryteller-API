@@ -18,6 +18,7 @@ import {
   type TTSMapping as CalcTTSMapping
 } from '../utils/TimelineCalculator'
 import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
+import type { IrodoriLineOverride } from '../../../common/tts/irodori'
 
 export interface SnippetTimelineEntry {
   snippetIndex: number
@@ -39,6 +40,9 @@ interface TalkSnippet {
   content: string
   ttsText: string
   emotion: string
+  ttsCaption?: string
+  ttsSpeed?: number
+  ttsSpecialScene?: boolean
 }
 
 interface SynthesizeResult {
@@ -259,13 +263,19 @@ export class TTSManager {
           content: string
           ttsText?: string
           emotion?: string
+          ttsCaption?: string
+          ttsSpeed?: number
+          ttsSpecialScene?: boolean
         }
         talkSnippets.push({
           index: i,
           speaker: data.speaker,
           content: data.content,
           ttsText: data.ttsText || '',
-          emotion: data.emotion || ''
+          emotion: data.emotion || '',
+          ttsCaption: data.ttsCaption || undefined,
+          ttsSpeed: typeof data.ttsSpeed === 'number' ? data.ttsSpeed : undefined,
+          ttsSpecialScene: typeof data.ttsSpecialScene === 'boolean' ? data.ttsSpecialScene : undefined
         })
       }
     }
@@ -389,12 +399,21 @@ export class TTSManager {
       if (!hasSpeakableTts && !hasSpeakableContent) {
         return { success: false, duration: 0, index: talk.index }
       }
+      const lineOverride: IrodoriLineOverride | undefined =
+        talk.ttsCaption || talk.ttsSpeed !== undefined || talk.ttsSpecialScene !== undefined
+          ? {
+              ttsCaption: talk.ttsCaption,
+              ttsSpeed: talk.ttsSpeed,
+              ttsSpecialScene: talk.ttsSpecialScene
+            }
+          : undefined
       if (hasSpeakableTts) {
         const result = await this.synthesizeWithText(
           talk.ttsText,
           talk.speaker,
           talk.index,
-          talk.emotion
+          talk.emotion,
+          lineOverride
         )
         return { ...result, index: talk.index }
       }
@@ -402,7 +421,8 @@ export class TTSManager {
         talk.content,
         talk.speaker,
         talk.index,
-        talk.emotion
+        talk.emotion,
+        lineOverride
       )
       return { ...result, index: talk.index }
     } catch (error) {
@@ -417,7 +437,8 @@ export class TTSManager {
     text: string,
     characterName: string,
     snippetIndex?: number,
-    emotion = ''
+    emotion = '',
+    lineOverride?: IrodoriLineOverride
   ): Promise<{ success: boolean; duration: number }> {
     if (!hasSpeakableSpeechText(text)) {
       return { success: false, duration: 0 }
@@ -434,7 +455,8 @@ export class TTSManager {
       text,
       characterName,
       undefined,
-      emotion
+      emotion,
+      lineOverride
     )
 
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
@@ -466,7 +488,8 @@ export class TTSManager {
     text: string,
     characterName: string,
     snippetIndex?: number,
-    emotion = ''
+    emotion = '',
+    lineOverride?: IrodoriLineOverride
   ): Promise<{ success: boolean; duration: number }> {
     if (!hasSpeakableSpeechText(text)) {
       return { success: false, duration: 0 }
@@ -509,7 +532,8 @@ export class TTSManager {
       translatedText,
       characterName,
       undefined,
-      emotion
+      emotion,
+      lineOverride
     )
 
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
@@ -624,10 +648,18 @@ export class TTSManager {
   async translateAndSynthesize(
     text: string,
     characterName: string,
-    snippetIndex?: number
+    snippetIndex?: number,
+    emotion = '',
+    lineOverride?: IrodoriLineOverride
   ): Promise<{ success: boolean; duration: number }> {
     // 不清空缓存，允许复用预取结果
-    return this.translateAndSynthesizeWithPrefetch(text, characterName, snippetIndex)
+    return this.translateAndSynthesizeWithPrefetch(
+      text,
+      characterName,
+      snippetIndex,
+      emotion,
+      lineOverride
+    )
   }
 
   getService(): TTSService | null {
