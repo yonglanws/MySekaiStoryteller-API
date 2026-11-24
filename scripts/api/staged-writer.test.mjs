@@ -967,18 +967,18 @@ test('composed staging keeps ambient and second background through validation', 
   assert.ok(
     appears.every(
       (snippet) =>
-        (snippet.data.to.side === 'Left' && snippet.data.from.side === 'LeftOver') ||
-        (snippet.data.to.side === 'Right' && snippet.data.from.side === 'RightOver')
+        (snippet.data.to.side === 'Left' && snippet.data.from.side === 'Left') ||
+        (snippet.data.to.side === 'Right' && snippet.data.from.side === 'Right')
     ),
-    'Left/Right 槽入场默认从同侧画外滑入（from=LeftOver/RightOver）'
+    'Left/Right 槽入场默认原地淡入（from == to）'
   )
   assert.ok(
     appears.every((snippet) => snippet.data.from.offset === 0 && snippet.data.to.offset === 0),
-    '画外滑入起终点 offset 均为 0'
+    '原地淡入起终点 offset 均为 0'
   )
   assert.ok(
     appears.every((snippet) => snippet.data.moveSpeed === 'Normal'),
-    '画外滑入用官方 Normal 时长'
+    '原地淡入用官方 Normal 时长'
   )
   assert.deepEqual(
     appears
@@ -1006,7 +1006,7 @@ test('composed staging keeps ambient and second background through validation', 
   )
 })
 
-test('composed staging keeps solo Center entries in place while duo entries slide from offstage', () => {
+test('composed staging keeps solo Center entries in place', () => {
   const view = new CatalogView(catalog.get())
   const [first] = view.models
   const plan = {

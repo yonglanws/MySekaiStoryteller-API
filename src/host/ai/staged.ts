@@ -3441,15 +3441,12 @@ export function composeStory(
     incoming.forEach((id, idx) => {
       const slot = desiredSlotFor.get(id)!
       const isWalk = walkInSet.has(id)
-      // 入场默认画外滑入（官方 Appear 观感）：Left/Right 槽 from=同侧画外
-      // （Left→LeftOver、Right→RightOver），Center 特写保持原地淡入（横穿
-      // 全屏约 1870px 易喧宾，且方向确定性差；Center 滑入方向待观感确认）。
-      // 仅飘现/传送类演出由 prompt 显式指定原地淡入；isWalk 本就来自画外，语义不变。
+      // 官方 LayoutData 的 Type=2 入场全部 SideFrom==SideTo（Left/Center/Right
+      // 槽位原地淡入，没有画外起点）。默认 from 与 to 同槽位（offset 0）；
+      // 仅 walkInCast 显式“走入”保留 LeftOver/RightOver 画外起点。
       const fromPos = isWalk
         ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
-        : slot === 'Center'
-          ? { side: slot, offset: 0 }
-          : { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
+        : { side: slot, offset: 0 }
       const member = cast.find((c) => c.modelId === id)
       const memberName = member?.name
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
