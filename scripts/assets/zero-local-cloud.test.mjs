@@ -834,7 +834,11 @@ test('ResourceCatalog ignores empty or comment-only bgm.yaml and images.yaml wit
   try {
     fs.mkdirSync(path.join(resourcesDir, 'audio', 'bgm'), { recursive: true })
     fs.mkdirSync(path.join(resourcesDir, 'images'), { recursive: true })
-    fs.writeFileSync(path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml'), '# comment only\n', 'utf8')
+    fs.writeFileSync(
+      path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml'),
+      '# comment only\n',
+      'utf8'
+    )
     fs.writeFileSync(path.join(resourcesDir, 'images', 'images.yaml'), '\n', 'utf8')
     fs.writeFileSync(path.join(resourcesDir, 'images', 'bg_local.png'), Buffer.from('PNG'))
 
@@ -925,12 +929,26 @@ test('concurrent resolveStoryCloudAssets with different resourcesDirs downloads 
     assert.equal(resB.models, 1)
     assert.ok(
       fs.existsSync(
-        path.join(resDirA, 'models', 'cloud', '01ichika_school', '01ichika_school', '01ichika_school.model3.json')
+        path.join(
+          resDirA,
+          'models',
+          'cloud',
+          '01ichika_school',
+          '01ichika_school',
+          '01ichika_school.model3.json'
+        )
       )
     )
     assert.ok(
       fs.existsSync(
-        path.join(resDirB, 'models', 'cloud', '01ichika_school', '01ichika_school', '01ichika_school.model3.json')
+        path.join(
+          resDirB,
+          'models',
+          'cloud',
+          '01ichika_school',
+          '01ichika_school',
+          '01ichika_school.model3.json'
+        )
       )
     )
   } finally {

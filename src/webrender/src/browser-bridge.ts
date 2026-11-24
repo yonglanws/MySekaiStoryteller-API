@@ -95,8 +95,12 @@ async function invokeBinary(channel: string, args: unknown[]): Promise<unknown> 
   }
 
   const metaParam = encodeURIComponent(JSON.stringify(meta))
-  const body: ArrayBuffer =
-    binary instanceof Uint8Array ? (binary.slice().buffer as ArrayBuffer) : binary
+  const body: BodyInit =
+    binary instanceof ArrayBuffer
+      ? binary
+      : binary.buffer instanceof ArrayBuffer
+        ? (binary as Uint8Array<ArrayBuffer>)
+        : binary.slice()
   const res = await fetch(`/bridge/bin/${encodeChannel(channel)}?args=${metaParam}`, {
     method: 'POST',
     headers: bridgeHeaders({ 'content-type': 'application/octet-stream' }),

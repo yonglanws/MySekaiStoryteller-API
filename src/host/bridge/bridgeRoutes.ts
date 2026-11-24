@@ -470,10 +470,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     workerId: string | null
     taskId: string | null
     idleTimer: ReturnType<typeof setTimeout> | null
+    lastIdleTouchAt: number
     cleaning?: Promise<void>
   }
   const framesPipeSessions = new Map<string, PipeStreamEntry>()
   const framesPipeIdleMs = deps.framesPipeIdleMs ?? DEFAULT_FRAMES_PIPE_IDLE_MS
+  const framesPipeTouchThrottleMs = Math.min(5_000, Math.floor(framesPipeIdleMs / 4))
   const createPipe = deps.createFramesPipe ?? createFramesPipeSession
 
   /**
@@ -553,6 +555,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   }
 
   function touchPipeIdle(entry: PipeStreamEntry): void {
+    const now = Date.now()
+    if (entry.idleTimer && now - entry.lastIdleTouchAt < framesPipeTouchThrottleMs) {
+      return
+    }
+    entry.lastIdleTouchAt = now
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer)
     }
@@ -871,7 +878,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       fps,
       workerId,
       taskId,
-      idleTimer: null
+      idleTimer: null,
+      lastIdleTouchAt: 0
     }
     framesPipeSessions.set(id, entry)
     touchPipeIdle(entry)
@@ -1341,7 +1349,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             )
           }
 
-          const encodeArgs = (targetPath: string): Promise<number> =>
+          const encodeArgs = (targetPath: string, faststart: boolean): Promise<number> =>
             encodeFramesToVideo(
               payload.fps,
               safeFramesDir,
@@ -1352,12 +1360,13 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
               config.video.crf,
               payload.inputWidth ?? 0,
               payload.inputHeight ?? 0,
-              codec
+              codec,
+              faststart
             )
           const isCancelled = (): boolean => Boolean(taskId && isTaskCancelled(taskId))
 
           if (hasAudio && safeAudioPath && intermediatePath) {
-            const frameCount = await encodeArgs(intermediatePath)
+            const frameCount = await encodeArgs(intermediatePath, false)
             await writeOutputAtomically(
               safeOutputPath,
               async (partialPath) => {
@@ -1374,7 +1383,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           } else {
             await writeOutputAtomically(
               safeOutputPath,
-              (partialPath) => encodeArgs(partialPath),
+              (partialPath) => encodeArgs(partialPath, true),
               isCancelled
             )
           }
@@ -1522,13 +1531,22 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
   ): Promise<unknown> {
     switch (channel) {
       case 'electron:frames-stream-chunk': {
-        const payload = args[0] as { id?: string } | undefined
+        const payload = args[0] as { id?: string; frameCount?: unknown } | undefined
         const id = payload?.id
         const entry = id ? framesPipeSessions.get(id) : undefined
         if (!entry || !id) throw new Error('Unknown frames stream session')
+        if (
+          payload?.frameCount !== undefined &&
+          (typeof payload.frameCount !== 'number' ||
+            !Number.isInteger(payload.frameCount) ||
+            payload.frameCount <= 0)
+        ) {
+          throw new BridgeSecurityError('Invalid frameCount in frames-stream-chunk', 400)
+        }
+        const framesInChunk = payload?.frameCount as number | undefined
         touchPipeIdle(entry)
         try {
-          await entry.session.write(body)
+          await entry.session.write(body, framesInChunk)
           if (framesPipeSessions.has(id)) touchPipeIdle(entry)
           return null
         } catch (error) {

@@ -1475,7 +1475,15 @@ test('apiEncodeVideoAudioToBitrate probes h264 GPU encoders matching targetBitra
     return makeFakeChild({ code: 0 })
   })
 
-  await ffmpeg.apiEncodeVideoAudioToBitrate(videoPath, undefined, outputPath, '128k', 'auto', 4_000_000, 10)
+  await ffmpeg.apiEncodeVideoAudioToBitrate(
+    videoPath,
+    undefined,
+    outputPath,
+    '128k',
+    'auto',
+    4_000_000,
+    10
+  )
   const probeCall = calls.find((args) => args.includes('null'))
   assert.ok(probeCall, 'expected GPU smoke probe')
   assert.equal(probeCall[probeCall.indexOf('-c:v') + 1], 'h264_nvenc')
@@ -1588,4 +1596,142 @@ test('write-frame-batch validates input and propagates disk failures; pipe frame
   assert.equal(remux.status, 200)
   assert.equal(remux.body.result.success, true)
   assert.deepEqual(muxOptions, { frameCount: 60, fps: 30, startFrame: undefined })
+})
+
+test('FramesPipeSession omits +faststart by default and counts batched framesInChunk via bridge', async (t) => {
+  const ffmpeg = loadFreshFfmpeg()
+  ffmpeg.resetGpuEncoderCache()
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'msst-pipe-batch-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const framesDir = path.join(dir, 'frames')
+  const audioPath = path.join(dir, 'audio.wav')
+  const outputDir = path.join(dir, 'out')
+  await fs.promises.mkdir(framesDir, { recursive: true })
+  await fs.promises.mkdir(outputDir, { recursive: true })
+  await writeFile(path.join(framesDir, 'frame-000000.jpg'), 'jpg')
+  await writeFile(audioPath, 'RIFF')
+
+  const spawnArgs = []
+  t.mock.method(childProcess, 'spawn', (_bin, args) => {
+    spawnArgs.push(args)
+    return makeOpenChild()
+  })
+
+  // Intermediate pipe MP4 must skip +faststart unless faststart: true is requested
+  const pipeSession = await ffmpeg.createFramesPipeSession({
+    fps: 30,
+    width: 640,
+    height: 360,
+    encoder: 'cpu',
+    codec: 'h264',
+    outputPath: path.join(dir, 'pipe.mp4')
+  })
+  assert.equal(spawnArgs.at(-1).includes('+faststart'), false)
+  await pipeSession.write(Buffer.from('4-jpegs'), 4)
+  assert.equal(pipeSession.frameCount, 4)
+  await assert.rejects(pipeSession.write(Buffer.from('bad'), 0), /Invalid frameCount/)
+  await pipeSession.abort()
+
+  // encodeFramesToVideo skips +faststart when faststart=false
+  spawnArgs.length = 0
+  t.mock.method(childProcess, 'spawn', (_bin, args) => {
+    spawnArgs.push(args)
+    return makeFakeChild({ code: 0 })
+  })
+  await ffmpeg.encodeFramesToVideo(
+    30,
+    framesDir,
+    path.join(dir, 'intermediate.mp4'),
+    'cpu',
+    640,
+    360,
+    23,
+    640,
+    360,
+    'h264',
+    false
+  )
+  assert.equal(spawnArgs.at(-1).includes('+faststart'), false)
+
+  // Bridge electron:frames-stream-chunk forwards frameCount and rejects invalid frameCount
+  const app = express()
+  const recordedWrites = []
+  app.use(
+    '/bridge',
+    createBridgeRouter({
+      logger: new Logger({ type: 'hidden' }),
+      config: {
+        paths: { output: outputDir },
+        video: { width: 640, height: 360, fps: 30, crf: 18, encoder: 'cpu', codec: 'hevc' },
+        render: { workers: 1 },
+        tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 5000 },
+        llm: { enabled: false }
+      },
+      bridgeToken: 'tok',
+      createFramesPipe: async (options) => ({
+        outputPath: options.outputPath,
+        frameCount: 0,
+        async write(buf, count) {
+          recordedWrites.push({ len: buf.length, count })
+          this.frameCount += count ?? 1
+        },
+        async finish() {
+          await writeFile(options.outputPath, 'mp4')
+          return options.outputPath
+        },
+        async abort() {}
+      })
+    })
+  )
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  t.after(async () => {
+    const closed = once(server, 'close')
+    server.close()
+    server.closeAllConnections()
+    await closed
+  })
+
+  const post = (reqPath, body, contentType = 'application/json') =>
+    new Promise((resolve, reject) => {
+      const payload = Buffer.isBuffer(body) ? body : JSON.stringify(body)
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: reqPath,
+          method: 'POST',
+          headers: { 'x-mss-bridge-token': 'tok', 'content-type': contentType }
+        },
+        (res) => {
+          const chunks = []
+          res.on('data', (c) => chunks.push(c))
+          res.on('end', () =>
+            resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) })
+          )
+        }
+      )
+      req.on('error', reject)
+      req.end(payload)
+    })
+
+  const started = await post('/bridge/invoke/electron:frames-stream-start', [{ fps: 30 }])
+  const id = started.body.result.id
+  const bad = await post(
+    `/bridge/bin/electron:frames-stream-chunk?args=${encodeURIComponent(JSON.stringify([{ id, frameCount: 0 }]))}`,
+    Buffer.from('abc'),
+    'application/octet-stream'
+  )
+  assert.equal(bad.status, 400)
+
+  const ok = await post(
+    `/bridge/bin/electron:frames-stream-chunk?args=${encodeURIComponent(JSON.stringify([{ id, frameCount: 6 }]))}`,
+    Buffer.from('batched-jpegs'),
+    'application/octet-stream'
+  )
+  assert.equal(ok.status, 200)
+  assert.deepEqual(recordedWrites, [{ len: 13, count: 6 }])
+  await post('/bridge/invoke/electron:frames-stream-cancel', [{ id }])
 })

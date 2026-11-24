@@ -1159,7 +1159,8 @@ export async function encodeFramesToVideo(
   crf: number = 23,
   inputWidth: number = 0,
   inputHeight: number = 0,
-  codec: VideoCodec = 'hevc'
+  codec: VideoCodec = 'hevc',
+  faststart: boolean = true
 ): Promise<number> {
   checkEncodeSize(width, height)
   const entries = await fs.promises.readdir(framesDir)
@@ -1189,8 +1190,7 @@ export async function encodeFramesToVideo(
     '-i',
     `${framesDir}/${framePattern}`,
     ...videoEncoderOutputArgs(encoderArgs, filters),
-    '-movflags',
-    '+faststart',
+    ...(faststart ? ['-movflags', '+faststart'] : []),
     '-y',
     outputPath
   ]
@@ -1212,7 +1212,8 @@ export async function encodeFramesToVideo(
         crf,
         inputWidth,
         inputHeight,
-        codec
+        codec,
+        faststart
       )
     }
     throw error
@@ -1241,6 +1242,8 @@ export interface FramesPipeSessionOptions {
   /** 导出的起始/结束帧（含起始、不含结束）；用于入口校验，from 必须小于 to。 */
   fromFrame?: number
   toFrame?: number
+  /** 仅直出成片时启用 +faststart；默认 false（管道产出临时 MP4，随后由 remux 统一写 +faststart）。 */
+  faststart?: boolean
 }
 
 /**
@@ -1259,6 +1262,7 @@ export class FramesPipeSession {
   private settled = false
   private eofSent = false
   private idleTimer: ReturnType<typeof setTimeout> | null = null
+  private lastIdleTouchAt = 0
   private finishTimer: ReturnType<typeof setTimeout> | null = null
   private queue: Promise<void> = Promise.resolve()
   private frames = 0
@@ -1369,8 +1373,7 @@ export class FramesPipeSession {
       '-y',
       ...inputArgs,
       ...videoEncoderOutputArgs(encoderArgs, filters),
-      '-movflags',
-      '+faststart',
+      ...(options.faststart ? ['-movflags', '+faststart'] : []),
       options.outputPath
     ]
 
@@ -1395,6 +1398,9 @@ export class FramesPipeSession {
 
   private touchIdle(): void {
     if (this.settled || this.eofSent) return
+    const now = Date.now()
+    if (this.idleTimer && now - this.lastIdleTouchAt < 5_000) return
+    this.lastIdleTouchAt = now
     if (this.idleTimer) clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => {
       void this.abort(new Error('FFmpeg image2pipe idle timeout'))
@@ -1402,13 +1408,21 @@ export class FramesPipeSession {
     this.idleTimer.unref?.()
   }
 
-  write(chunk: Buffer): Promise<void> {
+  write(chunk: Buffer, framesInChunk?: number): Promise<void> {
     if (this.frameBytes > 0 && chunk.length % this.frameBytes !== 0) {
       return Promise.reject(
         new ExportValidationError(
           `Invalid rawvideo chunk: ${chunk.length} bytes is not a multiple of ${this.frameBytes} ` +
             '(yuv420p frame size)'
         )
+      )
+    }
+    if (
+      framesInChunk !== undefined &&
+      (!Number.isInteger(framesInChunk) || framesInChunk <= 0)
+    ) {
+      return Promise.reject(
+        new ExportValidationError(`Invalid frameCount in pipe chunk: ${framesInChunk}`)
       )
     }
     const task = this.queue.then(async () => {
@@ -1427,7 +1441,8 @@ export class FramesPipeSession {
           else resolve()
         })
       })
-      this.frames += this.frameBytes > 0 ? chunk.length / this.frameBytes : 1
+      this.frames +=
+        this.frameBytes > 0 ? chunk.length / this.frameBytes : (framesInChunk ?? 1)
     })
     this.queue = task.catch((err) => {
       this.error ??= err instanceof Error ? err : new Error(String(err))

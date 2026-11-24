@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  promises as fsPromises,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
