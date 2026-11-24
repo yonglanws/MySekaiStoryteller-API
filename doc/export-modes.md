@@ -118,8 +118,8 @@ WebCodecs 直编不使用 `crf`，而是以 `exportBitrate` 控制目标码率�
   - 虚拟时钟安装会将页面 `performance.now()` 重置到新起点，导致相邻导出间时钟向后跳变。Wave 4 通过 `resetStageTiming` / `resetClockBaselines` 与 `AdvancedModel.resetAllClockBaselines` 统一重置舞台计时、`lastNaturalUpdateMs`、`currentBodyStartedAt`、眨眼与各通道队列时间戳，并在 `AnimationManager` 与 `TalkSnippet` 中防御时钟回退。
 - **Live2D 动作保持与面部参数隔离**：
   - `AdvancedModel.installHoldLastFrameHook` 保持非循环身体与 v2 `face_*` 表情末帧定格至下一条 cue 交叉淡化，不会在 1–2 秒后过早淡出或回弹默认表情，同时在播完时立即向门控与 trace 报告 `isFinished() === true`。
-  - `installMotionLoopHook` 正确传播 `_motionData.loop === true`（非 `oneShotWaitDepth` 等待期间关闭 `loopFadeIn`）。
-  - `installBodyParameterIsolation` 统一覆写并隔离 `ParamEyeball*` / `ParamEyeBall*`（含 Cubism2 `PARAM_EYE_BALL_*` / `PARAM_EYEBALL_*`）、眉眼嘴微笑、呼吸及通道 1 活跃表情曲线；只要眼睑参数被隔离，即使播放循环身体动作也继续保持 `wakeBlink` 自动眨眼。
+  - `installMotionLoopHook` 强制场景 cue 单次播放：PJSK 的 `motion3.json` 全部带 `Meta.Loop = true`，但按它开原生循环会让每个动作每 2~3 秒从头重播（观感像动画突然重启），因此运行时无条件 `setIsLoop(false)`，由 hold-last-frame 定格末帧。
+  - `installBodyParameterIsolation` 统一覆写并隔离 `ParamEyeball*` / `ParamEyeBall*`（含 Cubism2 `PARAM_EYE_BALL_*` / `PARAM_EYEBALL_*`）、眉眼嘴微笑、呼吸及通道 1 活跃表情曲线；眼睑参数被隔离时保持 `wakeBlink` 自动眨眼。
 
 ### 渲染倍率与清晰度
 

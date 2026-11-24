@@ -682,10 +682,14 @@ export default class AdvancedModel extends Live2DModel {
   }
 
   /**
-   * Cubism4MotionManager.createMotion in pixi-live2d-display-advanced does not propagate
-   * Meta.Loop to CubismMotion.setIsLoop(), causing v1 looping clips to terminate after 1 pass
-   * and fade-in from default at loop boundaries. Enable native loop with loopFadeIn=false
-   * unless a one-shot wait explicitly requires completion.
+   * 场景 cue 的动作一律单次播放后定格（官方 PlayableAnimator 语义）。
+   *
+   * PJSK 的 motion3.json 全部带 `Meta.Loop = true`，但那是给游戏内 idle 用的；
+   * 之前按 Meta.Loop 打开原生循环，结果每个身体动作每 2~3 秒从头再播一次：
+   * 2026-11-25 实测 `w-normal-trouble01`（2.6s）在 36.4/39.0/41.6/44.2s 出现
+   * 4~6 YAVG 的定格跳变，观感就是“动作突然重启”。旧版渲染器不读 Meta.Loop，
+   * 动作播完自然回到 idle，用户对照的样例渲染同样是这种表现。
+   * 所以这里无条件关掉循环，让 `installHoldLastFrameHook` 把末帧定住。
    */
   private installMotionLoopHook(): void {
     const motionManager = this.internalModel?.motionManager as unknown as {
@@ -702,17 +706,10 @@ export default class AdvancedModel extends Live2DModel {
 
   private syncMotionLoopFlag(motion: unknown): void {
     const typed = motion as {
-      _motionData?: { loop?: boolean }
       setIsLoop?: (loop: boolean) => void
-      setIsLoopFadeIn?: (fade: boolean) => void
     } | null
     if (!typed) return
-    if (this.oneShotWaitDepth > 0) {
-      typed.setIsLoop?.(false)
-    } else if (typed._motionData?.loop === true) {
-      typed.setIsLoop?.(true)
-      typed.setIsLoopFadeIn?.(false)
-    }
+    typed.setIsLoop?.(false)
   }
 
   /**

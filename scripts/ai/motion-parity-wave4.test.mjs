@@ -589,8 +589,11 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
   // Hook installation
   model.installMotionLoopHook()
   const wrappedCreated = model.internalModel.motionManager.createMotion({}, 'w-normal01-nod', {})
-  assert.equal(wrappedCreated._isLoop, true, 'Meta.Loop=true must call setIsLoop(true)')
-  assert.equal(wrappedCreated._isLoopFadeIn, false, 'Looping clips must disable fadeIn bounce')
+  assert.equal(
+    wrappedCreated._isLoop,
+    false,
+    'Scene cues must play once even when Meta.Loop=true (loop restart reads as a twitch)'
+  )
 
   model.installHoldLastFrameHook(0)
   model.installHoldLastFrameHook(1)
@@ -601,11 +604,15 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
   // Patch coreModel instanceof check bypass by testing isolation around startMotions(facialFirst=undefined)
   // Real runtime uses Cubism4InternalModel, so test both startMotions param isolation wiring & hold-last-frame!
   await model.startMotions('w-normal01-nod', 'face_smile_01', undefined, { facialForce: true })
-  assert.equal(loopMotion._isLoop, true, 'Looping body clip must enable setIsLoop(true)')
+  assert.equal(
+    loopMotion._isLoop,
+    false,
+    'Body clips stay one-shot at runtime; hold-last-frame keeps the final pose'
+  )
   assert.equal(
     model.blinkState.status,
-    'ready',
-    'Isolated eyes must wake auto-blink even while looping'
+    'sleep',
+    'Body clip start sleeps auto-blink; the non-loop finish wakes it again'
   )
   assert.ok(
     model.bodyIgnoredParamIds.includes('ParamEyeballX') &&
@@ -664,10 +671,10 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
     )
   }
 
-  // Verify applyAndWait turns off loop temporarily so one-shot completes, then normal start turns loop back on
+  // Verify one-shot waits keep the clip non-looping and still record the fade-in
   model.oneShotWaitDepth++
   await model.startMotions('w-normal01-nod', undefined, false)
-  assert.equal(loopMotion._isLoop, false, 'One-shot wait must disable loop temporarily')
+  assert.equal(loopMotion._isLoop, false, 'One-shot wait keeps the clip non-looping')
   model.oneShotWaitDepth--
   assert.ok(currentFadeIn >= 0)
 
@@ -676,6 +683,7 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
   const snippetModel = Object.assign(Object.create(AdvancedModel.prototype), {
     _metadata: { id: 1 },
     internalModel: {},
+    position: { x: 0, y: 0 },
     beginVisibilityChange: () => 1,
     hasMotion: () => true,
     isMotionLooping: () => false,
@@ -683,6 +691,9 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
     setPositionRel() {},
     setOpacity() {},
     async move() {},
+    async moveToCurrent() {
+      return false
+    },
     async show() {},
     startBodyIdleLoop() {},
     async startMotions(motion, facial, facialFirst, opts) {
