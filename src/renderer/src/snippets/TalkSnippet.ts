@@ -173,9 +173,15 @@ export default class TalkSnippet extends BaseSnippet {
 
     let snippetStartTime = nowMs()
     this.app.currentTalkStartedAtMs = snippetStartTime
+    ;(
+      this.app as unknown as {
+        onTalkSpeechStart?: (index: number, wallMs: number) => void
+      }
+    ).onTalkSpeechStart?.(this.snippetIndex, snippetStartTime)
     const ui = this.app.layerUI as unknown as ExtendedUILayer
     const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
-    const hasModel = talkData.data.modelId !== -1
+    const modelId = talkData.data.modelId
+    const hasModel = typeof modelId === 'number' && Number.isFinite(modelId) && modelId >= 0
     if (hasModel) {
       modelLayer.setLayoutDepth?.(talkData.data.modelId, 'Front')
     }
@@ -194,18 +200,23 @@ export default class TalkSnippet extends BaseSnippet {
     }
     actions.push(...(talkData.data.actions ?? []))
 
+    // 同一帧并发 LayoutAppear 时，模型 alpha 从 0 起渐显（isModelVisible=false），
+    // 需以 isModelShown 判断是否在台，避免首帧被误判为隐身而丢失动作/表情。
+    const isModelAvailable = (id: number): boolean =>
+      modelLayer.isModelShown?.(id) ?? this.app.layerModel.isModelVisible(id)
+
     // 语音与 at=0 动作在 act 帧立即启动（不等 0.2s 窗口打开动画结束）。
     const sequence = scheduleCharacterActions(
       actions,
       targetDurationMs,
       {
-        isVisible: (id) => this.app.layerModel.isModelVisible(id),
+        isVisible: isModelAvailable,
         apply: async (action, actionSignal) => {
           const model = this.app.getModelById(action.modelId)
           await model.applyCharacterAction(
             action,
             actionSignal,
-            () => this.app.layerModel.isModelVisible(action.modelId),
+            () => isModelAvailable(action.modelId),
             this.snippetIndex,
             { talkDurationMs: targetDurationMs }
           )
@@ -285,7 +296,7 @@ export default class TalkSnippet extends BaseSnippet {
         }
         if (!signal?.aborted) {
           const tailMs =
-            voiceDoneMs < typingEndedAtMs ? AUTO_NEXT_PAGE_DELAY_MS : AUTO_WAIT_AFTER_VOICE_MS
+            voiceDoneMs <= typingEndedAtMs ? AUTO_NEXT_PAGE_DELAY_MS : AUTO_WAIT_AFTER_VOICE_MS
           await AnimationManager.delay(tailMs)
         }
       } else {
@@ -304,8 +315,9 @@ export default class TalkSnippet extends BaseSnippet {
         if (currentElapsedNow < snippetStartTime) snippetStartTime = currentElapsedNow
         const elapsedMs = Math.max(0, currentElapsedNow - snippetStartTime)
         const remainingTargetMs = Math.max(0, targetDurationMs - elapsedMs)
-        if (remainingTargetMs > 0 && !signal?.aborted) {
-          await AnimationManager.delay(remainingTargetMs)
+        if (remainingTargetMs > 0.001 && !signal?.aborted) {
+          // framesToMs(N) 对 N%3===1 向上取整（如 3416.667ms），减去 0.001ms 避免 60Hz 虚钟多等一帧
+          await AnimationManager.delay(remainingTargetMs - 0.001)
         }
         await sequence.finished
       }

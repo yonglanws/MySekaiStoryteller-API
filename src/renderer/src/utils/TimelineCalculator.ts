@@ -765,11 +765,19 @@ export function calculateTimeline(
     }
 
     const layoutRunningMs = isTalk ? Math.max(0, activeLayoutEndMs - startTimeMs) : 0
+    const officialVoiceMs =
+      isTalk &&
+      typeof snippet.data.voiceDurationMs === 'number' &&
+      Number.isFinite(snippet.data.voiceDurationMs) &&
+      snippet.data.voiceDurationMs > 0
+        ? snippet.data.voiceDurationMs
+        : 0
     const silentHoldMs =
       isExport &&
       options.ttsEnabled !== false &&
       snippet.type === 'Talk' &&
       !hasTTS &&
+      officialVoiceMs <= 0 &&
       !snippet.data.voice &&
       !hasSpeakableSpeechText(snippet.data.content) &&
       !hasSpeakableSpeechText(snippet.data.ttsText ?? '')
@@ -818,8 +826,12 @@ export function calculateTimeline(
     let layoutDurationMs: number | null = null
     let layoutDecision = ''
     if (snippet.type === 'LayoutAppear') {
-      const modelId = Number(getSnippetDataField(snippet, 'modelId'))
-      const shown = visibleModels.has(modelId)
+      const rawModelId = getSnippetDataField(snippet, 'modelId')
+      const modelId =
+        rawModelId !== undefined && rawModelId !== null && String(rawModelId).trim() !== ''
+          ? Number(rawModelId)
+          : NaN
+      const shown = Number.isFinite(modelId) && visibleModels.has(modelId)
       // 官方 `at = frame + (hidden && motion)`：隐藏角色的类型分支（淡入与滑入）
       // 带 motion 时延后一帧。片段只等淡入 0.1s，滑入在后台继续。
       const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
@@ -835,10 +847,14 @@ export function calculateTimeline(
         activeLayoutEndMs,
         startTimeMs + (layoutGateMs >= 30 ? quantizeMsToFrame(layoutGateMs) : layoutGateMs)
       )
-      visibleModels.add(modelId)
+      if (Number.isFinite(modelId)) visibleModels.add(modelId)
     } else if (snippet.type === 'LayoutClear') {
-      const modelId = Number(getSnippetDataField(snippet, 'modelId'))
-      const shown = visibleModels.has(modelId)
+      const rawModelId = getSnippetDataField(snippet, 'modelId')
+      const modelId =
+        rawModelId !== undefined && rawModelId !== null && String(rawModelId).trim() !== ''
+          ? Number(rawModelId)
+          : NaN
+      const shown = Number.isFinite(modelId) && visibleModels.has(modelId)
       const speed = getSnippetDataField(snippet, 'moveSpeed')
       const from = getSnippetDataField(snippet, 'from')
       const to = getSnippetDataField(snippet, 'to')
@@ -855,7 +871,7 @@ export function calculateTimeline(
         const quantizedClearMs = clearMs >= 30 ? quantizeMsToFrame(clearMs) : clearMs
         activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + quantizedClearMs)
       }
-      visibleModels.delete(modelId)
+      if (Number.isFinite(modelId)) visibleModels.delete(modelId)
     } else if (snippet.type === 'Move') {
       const moveMs =
         crossResult.finalDurationMs >= 30
@@ -992,6 +1008,7 @@ export function buildTTSMappingsFromAudioTracks(
     characterName: string
     text: string
     audioBuffer: ArrayBuffer
+    snippetIndex?: number
   }>,
   timelineEntries: TimelineEntry[]
 ): Map<number, TTSMapping> {
@@ -1000,11 +1017,14 @@ export function buildTTSMappingsFromAudioTracks(
   for (const entry of timelineEntries) {
     if (entry.snippetType !== 'Talk') continue
 
-    const matchingTrack = audioTracks.find(
-      (track) =>
-        Math.abs(track.startTime - entry.startTimeMs) < 1000 &&
-        track.characterName === (entry.speaker || '')
-    )
+    const matchingTrack =
+      audioTracks.find((track) => track.snippetIndex === entry.snippetIndex) ??
+      audioTracks.find(
+        (track) =>
+          track.snippetIndex === undefined &&
+          Math.abs(track.startTime - entry.startTimeMs) < 1000 &&
+          track.characterName === (entry.speaker || '')
+      )
 
     if (matchingTrack) {
       const durationMs = matchingTrack.endTime - matchingTrack.startTime

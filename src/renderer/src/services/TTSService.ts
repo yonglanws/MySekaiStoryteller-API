@@ -178,6 +178,7 @@ export class TTSService {
   private leaseUnavailableLogged: boolean = false
   /** 宿主没有租约端点（Electron/开发模式）时永久降级，避免每句都白等一次 */
   private leaseDisabled: boolean = false
+  private consecutiveLeaseNetworkErrors: number = 0
 
   constructor(config: TTSConfig) {
     this.config = config
@@ -220,10 +221,37 @@ export class TTSService {
     characterName: string,
     speedFactor?: number,
     gptWeightsPath: string = '',
-    sovitsWeightsPath: string = ''
+    sovitsWeightsPath: string = '',
+    refAudioPath?: string,
+    promptText?: string,
+    promptLang?: string
   ): string {
-    // 权重也进缓存键：改了角色权重后不能复用旧音色的缓存
-    return `${characterName}:${speedFactor ?? this.config.speedFactor}:${gptWeightsPath}:${sovitsWeightsPath}:${text}`
+    const charConfig = this.getCharacterVoice(characterName)
+    const effectiveRef =
+      refAudioPath ?? (charConfig?.refAudioPath || this.config.defaultRefAudioPath)
+    const effectivePrompt = promptText ?? (charConfig?.promptText || this.config.defaultPromptText)
+    const effectivePromptLang = promptLang ?? (charConfig?.promptLang || this.config.promptLang)
+    const effectiveGpt =
+      gptWeightsPath || charConfig?.gptWeightsPath || this.config.gptWeightsPath || ''
+    const effectiveSovits =
+      sovitsWeightsPath || charConfig?.sovitsWeightsPath || this.config.sovitsWeightsPath || ''
+    // 权重与关键推理参数都进缓存键：修改配置或角色音色后不能复用旧缓存
+    return [
+      characterName,
+      speedFactor ?? this.config.speedFactor,
+      effectiveGpt,
+      effectiveSovits,
+      effectiveRef,
+      effectivePrompt,
+      effectivePromptLang,
+      this.config.textLang,
+      this.config.topK,
+      this.config.topP,
+      this.config.temperature,
+      this.config.mediaType,
+      this.config.fragmentInterval,
+      text
+    ].join(':')
   }
 
   private addToCache(key: string, result: TTSResult): void {
@@ -292,7 +320,10 @@ export class TTSService {
       characterName,
       speedFactor,
       gptWeightsPath,
-      sovitsWeightsPath
+      sovitsWeightsPath,
+      refAudioPath,
+      promptText,
+      promptLang
     )
     const cached = this.audioCache.get(cacheKey)
     if (cached) {
@@ -446,6 +477,9 @@ export class TTSService {
       voice.loraAdapter ?? '',
       voice.caption ?? '',
       voice.speed ?? '',
+      voice.numSteps ?? this.config.irodori.numSteps ?? '',
+      this.config.irodori.cfgScaleText ?? '',
+      this.config.irodori.cfgScaleSpeaker ?? '',
       text
     ].join(':')
     const cached = this.audioCache.get(cacheKey)
@@ -546,13 +580,19 @@ export class TTSService {
         permanentFailure = true
         throw new Error('invalid lease response')
       }
+      this.consecutiveLeaseNetworkErrors = 0
       return {
         leaseId: data.leaseId,
         currentWeights: data.currentWeights ?? null
       }
     } catch (error) {
-      if (permanentFailure || error instanceof TypeError) {
+      if (permanentFailure) {
         this.leaseDisabled = true
+      } else if (error instanceof TypeError) {
+        this.consecutiveLeaseNetworkErrors++
+        if (this.consecutiveLeaseNetworkErrors >= 3) {
+          this.leaseDisabled = true
+        }
       }
       if (!this.leaseUnavailableLogged) {
         this.leaseUnavailableLogged = true
@@ -721,7 +761,8 @@ export class TTSService {
   }
 
   private async fetchTTS(request: TTSRequest): Promise<ArrayBuffer> {
-    return this.fetchAudio(`${this.config.apiBaseUrl}/tts`, request)
+    const baseUrl = this.normalizeBaseUrl(this.config.apiBaseUrl)
+    return this.fetchAudio(`${baseUrl}/tts`, request)
   }
 
   /**
@@ -800,8 +841,9 @@ export class TTSService {
       caption: this.config.irodori.defaultCaption
     }
     const payload = buildIrodoriSpeechRequest('テスト', voice, this.config.irodori, 1.0)
+    const baseUrl = this.normalizeBaseUrl(this.config.apiBaseUrl)
     try {
-      const audioData = await this.fetchAudio(`${this.config.apiBaseUrl}/v1/audio/speech`, payload)
+      const audioData = await this.fetchAudio(`${baseUrl}/v1/audio/speech`, payload)
       return {
         success: true,
         message: 'Irodori TTS 服务连接成功',
@@ -820,23 +862,58 @@ export class TTSService {
   }
 
   private async calculateAudioDuration(audioBuffer: ArrayBuffer): Promise<number> {
-    if (audioBuffer.byteLength < 44) {
+    if (audioBuffer.byteLength < 12) {
       return 0
     }
 
     const view = new DataView(audioBuffer)
-    if (view.getUint32(0, true) === 0x46464952) {
-      const sampleRate = view.getUint32(24, true)
-      const dataSize = view.getUint32(40, true)
-      const bitsPerSample = view.getUint16(34, true)
-      const numChannels = view.getUint16(22, true)
+    // "RIFF" (0x46464952) + "WAVE" (0x45564157)：按标准 RIFF chunk 遍历，兼容非 44 字节头部
+    // （如扩展 fmt chunk、fact/LIST/JUNK/smpl 等附加 chunk）
+    if (view.getUint32(0, true) === 0x46464952 && view.getUint32(8, true) === 0x45564157) {
+      let offset = 12
+      let sampleRate = 0
+      let numChannels = 0
+      let bitsPerSample = 0
+      let headerByteRate = 0
+      let dataSize = -1
 
-      const byteRate = sampleRate * numChannels * (bitsPerSample / 8)
-      if (byteRate === 0) {
-        return 0
+      while (offset + 8 <= audioBuffer.byteLength) {
+        const chunkId = view.getUint32(offset, true)
+        const rawChunkSize = view.getUint32(offset + 4, true)
+        const payloadOffset = offset + 8
+        const availableBytes = audioBuffer.byteLength - payloadOffset
+
+        if (chunkId === 0x20746d66 && availableBytes >= 16 && rawChunkSize >= 16) {
+          // "fmt "
+          numChannels = view.getUint16(payloadOffset + 2, true)
+          sampleRate = view.getUint32(payloadOffset + 4, true)
+          headerByteRate = view.getUint32(payloadOffset + 8, true)
+          bitsPerSample = view.getUint16(payloadOffset + 14, true)
+        } else if (chunkId === 0x61746164) {
+          // "data"：流式服务端可能将 data chunk size 写成 0xffffffff 或未回填截断值，需钳制到实际可用字节数
+          dataSize =
+            rawChunkSize === 0xffffffff || rawChunkSize > availableBytes
+              ? availableBytes
+              : rawChunkSize
+          break
+        }
+
+        if (rawChunkSize > availableBytes) {
+          break
+        }
+        // RIFF 子块按 2 字节偶对齐填充
+        offset = payloadOffset + rawChunkSize + (rawChunkSize & 1)
       }
 
-      return (dataSize / byteRate) * 1000
+      if (dataSize >= 0) {
+        const effectiveByteRate =
+          sampleRate > 0 && numChannels > 0 && bitsPerSample > 0
+            ? sampleRate * numChannels * (bitsPerSample / 8)
+            : headerByteRate
+        if (effectiveByteRate > 0) {
+          return (dataSize / effectiveByteRate) * 1000
+        }
+      }
     }
 
     try {
@@ -855,7 +932,7 @@ export class TTSService {
     concurrency: number = 3
   ): Promise<Map<string, TTSResult>> {
     const results = new Map<string, TTSResult>()
-    const executing: Promise<void>[] = []
+    const executing: Set<Promise<void>> = new Set()
 
     for (let i = 0; i < dialogues.length; i++) {
       const dialogue = dialogues[i]
@@ -865,14 +942,11 @@ export class TTSService {
           results.set(cacheKey, result)
         }
       )
-      executing.push(promise)
+      executing.add(promise)
+      promise.finally(() => executing.delete(promise))
 
-      if (executing.length >= concurrency) {
+      if (executing.size >= concurrency) {
         await Promise.race(executing)
-        const index = executing.findIndex((p) => p === promise)
-        if (index > -1) {
-          executing.splice(index, 1)
-        }
       }
     }
 
@@ -919,11 +993,13 @@ export class TTSService {
       testRequest.sovits_weights = this.config.sovitsWeightsPath
     }
 
+    const baseUrl = this.normalizeBaseUrl(this.config.apiBaseUrl)
+
     try {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
 
-      const response = await fetch(`${this.config.apiBaseUrl}/tts`, {
+      const response = await fetch(`${baseUrl}/tts`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -970,7 +1046,7 @@ export class TTSService {
 
       try {
         const ipcResult = await window.electron.ipcRenderer.invoke('electron:tts-fetch', {
-          url: `${this.config.apiBaseUrl}/tts`,
+          url: `${baseUrl}/tts`,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'

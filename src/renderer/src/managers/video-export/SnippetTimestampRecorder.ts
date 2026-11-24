@@ -24,6 +24,15 @@ export class SnippetTimestampRecorder {
   private currentSnippetIndex: number = -1
   private currentSnippetType: string = ''
   private currentSnippetData: { speaker?: string; content?: string } = {}
+  private activeStarts: Map<
+    number,
+    {
+      snippetType: string
+      wallStartMs: number
+      data: { speaker?: string; content?: string }
+    }
+  > = new Map()
+  private talkSpeechStartByIndex: Map<number, number> = new Map()
 
   /**
    * @param renderStartWallMs 成片帧 0（故事帧 0）的时刻；音频 placement 相对它。
@@ -37,6 +46,9 @@ export class SnippetTimestampRecorder {
     this.renderStartWallMs = renderStartWallMs
     this.timelineStartWallMs = timelineStartWallMs
     this.timestamps = []
+    this.timestampIndex.clear()
+    this.activeStarts.clear()
+    this.talkSpeechStartByIndex.clear()
     this.logger.info(
       `Render start marked at wall time ${this.renderStartWallMs.toFixed(0)}ms ` +
         `(timeline origin ${this.timelineStartWallMs.toFixed(0)}ms)`
@@ -48,32 +60,57 @@ export class SnippetTimestampRecorder {
     type: string,
     data?: { speaker?: string; content?: string }
   ): void {
+    const wallStartMs = performance.now()
+    const snippetData = data || {}
     this.currentSnippetIndex = index
     this.currentSnippetType = type
-    this.currentSnippetData = data || {}
-    this.currentSnippetStartWallMs = performance.now()
-    this.logger.info(
-      `Snippet[${index}] start: type=${type}, wall=${this.currentSnippetStartWallMs.toFixed(0)}ms`
-    )
+    this.currentSnippetData = snippetData
+    this.currentSnippetStartWallMs = wallStartMs
+    this.activeStarts.set(index, {
+      snippetType: type,
+      wallStartMs,
+      data: snippetData
+    })
+    this.logger.info(`Snippet[${index}] start: type=${type}, wall=${wallStartMs.toFixed(0)}ms`)
   }
 
-  markSnippetEnd(ttsDurationMs?: number, speechOffsetMs = 0): void {
-    if (this.currentSnippetIndex < 0) return
+  markTalkSpeechStart(index: number, wallMs: number = performance.now()): void {
+    this.talkSpeechStartByIndex.set(index, wallMs)
+  }
+
+  markSnippetEnd(ttsDurationMs?: number, speechOffsetMs = 0, snippetIndex?: number): void {
+    const targetIndex = snippetIndex ?? this.currentSnippetIndex
+    if (targetIndex < 0) return
+
+    const active = this.activeStarts.get(targetIndex)
+    const wallStartMs = active?.wallStartMs ?? this.currentSnippetStartWallMs
+    const snippetType = active?.snippetType ?? this.currentSnippetType
+    const snippetData = active?.data ?? this.currentSnippetData
+    this.activeStarts.delete(targetIndex)
+
+    const recordedSpeechStart = this.talkSpeechStartByIndex.get(targetIndex)
+    this.talkSpeechStartByIndex.delete(targetIndex)
+    const resolvedSpeechOffsetMs =
+      speechOffsetMs > 0
+        ? speechOffsetMs
+        : recordedSpeechStart !== undefined
+          ? Math.max(0, recordedSpeechStart - wallStartMs)
+          : 0
 
     const wallEndMs = performance.now()
-    const isTalk = this.currentSnippetType === 'Talk'
+    const isTalk = snippetType === 'Talk'
 
     const entry: SnippetTimestamp = {
-      snippetIndex: this.currentSnippetIndex,
-      snippetType: this.currentSnippetType,
-      wallStartMs: this.currentSnippetStartWallMs,
+      snippetIndex: targetIndex,
+      snippetType,
+      wallStartMs,
       wallEndMs,
-      wallDurationMs: wallEndMs - this.currentSnippetStartWallMs,
+      wallDurationMs: wallEndMs - wallStartMs,
       isTalk,
-      speaker: this.currentSnippetData.speaker,
-      content: this.currentSnippetData.content,
+      speaker: snippetData.speaker,
+      content: snippetData.content,
       ttsDurationMs,
-      speechOffsetMs: Math.max(0, speechOffsetMs)
+      speechOffsetMs: Math.max(0, resolvedSpeechOffsetMs)
     }
 
     this.timestamps.push(entry)
@@ -83,7 +120,9 @@ export class SnippetTimestampRecorder {
       `Snippet[${entry.snippetIndex}] end: wall=${wallEndMs.toFixed(0)}ms, duration=${entry.wallDurationMs.toFixed(0)}ms`
     )
 
-    this.currentSnippetIndex = -1
+    if (targetIndex === this.currentSnippetIndex) {
+      this.currentSnippetIndex = -1
+    }
   }
 
   recordSnippet(
@@ -249,5 +288,7 @@ export class SnippetTimestampRecorder {
     this.timelineStartWallMs = 0
     this.currentSnippetIndex = -1
     this.currentSnippetStartWallMs = 0
+    this.activeStarts.clear()
+    this.talkSpeechStartByIndex.clear()
   }
 }

@@ -639,3 +639,57 @@ test('Talk auto advance is max(typing_end, voice_end) + 30 / typing_end + 121', 
     assert.equal(talk.computedEndFrame, expectedGate + expectedTail, `voice=${c.voiceMs} finish`)
   }
 })
+
+test('bakeStoryPlan preserves modelId 0 across layout/actions and computes at > 0 action frames without timeline', () => {
+  const { load } = fixture()
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    {
+      type: 'LayoutAppear',
+      wait: false,
+      delay: 0,
+      data: {
+        modelId: 0,
+        motion: 'w-cute-nod01',
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Left', offset: 0 },
+        moveSpeed: 'Normal'
+      }
+    },
+    {
+      type: 'LayoutClear',
+      wait: true,
+      delay: 0,
+      data: {
+        modelId: 0,
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Left', offset: 0 },
+        moveSpeed: 'Normal'
+      }
+    },
+    {
+      type: 'Talk',
+      wait: true,
+      delay: 0,
+      data: {
+        speaker: '一歌',
+        content: 'こんにちは！今日もいい天気ですね。',
+        modelId: 0,
+        actions: [{ at: 0.5, facial: 'face_smile01' }]
+      }
+    }
+  ]
+  const plan = planModule.bakeStoryPlan(snippets, [], {
+    motionClipFrames: new Map([['0|w-cute-nod01', 90]])
+  })
+  // modelId 0 was previously coerced to -1 in layout handling, making LayoutAppear invisible & LayoutClear no-op
+  assert.equal(plan.entries[0].layout.kind, 'appear')
+  assert.equal(plan.entries[0].actions[0].modelId, 0)
+  assert.equal(plan.entries[1].layout.kind, 'clear')
+  assert.notEqual(plan.entries[1].layout.fadeStartFrame, null)
+  // Cleared modelId 0 must not block the subsequent Talk's settleFrames
+  assert.equal(plan.entries[2].talk.settleFrames, 0)
+  // Mid-line action (at=0.5) should advance past startFrame even when bakeStoryPlan receives empty timeline
+  assert.equal(plan.entries[2].actions[0].modelId, 0)
+  assert.ok(plan.entries[2].actions[0].frame > plan.entries[2].startFrame)
+})

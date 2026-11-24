@@ -142,3 +142,74 @@ test('mixSeCueSamples ramps loop volume and fades out on StopSe', () => {
   assert.ok(Math.abs(left[1750] - 0.25) < 1e-6, `stop fade midpoint: ${left[1750]}`)
   assert.equal(left[2000], 0)
 })
+
+test('buildSeCues preserves numberOfChannels and offsetMs when startTimesIncludeDelay is true', () => {
+  const buffers = new Map([
+    [
+      'mono.wav',
+      {
+        channel0: new Float32Array([0.5, 0.5]),
+        channel1: new Float32Array([0.5, 0.5]),
+        numberOfChannels: 1
+      }
+    ]
+  ])
+  const cues = buildSeCues(
+    [
+      {
+        snippetIndex: 0,
+        file: 'mono.wav',
+        stop: false,
+        volume: 1,
+        loop: false,
+        fadeMs: 0,
+        delayMs: 300,
+        offsetMs: 120
+      }
+    ],
+    [1300],
+    buffers,
+    true
+  )
+  assert.equal(cues.length, 1)
+  assert.equal(cues[0].timeMs, 1420)
+  assert.equal(cues[0].numberOfChannels, 1)
+})
+
+test('mixSeCueSamples interrupts an active fade-in without jumping to target gain', () => {
+  const sampleRate = 1000
+  const left = new Float32Array(1200)
+  const right = new Float32Array(1200)
+  mixSeCueSamples(
+    [
+      {
+        timeMs: 0,
+        file: 'fade.mp3',
+        stop: false,
+        volume: 1,
+        loop: true,
+        fadeMs: 1000,
+        channel0: new Float32Array([1]),
+        channel1: new Float32Array([1])
+      },
+      {
+        timeMs: 1000,
+        file: 'fade.mp3',
+        stop: true,
+        volume: 0,
+        loop: false,
+        fadeMs: 500,
+        channel0: null,
+        channel1: null
+      }
+    ],
+    left,
+    right,
+    sampleRate,
+    1.0
+  )
+  // At 500ms, fade-in is halfway (0.5). Stop fade starts at 500ms from actual gain 0.5 -> 0 (not jumping to 1.0).
+  assert.ok(Math.abs(left[500] - 0.5) < 1e-3, `fade-in midpoint at 500ms: ${left[500]}`)
+  assert.ok(Math.abs(left[750] - 0.25) < 1e-3, `stop fade midpoint at 750ms: ${left[750]}`)
+  assert.equal(left[1000], 0)
+})

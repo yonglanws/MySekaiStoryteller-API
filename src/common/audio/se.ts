@@ -68,16 +68,18 @@ export interface SeBufferCue {
   fadeMs: number
   channel0: Float32Array | null
   channel1: Float32Array | null
+  numberOfChannels?: number
 }
 
 export interface SeBuffer {
   channel0: Float32Array
   channel1: Float32Array
+  numberOfChannels?: number
 }
 
 /** 把 SE 变更和片段起始时间合成为混音事件；加载失败的文件跳过。 */
 export function buildSeCues(
-  changes: SeChangeSpec[],
+  changes: ReadonlyArray<SeChangeSpec & { offsetMs?: number }>,
   startTimesMs: ReadonlyArray<number>,
   buffers: ReadonlyMap<string, SeBuffer>,
   startTimesIncludeDelay = false
@@ -85,7 +87,8 @@ export function buildSeCues(
   const cues: SeBufferCue[] = []
   for (const change of changes) {
     const base = Math.max(0, startTimesMs[change.snippetIndex] ?? 0)
-    const timeMs = base + (startTimesIncludeDelay ? 0 : change.delayMs)
+    const timeMs =
+      base + (startTimesIncludeDelay ? 0 : change.delayMs) + Math.max(0, change.offsetMs ?? 0)
     if (change.stop) {
       cues.push({
         timeMs,
@@ -109,7 +112,10 @@ export function buildSeCues(
       loop: change.loop,
       fadeMs: change.fadeMs,
       channel0: buffer.channel0,
-      channel1: buffer.channel1
+      channel1: buffer.channel1,
+      ...(buffer.numberOfChannels !== undefined
+        ? { numberOfChannels: buffer.numberOfChannels }
+        : {})
     })
   }
   cues.sort((a, b) => a.timeMs - b.timeMs)
@@ -133,7 +139,7 @@ interface LoopInstance {
   channel1: Float32Array
   start: number
   end: number
-  volumes: Array<{ sample: number; volume: number; fadeSamples: number }>
+  volumes: Array<{ sample: number; volume: number; fadeSamples: number; isStop?: boolean }>
 }
 
 /**
@@ -163,10 +169,14 @@ export function mixSeCueSamples(
     instance.end = Math.min(totalSamples, Math.max(instance.start, atSample))
     if (fadeSamples > 0) {
       const fade = Math.min(fadeSamples, instance.end - instance.start)
+      const fadeStart = Math.max(instance.start, instance.end - fade)
+      // 保留初始起音事件，截断 StopSe 淡出起点之后的未执行渐变事件
+      instance.volumes = instance.volumes.filter((v, idx) => idx === 0 || v.sample <= fadeStart)
       instance.volumes.push({
-        sample: Math.max(instance.start, instance.end - fade),
+        sample: fadeStart,
         volume: 0,
-        fadeSamples: fade
+        fadeSamples: fade,
+        isStop: true
       })
     }
     closedLoops.push(instance)
@@ -244,30 +254,32 @@ export function mixSeCueSamples(
       .map((entry) => ({
         sample: Math.max(instance.start, Math.min(instance.end, entry.sample)),
         volume: entry.volume,
-        fadeSamples: entry.fadeSamples
+        fadeSamples: entry.fadeSamples,
+        isStop: entry.isStop ?? false
       }))
-      .sort((a, b) => a.sample - b.sample)
+      .sort((a, b) => a.sample - b.sample || Number(a.isStop) - Number(b.isStop))
     let volumeIndex = 0
     let currentVolume = volumes[0]?.volume ?? 0
     let fadeStart = instance.start
     let fadeFrom = 0
     let fadeTo = currentVolume
     let fadeSamples = volumes[0]?.fadeSamples ?? 0
+    const gainAt = (s: number): number =>
+      fadeSamples > 0 && s - fadeStart < fadeSamples
+        ? fadeFrom + (fadeTo - fadeFrom) * ((s - fadeStart) / fadeSamples)
+        : currentVolume
 
     for (let sample = instance.start; sample < instance.end; sample++) {
       while (volumeIndex + 1 < volumes.length && sample >= volumes[volumeIndex + 1].sample) {
+        const currentGain = gainAt(sample)
         volumeIndex++
-        fadeFrom = currentVolume
+        fadeFrom = currentGain
         fadeTo = volumes[volumeIndex].volume
         fadeStart = sample
         fadeSamples = volumes[volumeIndex].fadeSamples
         currentVolume = fadeTo
       }
-      let gain = currentVolume
-      if (fadeSamples > 0) {
-        const local = sample - fadeStart
-        if (local < fadeSamples) gain = fadeFrom + (fadeTo - fadeFrom) * (local / fadeSamples)
-      }
+      const gain = gainAt(sample)
       const sourceIndex = (sample - instance.start) % sourceLength
       left[sample] += source0[sourceIndex] * gain * globalVolume
       right[sample] +=

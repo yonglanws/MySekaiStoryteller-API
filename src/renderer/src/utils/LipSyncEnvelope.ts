@@ -83,6 +83,9 @@ export function buildLipSyncEnvelope(
     return emptyEnvelope(tvs)
   }
   const samples = Math.min(...channels.map((channel) => channel.length))
+  if (!Number.isFinite(samples) || samples <= 0) {
+    return emptyEnvelope(tvs)
+  }
   const audioDurationMs = (samples / sampleRate) * 1000
   const stepSamples = Math.floor(sampleRate / 60)
   const maxSteps = Math.ceil(samples / Math.max(1, stepSamples)) + 64

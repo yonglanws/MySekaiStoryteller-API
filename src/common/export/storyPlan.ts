@@ -249,15 +249,54 @@ export function bakeStoryPlan(
         ...(topFacial ? { facial: topFacial } : {})
       })
     }
+
+    let actionWindowFrames =
+      timing?.durationMs && timing.durationMs > 0 ? planDurationFrames(timing.durationMs) : 0
+    if (actionWindowFrames <= 0) {
+      if (snippet.type === 'Motion') {
+        actionWindowFrames = planDurationFrames((Number(data.duration) || 2) * 1000)
+      } else if (snippet.type === 'Talk') {
+        const talkData = data as TalkLike
+        const content = typeof talkData.content === 'string' ? talkData.content : ''
+        const typingText = typeof talkData.typingText === 'string' ? talkData.typingText : ''
+        const ttsText = typeof talkData.ttsText === 'string' ? talkData.ttsText : ''
+        const ttsMs = timing?.ttsDurationMs && timing.ttsDurationMs > 0 ? timing.ttsDurationMs : 0
+        const officialVoiceMs =
+          typeof talkData.voiceDurationMs === 'number' &&
+          Number.isFinite(talkData.voiceDurationMs) &&
+          talkData.voiceDurationMs > 0
+            ? talkData.voiceDurationMs
+            : 0
+        const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsMs
+        const fallbackSilentBeat =
+          isExport &&
+          options.ttsEnabled !== false &&
+          timingVoiceMs <= 0 &&
+          !talkData.voice &&
+          !hasSpeakableSpeechText(content) &&
+          !hasSpeakableSpeechText(ttsText)
+        const baseTiming = talkAutoFrameTiming({
+          startFrame,
+          windowFrames: windowOpenFrames,
+          length: visibleTextLength(typingText || content),
+          voiceSeconds: timingVoiceMs / 1000,
+          layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
+          settleFrames: 0,
+          silentHoldFrames: fallbackSilentBeat ? SILENT_PUNCTUATION_HOLD_FRAMES : undefined
+        })
+        actionWindowFrames = Math.max(0, baseTiming.endFrame - startFrame)
+      }
+    }
+
     for (const action of (data.actions as TalkLike['actions']) ?? []) {
       const actionMotion = typeof action.motion === 'string' ? action.motion.trim() : ''
       const actionFacial = typeof action.facial === 'string' ? action.facial.trim() : ''
       if (!actionMotion && !actionFacial) continue
       const at = Math.max(0, Math.min(1, Number(action.at) || 0))
       actions.push({
-        frame: startFrame + Math.round(at * planDurationFrames(timing?.durationMs ?? 0)),
+        frame: startFrame + Math.round(at * actionWindowFrames),
         at,
-        modelId: resolveActionModelId(action.modelId),
+        modelId: resolveActionModelId(action.modelId ?? data.modelId),
         ...(actionMotion ? { motion: actionMotion } : {}),
         ...(actionFacial ? { facial: actionFacial } : {})
       })
@@ -370,7 +409,7 @@ export function bakeStoryPlan(
       const layoutData = data as LayoutLike
       const moveFrames = moveFramesFor(layoutData)
       const moved = layoutMoved(layoutData)
-      const modelId = Number(layoutData.modelId) || -1
+      const modelId = resolveActionModelId(layoutData.modelId)
       if (snippet.type === 'LayoutAppear') {
         const shown = visibleModels.has(modelId)
         const hasMotion =
