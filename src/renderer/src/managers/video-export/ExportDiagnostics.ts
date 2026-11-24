@@ -5,7 +5,10 @@ import type { MotionTraceEvent } from './MotionTraceCollector'
 import type { ExportLogRecord } from './ExportLogBus'
 import { isJapaneseSpeechText } from '../../../../common/tts/speechText'
 import { bakeStoryPlan } from '../../../../common/export/storyPlan'
-import { PLAYCORE_WARMUP_FRAMES } from '../../../../common/official/timing'
+import {
+  PLAYCORE_WARMUP_FRAMES,
+  videoFrameCountForStoryFrames
+} from '../../../../common/official/timing'
 import type {
   DiagnosticAction,
   DiagnosticSnippet,
@@ -213,6 +216,24 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     exportFps: input.exportMeta.fps,
     ttsEnabled: input.ttsEnabled
   })
+  const videoFps = input.exportMeta.videoFps ?? input.exportMeta.fps
+  // 帧泵实际输出的帧数（fast 模式的 timings.encodedFrames）。plan 20268 故事帧、
+  // 25fps 时应当是 ceil(20268×25/60)=8445 帧；差额说明帧泵/收尾没按输出帧数停。
+  const pumpFrames = input.exportMeta.timings?.encodedFrames
+  const expectedVideoFrames = videoFrameCountForStoryFrames(plan.totalFrames, videoFps)
+  if (pumpFrames !== undefined) {
+    if (input.exportMeta.frameCount !== expectedVideoFrames) {
+      anomalies.push(
+        `成片帧数 ${input.exportMeta.frameCount} 与 plan ${plan.totalFrames} 故事帧在 ` +
+          `${videoFps}fps 下应有的 ${expectedVideoFrames} 帧不一致`
+      )
+    }
+    if (pumpFrames !== input.exportMeta.frameCount) {
+      anomalies.push(
+        `帧泵实际输出 ${pumpFrames} 帧，与记录/截断用的 ${input.exportMeta.frameCount} 帧不一致`
+      )
+    }
+  }
   const approximations = [
     'Pass 2 使用 PixiJS + pixi-live2d-display-advanced，不是 SSE 的原生 wgpu/Cubism Native 渲染器',
     `剧情时钟 60 fps，编码 ${input.exportMeta.fps} fps；导出仍是单浏览器实时录制/虚拟时钟，未实现 --jobs N 分段并行`,
@@ -257,7 +278,6 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
     anomalies: anomalies.length
   }
 
-  const videoFps = input.exportMeta.videoFps ?? input.exportMeta.fps
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -269,6 +289,7 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
       videoFps,
       storyFrames: plan.totalFrames,
       videoFrames: input.exportMeta.frameCount,
+      ...(pumpFrames !== undefined ? { pumpFrames } : {}),
       videoFrameToStoryFrame: videoFps === plan.fps ? 'n' : `floor(n*${plan.fps}/${videoFps})`,
       playcoreWarmupStoryFrames: PLAYCORE_WARMUP_FRAMES,
       timelineOriginStoryFrame: PLAYCORE_WARMUP_FRAMES

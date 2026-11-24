@@ -78,6 +78,8 @@ export interface ExportFrameMap {
   storyFrames: number
   /** 成片实际帧数。 */
   videoFrames: number
+  /** 帧泵实际渲染/编码的帧数（fast 模式）；与 videoFrames 不等即为缺陷。 */
+  pumpFrames?: number
   /** 成片帧 -> 故事帧的公式；60fps 时为 `n`。 */
   videoFrameToStoryFrame: string
   /** PlayCore 预热故事帧数；它们是成片开头的一部分。 */

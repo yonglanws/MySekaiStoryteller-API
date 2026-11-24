@@ -1116,6 +1116,36 @@ test('remux reuses the image2pipe frame count and fps to truncate the mix exactl
   )
   assert.equal(pipeSessions.length, 1)
 
+  // 帧数变化后重导到同一路径：上一版成片必须被新成片原子替换，`-t` 用新的帧数。
+  const originalMuxVideoAudio = bridgeFfmpeg.apiMuxVideoAudioCopy
+  bridgeFfmpeg.apiMuxVideoAudioCopy = async (_v, _a, outPath, _bitrate, options) => {
+    muxOptions = options
+    await writeFile(outPath, `remuxed-${options.frameCount}`)
+  }
+  t.after(() => {
+    bridgeFfmpeg.apiMuxVideoAudioCopy = originalMuxVideoAudio
+  })
+  // 上一次 remux 的 finally 已删掉页内视频/音频临时文件（含 mss-fpipe-* 目录）；
+  // 重建一份代表新一版导出的页内视频与音频。
+  await fs.promises.mkdir(path.dirname(videoPath), { recursive: true })
+  await writeFile(videoPath, 'encoded-video')
+  await writeFile(audioPath, 'RIFF')
+  const shorter = await invoke('electron:api-remux-video-from-files', [
+    { videoPath, audioPath, outputPath, audioBitrate: '192k', frameCount: 45, fps: 30 }
+  ])
+  assert.equal(shorter.status, 200)
+  assert.equal(shorter.body.result.success, true, JSON.stringify(shorter.body))
+  assert.deepEqual(muxOptions, { frameCount: 45, fps: 30, startFrame: undefined })
+  assert.equal(
+    await readFile(outputPath, 'utf8'),
+    'remuxed-45',
+    'a shorter re-export replaces the previous file at the same path'
+  )
+  assert.deepEqual(
+    (await readdir(outputDir)).filter((name) => name.includes('.partial')),
+    []
+  )
+  assert.equal(pipeSessions.length, 1)
   // WebCodecs 的 full-range 流必须走 BT.709/tv 重编码，而不是 copy
   await writeFile(audioPath, 'RIFF')
   let mergeArgs = null

@@ -1686,8 +1686,13 @@ export default class VideoExportManager {
         currentStoryFrame + envelopeFrames - plannedStoryFrames
       )
       const targetFrames = plannedStoryFrames
+      // 成片帧数由 plan 直接换算（`Clock::frames`）：ceil(storyFrames × fps / 60)。
+      // 帧泵按「输出帧」计时，不能把 60Hz 故事时长四舍五入到最近的输出帧：
+      // 25fps、plan=77 故事帧时 1283.33ms / 40ms = 32.08，四舍五入只拍 32 帧，
+      // 而参考 `Clock.frames(0..77)` 是 33 帧。目标时刻必须是 finalFrameCount 帧。
+      const finalFrameCount = videoFrameCountForStoryFrames(targetFrames, encodeFps)
       const rawPumpTargetMs = virtualRenderStartMs + targetFrames * storyFrameMs
-      pumpTargetVirtualMs = Math.round(rawPumpTargetMs / frameMs) * frameMs
+      pumpTargetVirtualMs = virtualRenderStartMs + finalFrameCount * frameMs
       const holdFrames = Math.max(
         0,
         Math.round(PLAYED_WAIT_TIME_MS / storyFrameMs) - envelopeOverrunFrames
@@ -1710,8 +1715,9 @@ export default class VideoExportManager {
         endingHoldMs,
         endingFadeMs,
         rawPumpTargetMs,
+        finalFrameCount,
         pumpTargetVirtualMs,
-        targetFrames: pumpTargetVirtualMs / frameMs
+        targetFrames: finalFrameCount
       })
       // 收尾黑幕从片段循环结束的当前虚拟时刻启动；目标帧已为它预留完整尾长。
       tailStorySteps = targetFrames
@@ -1738,8 +1744,7 @@ export default class VideoExportManager {
       const actualVideoDurationMs = timestampRecorder.getTotalVideoDurationMs()
       // targetFrames 是 60Hz 故事帧数；成片帧 n 覆盖故事帧 n，按编码帧率换算：
       // ceil(storyFrames × fps / 60)。用浮点 ceil 会把 835.0000004 收成 836，
-      // 所以交给 videoFrameCountForStoryFrames 做整数换算。
-      const finalFrameCount = videoFrameCountForStoryFrames(targetFrames, encodeFps)
+      // 所以交给 videoFrameCountForStoryFrames 做整数换算（也用于上面的帧泵目标）。
       const totalDurationMs = Math.max(
         actualVideoDurationMs + endingEnvelopeMs,
         Math.round((finalFrameCount / encodeFps) * 1000)

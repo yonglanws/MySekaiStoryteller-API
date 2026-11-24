@@ -57,7 +57,9 @@ export function formatDiagnosticsText(report: ExportDiagnostics): string {
     lines.push(
       `frame map: video frame n = story frame ${map.videoFrameToStoryFrame} ` +
         `(${map.storyFps}Hz story, ${map.videoFps}fps video, ${map.storyFrames} story frames -> ` +
-        `${map.videoFrames} video frames; PlayCore warmup ${map.playcoreWarmupStoryFrames} frames ` +
+        `${map.videoFrames} video frames${
+          map.pumpFrames !== undefined ? ` (pump ${map.pumpFrames})` : ''
+        }; PlayCore warmup ${map.playcoreWarmupStoryFrames} frames ` +
         `are part of the video, timeline 0 = story frame ${map.timelineOriginStoryFrame})`
     )
   }
