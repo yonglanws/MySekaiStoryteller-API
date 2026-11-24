@@ -23,6 +23,7 @@ import {
 import { hasTranslationContent } from './ttsText'
 import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
 import type { RagRetrieveResult } from '../rag/types'
+import type { DialogueLintIssue } from './dialogueLinter'
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -2297,6 +2298,105 @@ export function applyEmotionPlan(
     lines: dialogue.lines.map((line) => {
       const emotion = strPlan.get(line.id) ?? ''
       return allowed.has(emotion) ? { ...line, emotion } : { ...line, emotion: '' }
+    })
+  }
+}
+
+export function buildDialoguePolishPrompt(
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  issues: DialogueLintIssue[]
+): StagedMessages {
+  const flaggedIds = Array.from(new Set(issues.map((i) => i.lineId)))
+  const issueMap = new Map<string, string[]>()
+  for (const issue of issues) {
+    const list = issueMap.get(issue.lineId) ?? []
+    list.push(issue.message)
+    issueMap.set(issue.lineId, list)
+  }
+
+  const lineBlocks = flaggedIds
+    .map((id) => {
+      const idx = dialogue.lines.findIndex((l) => l.id === id)
+      if (idx < 0) return ''
+      const prev = idx > 0 ? dialogue.lines[idx - 1] : null
+      const curr = dialogue.lines[idx]
+      const next = idx + 1 < dialogue.lines.length ? dialogue.lines[idx + 1] : null
+      const reasons = (issueMap.get(id) ?? []).join('；')
+      return [
+        `### 目标句 ${curr.id}（${curr.speaker}）`,
+        prev ? `前一句（${prev.speaker}）：${prev.content.replace(/\n/g, ' / ')}` : '',
+        `原句：${curr.content.replace(/\n/g, ' / ')}`,
+        next ? `后一句（${next.speaker}）：${next.content.replace(/\n/g, ' / ')}` : '',
+        `问题：${reasons}`
+      ]
+        .filter(Boolean)
+        .join('\n')
+    })
+    .filter(Boolean)
+    .join('\n\n')
+
+  const addressBlock = formatPairwiseAddressBlock(plan)
+  const understandingBlock = formatUnderstandingBlock(plan)
+  const example = {
+    replacements: flaggedIds.slice(0, 2).map((id) => ({
+      id,
+      content: '改写后的自然口语台词（不含动作旁白）'
+    }))
+  }
+
+  return {
+    system: [
+      '你是 Project SEKAI 官方剧情的台词精修编辑（dialogue-polish）。',
+      '只做外科手术式逐句改写：仅改写下方点名的问题句，保持原意、角色口吻与字数规模，不增删句子，不改说话人。只输出一个 JSON 对象。'
+    ].join('\n'),
+    user: `${understandingBlock}${addressBlock}## 需要改写的问题句
+${lineBlocks}
+
+## 改写要求
+- 仅输出 \`replacements\` 数组，每项含 \`id\` 与改写后的 \`content\`。
+- 去掉 AI 心理咨询套话、动作旁白与说教总结，改用具体细节、停顿（……、——）或侧面回应表达。
+- 严格遵守称呼表，每行不超过 30 字宽，最多 3 行。
+
+## 输出 JSON
+${JSON.stringify(example, null, 2)}
+
+只输出 JSON 对象本身，不要 markdown 或解释。`
+  }
+}
+
+export function applyDialoguePolish(
+  dialogue: StagedDialogue,
+  raw: unknown,
+  allowedIds: Set<string>
+): StagedDialogue {
+  const doc = isRecord(raw) ? raw : {}
+  const list = Array.isArray(raw)
+    ? raw
+    : Array.isArray(doc.replacements)
+      ? doc.replacements
+      : Array.isArray(doc.lines)
+        ? doc.lines
+        : []
+
+  const replacementMap = new Map<string, string>()
+  for (const item of list) {
+    if (!isRecord(item)) continue
+    const id = str(item.id ?? item.lineId).trim()
+    if (!id || !allowedIds.has(id)) continue
+    const content = normalizePjskTerminology(
+      str(item.content ?? item.text ?? item.line).replace(/\\n/g, '\n').trim()
+    )
+    if (!content) continue
+    replacementMap.set(id, content)
+  }
+  if (replacementMap.size === 0) return dialogue
+
+  return {
+    ...dialogue,
+    lines: dialogue.lines.map((line) => {
+      const updated = replacementMap.get(line.id)
+      return updated ? { ...line, content: updated } : line
     })
   }
 }

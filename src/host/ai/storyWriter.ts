@@ -6,9 +6,11 @@ import { extractJson, LlmClient, type ChatMessage, type ChatResult, type ChatUsa
 import { loadPersonas, type PersonaEntry } from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
+  applyDialoguePolish,
   applyVoiceDirectionPlan,
   buildCastPrompt,
   buildDialoguePrompt,
+  buildDialoguePolishPrompt,
   buildDialogueRepairPrompt,
   buildDialogueLengthPrompt,
   buildDirectionPrompt,
@@ -41,6 +43,7 @@ import {
   type StagedVoiceDirectionLine
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
+import { lintDialogueFidelity } from './dialogueLinter'
 import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
 import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
 import { AdaptiveRagRetriever } from '../rag/retriever'
@@ -765,6 +768,45 @@ export class StoryWriter {
       }
     }
 
+    // ---- 2.2 反套路对白质检与条件外科润色（零成本确定性 Linter + 仅在问题严格减少时采纳） --------------------
+    if (this.settings.polishDialogue !== false) {
+      const lintBefore = lintDialogueFidelity(dialogue, plan)
+      if (lintBefore.shouldPolish) {
+        try {
+          const polishResult = await runStage(
+            'dialogue-polish',
+            buildDialoguePolishPrompt(plan, dialogue, lintBefore.issues),
+            { temperature: 0.35 }
+          )
+          const polished = applyDialoguePolish(
+            dialogue,
+            parseStageJson(polishResult),
+            new Set(lintBefore.flaggedLineIds)
+          )
+          const lintAfter = lintDialogueFidelity(polished, plan)
+          const beforeChars = countDialogueChars(dialogue)
+          const afterChars = countDialogueChars(polished)
+          if (
+            polished.lines.length === dialogue.lines.length &&
+            afterChars >= Math.floor(beforeChars * 0.85) &&
+            lintAfter.issues.length < lintBefore.issues.length
+          ) {
+            this.logger.info(
+              `[AI] dialogue-polish 采纳：问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}`
+            )
+            dialogue = polished
+          } else {
+            this.logger.info(
+              `[AI] dialogue-polish 未改善（问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}），保留原稿`
+            )
+          }
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          this.logger.warn(`[AI] dialogue-polish 失败，保留原稿：${errorMessage(error)}`)
+        }
+      }
+    }
+
     // ---- 2.5 语音导演（Voice Direction）与舞台调度并行 -------------------------------------------------------
     const finalDialogue = enforceDialogueLength ? softenPunctuation(dialogue) : dialogue
     const translateForTts = options.translateForTts ?? this.settings.translateForTts
@@ -961,6 +1003,7 @@ export class StoryWriter {
       'dialogue-repair',
       'dialogue-expand',
       'dialogue-expand-2',
+      'dialogue-polish',
       'emotion',
       'emotion-repair',
       'staging',
