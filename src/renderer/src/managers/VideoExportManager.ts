@@ -37,6 +37,9 @@ import { estimateSnippetDuration } from '../utils/TimelineCalculator'
 import { calculateTalkDurationMs } from '../utils/TalkTiming'
 import {
   FRAME_MS,
+  LIP_LOUD_CHARACTERS,
+  LIP_LOUD_TARGET_VALUE_SCALE,
+  LIP_TARGET_VALUE_SCALE,
   OPENING_COVER_FADE_MS,
   PLAYCORE_WARMUP_FRAMES,
   PLAYED_WAIT_TIME_MS,
@@ -160,11 +163,24 @@ export default class VideoExportManager {
     try {
       model = this.app.getModelById?.(modelId)
     } catch {
-      // 模型尚未加载（预热早期）时退回 1.0，不让口型解码中断导出。
       model = undefined
     }
     const scale = model?.getLipSyncScale?.()
-    return typeof scale === 'number' && Number.isFinite(scale) && scale > 0 ? scale : 1
+    if (typeof scale === 'number' && Number.isFinite(scale) && scale > 0) return scale
+
+    const modelPath = this.app.storyManager?.storyData?.models?.find((m) => m.id === modelId)?.model
+    if (typeof modelPath === 'string' && modelPath) {
+      const match = /(?:^|[/\\])(?:v\d+_)?0?([1-9]\d?)[a-z_-]/i.exec(modelPath)
+      if (match) {
+        const charId = Number(match[1])
+        if (Number.isInteger(charId)) {
+          return (LIP_LOUD_CHARACTERS as readonly number[]).includes(charId)
+            ? LIP_LOUD_TARGET_VALUE_SCALE
+            : LIP_TARGET_VALUE_SCALE
+        }
+      }
+    }
+    return 1
   }
 
   private async decodeLipSyncEnvelope(
@@ -1371,6 +1387,16 @@ export default class VideoExportManager {
       // 它的 act 由故事帧推进触发，帧泵不会等片段结束。
       markStageReady()
 
+      const appSpeechHooks = this.app as unknown as {
+        onTalkSpeechStart?: (snippetIndex: number, wallMs: number) => void
+      }
+      const recorderSpeechHooks = timestampRecorder as unknown as {
+        markTalkSpeechStart?: (snippetIndex: number, startWallMs: number) => void
+      }
+      appSpeechHooks.onTalkSpeechStart = (talkSnippetIndex, wallMs) => {
+        recorderSpeechHooks.markTalkSpeechStart?.(talkSnippetIndex, wallMs)
+      }
+
       const pendingTimestampTasks: Promise<void>[] = []
       const flushPendingTimestamps = async (): Promise<void> => {
         if (pendingTimestampTasks.length === 0) return
@@ -1578,7 +1604,7 @@ export default class VideoExportManager {
           Math.max(0, (timelineEntry?.startTimeMs ?? 0) - Math.round((snippet.delay || 0) * 1000))
         const waitForPlannedStartMs = timelineStartMs + plannedDelayStartMs - virtualClock.now()
         if (waitForPlannedStartMs > 0.5 && !this.isAborted) {
-          await AnimationManager.delay(waitForPlannedStartMs)
+          await AnimationManager.delay(Math.max(0, waitForPlannedStartMs - 0.001))
         }
 
         if (isTalk) {
@@ -1623,7 +1649,15 @@ export default class VideoExportManager {
               ? this.app.currentTalkStartedAtMs - snippetStartedAtMs
               : 0
           const recordEnd = (): void => {
-            timestampRecorder.markSnippetEnd(ttsDur, speechOffsetMs)
+            ;(
+              timestampRecorder as unknown as {
+                markSnippetEnd: (
+                  ttsDurationMs?: number,
+                  speechOffsetMs?: number,
+                  snippetIndex?: number
+                ) => void
+              }
+            ).markSnippetEnd(ttsDur, speechOffsetMs, i)
           }
           if (launchedTask) {
             pendingTimestampTasks.push(launchedTask.then(recordEnd, () => {}))
@@ -1846,11 +1880,6 @@ export default class VideoExportManager {
       await framePump
       if (pumpError) throw pumpError
 
-      const audioFinishStart = virtualClock.realTimeMs()
-      const audioFilePath = await audioTask
-      audioMs = virtualClock.realTimeMs() - audioFinishStart
-      sinks.audioFilePath = audioFilePath ?? null
-
       concurrentPipeline.markRenderEnd()
       timestampRecorder.logSummary()
 
@@ -1859,17 +1888,29 @@ export default class VideoExportManager {
       // 片尾分块写入直到客户端超时。
       virtualClock.uninstall()
 
-      let videoFilePath: string
-      const encodeStart = virtualClock.realTimeMs()
-      if (sinks.encoder) {
-        videoFilePath = await sinks.encoder.finish()
-      } else {
-        videoFilePath = await sinks.jpegSink!.finish()
-        if (sinks.jpegSink!.isPipeMode) {
-          sinks.pipeTempDir = videoFilePath.replace(/[\\/][^\\/]*$/, '')
+      const finishStart = virtualClock.realTimeMs()
+      const finishVideoSink = async (): Promise<string> => {
+        if (sinks.encoder) {
+          return sinks.encoder.finish()
         }
+        const path = await sinks.jpegSink!.finish()
+        if (sinks.jpegSink!.isPipeMode) {
+          sinks.pipeTempDir = path.replace(/[\\/][^\\/]*$/, '')
+        }
+        return path
       }
-      encodeMs = virtualClock.realTimeMs() - encodeStart
+
+      const [audioFilePath, videoFilePath] = await Promise.all([
+        audioTask.then((res) => {
+          audioMs = virtualClock.realTimeMs() - finishStart
+          return res
+        }),
+        finishVideoSink().then((res) => {
+          encodeMs = virtualClock.realTimeMs() - finishStart
+          return res
+        })
+      ])
+      sinks.audioFilePath = audioFilePath ?? null
 
       if (exportStatus) exportStatus.textContent = '正在合成视频…'
       onProgress({
@@ -2000,6 +2041,11 @@ export default class VideoExportManager {
       throw error
     } finally {
       this.signal?.removeEventListener('abort', abortFastWait)
+      ;(
+        this.app as unknown as {
+          onTalkSpeechStart?: ((snippetIndex: number, wallMs: number) => void) | null
+        }
+      ).onTalkSpeechStart = null
       animationSteps.resetExportStepHandlers?.()
       animationSteps.setExportStepDriver?.(false)
       try {
@@ -2586,12 +2632,17 @@ export default class VideoExportManager {
 
       const ttsDurations = this.app.ttsManager.getPreSynthesizedTtsDurations()
       const audioTracks = this.app.ttsManager.getAudioTracks()
+      const trackBySnippetIndex = new Map<number, (typeof audioTracks)[number]>()
+      for (const track of audioTracks) {
+        const idx = (track as { snippetIndex?: number }).snippetIndex
+        if (typeof idx === 'number') trackBySnippetIndex.set(idx, track)
+      }
       let talkIdx = 0
 
       for (let i = 0; i < snippets.length; i++) {
         if (snippets[i].type === 'Talk') {
           const duration = ttsDurations.get(i) ?? timeline[i]?.durationMs ?? 0
-          const track = audioTracks[talkIdx]
+          const track = trackBySnippetIndex.get(i) ?? audioTracks[talkIdx]
 
           if (track) {
             ttsAudioResults.set(i, {

@@ -41,6 +41,8 @@ import { interpolatePosition } from '../../../common/official/layoutMotion'
 import { registerClockBaselineResetListener } from '../snippets/stageTiming'
 
 const MODEL_PREFIX_STANDING_RE = /(?:^|-)(?:default|stand|blushed)\d*$/i
+const NON_EYE_OPEN_FACIAL_PARAM_RE =
+  /^(?:Param(?:Brow|Eye(?!LOpen$|ROpen$|Ball|ball)|Mouth(?!OpenY$)|Cheek|Tear|Sweat|FaceShadow|Teeth|Kirakira|SpecialEye|Highlight|Cry|Eyelid|Darkcycle|ReflectedLight)|PARAM_(?:BROW|EYE_(?!L_OPEN$|R_OPEN$|BALL)|MOUTH_(?!OPEN_Y$)|CHEEK|TEAR|SWEAT))/i
 
 /**
  * Normalizes a PJSK body motion name into its motion family prefix so v1 (`w-normal-nod01`),
@@ -180,6 +182,9 @@ export default class AdvancedModel extends Live2DModel {
   private readonly channelEntryCounts = [0, 0]
   private bodyIgnoredParamIds: string[] = []
   private restoreBodyUpdate: (() => void) | null = null
+  private restoreFacialUpdate: (() => void) | null = null
+  private facialManagedParamIds: Set<string> = new Set<string>()
+  private defaultParamValues: Map<string, number> = new Map<string, number>()
   private readonly actionController = new AbortController()
   private defaultMotionName: string | null = null
   private defaultFacialName: string | null = null
@@ -220,12 +225,15 @@ export default class AdvancedModel extends Live2DModel {
     this.internalModel.extendParallelMotionManager(2)
     this.neutralizeDrawableColors()
     this.modelParamIds = this.resolveCoreParameterIds()
+    this.seedDefaultParameterValues()
+    this.collectPreloadedFacialParams()
     this.resolveMouthParams()
     this.installMotionIdNormalization()
     this.installMotionLoopHook()
     this.installHoldLastFrameHook(0)
     this.installHoldLastFrameHook(1)
     this.installBodyParameterIsolation()
+    this.installFacialDefaultReset()
     this.installCrossfade(0)
     this.installCrossfade(1)
 
@@ -469,10 +477,9 @@ export default class AdvancedModel extends Live2DModel {
     const queue = manager?.queueManager
     if (!queue || typeof queue.setEventCallback !== 'function') return
     const original = queue._eventCallBack
-    const host = this
     queue.setEventCallback((caller, value, data) => {
       original?.(caller, value, data)
-      if (typeof value === 'string') invokeBlinkUserData(host.blinkState, value)
+      if (typeof value === 'string') invokeBlinkUserData(this.blinkState, value)
     }, queue._eventCustomData)
   }
 
@@ -579,12 +586,11 @@ export default class AdvancedModel extends Live2DModel {
     this.writeMouthOpeningNow(open)
     if (this.mouthUpdateHooked) return
     const original = core.update
-    const host = this
-    core.update = function updateMouthThenMesh(this: { update?: () => void }) {
-      if (host.pendingMouthOpen !== null) {
-        host.writeMouthOpeningNow(host.pendingMouthOpen)
+    core.update = () => {
+      if (this.pendingMouthOpen !== null) {
+        this.writeMouthOpeningNow(this.pendingMouthOpen)
       }
-      return original.call(this)
+      return original.call(core)
     }
     this.mouthUpdateHooked = true
   }
@@ -914,21 +920,168 @@ export default class AdvancedModel extends Live2DModel {
    */
   private installMotionIdNormalization(): void {
     const internal = this.internalModel
-    if (!(internal instanceof Cubism4InternalModel)) return
+    const motionManager = internal?.motionManager
+    if (!motionManager || typeof motionManager.loadMotion !== 'function') return
     const core = internal.coreModel as unknown as {
       _parameterIds?: string[]
       parameters?: { ids?: string[] }
     }
-    const modelIds = core._parameterIds ?? core.parameters?.ids
-    if (!modelIds?.length) return
-    const idSet = new Set(modelIds)
-    const motionManager = internal.motionManager
+    const modelIds =
+      internal instanceof Cubism4InternalModel
+        ? (core?._parameterIds ?? core?.parameters?.ids)
+        : undefined
+    const idSet = modelIds?.length ? new Set(modelIds) : null
     const originalLoad = motionManager.loadMotion.bind(motionManager)
     motionManager.loadMotion = (group: string, index: number) =>
       Promise.resolve(originalLoad(group, index)).then((motion) => {
-        if (motion) this.normalizeMotionParameterIds(motion, idSet)
+        if (motion) {
+          if (idSet) this.normalizeMotionParameterIds(motion, idSet)
+          if (group.startsWith('face_')) this.collectFacialCurveIds(motion)
+        }
         return motion
       })
+  }
+
+  private extractMotionCurveIds(motion: unknown): string[] {
+    const typed = motion as {
+      _motionData?: { curves?: Array<{ id?: string }> }
+      motions?: Array<{ _$4P?: string }>
+    } | null
+    if (!typed) return []
+    const ids: string[] = []
+    if (Array.isArray(typed._motionData?.curves)) {
+      for (const curve of typed._motionData.curves) {
+        if (curve?.id) ids.push(curve.id)
+      }
+    } else if (Array.isArray(typed.motions)) {
+      for (const item of typed.motions) {
+        if (item?._$4P) ids.push(item._$4P)
+      }
+    }
+    return ids
+  }
+
+  private getFacialManagedParamSet(): Set<string> {
+    return (this.facialManagedParamIds ??= new Set<string>())
+  }
+
+  private getDefaultParamValueMap(): Map<string, number> {
+    return (this.defaultParamValues ??= new Map<string, number>())
+  }
+
+  private collectFacialCurveIds(motion: unknown): void {
+    const managed = this.getFacialManagedParamSet()
+    for (const id of this.extractMotionCurveIds(motion)) {
+      if (this.modelParamIds && !this.modelParamIds.has(id)) continue
+      managed.add(id)
+    }
+  }
+
+  private collectPreloadedFacialParams(): void {
+    const groups = this.internalModel?.motionManager?.motionGroups as
+      | Record<string, unknown[]>
+      | undefined
+    if (!groups) return
+    for (const [name, list] of Object.entries(groups)) {
+      if (!name.startsWith('face_') || !Array.isArray(list)) continue
+      for (const motion of list) {
+        if (motion) this.collectFacialCurveIds(motion)
+      }
+    }
+  }
+
+  private seedDefaultParameterValues(): void {
+    const defaults = this.getDefaultParamValueMap()
+    const core = this.internalModel?.coreModel as unknown as {
+      _parameterIds?: string[]
+      parameters?: { ids?: string[] }
+      getParameterIndex?: (id: string) => number
+      getParameterDefaultValue?: (index: number) => number
+      getParameterValueById?: (id: string) => number
+      getParamFloat?: (id: string) => number
+    }
+    if (!core) return
+    const ids = core._parameterIds ?? core.parameters?.ids ?? []
+    for (const id of ids) {
+      const index = core.getParameterIndex?.(id) ?? -1
+      const def =
+        index >= 0 && typeof core.getParameterDefaultValue === 'function'
+          ? core.getParameterDefaultValue(index)
+          : typeof core.getParameterValueById === 'function'
+            ? core.getParameterValueById(id)
+            : core.getParamFloat?.(id)
+      if (typeof def === 'number' && Number.isFinite(def)) {
+        defaults.set(id, def)
+      }
+    }
+  }
+
+  private getParameterDefaultValueById(id: string): number {
+    const defaults = this.getDefaultParamValueMap()
+    const cached = defaults.get(id)
+    if (cached !== undefined) return cached
+    const core = this.internalModel?.coreModel as unknown as {
+      getParameterIndex?: (paramId: string) => number
+      getParameterDefaultValue?: (index: number) => number
+    }
+    const index = core?.getParameterIndex?.(id) ?? -1
+    const def =
+      index >= 0 && typeof core?.getParameterDefaultValue === 'function'
+        ? core.getParameterDefaultValue(index)
+        : 0
+    const resolved = typeof def === 'number' && Number.isFinite(def) ? def : 0
+    defaults.set(id, resolved)
+    return resolved
+  }
+
+  private setCoreParameterValue(coreTarget: unknown, id: string, value: number): void {
+    const core = (coreTarget ?? this.internalModel?.coreModel) as {
+      setParameterValueById?: (paramId: string, val: number) => void
+      setParamFloat?: (paramId: string, val: number) => void
+    } | null
+    if (!core) return
+    if (typeof core.setParameterValueById === 'function') {
+      core.setParameterValueById(id, value)
+    } else if (typeof core.setParamFloat === 'function') {
+      core.setParamFloat(id, value)
+    }
+  }
+
+  private installFacialDefaultReset(): void {
+    const manager = this.internalModel?.parallelMotionManager?.[1] as unknown as {
+      update?: (core: unknown, now: number) => boolean
+      queueManager?: {
+        _motions?: Array<{ isFinished?: () => boolean; _motion?: unknown } | null>
+      }
+    }
+    if (!manager || typeof manager.update !== 'function') return
+    const originalUpdate = manager.update
+    manager.update = (core, now): boolean => {
+      const entries = manager.queueManager?._motions
+      if (Array.isArray(entries) && entries.length > 0) {
+        let newestMotion: unknown = null
+        for (const entry of entries) {
+          if (!entry) continue
+          this.collectFacialCurveIds(entry._motion)
+          if (!entry.isFinished?.()) {
+            newestMotion = entry._motion
+          }
+        }
+        const managed = this.getFacialManagedParamSet()
+        if (newestMotion && managed.size > 0) {
+          const newestCurves = new Set(this.extractMotionCurveIds(newestMotion))
+          for (const id of managed) {
+            if (newestCurves.has(id)) continue
+            if (this.modelParamIds && !this.modelParamIds.has(id)) continue
+            this.setCoreParameterValue(core, id, this.getParameterDefaultValueById(id))
+          }
+        }
+      }
+      return originalUpdate.call(manager, core, now)
+    }
+    this.restoreFacialUpdate = () => {
+      manager.update = originalUpdate
+    }
   }
 
   private normalizeMotionParameterIds(motion: unknown, modelIds: Set<string>): void {
@@ -1120,16 +1273,23 @@ export default class AdvancedModel extends Live2DModel {
   /** 已预加载动作的剪辑时长；循环动作返回 0（官方自动模式等不到它结束）。 */
   public getMotionDurationMs(name: string): number {
     const motion = this.loadedMotion(name)
-    if (!motion) return 0
-    const data = (motion as { _motionData?: { loop?: boolean } })._motionData
-    if (data?.loop) return 0
+    if (!motion || this.isMotionLooping(name)) return 0
     return this.motionClipDurationMs(motion)
   }
 
   public isMotionLooping(name: string): boolean {
-    const motion = this.loadedMotion(name)
-    const data = (motion as { _motionData?: { loop?: boolean } } | null)?._motionData
-    return data?.loop === true
+    const motion = this.loadedMotion(name) as {
+      isLoop?: () => boolean
+      _isLoop?: boolean
+    } | null
+    if (!motion) return false
+    if (typeof motion.isLoop === 'function') {
+      return Boolean(motion.isLoop())
+    }
+    if (typeof motion._isLoop === 'boolean') {
+      return motion._isLoop
+    }
+    return false
   }
 
   /**
@@ -1243,6 +1403,8 @@ export default class AdvancedModel extends Live2DModel {
               'PARAM_EYE_R_SMILE',
               'PARAM_MOUTH_FORM',
               'PARAM_CHEEK',
+              'PARAM_TEAR',
+              'PARAM_SWEAT',
               'PARAM_BREATH'
             ]
           : [
@@ -1254,48 +1416,90 @@ export default class AdvancedModel extends Live2DModel {
               'ParamBrowRAngle',
               'ParamBrowLForm',
               'ParamBrowRForm',
+              'ParamBrowForm01',
+              'ParamBrowForm02',
+              'ParamBrowWrinkleL',
+              'ParamBrowWrinkleR',
+              'ParamBrowLWrinkle',
+              'ParamBrowRWrinkle',
               'ParamEyeLSmile',
               'ParamEyeRSmile',
               'ParamEyeLForm',
               'ParamEyeRForm',
               'ParamEyeSize',
               'ParamEyeTeary',
+              'ParamEyeChange',
+              'ParamEyeSpecial',
+              'ParamEye_kira',
+              'ParamKirakira',
+              'ParamSpecialEye01',
+              'ParamSpecialEye02',
+              'ParamSpecialEye03',
+              'ParamSpecialEyeRotate1',
+              'ParamHighlight',
+              'ParamHighlightL',
+              'ParamHighlightR',
+              'ParamEyeHighlight',
+              'ParamEyeHiLight',
+              'ParamDarkcycles',
+              'ParamEyelids',
+              'ParamReflectedLight',
               'ParamMouthForm',
+              'ParamMouthForm2',
               'ParamMouthForm01',
               'ParamMouthForm02',
+              'ParamMouthPositionY',
               'ParamMouthScaleX',
               'ParamMouthScaleY',
               'ParamCheek',
+              'ParamCheek2',
+              'ParamCheekAngry',
+              'ParamCheekAngry01',
+              'ParamCheekAngry02',
               'ParamTear',
+              'ParamTear01',
+              'ParamTear02',
+              'ParamCry',
               'ParamSweat',
+              'ParamSweat01',
+              'ParamSweat02',
               'ParamFaceShadow',
+              'ParamFaceShadow2',
               'ParamTeeth',
+              'ParamTeeth2',
               'ParamBreath'
             ])
       )
+      if (this.modelParamIds) {
+        for (const id of this.modelParamIds) {
+          if (NON_EYE_OPEN_FACIAL_PARAM_RE.test(id)) out.push(id)
+        }
+      }
     }
     return [...new Set(this.filterToExistingModelParams(out))]
   }
 
   private getEffectiveBodyIgnoredParamIds(): string[] {
     const base = this.bodyIgnoredParamIds ?? []
-    if (!this.currentFacialName) return base
-    const motion = this.loadedMotion(this.currentFacialName) as {
-      _motionData?: { curves?: Array<{ id?: string }> }
-    } | null
-    const curves = motion?._motionData?.curves
-    if (!Array.isArray(curves) || curves.length === 0) return base
     const baseSet = new Set(base)
     const eyeOpenSet = new Set(this.eyeParameterIds().slice(0, 2))
     let extra: string[] | null = null
-    for (const curve of curves) {
-      const id = curve?.id
-      if (!id || baseSet.has(id)) continue
-      if (this.bodyAllowEyeOverride && eyeOpenSet.has(id)) continue
-      if (this.modelParamIds && !this.modelParamIds.has(id)) continue
+    const appendIgnored = (id: string | undefined): void => {
+      if (!id || baseSet.has(id)) return
+      if (this.bodyAllowEyeOverride && eyeOpenSet.has(id)) return
+      if (this.modelParamIds && !this.modelParamIds.has(id)) return
       baseSet.add(id)
       if (!extra) extra = [...base]
       extra.push(id)
+    }
+    for (const id of this.getFacialManagedParamSet()) {
+      appendIgnored(id)
+    }
+    if (this.currentFacialName) {
+      const motion = this.loadedMotion(this.currentFacialName)
+      for (const id of this.extractMotionCurveIds(motion)) {
+        appendIgnored(id)
+      }
     }
     return extra ?? base
   }
@@ -1307,7 +1511,8 @@ export default class AdvancedModel extends Live2DModel {
     signal?: AbortSignal,
     canApply?: () => boolean,
     chainAfter = false,
-    traceSnippetIndex?: number
+    traceSnippetIndex?: number,
+    channelOptions?: { facialForce?: boolean }
   ): Promise<void> {
     const generation = ++this.channelGeneration[channel]
     if (channel === 0) {
@@ -1367,7 +1572,10 @@ export default class AdvancedModel extends Live2DModel {
     // Invalidate older asynchronous reservations without stopping the currently playing clip.
     manager.state.setReserved(undefined, undefined, 0)
     const motion = await internal.motionManager.loadMotion(name, 0)
-    if (motion) this.syncMotionLoopFlag(motion)
+    if (motion) {
+      this.syncMotionLoopFlag(motion)
+      if (channel === 1) this.collectFacialCurveIds(motion)
+    }
     const loadedAt = performance.now()
     if (
       !motion ||
@@ -1444,6 +1652,7 @@ export default class AdvancedModel extends Live2DModel {
     // body force&&first → 0、same_category → 0.125、force → 0、否则 clip FadeInTime/0.5；
     // facial force → 0、否则 clip FadeInTime（缺省 0.25）。
     const clipFadeIn = this.clipFadeInSeconds(name)
+    const facialForce = channelOptions?.facialForce ?? this.facialForceNext
     const fadeSeconds =
       channel === 0
         ? bodyBlendSeconds(this.currentBodyMotion, name, {
@@ -1451,7 +1660,7 @@ export default class AdvancedModel extends Live2DModel {
             first: this.firstBodyCue || !this.currentBodyMotion,
             clipFadeIn
           })
-        : facialBlendSeconds(this.facialForceNext, clipFadeIn)
+        : facialBlendSeconds(facialForce, clipFadeIn)
     this.channelFadeSeconds[channel] = fadeSeconds
     const invalidateReservation = (): void => {
       if (generation === this.channelGeneration[channel] && !this.destroyed) {
@@ -1495,7 +1704,9 @@ export default class AdvancedModel extends Live2DModel {
         }
       }
       if (started && channel === 1) {
-        this.facialForceNext = false
+        if (channelOptions?.facialForce === undefined) {
+          this.facialForceNext = false
+        }
         this.currentFacialName = name
       }
     } finally {
@@ -1556,20 +1767,16 @@ export default class AdvancedModel extends Live2DModel {
     force = false,
     traceSnippetIndex?: number
   ): Promise<void> {
-    this.facialForceNext = force
-    try {
-      await this.startCharacterChannel(
-        1,
-        facial,
-        [],
-        undefined,
-        undefined,
-        false,
-        traceSnippetIndex
-      )
-    } finally {
-      this.facialForceNext = false
-    }
+    await this.startCharacterChannel(
+      1,
+      facial,
+      [],
+      undefined,
+      undefined,
+      false,
+      traceSnippetIndex,
+      { facialForce: force }
+    )
   }
 
   /**
@@ -1613,7 +1820,7 @@ export default class AdvancedModel extends Live2DModel {
         if (targetMotion !== this.currentBodyMotion) {
           const remainingMs = this.getEarlyBodyInterruptRemainingMs()
           const talkMs = options?.talkDurationMs ?? 0
-          if (remainingMs > 0 && (talkMs <= 0 || remainingMs < talkMs * 0.55)) {
+          if (remainingMs > 0 && talkMs > 0 && remainingMs < talkMs * 0.55) {
             const delayMs = Math.min(800, remainingMs)
             const genBefore = this.channelGeneration[0]
             await AnimationManager.delay(delayMs)
@@ -1643,7 +1850,16 @@ export default class AdvancedModel extends Live2DModel {
     }
     if (action.facial)
       tasks.push(
-        this.startCharacterChannel(1, action.facial, [], signal, canApply, false, traceSnippetIndex)
+        this.startCharacterChannel(
+          1,
+          action.facial,
+          [],
+          signal,
+          canApply,
+          false,
+          traceSnippetIndex,
+          { facialForce: false }
+        )
       )
     await Promise.all(tasks)
   }
@@ -1903,11 +2119,19 @@ export default class AdvancedModel extends Live2DModel {
     return this.alphaFilter
   }
 
-  private syncModelFilters(): void {
+  public syncModelFilters(): void {
     const alpha = this.resolveAlphaFilter()
     const list: Filter[] = alpha ? [alpha] : []
     if (this.characterShaderFilter) list.push(this.characterShaderFilter)
     if (this.ambientColorFilter) list.push(this.ambientColorFilter)
+    const vfxFilters = (
+      this.visualEffectManager as unknown as { getActiveFilters?: () => Filter[] } | undefined
+    )?.getActiveFilters?.()
+    if (Array.isArray(vfxFilters)) {
+      for (const effectFilter of vfxFilters) {
+        if (!list.includes(effectFilter)) list.push(effectFilter)
+      }
+    }
     this.filters = list.length > 0 ? list : null
   }
 
@@ -2109,7 +2333,14 @@ export default class AdvancedModel extends Live2DModel {
     this.autoBlink = false
     this.restoreBodyUpdate?.()
     this.restoreBodyUpdate = null
-    this.visualEffectManager.disableAll()
+    this.restoreFacialUpdate?.()
+    this.restoreFacialUpdate = null
+    const vfx = this.visualEffectManager as unknown as {
+      destroy?: () => void
+      disableAll?: () => void
+    } | null
+    if (typeof vfx?.destroy === 'function') vfx.destroy()
+    else vfx?.disableAll?.()
     if (this.characterShaderFilter) {
       this.characterShaderFilter.destroy()
       this.characterShaderFilter = null

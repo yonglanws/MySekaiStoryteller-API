@@ -20,17 +20,23 @@ export default class MotionSnippet extends BaseSnippet {
         })
       }
       actions.push(...data.actions)
+      const layerModel = this.app.layerModel as unknown as {
+        isModelVisible: (id: number) => boolean
+        isModelShown?: (id: number) => boolean
+      }
+      const isTargetShown = (id: number): boolean =>
+        layerModel.isModelShown?.(id) ?? layerModel.isModelVisible(id)
       const sequence = scheduleCharacterActions(
         actions,
         (data.duration ?? 2) * 1000,
         {
-          isVisible: (id) => this.app.layerModel.isModelVisible(id),
+          isVisible: isTargetShown,
           apply: async (action, signal) => {
             const model = this.app.getModelById(action.modelId)
             await model.applyCharacterAction(
               action,
               signal,
-              () => this.app.layerModel.isModelVisible(action.modelId),
+              () => isTargetShown(action.modelId),
               this.snippetIndex
             )
             if (action.motion && !model.isMotionLooping?.(action.motion)) {
@@ -47,14 +53,14 @@ export default class MotionSnippet extends BaseSnippet {
         },
         this.app.videoExportManager?.signal
       )
-      const anchorModel = this.app.getModelById(data.modelId)
+      const anchorModel = data.modelId >= 0 ? this.app.getModelById(data.modelId) : null
       const cancel = (): void => sequence.cancel()
-      anchorModel.actionSignal.addEventListener('abort', cancel, { once: true })
-      if (anchorModel.actionSignal.aborted) cancel()
+      anchorModel?.actionSignal.addEventListener('abort', cancel, { once: true })
+      if (anchorModel?.actionSignal.aborted) cancel()
       try {
         await sequence.finished
       } finally {
-        anchorModel.actionSignal.removeEventListener('abort', cancel)
+        anchorModel?.actionSignal.removeEventListener('abort', cancel)
         sequence.cancel()
       }
       return
