@@ -373,6 +373,12 @@ function validateActions(
     }
   }
   kept.sort((a, b) => toNumber(a.at) - toNumber(b.at))
+  if (speakerCap === 1 && kept.length > 1) {
+    // Talk 整句也只留 1 条动作：说话者优先，听者动作让位。
+    const speakerAction = kept.find((action) => action.modelId === speakerId)
+    data.actions = [speakerAction ?? kept[0]]
+    return
+  }
   data.actions = kept
 }
 

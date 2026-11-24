@@ -684,3 +684,20 @@ test('keeps multi-beat actions on silent Motion snippets', () => {
     'silent Motion sequences are not Talk and keep their beats'
   )
 })
+
+test('keeps one action per Talk when a listener reaction shares the line', () => {
+  const story = makeStory()
+  const talk = story.snippets.find(
+    (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
+  )
+  talk.data.actions = [
+    { at: 0, modelId: 1, motion: 'w-normal-nod01', facial: 'face_smile_01' },
+    { at: 0, modelId: 2, facial: 'face_smile_01' }
+  ]
+  const { story: fixed } = validateAndFixStory(story, makeView())
+  const fixedTalk = fixed.snippets.find(
+    (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
+  )
+  assert.equal(fixedTalk.data.actions.length, 1, 'official Talk rows carry at most one motion')
+  assert.equal(fixedTalk.data.actions[0].modelId, 1, 'the speaker action outranks a listener reaction')
+})
