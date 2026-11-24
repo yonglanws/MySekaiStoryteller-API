@@ -1185,3 +1185,57 @@ test('VideoExportManager: warm worker skips validateModelRendering, overlapping 
   assert.equal(validateCanvasCalls, 2)
   assert.equal(validateModelCalls, 2)
 })
+
+test('AudioMuxer resamples non-48kHz decoded audio linearly and SnippetTimestampRecorder honors markTalkSpeechStart', async () => {
+  const muxerLoader = createRendererLoader(new Map())
+  const { AudioMuxer } = muxerLoader.load('managers/video-export/AudioMuxer.ts')
+  const { SnippetTimestampRecorder } = muxerLoader.load(
+    'managers/video-export/SnippetTimestampRecorder.ts'
+  )
+
+  const muxer = new AudioMuxer()
+  // Simulate fallback AudioContext decoding a 250ms clip at 24kHz (6000 samples)
+  const ch = new Float32Array(6000).fill(0.5)
+  muxer.decodeAudioData = async () => ({
+    sampleRate: 24000,
+    numberOfChannels: 1,
+    duration: 0.25,
+    length: 6000,
+    getChannelData: () => ch
+  })
+  muxer.addAudioTrack({
+    audioBuffer: new ArrayBuffer(16),
+    startTime: 0,
+    endTime: 250,
+    characterName: '一歌',
+    text: 'a'
+  })
+  const pcm = await muxer.mixToInt16Interleaved(300)
+  // Midpoint sample at 150ms (7200 @ 48kHz) must still be active audio, not silent or double-speed
+  const idx = 7200 * 2
+  assert.ok(pcm[idx] > 1000, `24kHz track resampled cleanly at 150ms: ${pcm[idx]}`)
+  // Past 250ms (at 275ms = 13200 @ 48kHz) must be silent
+  assert.equal(pcm[13200 * 2], 0)
+
+  const recorder = new SnippetTimestampRecorder()
+  recorder.markRenderStart(1000, 1000)
+  recorder.markSnippetStart(3, 'Talk', { speaker: '一歌', content: 'hi' })
+  recorder.markTalkSpeechStart(3, 1500)
+  recorder.markSnippetEnd(800, 0, 3)
+  const placements = recorder.buildAudioTrackPlacements(
+    new Map([
+      [
+        3,
+        {
+          audioBuffer: new ArrayBuffer(8),
+          durationMs: 800,
+          characterName: '一歌',
+          text: 'hi'
+        }
+      ]
+    ])
+  )
+  assert.equal(placements.length, 1)
+  // Snippet started at render+0, Wait/delay 500ms before Talk act -> audio starts at ~500ms+wallStartOffset
+  assert.ok(placements[0].startTimeMs >= 490)
+})

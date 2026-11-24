@@ -35,6 +35,53 @@ export type BgmAudioCue = BgmCue<AudioBuffer> & {
 }
 export type SeAudioCue = SeBufferCue & { numberOfChannels?: number; snippetIndex?: number }
 
+/** 线性重采样单声道 PCM 至目标采样率（如 fallback AudioContext 的 44.1kHz → 48kHz）。 */
+export function resampleChannelLinear(
+  input: Float32Array,
+  sourceRate: number,
+  targetRate: number
+): Float32Array {
+  if (
+    input.length === 0 ||
+    !Number.isFinite(sourceRate) ||
+    !Number.isFinite(targetRate) ||
+    sourceRate <= 0 ||
+    targetRate <= 0 ||
+    sourceRate === targetRate
+  ) {
+    return input
+  }
+  const outLength = Math.max(1, Math.round((input.length * targetRate) / sourceRate))
+  const output = new Float32Array(outLength)
+  const step = sourceRate / targetRate
+  const lastIndex = input.length - 1
+  for (let i = 0; i < outLength; i++) {
+    const pos = i * step
+    const idx = Math.floor(pos)
+    if (idx >= lastIndex) {
+      output[i] = input[lastIndex]
+    } else {
+      const frac = pos - idx
+      output[i] = input[idx] + (input[idx + 1] - input[idx]) * frac
+    }
+  }
+  return output
+}
+
+function resampleStereoChannels(
+  ch0: Float32Array,
+  ch1: Float32Array,
+  sourceRate: number | undefined,
+  targetRate: number
+): { ch0: Float32Array; ch1: Float32Array } {
+  if (!sourceRate || !Number.isFinite(sourceRate) || sourceRate <= 0 || sourceRate === targetRate) {
+    return { ch0, ch1 }
+  }
+  const out0 = resampleChannelLinear(ch0, sourceRate, targetRate)
+  const out1 = ch1 === ch0 ? out0 : resampleChannelLinear(ch1, sourceRate, targetRate)
+  return { ch0: out0, ch1: out1 }
+}
+
 /** CRI `SquareReverse(s)`: `1 - (1 - x)^(1 + s)` (`sse-mix/src/lib.rs:122`). */
 export function evaluateDuckReleaseCurve(kind: 'voice' | 'se', x: number): number {
   const clamped = Math.max(0, Math.min(1, x))
@@ -380,7 +427,8 @@ export class AudioMuxer {
     sampleRate: number
   }> {
     const sampleRate = 48000
-    const totalSamples = Math.ceil((outputDuration / 1000) * sampleRate)
+    const clampedDuration = Number.isFinite(outputDuration) ? Math.max(0, outputDuration) : 0
+    const totalSamples = Math.ceil((clampedDuration / 1000) * sampleRate)
     const leftBuffer = new Float32Array(totalSamples)
     const rightBuffer = new Float32Array(totalSamples)
 
@@ -402,7 +450,15 @@ export class AudioMuxer {
       if (this.bgmCues.length > 0) {
         this.mixStoryBGM(leftBuffer, rightBuffer, totalSamples, sampleRate, duckGains, tweenGains)
       } else if (bgmBuffer) {
-        this.mixBGM(leftBuffer, rightBuffer, bgmBuffer, totalSamples, duckGains, tweenGains)
+        this.mixBGM(
+          leftBuffer,
+          rightBuffer,
+          bgmBuffer,
+          totalSamples,
+          sampleRate,
+          duckGains,
+          tweenGains
+        )
       }
     }
 
@@ -434,17 +490,23 @@ export class AudioMuxer {
     rightBuffer: Float32Array,
     bgmBuffer: AudioBuffer,
     totalSamples: number,
+    sampleRate: number,
     duckGains: Float32Array,
     tweenGains: Float32Array
   ): void {
     const bgmChannels = bgmBuffer.numberOfChannels
-    const bgmTotalSamples = bgmBuffer.getChannelData(0).length
-    if (bgmTotalSamples <= 0) return
+    const rawLeft = bgmBuffer.getChannelData(0)
+    if (rawLeft.length <= 0) return
+    const rawRight = bgmChannels > 1 ? bgmBuffer.getChannelData(1) : rawLeft
+    const { ch0: bgmLeftData, ch1: bgmRightData } = resampleStereoChannels(
+      rawLeft,
+      rawRight,
+      bgmBuffer.sampleRate,
+      sampleRate
+    )
+    const bgmTotalSamples = bgmLeftData.length
     const volume =
       (this.bgmConfig?.volume ?? 1.0) * ACF_GAIN_BGM * (bgmChannels === 1 ? MONO_PAN_GAIN : 1)
-
-    const bgmLeftData = bgmBuffer.getChannelData(0)
-    const bgmRightData = bgmChannels > 1 ? bgmBuffer.getChannelData(1) : bgmLeftData
 
     for (let i = 0; i < totalSamples; i++) {
       const idx = i % bgmTotalSamples
@@ -513,9 +575,15 @@ export class AudioMuxer {
             volume: cue.volume
           }
         }
-        const channel0 = cue.buffer.getChannelData(0)
+        const raw0 = cue.buffer.getChannelData(0)
         const isMono = cue.buffer.numberOfChannels === 1
-        const channel1 = isMono ? channel0 : cue.buffer.getChannelData(1)
+        const raw1 = isMono ? raw0 : cue.buffer.getChannelData(1)
+        const { ch0: channel0, ch1: channel1 } = resampleStereoChannels(
+          raw0,
+          raw1,
+          cue.buffer.sampleRate,
+          sampleRate
+        )
         const pan = isMono ? MONO_PAN_GAIN : 1
         return {
           timeMs: cue.timeMs,
@@ -546,10 +614,16 @@ export class AudioMuxer {
     for (let idx = 0; idx < sorted.length; idx++) {
       const cue = sorted[idx]
       if (cue.stop || !cue.buffer) continue
-      const source0 = cue.buffer.getChannelData(0)
-      if (source0.length === 0) continue
+      const raw0 = cue.buffer.getChannelData(0)
+      if (raw0.length === 0) continue
       const isMono = cue.buffer.numberOfChannels === 1
-      const source1 = isMono ? source0 : cue.buffer.getChannelData(1)
+      const raw1 = isMono ? raw0 : cue.buffer.getChannelData(1)
+      const { ch0: source0, ch1: source1 } = resampleStereoChannels(
+        raw0,
+        raw1,
+        cue.buffer.sampleRate,
+        sampleRate
+      )
       const pan = isMono ? MONO_PAN_GAIN : 1
       const start = starts[idx]
       const next = sorted[idx + 1]
@@ -607,16 +681,16 @@ export class AudioMuxer {
             endSample: Math.min(totalSamples, startSample + cue.channel0.length),
             kind: 'se'
           })
-        } else {
+        } else if (!activeLoopStartByKey.has(key)) {
           activeLoopStartByKey.set(key, startSample)
         }
       } else if (cue.stop) {
-        const stopFade = Math.round((Math.max(0, cue.fadeMs) / 1000) * sampleRate)
+        // StopSe 在 startSample 时刻完全淡出静音，压低区间应止于 startSample（而非 +stopFade）
         for (const [k, sStart] of activeLoopStartByKey.entries()) {
           if (!cue.file || k === key) {
             spans.push({
               startSample: sStart,
-              endSample: Math.min(totalSamples, startSample + stopFade),
+              endSample: Math.min(totalSamples, Math.max(sStart, startSample)),
               kind: 'se'
             })
             activeLoopStartByKey.delete(k)
@@ -665,7 +739,7 @@ export class AudioMuxer {
         continue
       }
 
-      const startSample = Math.floor((track.startTime / 1000) * sampleRate)
+      const startSample = Math.max(0, Math.floor((track.startTime / 1000) * sampleRate))
       if (startSample >= totalSamples) {
         this.logger.warn(
           `Audio track for "${track.characterName}" starts at ${track.startTime}ms which is beyond output duration, skipping`
@@ -699,12 +773,28 @@ export class AudioMuxer {
             const track = tracksToDecode[cursor++]
             const decoded = await this.decodeAudioTrackCached(track)
             if (!decoded || typeof decoded.getChannelData !== 'function') {
+              if (track.pcmData && track.pcmData.channel0.length > 0) {
+                const { ch0, ch1 } = resampleStereoChannels(
+                  track.pcmData.channel0,
+                  track.pcmData.channel1,
+                  track.pcmData.sampleRate,
+                  sampleRate
+                )
+                validTracks.push({
+                  track,
+                  sourceCh0: ch0,
+                  sourceCh1: ch1,
+                  isMono: track.pcmData.channel0 === track.pcmData.channel1
+                })
+                continue
+              }
               this.logger.warn(`Decoded buffer invalid for "${track.characterName}", skipping`)
               continue
             }
-            const ch0 = decoded.getChannelData(0)
+            const raw0 = decoded.getChannelData(0)
             const isMono = decoded.numberOfChannels <= 1
-            const ch1 = isMono ? ch0 : decoded.getChannelData(1)
+            const raw1 = isMono ? raw0 : decoded.getChannelData(1)
+            const { ch0, ch1 } = resampleStereoChannels(raw0, raw1, decoded.sampleRate, sampleRate)
             validTracks.push({ track, sourceCh0: ch0, sourceCh1: ch1, isMono })
           }
         })
@@ -723,7 +813,7 @@ export class AudioMuxer {
           continue
         }
 
-        const startSample = Math.floor((track.startTime / 1000) * sampleRate)
+        const startSample = Math.max(0, Math.floor((track.startTime / 1000) * sampleRate))
         const endSample = Math.min(startSample + sourceCh0.length, totalSamples)
         if (startSample >= totalSamples) {
           skippedTrackCount++

@@ -284,3 +284,11 @@ test('text lip starts closing at typing_end minus one whole char and releases', 
   for (let i = 0; i < 6; i++) assert.equal(clicked.values[i], sequence.values[i])
   assert.ok(clicked.releaseStep < sequence.releaseStep)
 })
+
+test('buildLipSyncEnvelope returns empty envelope immediately for 0-sample channels', () => {
+  const lip = loadRendererModule('utils/LipSyncEnvelope.ts')
+  const env = lip.buildLipSyncEnvelope([new Float32Array(0)], 48000)
+  assert.equal(env.durationMs, 0)
+  assert.equal(env.releaseStep, -1)
+  assert.equal(env.values.length, 0)
+})

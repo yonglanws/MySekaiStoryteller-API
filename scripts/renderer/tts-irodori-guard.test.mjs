@@ -116,3 +116,32 @@ test('IrodoriTTS accepts Japanese and reaches the request builder', async (t) =>
   )
   assert.equal(builderCalls(), 1, '日文必须走到 Irodori 请求构造器')
 })
+
+test('TTSService.calculateAudioDuration parses RIFF/WAVE subchunks when LIST/JUNK precedes data', async (t) => {
+  const { service } = loadService(t)
+  // Build RIFF/WAVE: 12-byte RIFF + 24-byte fmt (16kHz, 1ch, 16-bit) + 16-byte JUNK + 8-byte data header + 3200 bytes PCM (100ms)
+  const dataBytes = 3200
+  const buf = new ArrayBuffer(12 + 24 + 16 + 8 + dataBytes)
+  const view = new DataView(buf)
+  const writeTag = (off, str) => {
+    for (let i = 0; i < 4; i++) view.setUint8(off + i, str.charCodeAt(i))
+  }
+  writeTag(0, 'RIFF')
+  view.setUint32(4, buf.byteLength - 8, true)
+  writeTag(8, 'WAVE')
+  writeTag(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, 16000, true)
+  view.setUint32(28, 32000, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeTag(36, 'JUNK')
+  view.setUint32(40, 8, true) // Offset 40 is JUNK's chunk size (8), NOT dataSize!
+  writeTag(52, 'data')
+  view.setUint32(56, dataBytes, true)
+
+  const durationMs = await service.calculateAudioDuration(buf)
+  assert.equal(durationMs, 100)
+})

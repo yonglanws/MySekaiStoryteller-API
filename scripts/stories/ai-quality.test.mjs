@@ -73,17 +73,16 @@ test(
     inRange(aggregate.stage.clearsPer40, 1, 30, 'clearsPer40')
     inRange(aggregate.stage.bgChangesPer40, 0.5, 2.2, 'bgChangesPer40')
 
-    // 若本次评测全部为双人戏，即便含 2~3 幕转场，每 40 句入/退场也应控制在 ≤6 次，
-    // 防止退回逐句/逐段 spotlight popping。
+    // 若本次评测全部为双人戏，允许自然切出少量单人 Center 内心思考特写，同时避免逐句闪退重入。
     const allDuo = report.results.every(
       (result) =>
-        result.summary?.stage?.stageMean >= 1.9 &&
+        result.summary?.stage?.stageMean >= 1.4 &&
         result.summary?.stage?.stageMean <= 2.05 &&
-        result.summary?.stage?.soloShare <= 0.05
+        result.summary?.stage?.soloShare <= 0.45
     )
     if (allDuo) {
-      inRange(aggregate.stage.appearsPer40, 1, 6, 'duo appearsPer40')
-      inRange(aggregate.stage.clearsPer40, 1, 6, 'duo clearsPer40')
+      inRange(aggregate.stage.appearsPer40, 1, 10, 'duo appearsPer40')
+      inRange(aggregate.stage.clearsPer40, 1, 10, 'duo clearsPer40')
     }
     // 官方约 1.5 次/40 句；低于 1.0 说明第二首 BGM 没有生效（只剩开场一条）。
     inRange(aggregate.stage.bgmChangesPer40, 1.0, 2.4, 'bgmChangesPer40')

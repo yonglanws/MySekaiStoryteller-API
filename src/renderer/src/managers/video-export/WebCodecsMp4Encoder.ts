@@ -1,5 +1,6 @@
 import { Muxer, StreamTarget } from 'mp4-muxer'
 import { ExportLogger } from './ExportLogger'
+import { GpuYuv420Converter } from './GpuYuv420Converter'
 
 const DEFAULT_MAX_PROBE_MS = 150
 const PROBE_FRAME_COUNT = 5
@@ -79,6 +80,7 @@ export class WebCodecsMp4Encoder {
   /** 画布尺寸 ≠ 编码尺寸时的 GPU 缩放中间画布 */
   private scaleCanvas: OffscreenCanvas | null = null
   private scaleCtx: OffscreenCanvasRenderingContext2D | null = null
+  private yuvConverter: GpuYuv420Converter | null = null
   private dequeueWaiter: (() => void) | null = null
 
   constructor(opts: {
@@ -394,6 +396,7 @@ export class WebCodecsMp4Encoder {
       }
     })
     this.encoder.configure(config)
+    this.yuvConverter = GpuYuv420Converter.create(this.width, this.height, 0)
   }
 
   private wakeDequeueWaiter(): void {
@@ -439,26 +442,44 @@ export class WebCodecsMp4Encoder {
         throw new Error('Encoder disposed during backpressure wait')
     }
 
-    // 源尺寸 ≠ 编码尺寸（renderScale 超采样）时，经 OffscreenCanvas
-    // 做一次 GPU 缩放；同尺寸则零拷贝直接构造 VideoFrame。
-    let frameSource = source as CanvasImageSource
-    const srcW = (source as { width?: number }).width ?? this.width
-    const srcH = (source as { height?: number }).height ?? this.height
-    if (srcW !== this.width || srcH !== this.height) {
-      if (!this.scaleCanvas) {
-        this.scaleCanvas = new OffscreenCanvas(this.width, this.height)
-        this.scaleCtx = this.scaleCanvas.getContext('2d')
+    let frame: VideoFrame
+    if (this.yuvConverter) {
+      const yuvBytes = this.yuvConverter.convertSync(source as TexImageSource)
+      frame = new VideoFrame(yuvBytes, {
+        format: 'I420',
+        codedWidth: this.width,
+        codedHeight: this.height,
+        timestamp: timestampUs,
+        duration: durationUs,
+        colorSpace: {
+          primaries: 'bt709',
+          transfer: 'bt709',
+          matrix: 'bt709',
+          fullRange: false
+        }
+      })
+    } else {
+      // 源尺寸 ≠ 编码尺寸（renderScale 超采样）时，经 OffscreenCanvas
+      // 做一次 GPU 缩放；同尺寸则零拷贝直接构造 VideoFrame。
+      let frameSource = source as CanvasImageSource
+      const srcW = (source as { width?: number }).width ?? this.width
+      const srcH = (source as { height?: number }).height ?? this.height
+      if (srcW !== this.width || srcH !== this.height) {
+        if (!this.scaleCanvas) {
+          this.scaleCanvas = new OffscreenCanvas(this.width, this.height)
+          this.scaleCtx = this.scaleCanvas.getContext('2d')
+        }
+        if (this.scaleCtx) {
+          this.scaleCtx.drawImage(source as CanvasImageSource, 0, 0, this.width, this.height)
+          frameSource = this.scaleCanvas
+        }
       }
-      if (this.scaleCtx) {
-        this.scaleCtx.drawImage(source as CanvasImageSource, 0, 0, this.width, this.height)
-        frameSource = this.scaleCanvas
-      }
-    }
 
-    const frame = new VideoFrame(frameSource, {
-      timestamp: timestampUs,
-      duration: durationUs
-    })
+      frame = new VideoFrame(frameSource, {
+        timestamp: timestampUs,
+        duration: durationUs
+      })
+    }
     try {
       this.encoder.encode(frame, { keyFrame })
       this.frameCount++
@@ -472,6 +493,9 @@ export class WebCodecsMp4Encoder {
   async finish(): Promise<string> {
     if (this.encodeError) throw this.encodeError
     if (!this.encoder || !this.muxer) throw new Error('Encoder not initialized')
+
+    this.yuvConverter?.dispose()
+    this.yuvConverter = null
 
     await this.encoder.flush()
     if (this.encodeError) throw this.encodeError
@@ -517,6 +541,8 @@ export class WebCodecsMp4Encoder {
   dispose(): void {
     this.isDisposed = true
     this.wakeDequeueWaiter()
+    this.yuvConverter?.dispose()
+    this.yuvConverter = null
     try {
       this.encoder?.close()
     } catch {

@@ -1,162 +1,52 @@
 # 部署指南
 
-[返回 README](../README.md) · [文档索引](README.md) · [资源与音频配置](resources.md) · [导出模式](export-modes.md) · [故障排除](troubleshooting.md)
+[返回 README](../README.md) · [文档总览](README.md) · [导出模式与提速调参](export-modes.md) · [故障排除](troubleshooting.md)
 
-渲染宿主是普通 Node 进程：Playwright 管理无头 Chrome / Edge，Node 提供 HTTP API、静态资源托管、云端目录/按需物化、内置 AI 导演与 ffmpeg 编码。
-支持 Windows / Linux / macOS，不依赖 Electron；Linux 无头服务器不需要 Xorg / Xvfb 或桌面环境。
+服务本质上就是一个 Node 进程：它拉起几个无头 Chrome / Edge 页面当渲染 worker（每页一个独立 WebGL 上下文），对外提供 HTTP API、静态文件、云端资源拉取、AI 编剧和 `ffmpeg` 合轨。支持 Windows / Linux / macOS，Linux 服务器不需要装桌面或 Xvfb。
 
-本文导航：[依赖](#依赖) · [平台差异](#按平台) · [构建与启动](#构建与启动) · [配置与环境变量](#配置与环境变量) · [常驻运行](#常驻运行) · [配置建议](#配置建议) · [启停检查](#启动与停止检查清单) · [GPU](#webgl-硬件加速) · [安全](#安全提示)
+## 环境要求
 
-## 架构
+| 组件         | 说明                                                                                                                                                              |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Node.js**  | `>= 20`，推荐 22 LTS                                                                                                                                              |
+| **浏览器**   | Chrome / Edge / Chromium（按 `msedge → chrome → chromium` 探测；都没有就运行 `npx playwright install chromium`）                                                  |
+| **ffmpeg**   | 依赖里自带 `ffmpeg-static`；也可设 `MSS_FFMPEG_PATH` 用系统版（比如 Linux 想用系统带 `h264_nvenc` / `hevc_nvenc` 的 ffmpeg 时推荐设一下）                         |
+| **GPU 驱动** | 有独显/核显建议装好驱动；纯 CPU 机器也能跑软渲染 + `encoder: libx264`                                                                                             |
+| **外网访问** | 开启 `assets.cloudCatalog: true` 时需能访问 `assets.pjsk.moe`、`storage.exmeaning.com`（可选 `cdn.jsdelivr.net`）；纯内网可关闭 `cloudCatalog` 并提前预拉本地资源 |
 
-```text
-Node 宿主
-├─ :9881  HTTP API          导出、AI 生成、资源目录、云端刷新、健康检查
-├─ :9881  静态托管          / 渲染页面 · /resources/* · /apifile/*
-├─ :9881  /bridge/*         渲染端与宿主桥接层（文件写入、TTS/翻译代理、WS）
-└─ RenderPool              N 个无头浏览器页面，每页独立 WebGL 上下文
-```
+> 建议直接宿主机运行，尽量别往 Docker 里塞无头浏览器（Docker 透传 GPU 给 Chromium 排障成本高很多）。
 
-`POST /api/v1/export` 与 `POST /api/v1/generate` 提交的故事进入统一队列，并发上限由 `render.maxConcurrentExports`（`0` 时跟随 `render.workers`）控制。
+## 平台与编码器差异
 
-### 取消与故障恢复
+- **Windows**：直接用系统 Edge / Chrome 一般都能吃到核显或独显 WebGL；ffmpeg `auto` 可探测 NVIDIA (`nvenc`) / AMD (`amf`) / Intel (`qsv`)。
+- **Linux**：Chrome / Chromium；如果是有 NVIDIA 独显但**没有桌面/X11** 的服务器，记得看下面 [WebGL 硬件加速](#webgl-硬件加速)。
+- **macOS**：可用系统 GPU 跑 WebGL；目前 `ffmpeg` 不探测 VideoToolbox，`auto` 会用 CPU 软编。
 
-- 取消或客户端断连后，仍在缓冲队列中的任务会直接移除，不再开始渲染。
-- 通过 `POST /api/v1/export/:taskId/cancel` 或超时/断连取消正在渲染的任务时，宿主等待渲染池清理完成（`BridgeController.cleanupTask` 会关闭该任务在途句柄与 `FramesPipeSession` 管道、立即删除本次关联的 `mss-export-*` / `mss-hf-*` / `mss-fpipe-*` 临时目录并标记防回写）。
-- 正在渲染的任务收到中止通知后有 60 秒宽限期；超时或浏览器意外退出时，宿主在 15 秒巡检周期内重启该 worker 的浏览器并恢复就绪。
-- 其余 worker 上的任务互不干扰。
+注意：**`video.encoder` 填的是厂商/模式关键字**：`auto` / `nvidia` / `amd` / `intel` / `cpu` / `libx264`，别直接填 `nvenc` 或 `hevc_nvenc`。
 
-`npm run test:pool` 可在无浏览器与模型资源的环境下验证取消、超时、并发隔离与恢复。
-
-## 依赖
-
-| 组件                     | 要求                                                                                                                                                                |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Node.js                  | ≥ 20，推荐 22 LTS                                                                                                                                                   |
-| Chrome / Edge / Chromium | 默认按 `msedge` → `chrome` → `chromium` 探测；无系统浏览器时先执行 `npx playwright install chromium`                                                                |
-| ffmpeg                   | 优先 `MSS_FFMPEG_PATH`，其次依赖包 `ffmpeg-static`，最后系统 `PATH`                                                                                                 |
-| GPU 驱动                 | 推荐安装独显或核显驱动；无 GPU 也可软件渲染，编码设为 `libx264`                                                                                                     |
-| 网络（零本地云端模式）   | 启用 `assets.cloudCatalog: true` 时需能访问 `assets.pjsk.moe`、`storage.exmeaning.com` 与（可选）`cdn.jsdelivr.net`；内网环境可关闭 `cloudCatalog` 或预拉取本地资源 |
-
-建议直接在宿主机运行 Node 进程，避免 Docker 中无头浏览器 GPU 透传的额外排障成本。
-
-## 按平台
-
-| 平台    | 浏览器与 WebGL                                         | 视频编码                                       |
-| ------- | ------------------------------------------------------ | ---------------------------------------------- |
-| Windows | 系统 Edge / Chrome 通常可直接使用独显或核显            | 可探测 NVENC / AMF / QSV                       |
-| Linux   | Chrome / Chromium；NVIDIA 无 X 环境的 ANGLE 设置见下文 | ffmpeg 需包含并能使用相应硬件编码器            |
-| macOS   | Chrome / Edge，使用系统 GPU                            | 当前不探测 VideoToolbox，`auto` 回退 `libx264` |
-
-`video.encoder: auto` 在宿主启动时依次探测 `h264_nvenc`（`nvidia`）→ `h264_amf`（`amd`）→ `h264_qsv`（`intel`），全部失败回退 `libx264`。不要把 `nvenc` 直接填到 `video.encoder`。
-
-## 构建与启动
-
-首次安装见 [README 快速开始](../README.md#快速开始)。默认开启云端目录，**空 `resources/` 目录即可启动**：
+## 安装、构建与最小试跑
 
 ```bash
-cp config.example.yaml config.yaml   # 可选：不复制则全部使用 src/host/config.ts 内置默认值
-export MSS_LLM_API_KEY=sk-...        # 若需使用 /api/v1/script/generate 或 /api/v1/generate
+cp config.example.yaml config.yaml   # 可选；不复制就按 src/host/config.ts 内置默认值跑
+export MSS_LLM_API_KEY=sk-...        # 如果要用 AI 写剧本
+npm ci
 npm run build
 npm start
 ```
 
-`npm run build` 包含 `typecheck`、`vite build`（输出 `out/webrenderer/`）和 `tsc -p tsconfig.node.json`（输出 `out-host/`）；`npm start` 执行 `node out-host/host/main.js`。
-
-## 配置与环境变量
-
-宿主主配置位于根目录 `config.yaml`（由 [config.example.yaml](../config.example.yaml) 复制，不入库）；BGM 还可由 `resources/audio/bgm/bgm.yaml` 独立配置（不存在且无 `bg1.mp3` 时自动回落云端 `bgm00003`）。
-
-优先级：**环境变量（`MSST_*` / `MSS_*`） > `config.yaml` > `src/host/config.ts` 内置默认值**。
-
-| 环境变量                                                                                        | 对应配置 / 作用                                                                   |
-| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `MSS_PORT` / `MSS_HOST`                                                                         | `server.port` / `server.host`                                                     |
-| `MSST_API_KEY` / `MSS_API_KEY`                                                                  | `server.apiKey`（Bearer 鉴权密钥，空串关闭；`MSST_*` 优先）                       |
-| `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`                                                        | 逗号分隔的 `CORS` 允许来源（未设 `server.corsOrigins` 时回落读取；`MSST_*` 优先） |
-| `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                      | 输出分辨率、帧率、质量因子                                                        |
-| `MSS_FFMPEG_ENCODER` / `MSS_FFMPEG_PATH`                                                        | `video.encoder` / 显式 ffmpeg 可执行文件                                          |
-| `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE`                                                        | `video.exportMode`（默认且唯一活跃管线 `fast`；`record` 已弃用）/ WebCodecs 码率  |
-| `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                                      | fast 编码路径（`auto`/`webcodecs`/`frames`）/ fast 帧率上限（默认 `30`）          |
-| `MSS_RECORD_TARGET_SIZE_MB`                                                                     | 已弃用兼容项（仅在设为 `> 0` 时输出弃用警告并忽略）                               |
-| `MSS_VIDEO_WATERMARK` / `MSS_VIDEO_WATERMARK_TEXT`                                              | 水印开关 / 自定义水印文字                                                         |
-| `MSS_IDLE_CHAIN_GAP_SEC` / `MSS_TTS_MODE`                                                       | 动作续演间隔秒数 / `concurrent`（默认）或 `serial`                                |
-| `MSS_WORKERS` / `MSS_MAX_CONCURRENT_EXPORTS` / `MSS_WORKER_RECYCLE_EXPORTS`                     | worker 数量 / 导出并发上限 / 按导出次数回收周期                                   |
-| `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS`                           | 浏览器探测顺序（逗号分隔）/ 可执行路径 / 附加参数                                 |
-| `MSS_LINUX_GPU_ANGLE` / `MSS_MIN_FREE_MEMORY_MB`                                                | Linux ANGLE 开关 / 派发前最小可用内存 MB                                          |
-| `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                  | 输出、资源与渲染端目录                                                            |
-| `MSS_TTS_ENABLED` / `MSS_TTS_PROVIDER` / `MSS_TTS_API_BASE_URL` / `MSS_TTS_TIMEOUT_MS`          | TTS 开关、后端（`gpt-sovits`/`irodori`）、地址与超时                              |
-| `MSS_IRODORI_MODEL` / `MSS_IRODORI_NUM_STEPS`                                                   | Irodori 模型名与采样步数                                                          |
-| `MSS_LLM_ENABLED` / `MSS_LLM_BASE_URL` / `MSS_LLM_API_KEY_ENV` / `MSS_LLM_MODEL`                | LLM 开关、地址、密钥变量名、模型名                                                |
-| `MSS_LLM_TEMPERATURE` / `MSS_LLM_MAX_TOKENS` / `MSS_LLM_TIMEOUT_MS` / `MSS_LLM_RETRIES`         | LLM 温度、token 上限、超时、重试次数                                              |
-| `MSS_LLM_REPAIR_ROUNDS` / `MSS_LLM_PIPELINE` / `MSS_LLM_JSON_MODE`                              | 修复轮数、流水线（`staged`/`single`）、JSON 模式                                  |
-| `MSS_LLM_TRANSLATE` / `MSS_LLM_TARGET_MINUTES` / `MSS_LLM_SYSTEM_PROMPT` / `MSS_LLM_EXTRA_BODY` | TTS 日语翻译开关、目标分钟数、系统提示词、额外请求体 JSON                         |
-| `MSS_ASSETS_REGION` / `MSS_ASSETS_INDEX_BASE` / `MSS_ASSETS_LIBRARY_BASE` / `MSS_ASSETS_BASE`   | 云端区服（`jp`/`cn`/`tw`/`kr`/`en`）与镜像地址                                    |
-| `MSS_ASSETS_SOUNDTRACK_BASE` / `MSS_ASSETS_CACHE_DIR`                                           | 曲名索引镜像 / 缓存目录                                                           |
-| `MSS_ASSETS_CONCURRENCY` / `MSS_ASSETS_TIMEOUT_MS` / `MSS_ASSETS_RETRIES`                       | 下载并发、超时、重试                                                              |
-| `MSS_ASSETS_CLOUD_CATALOG` / `MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS`                               | 云端目录开关（默认 `true`）与刷新周期                                             |
-| `MSS_LOG_LEVEL`                                                                                 | `silly` / `trace` / `debug` / `info` / `warn` / `error` / `fatal`                 |
-
-## 启动后自检
-
-```bash
-curl http://127.0.0.1:9881/api/v1/health
-# 若配置了 server.apiKey / MSST_API_KEY，除 /health 外的端点需附带 Authorization 头：
-curl -H "Authorization: Bearer $MSST_API_KEY" http://127.0.0.1:9881/api/v1/resources
-```
-
-检查 `renderPool.readyWorkers`、真实 GPU `webglRenderers`、`videoConfig.exportMode`（`fast`）与 `cloud` 字段（`models` / `backgrounds` / `bgm` / `se`）。
-
-## 常驻运行
-
-建议将工作目录固定在仓库根目录。
-
-### Linux：systemd
-
-仓库提供 [deploy/mysekai-host.service](../deploy/mysekai-host.service)，按实际用户、仓库路径与环境变量调整后安装：
-
-```bash
-sudo cp deploy/mysekai-host.service /etc/systemd/system/mysekai-host.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now mysekai-host.service
-systemctl status mysekai-host.service
-```
-
-- 不需要 `DISPLAY` 或 Xorg；宿主的优雅关停排空上限为 120 秒，systemd 的 `TimeoutStopSec` 建议设 `150s`。
-- 浏览器由哪个用户安装决定服务账号能否找到它，确保 `User` 对仓库、`resources/`、`cache/`、`apifile/` 与浏览器有读写执行权限。
-
-### Windows / macOS
-
-- **Windows**：使用任务计划程序或 NSSM，程序 `node`、参数 `out-host/host/main.js`、起始于 `<仓库根>`。
-- **macOS**：使用 `launchd`、`tmux`/`screen` 或前台 `npm start`。
-
-### 升级代码
-
-```bash
-git pull
-npm ci
-npm run build
-# 重启服务进程
-```
-
-## 配置建议
-
-### 最小试跑配置
-
-如果不使用 TTS，在 `config.yaml` 中仅关闭 TTS 即可零本地资源开箱运行（BGM 会自动使用云端 `bgm00003`）：
+刚上手不想配 TTS 的话，一份最简 `config.yaml` 只要关闭 TTS 就行（BGM 会自动用云端 `bgm00003`）：
 
 ```yaml
 server:
   host: 127.0.0.1
   port: 9881
-  apiKey: '' # 对外开放时设置强密钥，或改用环境变量 MSST_API_KEY
 
 video:
   width: 1280
   height: 720
   fps: 30
+  fastFps: 30
   renderScale: 1
-  exportMode: fast
 
 tts:
   enabled: false
@@ -167,35 +57,77 @@ llm:
   model: gpt-4.1-mini
 ```
 
-注意：**省略 `video` 节时的内置默认是 1280×720 / 30fps / `renderScale: 1.5` / `crf: 23` / `exportMode: fast` / `fastFps: 30` / `ttsMode: concurrent`，而 `config.example.yaml` 模板写的是 1920×1080 / 60fps（`fastFps: 30`） / `renderScale: 1` / `crf: 28`**，详见 [导出模式](export-modes.md)。
+> 再次提醒：不建 `config.yaml` 时内置默认是 `1280×720`、`30fps`、`renderScale: 1.5`、`crf: 18`、`codec: hevc`；复制 `config.example.yaml` 则是 `1920×1080`、`60fps`、`fastFps: 30`、`renderScale: 1`、`crf: 28`。
 
-### 并发、热备与内存
+启动后检查：
 
-- 每个渲染 worker 占一个独立无头浏览器页面与 WebGL 上下文（约 300~500 MB 内存）。
-- 建议将 `render.workers` 设为比 `render.maxConcurrentExports` 多 1（如 `workers: 3`、`maxConcurrentExports: 2`），保留 1 个热备 worker 在其他 worker 回收或崩溃重启时无缝顶替。
-- `workerRecycleExports` 默认为 `5`，防止长驻 Live2D 纹理内存累积；`minFreeMemoryMb` 可在低内存服务器上延迟派发防止 OOM。
-- `idleChainGapSec` 默认 `0`（动作播完保持末帧姿势+呼吸眨眼），想改成连续摇晃风格可设正数。
-- 默认 `ttsMode: concurrent`（`maxConcurrentTts = 3`，后台边渲染边合成并预热语音口型）；若使用共享单槽 TTS 推理（如单 GPU 本地 Irodori），可显式改回 `ttsMode: serial` 以避免 TTS 与 WebGL/编码争抢算力。
+```bash
+curl http://127.0.0.1:9881/api/v1/health
+```
 
-## 启动与停止检查清单
+确认 `renderPool.readyWorkers >= 1`，且 `webglRenderers` 里有真实显卡名字。
 
-1. `npm ci` 与 `npm run build` 完成，存在 `out/webrenderer/` 与 `out-host/`。
-2. 等待日志出现 `Host ready`，并检查 `/api/v1/health` 至少有 1 个 ready worker 且 WebGL 非软件渲染。
-3. 发送 `SIGINT` / `SIGTERM` 停止服务时，宿主会等待在途导出最多 120 秒再释放浏览器池。
+---
+
+## 环境变量覆盖表
+
+配置优先级：**`MSST_*` / `MSS_*` 环境变量 > `config.yaml` > 内置默认值**。只列出真实生效的变量，没写出来的字段请改 `config.yaml`：
+
+| 环境变量                                                                                                                                      | 对应配置                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `MSS_PORT` / `MSS_HOST`                                                                                                                       | `server.port` / `server.host`                                     |
+| `MSST_API_KEY` / `MSS_API_KEY`                                                                                                                | `server.apiKey`（`MSST_*` 优先）                                  |
+| `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`                                                                                                      | `server.corsOrigins`（逗号分隔）                                  |
+| `MSS_VIDEO_WIDTH` / `MSS_VIDEO_HEIGHT` / `MSS_VIDEO_FPS` / `MSS_VIDEO_CRF`                                                                    | 输出宽高、帧率、质量因子                                          |
+| `MSS_VIDEO_CODEC` / `MSS_FFMPEG_ENCODER` / `MSS_FFMPEG_PATH`                                                                                  | `hevc`/`h264`、硬件厂商选择、指定 ffmpeg 可执行文件               |
+| `MSS_EXPORT_MODE` / `MSS_EXPORT_BITRATE` / `MSS_EXPORT_FAST_ENCODER` / `MSS_FAST_FPS`                                                         | 导出模式（`fast`）、码率、编码路径、编码帧率上限                  |
+| `MSS_VIDEO_WATERMARK` / `MSS_VIDEO_WATERMARK_TEXT`                                                                                            | 水印开关与自定义文字                                              |
+| `MSS_IDLE_CHAIN_GAP_SEC` / `MSS_TTS_MODE`                                                                                                     | 动作续演间隔 / `concurrent` 或 `serial`                           |
+| `MSS_WORKERS` / `MSS_MAX_CONCURRENT_EXPORTS` / `MSS_WORKER_RECYCLE_EXPORTS`                                                                   | 常驻 worker 数、导出并发上限、每 N 次回收重建                     |
+| `MSS_BROWSER_CHANNELS` / `MSS_BROWSER_EXECUTABLE` / `MSS_CHROME_ARGS`                                                                         | 浏览器通道（逗号分隔）、路径、启动参数                            |
+| `MSS_LINUX_GPU_ANGLE` / `MSS_MIN_FREE_MEMORY_MB`                                                                                              | Linux `--use-angle=gl` 开关 / 最小可用内存护栏（MB）              |
+| `MSS_OUTPUT_DIR` / `MSS_RESOURCE_DIR` / `MSS_WEB_RENDERER_DIR`                                                                                | 输出、资源、前端产物目录                                          |
+| `MSS_TTS_ENABLED` / `MSS_TTS_PROVIDER` / `MSS_TTS_API_BASE_URL` / `MSS_TTS_TIMEOUT_MS`                                                        | TTS 开关、引擎（`gpt-sovits`/`irodori`）、地址、超时              |
+| `MSS_IRODORI_MODEL` / `MSS_IRODORI_NUM_STEPS`                                                                                                 | Irodori 模型名与采样步数                                          |
+| `MSS_LLM_ENABLED` / `MSS_LLM_BASE_URL` / `MSS_LLM_API_KEY_ENV` / `MSS_LLM_MODEL`                                                              | LLM 开关、接口地址、密钥变量名、模型名                            |
+| `MSS_LLM_TEMPERATURE` / `MSS_LLM_MAX_TOKENS` / `MSS_LLM_TIMEOUT_MS` / `MSS_LLM_RETRIES`                                                       | 温度、token 上限、超时、重试次数                                  |
+| `MSS_LLM_REPAIR_ROUNDS` / `MSS_LLM_PIPELINE` / `MSS_LLM_JSON_MODE`                                                                            | 修复轮数、`staged`/`single`、JSON 模式                            |
+| `MSS_LLM_TRANSLATE` / `MSS_LLM_TARGET_MINUTES` / `MSS_LLM_SYSTEM_PROMPT` / `MSS_LLM_EXTRA_BODY`                                               | 日文翻译、目标分钟、系统提示词、额外请求体 JSON                   |
+| `MSS_RAG_ENABLED` / `MSS_RAG_BASE_URL` / `MSS_RAG_API_KEY_ENV` / `MSS_RAG_MODEL` / `MSS_RAG_CACHE_DIR`                                        | RAG 开关、Embedding 接口、模型、缓存目录                          |
+| `MSS_RAG_RERANK_ENABLED` / `MSS_RAG_RERANK_MODEL` / `MSS_RAG_RERANK_BASE_URL` / `MSS_RAG_RERANK_API_KEY_ENV` / `MSS_RAG_RERANK_ENDPOINT_PATH` | RAG 重排开关、模型与接口                                          |
+| `MSS_ASSETS_REGION` / `MSS_ASSETS_INDEX_BASE` / `MSS_ASSETS_LIBRARY_BASE` / `MSS_ASSETS_BASE`                                                 | 云端区服（`jp`/`cn`/`tw`/`kr`/`en`）与镜像地址                    |
+| `MSS_ASSETS_SOUNDTRACK_BASE` / `MSS_ASSETS_CACHE_DIR`                                                                                         | 曲名索引镜像 / 缓存目录                                           |
+| `MSS_ASSETS_CONCURRENCY` / `MSS_ASSETS_TIMEOUT_MS` / `MSS_ASSETS_RETRIES`                                                                     | 云端下载并发、超时、重试                                          |
+| `MSS_ASSETS_CLOUD_CATALOG` / `MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS`                                                                             | 云端目录开关与缓存小时数                                          |
+| `MSS_LOG_LEVEL`                                                                                                                               | `silly` / `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
+
+---
+
+## 并发、热备与内存建议
+
+- **每个渲染 worker 占用约 300~500 MB 内存**和一份 WebGL 上下文。
+- 推荐把 `render.workers` 设为比 `render.maxConcurrentExports` 多 1（比如 `workers: 3`、`maxConcurrentExports: 2`），留一个热备 worker，这样有人触发回收或意外崩溃时下一个任务不用等浏览器重新冷启动。
+- `workerRecycleExports` 默认 `5`（每导出 5 次重建一次页面释放 Live2D 纹理内存）；低内存机器可以配 `minFreeMemoryMb: 1500` 防止 OOM。
+- 收到 `SIGINT` / `SIGTERM` 关停时，宿主最多等 120 秒让在途导出跑完再退出。
+
+## 常驻运行
+
+- **Linux（systemd）**：直接参考模板 [deploy/mysekai-host.service](../deploy/mysekai-host.service)，工作目录固定在仓库根，`TimeoutStopSec` 建议设为 `150s`（大于宿主的 120s 排空上限）。确保运行用户对仓库、`resources/`、`cache/`、`apifile/` 和浏览器可执行文件有权限。
+- **Windows**：用任务计划程序或 NSSM 跑 `node out-host/host/main.js`，起始目录填仓库根目录。
+- **更新升级**：`git pull && npm ci && npm run build`，然后重启服务。
 
 ## WebGL 硬件加速
 
-若 `/api/v1/health` 显示 `SwiftShader` 或 `llvmpipe`，在 `config.yaml` 的 `render` 节调整参数（一次只改一项）：
+如果 `/api/v1/health` 里的 `webglRenderers` 显示 `SwiftShader` 或 `llvmpipe`：
 
-- **Linux + NVIDIA 无 X 环境**：将 `linuxGpuAngle: false` 并设 `extraChromeArgs: "--use-angle=vulkan"`。
-- **Linux 有 X11/GLX**：保留 `linuxGpuAngle: true`（自动追加 `--use-angle=gl`）。
-- 优先使用系统完整版 Chrome / Edge，避免落到 Playwright 的 `chrome-headless-shell`。
+- **Linux + NVIDIA 无桌面环境**：把 `render.linuxGpuAngle` 设为 `false`，同时设 `extraChromeArgs: "--use-angle=vulkan"`。
+- **Linux 有 X11 桌面**：保持 `linuxGpuAngle: true`（会自动加 `--use-angle=gl`）。
+- 尽量用系统完整版 Chrome / Edge，不要退到 Playwright 自带的 `chrome-headless-shell`。
 
 ## 安全提示
 
-API 默认监听 `0.0.0.0`：
+服务默认监听 `0.0.0.0:9881`：
 
-- **开启 Bearer 鉴权**：公网或半开放部署请配置 `server.apiKey` 或环境变量 `MSST_API_KEY`（`/api/v1/*` 与 `/apifile/*` 强制校验 `Authorization: Bearer <token>`）；仅本机回环联调时可留空，但仍建议改 `server.host: 127.0.0.1`。
-- **CORS 与健康信息收敛**：`server.cors` 默认启用且在未配置 `server.corsOrigins` / `MSST_CORS_ORIGINS` 时仅放行本机回环源；启用 `apiKey` 后，未认证调用 `GET /api/v1/health` 会自动隐藏 `tts.apiBaseUrl`、`llm.baseUrl`、`assets.indexBase`/`libraryBase` 与 `ttsLease.currentWeights`。
-- **内部通道与下载边界**：`/api/v1/export`、`/api/v1/script/generate` 与 `/api/v1/generate` 均受按 IP 限流（10 次 / 60 秒，附 `Retry-After`）保护，`/api/v1/download/:filename` 通过 `fs.realpathSync` 阻断符号链接越界；外部部署应通过 nginx / Caddy 反向代理提供 HTTPS 与超时控制，并由防火墙禁止外部直接访问 `/bridge/*` 与未授权的内部管理接口。
-- **插件客户端适配**：对接 [astrbot_plugin_msst](https://github.com/yonglanws/astrbot_plugin_msst) 时建议保持 `wait: false` 异步轮询与 `api_key` 配置一致（开启 `api_key` 后插件会阻止发送原始 `downloadUrl` 避免需要鉴权的裸链在群聊失效，并在取消时调用 `/cancel`）；对接 [astrbot_plugin_ournotes_script](https://github.com/StarMoe/astrbot_plugin_ournotes_script) 时，插件会展开 HTTP `400/422` `details` 并在 HTTP `429` 时按 `Retry-After` 退避或提示冷却时间。
+- 如果不只在本机使用，请设置 `server.apiKey`（或 `MSST_API_KEY`）开启 Bearer 鉴权，并把未认证的接口放到 nginx / Caddy 反向代理后面提供 HTTPS。
+- 不需要开放外部网页跨域时，保持 `server.corsOrigins` 留空（仅放行本机回环）；对外开放则写明具体域名白名单。
+- 禁止把 `/bridge/*` 暴露到公网（通过反代只转发 `/api/v1/*` 即可）。

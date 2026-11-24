@@ -246,6 +246,17 @@ export class TTSManager {
     )
 
     const timeline = this.buildTimelineWithTTS(snippets)
+    this.preSynthesizedTimeline = timeline
+    // 同步预合成音轨的起点与最终时间线对齐（并发合成时按索引排序后回填精确起点）
+    const entryByIndex = new Map(timeline.map((e) => [e.snippetIndex, e]))
+    for (const track of this.audioTracks) {
+      if (track.snippetIndex === undefined) continue
+      const entry = entryByIndex.get(track.snippetIndex)
+      if (!entry) continue
+      const trackDuration = Math.max(0, track.endTime - track.startTime)
+      track.startTime = entry.startTimeMs
+      track.endTime = entry.startTimeMs + trackDuration
+    }
     this.logger.info(
       `Timeline built: ${timeline.length} entries, total duration=${timeline[timeline.length - 1]?.endTimeMs ?? 0}ms`
     )
@@ -275,7 +286,8 @@ export class TTSManager {
           emotion: data.emotion || '',
           ttsCaption: data.ttsCaption || undefined,
           ttsSpeed: typeof data.ttsSpeed === 'number' ? data.ttsSpeed : undefined,
-          ttsSpecialScene: typeof data.ttsSpecialScene === 'boolean' ? data.ttsSpecialScene : undefined
+          ttsSpecialScene:
+            typeof data.ttsSpecialScene === 'boolean' ? data.ttsSpecialScene : undefined
         })
       }
     }
@@ -300,7 +312,7 @@ export class TTSManager {
     let failed = 0
 
     for (const talk of talkSnippets) {
-      if (!hasSpeakableSpeechText(talk.content)) {
+      if (hasSpeakableSpeechText(talk.ttsText) || !hasSpeakableSpeechText(talk.content)) {
         continue
       }
       const cacheKey = talk.content
@@ -388,12 +400,32 @@ export class TTSManager {
     return results
   }
 
+  private upsertAudioTrack(audioTrack: AudioTrackData): void {
+    if (audioTrack.snippetIndex !== undefined) {
+      const existingIdx = this.audioTracks.findIndex(
+        (t) => t.snippetIndex === audioTrack.snippetIndex
+      )
+      if (existingIdx >= 0) {
+        this.audioTracks[existingIdx] = audioTrack
+      } else {
+        this.audioTracks.push(audioTrack)
+      }
+      this.audioTracks.sort((a, b) => {
+        const ai = a.snippetIndex ?? Number.MAX_SAFE_INTEGER
+        const bi = b.snippetIndex ?? Number.MAX_SAFE_INTEGER
+        return ai - bi
+      })
+      return
+    }
+    this.audioTracks.push(audioTrack)
+  }
+
   private async synthesizeSingle(
     talk: TalkSnippet,
     _arrayIndex: number
   ): Promise<SynthesizeResult> {
     try {
-      this.currentTimeMs = this.calculateCurrentTimeMsFromIndex(talk.index)
+      const trackStartTimeMs = this.calculateCurrentTimeMsFromIndex(talk.index)
       const hasSpeakableTts = hasSpeakableSpeechText(talk.ttsText)
       const hasSpeakableContent = hasSpeakableSpeechText(talk.content)
       if (!hasSpeakableTts && !hasSpeakableContent) {
@@ -413,7 +445,8 @@ export class TTSManager {
           talk.speaker,
           talk.index,
           talk.emotion,
-          lineOverride
+          lineOverride,
+          trackStartTimeMs
         )
         return { ...result, index: talk.index }
       }
@@ -422,7 +455,8 @@ export class TTSManager {
         talk.speaker,
         talk.index,
         talk.emotion,
-        lineOverride
+        lineOverride,
+        trackStartTimeMs
       )
       return { ...result, index: talk.index }
     } catch (error) {
@@ -438,7 +472,8 @@ export class TTSManager {
     characterName: string,
     snippetIndex?: number,
     emotion = '',
-    lineOverride?: IrodoriLineOverride
+    lineOverride?: IrodoriLineOverride,
+    trackStartTimeMs?: number
   ): Promise<{ success: boolean; duration: number }> {
     if (!hasSpeakableSpeechText(text)) {
       return { success: false, duration: 0 }
@@ -451,6 +486,7 @@ export class TTSManager {
       return { success: false, duration: 0 }
     }
 
+    const startTime = trackStartTimeMs ?? this.currentTimeMs
     const ttsResult = await this.ttsService.synthesizeSpeech(
       text,
       characterName,
@@ -462,13 +498,13 @@ export class TTSManager {
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
       const audioTrack: AudioTrackData = {
         audioBuffer: ttsResult.audioBuffer,
-        startTime: this.currentTimeMs,
-        endTime: this.currentTimeMs + ttsResult.duration,
+        startTime,
+        endTime: startTime + ttsResult.duration,
         characterName,
         text,
         snippetIndex
       }
-      this.audioTracks.push(audioTrack)
+      this.upsertAudioTrack(audioTrack)
       return { success: true, duration: ttsResult.duration }
     }
 
@@ -489,7 +525,8 @@ export class TTSManager {
     characterName: string,
     snippetIndex?: number,
     emotion = '',
-    lineOverride?: IrodoriLineOverride
+    lineOverride?: IrodoriLineOverride,
+    trackStartTimeMs?: number
   ): Promise<{ success: boolean; duration: number }> {
     if (!hasSpeakableSpeechText(text)) {
       return { success: false, duration: 0 }
@@ -528,6 +565,7 @@ export class TTSManager {
       return { success: false, duration: 0 }
     }
 
+    const startTime = trackStartTimeMs ?? this.currentTimeMs
     const ttsResult = await this.ttsService.synthesizeSpeech(
       translatedText,
       characterName,
@@ -539,13 +577,13 @@ export class TTSManager {
     if (ttsResult.success && ttsResult.audioBuffer.byteLength > 0) {
       const audioTrack: AudioTrackData = {
         audioBuffer: ttsResult.audioBuffer,
-        startTime: this.currentTimeMs,
-        endTime: this.currentTimeMs + ttsResult.duration,
+        startTime,
+        endTime: startTime + ttsResult.duration,
         characterName,
         text: translatedText,
         snippetIndex
       }
-      this.audioTracks.push(audioTrack)
+      this.upsertAudioTrack(audioTrack)
       return { success: true, duration: ttsResult.duration }
     }
 
@@ -575,10 +613,21 @@ export class TTSManager {
 
   buildTimelineWithTTSFromTracks(snippets: SnippetData[]): SnippetTimelineEntry[] {
     const ttsMappings = new Map<number, CalcTTSMapping>()
+    const positionalTracks: AudioTrackData[] = []
+    for (const track of this.audioTracks) {
+      const dur = track.endTime - track.startTime
+      if (track.snippetIndex !== undefined && snippets[track.snippetIndex]?.type === 'Talk') {
+        if (dur > 0) {
+          ttsMappings.set(track.snippetIndex, { snippetIndex: track.snippetIndex, durationMs: dur })
+        }
+      } else {
+        positionalTracks.push(track)
+      }
+    }
     let talkIdx = 0
     for (let i = 0; i < snippets.length; i++) {
-      if (snippets[i].type === 'Talk' && talkIdx < this.audioTracks.length) {
-        const track = this.audioTracks[talkIdx]
+      if (snippets[i].type === 'Talk' && !ttsMappings.has(i) && talkIdx < positionalTracks.length) {
+        const track = positionalTracks[talkIdx]
         const dur = track.endTime - track.startTime
         if (dur > 0) {
           ttsMappings.set(i, { snippetIndex: i, durationMs: dur })
@@ -741,16 +790,17 @@ export class TTSManager {
   }
 
   async checkTTSAvailability(): Promise<boolean> {
-    const apiBaseUrl = this.config.apiBaseUrl || 'http://127.0.0.1:9880'
+    const apiBaseUrl = (this.config.apiBaseUrl || 'http://127.0.0.1:9880')
+      .trim()
+      .replace(/\/+$/, '')
     const url = this.config.provider === 'irodori' ? `${apiBaseUrl}/health` : `${apiBaseUrl}/tts`
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
     try {
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 5000)
       await fetch(url, {
         method: 'HEAD',
         signal: controller.signal
       })
-      clearTimeout(timeoutId)
       return true
     } catch {
       const ipc = typeof window !== 'undefined' ? window.electron?.ipcRenderer : undefined
@@ -769,6 +819,8 @@ export class TTSManager {
       } catch {
         return false
       }
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
 

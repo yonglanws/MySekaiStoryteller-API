@@ -1,7 +1,7 @@
 import { Container, Graphics, Sprite, Text, TextStyle } from 'pixi.js'
 import { inappUrl, loadInappTexture } from '../effects/InappTextures'
 import AnimationManager from '../managers/AnimationManager'
-import { FRAME_MS, framesForSeconds, framesToMs } from '../../../common/official/timing'
+import { framesForSeconds, framesToMs } from '../../../common/official/timing'
 import {
   SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS,
   SIMPLE_SELECTABLE_CLOSE_SECONDS,

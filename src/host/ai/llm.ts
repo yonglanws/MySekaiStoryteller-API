@@ -1,9 +1,30 @@
 import { ILogObj, Logger } from 'tslog'
 import type { LlmSettings } from '../config'
 
+export interface LlmToolDefinition {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+export interface LlmToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
+}
+
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant'
-  content: string
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string | null
+  tool_calls?: LlmToolCall[]
+  tool_call_id?: string
+  name?: string
 }
 
 export interface ChatOptions {
@@ -12,6 +33,9 @@ export interface ChatOptions {
   temperature?: number
   maxTokens?: number
   signal?: AbortSignal
+  /** OpenAI 兼容 function/tool calling 工具定义 */
+  tools?: LlmToolDefinition[]
+  toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
 }
 
 export interface ChatUsage {
@@ -26,6 +50,7 @@ export interface ChatResult {
   usage: ChatUsage | null
   latencyMs: number
   finishReason?: string
+  toolCalls?: LlmToolCall[]
 }
 
 export interface ExtractJsonContext {
@@ -36,12 +61,19 @@ export interface ExtractJsonContext {
 export class LlmError extends Error {
   readonly status: number | null
   readonly retryable: boolean
+  readonly toolCallingUnsupported: boolean
 
-  constructor(message: string, status: number | null = null, retryable = false) {
+  constructor(
+    message: string,
+    status: number | null = null,
+    retryable = false,
+    toolCallingUnsupported = false
+  ) {
     super(message)
     this.name = 'LlmError'
     this.status = status
     this.retryable = retryable
+    this.toolCallingUnsupported = toolCallingUnsupported
   }
 }
 
@@ -125,7 +157,14 @@ export function extractJson(text: string, context?: ExtractJsonContext): unknown
 interface ChatCompletionResponse {
   model?: string
   choices?: Array<{
-    message?: { content?: string | null }
+    message?: {
+      content?: string | null
+      tool_calls?: Array<{
+        id?: string
+        type?: string
+        function?: { name?: string; arguments?: string }
+      }>
+    }
     finish_reason?: string
   }>
   usage?: {
@@ -187,15 +226,29 @@ export class LlmClient {
       options.signal?.addEventListener('abort', onAbort, { once: true })
 
       try {
+        const hasTools = Boolean(options.tools && options.tools.length > 0)
+        const serializedMessages = messages.map((message) => {
+          const msg: Record<string, unknown> = {
+            role: message.role,
+            content: message.content ?? ''
+          }
+          if (message.tool_calls?.length) msg.tool_calls = message.tool_calls
+          if (message.tool_call_id) msg.tool_call_id = message.tool_call_id
+          if (message.name) msg.name = message.name
+          return msg
+        })
         const body: Record<string, unknown> = {
           ...this.config.extraBody,
           model: this.config.model,
-          messages: messages.map((message) => ({ role: message.role, content: message.content })),
+          messages: serializedMessages,
           temperature: options.temperature ?? this.config.temperature,
           max_tokens: options.maxTokens ?? this.config.maxTokens,
           stream: false
         }
-        if (tryJson && this.config.jsonMode !== 'off') {
+        if (hasTools) {
+          body.tools = options.tools
+          body.tool_choice = options.toolChoice ?? 'auto'
+        } else if (tryJson && this.config.jsonMode !== 'off') {
           body.response_format = { type: 'json_object' }
         }
 
@@ -219,8 +272,20 @@ export class LlmClient {
             if (text.trim()) message += ` - ${text.trim().slice(0, 300)}`
           }
 
+          if (
+            hasTools &&
+            (response.status === 400 ||
+              response.status === 404 ||
+              response.status === 422 ||
+              response.status === 501 ||
+              /tool|function_call|not support|unrecognized/i.test(message))
+          ) {
+            throw new LlmError(message, response.status, false, true)
+          }
+
           // auto：服务不支持 response_format 时去掉它再试一次（不消耗重试次数）
           if (
+            !hasTools &&
             tryJson &&
             this.config.jsonMode === 'auto' &&
             !jsonFallbackTried &&
@@ -248,8 +313,27 @@ export class LlmClient {
           const maxTokens = options.maxTokens ?? this.config.maxTokens
           const choice = parsed.choices?.[0]
           const finishReason = choice?.finish_reason
+          const rawToolCalls = choice?.message?.tool_calls
+          const toolCalls: LlmToolCall[] = Array.isArray(rawToolCalls)
+            ? rawToolCalls
+                .filter((tc) => Boolean(tc?.function?.name))
+                .map((tc, idx) => ({
+                  id: tc.id || `call_${idx + 1}`,
+                  type: 'function' as const,
+                  function: {
+                    name: String(tc.function!.name),
+                    arguments:
+                      typeof tc.function?.arguments === 'string'
+                        ? tc.function.arguments
+                        : JSON.stringify(tc.function?.arguments ?? {})
+                  }
+                }))
+            : []
           const content = choice?.message?.content
-          if (typeof content !== 'string' || content.trim().length === 0) {
+          if (
+            toolCalls.length === 0 &&
+            (typeof content !== 'string' || content.trim().length === 0)
+          ) {
             if (finishReason === 'length') {
               throw new LlmError(
                 `${url}: empty choice content (finish_reason=length; output truncated at max_tokens=${maxTokens} before JSON/text output)`,
@@ -277,11 +361,12 @@ export class LlmClient {
               (usage?.totalTokens ? `, ${usage.totalTokens} tokens` : '')
           )
           return {
-            content,
+            content: typeof content === 'string' ? content : '',
             model: parsed.model ?? this.config.model,
             usage,
             latencyMs,
-            ...(finishReason ? { finishReason } : {})
+            ...(finishReason ? { finishReason } : {}),
+            ...(toolCalls.length > 0 ? { toolCalls } : {})
           }
         }
       } catch (error) {

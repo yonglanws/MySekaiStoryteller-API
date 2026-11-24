@@ -101,8 +101,16 @@ export function getMotionSettledEndMs(app: App | object, now = nowMs()): number 
   const state = stageTimingByApp.get(app)
   if (!state) return 0
   syncClockEpoch(state, now)
+  const layerModel = (
+    app as {
+      layerModel?: { isModelShown?: (id: number) => boolean }
+    }
+  ).layerModel
+  const hasShownCheck = typeof layerModel?.isModelShown === 'function'
   let maxEnd = 0
-  for (const endMs of state.motionEndByModel.values()) {
+  for (const [modelId, endMs] of state.motionEndByModel.entries()) {
+    // 已退场的角色不再阻塞后续单人场景对白的动作收尾门控
+    if (hasShownCheck && !layerModel.isModelShown!(modelId)) continue
     if (endMs > maxEnd) maxEnd = endMs
   }
   return maxEnd
@@ -181,6 +189,7 @@ export interface ExtendedSpecialEffectLayer {
 
 export interface ExtendedModelLayer {
   layoutMode: LayoutModes
+  isModelShown?: (modelId: number) => boolean
   updateLayoutMode?: (mode: 'Normal' | 'Three') => void
   setLayoutDepth?: (modelId: number, depth: 'Front' | 'Back' | 'Reset') => void
   shakeCharacter?: (modelId: number, axis: 'X' | 'Y') => Promise<void>

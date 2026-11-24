@@ -44,6 +44,7 @@ export default class UILayer extends BaseLayer {
   private readonly choiceDialog: UIChoiceDialog
 
   private _UITalkShowed = false
+  private talkWindowHideGen = 0
   private windowShakeGen = 0
 
   constructor(app: Application) {
@@ -121,6 +122,7 @@ export default class UILayer extends BaseLayer {
   }
 
   public async showTextBackground(durationMs = TALK_WINDOW_OPEN_CLOSE_MS): Promise<void> {
+    this.talkWindowHideGen++
     this._UITalkShowed = true
     // TalkWindow.Open：PlayActive(1, 0.2)，打字从 OnCompleteOpen 开始。
     const showDuration = Math.max(0, durationMs)
@@ -137,18 +139,24 @@ export default class UILayer extends BaseLayer {
   }
 
   public async hideTextBackground(durationMs = 0): Promise<void> {
-    // TalkWindow.Close 先把 canvas group 的 alpha 设为 0，tween 只延迟 OnCompleteClose；
-    // 默认立即消失（0ms），也兼容传入显式淡出时长。
-    this._UITalkShowed = false
+    // TalkWindow.Close：200ms 渐隐期间窗口仍算打开（对齐 storyPlan/TimelineCalculator），
+    // 立即关闭（durationMs <= 0，如 HideTalk）则立刻置 false。
+    const gen = ++this.talkWindowHideGen
+    const hideDuration = Math.max(0, durationMs)
+    if (hideDuration <= 0) {
+      this._UITalkShowed = false
+    }
     this.stopShakeWindow()
 
-    const hideDuration = Math.max(0, durationMs)
     await Promise.all([
       this.textBackgroundSprite.hide(hideDuration),
       this.textUnderlineSprite.hide(hideDuration),
       this.textSprite.hide(hideDuration),
       this.textSpeakerSprite.hide(hideDuration)
     ])
+    if (gen === this.talkWindowHideGen) {
+      this._UITalkShowed = false
+    }
   }
 
   public async showPlaceInfo(text: string, durationMs = PLACE_INFO_TRANSITION_MS): Promise<void> {

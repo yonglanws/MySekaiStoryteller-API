@@ -1,4 +1,4 @@
-import { Ticker } from 'pixi.js'
+import { Filter, Ticker } from 'pixi.js'
 import AdvancedModel from '../model/AdvancedModel'
 import { VisualEffect } from '../effects/VisualEffect'
 import { HologramEffect } from '../effects/HologramEffect'
@@ -27,6 +27,8 @@ export class VisualEffectManager {
   private effectSet: EffectSet = { effects: {} }
   private ticker: Ticker = VFXGlobalTicker.getInstance()
   private readonly effectFactories: Record<string, () => VisualEffect> = {}
+  private readonly onTick = (delta: number): void => this.updateAll(delta)
+  private destroyed = false
 
   constructor(private model: AdvancedModel) {
     this.effectFactories = {
@@ -34,16 +36,18 @@ export class VisualEffectManager {
       triangles: () => new TriangleParticleEffect(this.model)
     }
 
-    this.ticker.add((delta) => this.updateAll(delta))
+    this.ticker.add(this.onTick)
   }
 
   private updateAll(delta: number): void {
+    if (this.destroyed) return
     for (const name in this.effectSet.effects) {
       this.effectSet.effects[name].update(delta)
     }
   }
 
   public createAll(): void {
+    if (this.destroyed) return
     for (const name in this.effectFactories) {
       if (!this.effectSet.effects[name]) {
         this.effectSet.effects[name] = this.effectFactories[name]()
@@ -51,15 +55,41 @@ export class VisualEffectManager {
     }
   }
 
+  public getActiveFilters(): Filter[] {
+    const active: Filter[] = []
+    for (const name in this.effectSet.effects) {
+      const effect = this.effectSet.effects[name]
+      if (!effect.enabled) continue
+      for (const filter of effect.parentFilters) {
+        if (!active.includes(filter)) active.push(filter)
+      }
+    }
+    return active
+  }
+
+  private syncModelFilters(): void {
+    const syncable = this.model as unknown as { syncModelFilters?: () => void }
+    if (typeof syncable.syncModelFilters === 'function') {
+      syncable.syncModelFilters()
+      return
+    }
+    const existing = this.model.filters ?? []
+    const allEffectFilters = Object.values(this.effectSet.effects).flatMap(
+      (item) => item.parentFilters
+    )
+    const base = existing.filter((f) => !allEffectFilters.includes(f))
+    const next = [...base, ...this.getActiveFilters()]
+    this.model.filters = next.length > 0 ? next : null
+  }
+
   public applyEffect(effectName: string): void {
+    if (this.destroyed) return
     const effect = this.effectSet.effects[effectName]
     if (!effect) return
 
     if (!effect.parent) this.model.addChild(effect)
     effect.enabled = true
-    this.model.filters = this.model.filters
-      ? [...this.model.filters, ...effect.parentFilters]
-      : [...effect.parentFilters]
+    this.syncModelFilters()
   }
 
   public disable(effectName: string): void {
@@ -68,9 +98,7 @@ export class VisualEffectManager {
 
     effect.enabled = false
     if (effect.parent) effect.parent.removeChild(effect)
-    if (this.model.filters) {
-      this.model.filters = this.model.filters.filter((f) => !effect.parentFilters.includes(f))
-    }
+    this.syncModelFilters()
 
     effect.clearAllParticles()
   }
@@ -83,5 +111,12 @@ export class VisualEffectManager {
     for (const name in this.effectSet.effects) {
       this.disable(name)
     }
+  }
+
+  public destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
+    this.ticker.remove(this.onTick)
+    this.disableAll()
   }
 }

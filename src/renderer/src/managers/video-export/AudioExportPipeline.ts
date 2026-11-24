@@ -1,7 +1,19 @@
 import { ExportLogger } from './ExportLogger'
 import type { TTSManager } from '../TTSManager'
+import type { IrodoriLineOverride } from '../../../../common/tts/irodori'
 import type { SnippetData } from '../../../../common/types/Story'
+import { hasSpeakableSpeechText } from '../../../../common/tts/speechText'
+import { calculateTimeline, type TTSMapping } from '../../utils/TimelineCalculator'
 import type { AudioTimestampEntry, AudioTimestampManifest } from './AudioTimestampManifest'
+
+interface PipelineTalkSnippet {
+  index: number
+  speaker: string
+  content: string
+  ttsText: string
+  emotion: string
+  lineOverride?: IrodoriLineOverride
+}
 
 export interface AudioExportPipelineConfig {
   ttsTimeoutMs: number
@@ -51,19 +63,34 @@ export class AudioExportPipeline {
       maxRetries: this.config.maxRetries
     })
 
-    const talkSnippets: { index: number; speaker: string; content: string }[] = []
+    const talkSnippets: PipelineTalkSnippet[] = []
     for (let i = 0; i < snippets.length; i++) {
-      if (snippets[i].type === 'Talk') {
-        const snippet = snippets[i] as SnippetData & { data?: { speaker: string; content: string } }
-        const data =
-          snippet.data ||
-          ((snippet as Record<string, unknown>).data as
-            | { speaker: string; content: string }
-            | undefined)
+      const snippet = snippets[i]
+      if (snippet.type === 'Talk') {
+        const data = (snippet.data || {}) as {
+          speaker?: string
+          content?: string
+          ttsText?: string
+          emotion?: string
+          ttsCaption?: string
+          ttsSpeed?: number
+          ttsSpecialScene?: boolean
+        }
+        const lineOverride: IrodoriLineOverride | undefined =
+          data.ttsCaption || data.ttsSpeed !== undefined || data.ttsSpecialScene !== undefined
+            ? {
+                ttsCaption: data.ttsCaption,
+                ttsSpeed: data.ttsSpeed,
+                ttsSpecialScene: data.ttsSpecialScene
+              }
+            : undefined
         talkSnippets.push({
           index: i,
-          speaker: data?.speaker || '',
-          content: data?.content || ''
+          speaker: data.speaker || '',
+          content: data.content || '',
+          ttsText: data.ttsText || '',
+          emotion: data.emotion || '',
+          lineOverride
         })
       }
     }
@@ -71,65 +98,73 @@ export class AudioExportPipeline {
     this.logger.info(`Audio pipeline: ${talkSnippets.length} Talk snippets to synthesize`)
 
     const totalTalkCount = talkSnippets.length
-    const entries: AudioTimestampEntry[] = []
-    let currentTimeMs = 0
-    const synthesizedDurations: Map<number, number> = new Map()
+    const ttsMappings = new Map<number, TTSMapping>()
+    const talkByIndex = new Map<number, PipelineTalkSnippet>(talkSnippets.map((t) => [t.index, t]))
 
-    for (let i = 0; i < snippets.length; i++) {
+    for (let talkIndex = 0; talkIndex < talkSnippets.length; talkIndex++) {
       if (this.aborted) {
         this.logger.info('Audio pipeline aborted')
         break
       }
 
-      const snippet = snippets[i]
-      const baseDelayMs = Math.max((snippet.delay || 0) * 1000, 200)
-      const ttsDurationMs = synthesizedDurations.get(i) ?? 0
-      let snippetDurationMs =
-        ttsDurationMs > 0 ? Math.max(baseDelayMs, ttsDurationMs + 80) : baseDelayMs
+      const talk = talkSnippets[talkIndex]
+      const hasSpeakableTts = hasSpeakableSpeechText(talk.ttsText)
+      const hasSpeakableContent = hasSpeakableSpeechText(talk.content)
 
-      if (snippet.type === 'Talk') {
-        const talkIndex = talkSnippets.findIndex((t) => t.index === i)
-        if (talkIndex >= 0) {
-          const talk = talkSnippets[talkIndex]
+      if (hasSpeakableTts || hasSpeakableContent) {
+        const ttsResult = await this.synthesizeWithRetry(
+          ttsManager,
+          talk,
+          talkIndex,
+          totalTalkCount
+        )
 
-          ttsManager.setCurrentTime(currentTimeMs)
-
-          const ttsResult = await this.synthesizeWithRetry(
-            ttsManager,
-            talk,
-            talkIndex,
-            totalTalkCount
+        if (ttsResult && ttsResult.success && ttsResult.duration > 0) {
+          ttsMappings.set(talk.index, {
+            snippetIndex: talk.index,
+            durationMs: ttsResult.duration
+          })
+          this.logger.info(
+            `Audio entry [${talk.index}] "${talk.speaker}": duration=${ttsResult.duration}ms, ttsManager audioTracks now: ${ttsManager.getAudioTracks().length}`
           )
-
-          if (ttsResult && ttsResult.success) {
-            synthesizedDurations.set(i, ttsResult.duration)
-            snippetDurationMs = Math.max(baseDelayMs, ttsResult.duration + 200)
-            const entry: AudioTimestampEntry = {
-              snippetIndex: i,
-              characterName: talk.speaker,
-              text: talk.content,
-              startTimeMs: currentTimeMs,
-              endTimeMs: currentTimeMs + ttsResult.duration,
-              durationMs: ttsResult.duration,
-              audioFilePath: `track_${i}`
-            }
-            entries.push(entry)
-            this.logger.info(
-              `Audio entry [${i}] "${talk.speaker}": duration=${ttsResult.duration}ms, snippetDuration=${snippetDurationMs}ms, ttsManager audioTracks now: ${ttsManager.getAudioTracks().length}`
-            )
-          } else {
-            this.logger.warn(`Audio synthesis failed for snippet ${i}, using silence`)
-            synthesizedDurations.set(i, 0)
-          }
+        } else {
+          this.logger.warn(`Audio synthesis failed for snippet ${talk.index}, using silence`)
         }
       }
 
-      currentTimeMs += snippetDurationMs
-      const completed = Math.min(talkSnippets.filter((t) => t.index <= i).length, totalTalkCount)
-      onProgress?.(completed, totalTalkCount, `正在合成语音 ${completed}/${totalTalkCount}`)
+      onProgress?.(talkIndex + 1, totalTalkCount, `正在合成语音 ${talkIndex + 1}/${totalTalkCount}`)
     }
 
-    const totalDurationMs = currentTimeMs
+    // 用与渲染一致的官方时间线计算每条对白的精确起始时间（含 delay / 门控）
+    const timeline = calculateTimeline(snippets, ttsMappings)
+    const entryByIndex = new Map(timeline.entries.map((e) => [e.snippetIndex, e]))
+
+    for (const track of ttsManager.getAudioTracks()) {
+      if (track.snippetIndex === undefined) continue
+      const entry = entryByIndex.get(track.snippetIndex)
+      if (!entry) continue
+      const trackDuration = Math.max(0, track.endTime - track.startTime)
+      track.startTime = entry.startTimeMs
+      track.endTime = entry.startTimeMs + trackDuration
+    }
+
+    const entries: AudioTimestampEntry[] = []
+    for (const [snippetIndex, mapping] of ttsMappings) {
+      const entry = entryByIndex.get(snippetIndex)
+      const talk = talkByIndex.get(snippetIndex)
+      if (!entry || !talk) continue
+      entries.push({
+        snippetIndex,
+        characterName: talk.speaker,
+        text: talk.ttsText || talk.content,
+        startTimeMs: entry.startTimeMs,
+        endTimeMs: entry.startTimeMs + mapping.durationMs,
+        durationMs: mapping.durationMs,
+        audioFilePath: `track_${snippetIndex}`
+      })
+    }
+
+    const totalDurationMs = timeline.totalDurationMs
     const trackCount = entries.length
 
     const manifest: AudioTimestampManifest = {
@@ -155,7 +190,7 @@ export class AudioExportPipeline {
 
   private async synthesizeWithRetry(
     ttsManager: TTSManager,
-    talk: { speaker: string; content: string },
+    talk: PipelineTalkSnippet,
     index: number,
     _total: number
   ): Promise<{ success: boolean; duration: number } | null> {
@@ -165,7 +200,7 @@ export class AudioExportPipeline {
       if (this.aborted) return null
 
       try {
-        const result = await this.synthesizeWithTimeout(ttsManager, talk.content, talk.speaker)
+        const result = await this.synthesizeWithTimeout(ttsManager, talk)
         return result
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
@@ -186,25 +221,38 @@ export class AudioExportPipeline {
 
   private async synthesizeWithTimeout(
     ttsManager: TTSManager,
-    content: string,
-    characterName: string
+    talk: PipelineTalkSnippet
   ): Promise<{ success: boolean; duration: number }> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
         reject(new Error(`TTS synthesis timeout (${this.config.ttsTimeoutMs}ms)`))
       }, this.config.ttsTimeoutMs)
-
-      ttsManager
-        .translateAndSynthesize(content, characterName)
-        .then((result) => {
-          clearTimeout(timer)
-          resolve(result)
-        })
-        .catch((error) => {
-          clearTimeout(timer)
-          reject(error)
-        })
     })
+
+    const synthPromise = hasSpeakableSpeechText(talk.ttsText)
+      ? ttsManager.synthesizeWithText(
+          talk.ttsText,
+          talk.speaker,
+          talk.index,
+          talk.emotion,
+          talk.lineOverride
+        )
+      : ttsManager.translateAndSynthesize(
+          talk.content,
+          talk.speaker,
+          talk.index,
+          talk.emotion,
+          talk.lineOverride
+        )
+
+    try {
+      return await Promise.race([synthPromise, timeoutPromise])
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer)
+      }
+    }
   }
 
   private sleep(ms: number): Promise<void> {

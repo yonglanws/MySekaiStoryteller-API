@@ -7,10 +7,8 @@ import {
   type SeChangeSpec
 } from '../../../../common/audio/se'
 import { inappUrl } from '../../effects/InappTextures'
-import {
-  SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS
-} from '../../../../common/official/timing'
-import type { AudioMuxer } from './AudioMuxer'
+import { SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS } from '../../../../common/official/timing'
+import { resampleChannelLinear, type AudioMuxer } from './AudioMuxer'
 import { ExportLogger } from './ExportLogger'
 import { resolveSeUrl } from '../../utils/ResourceUrl'
 
@@ -90,9 +88,19 @@ export class SePlan {
       const response = await fetch(url)
       if (!response.ok) return null
       const decoded = await audioMuxer.decodeAudioData(await response.arrayBuffer())
-      const channel0 = decoded.getChannelData(0)
+      const raw0 = decoded.getChannelData(0)
+      const raw1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : raw0
+      const targetRate = 48000
+      const channel0 =
+        decoded.sampleRate && decoded.sampleRate !== targetRate
+          ? resampleChannelLinear(raw0, decoded.sampleRate, targetRate)
+          : raw0
       const channel1 =
-        decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : decoded.getChannelData(0)
+        decoded.sampleRate && decoded.sampleRate !== targetRate
+          ? raw1 === raw0
+            ? channel0
+            : resampleChannelLinear(raw1, decoded.sampleRate, targetRate)
+          : raw1
       return { channel0, channel1, numberOfChannels: decoded.numberOfChannels } as SeBuffer & {
         numberOfChannels: number
       }
@@ -139,7 +147,7 @@ export class SePlan {
         snippet?.type === 'PlaySe'
           ? Math.max(0, Number((snippet.data as { offsetMs?: number }).offsetMs) || 0)
           : 0
-      return extraOffset > 0 ? { ...change, delayMs: change.delayMs + extraOffset } : change
+      return extraOffset > 0 ? { ...change, offsetMs: extraOffset } : change
     })
     const cues = buildSeCues(adjustedChanges, startTimesMs, this.buffers, startTimesIncludeDelay)
 
@@ -155,7 +163,8 @@ export class SePlan {
         loop: false,
         volume: ev.volume,
         channel0: buf.channel0,
-        channel1: buf.channel1
+        channel1: buf.channel1,
+        ...(buf.numberOfChannels !== undefined ? { numberOfChannels: buf.numberOfChannels } : {})
       })
     }
 

@@ -56,6 +56,7 @@ export default class StoryManager {
         if (
           snippet.type !== 'Talk' &&
           snippet.type !== 'Motion' &&
+          snippet.type !== 'Move' &&
           snippet.type !== 'LayoutAppear' &&
           snippet.type !== 'LayoutClear'
         )

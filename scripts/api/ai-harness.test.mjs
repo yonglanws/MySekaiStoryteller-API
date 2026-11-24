@@ -565,7 +565,11 @@ test('official script invariants stay in both prompt builders', () => {
   })
   const stagedText = direction.system + direction.user
   assert.match(stagedText, /不要主动拆分人工双拍/, 'staged prompt allows exactly one beat')
-  assert.match(stagedText, /只占约 0\.5%/, 'listener reactions stay rare')
+  assert.match(
+    stagedText,
+    /绝不同时触发说话者与听者的身体动作/,
+    'staged prompt prevents simultaneous dual-actor motions'
+  )
   assert.match(stagedText, /约 22% 的句子可以完全没有动作/, 'staged prompt allows still lines')
 
   const story = buildStoryPrompt(view, {
@@ -575,7 +579,11 @@ test('official script invariants stay in both prompt builders', () => {
   })
   const singleText = story.system + story.user
   assert.match(singleText, /每句台词最多 1 个身体动作/, 'single prompt caps one action per line')
-  assert.match(singleText, /只占约 0\.5%/, 'single prompt keeps listener reactions rare')
+  assert.match(
+    singleText,
+    /禁止同句里让说话者和听者在同一瞬间一起做身体动作/,
+    'single prompt avoids simultaneous dual-actor motion'
+  )
   assert.match(singleText, /槽位原地淡入/, 'single prompt fades in at the slot')
   assert.ok(!singleText.includes('画外滑入'), 'single prompt no longer defaults to sliding in')
 })

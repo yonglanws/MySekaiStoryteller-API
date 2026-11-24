@@ -831,3 +831,17 @@ test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWaterma
   assert.equal(lines[0], '本视频由 MySekaiStoryteller-API 生成')
   assert.equal(lines[1], 'Line A · Line B')
 })
+
+test('stageTiming.getMotionSettledEndMs excludes cleared/hidden characters when isModelShown is provided', async (t) => {
+  const f = createFixture(t)
+  const stageTiming = f.load('snippets/stageTiming.ts')
+  const app = {
+    layerModel: {
+      isModelShown: (id) => id === 1,
+      markMotionSettledAt: () => {}
+    }
+  }
+  stageTiming.recordMotionSettledAt(app, 1, 1500)
+  stageTiming.recordMotionSettledAt(app, 2, 4000)
+  assert.equal(stageTiming.getMotionSettledEndMs(app, 100), 1500)
+})

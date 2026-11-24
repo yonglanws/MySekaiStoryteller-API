@@ -225,7 +225,7 @@ export function sanitizeIrodoriCaption(caption: string): string {
     .replace(IDENTITY_CONFLICT_PATTERN, '')
     .replace(/\s+/g, ' ')
     .replace(/[、,，]{2,}/g, '、')
-    .replace(/[。\.]{2,}/g, '。')
+    .replace(/[。.]{2,}/g, '。')
     .replace(/([。！？!?])[、,，]+/g, '$1')
     .replace(/^[、,，。・/\-—–\s]+/, '')
     .replace(/[、,，・/\-—–\s]+$/, '')
@@ -407,7 +407,11 @@ export function resolveIrodoriVoice(
     if (unlockEmotionRef) {
       if (text(hit.refAudioPath)) merged.refAudioPath = hit.refAudioPath
       const hitRefs = refsOf(hit)
-      if (hitRefs.length > 0) merged.refAudioPaths = hitRefs
+      if (hitRefs.length > 0) {
+        merged.refAudioPaths = hitRefs
+      } else if (text(hit.refAudioPath)) {
+        merged.refAudioPaths = undefined
+      }
       if (text(hit.loraAdapter)) merged.loraAdapter = hit.loraAdapter
     }
     if (text(hit.caption)) merged.caption = hit.caption
