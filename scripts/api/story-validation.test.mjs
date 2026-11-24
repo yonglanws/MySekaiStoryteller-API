@@ -658,3 +658,29 @@ test('accepts all expanded official snippet types and auto-closes open effects',
     'unclosed ShakeScreen should auto-close with StopShakeScreen'
   )
 })
+
+test('keeps multi-beat actions on silent Motion snippets', () => {
+  const story = makeStory()
+  const motionSnippet = {
+    type: 'Motion',
+    wait: false,
+    delay: 0,
+    data: {
+      modelId: 1,
+      duration: 2,
+      actions: [
+        { at: 0, modelId: 1, motion: 'w-normal-nod01' },
+        { at: 1, modelId: 1, motion: 'w-normal-greeting01' }
+      ]
+    }
+  }
+  const firstClear = story.snippets.findIndex((snippet) => snippet.type === 'LayoutClear')
+  story.snippets.splice(firstClear, 0, motionSnippet)
+  const { story: fixed } = validateAndFixStory(story, makeView())
+  const motion = fixed.snippets.find((snippet) => snippet.type === 'Motion')
+  assert.equal(
+    motion.data.actions.length,
+    2,
+    'silent Motion sequences are not Talk and keep their beats'
+  )
+})
