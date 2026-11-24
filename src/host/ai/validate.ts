@@ -6,6 +6,7 @@ import { normalizePjskTerminology } from './personas'
 import { isStandingMotion, type CatalogView } from './prompt'
 import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
+import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
 
 const TALK_LINE_WIDTH_UNITS = 30
 const TALK_MAX_LINES = 3
@@ -821,12 +822,33 @@ export function validateAndFixStory(
       const rawTtsText = typeof data.ttsText === 'string' ? data.ttsText.trim() : ''
       data.ttsText =
         hasTranslationContent(data.content as string) && hasTranslationContent(rawTtsText)
-          ? rawTtsText
+          ? enforceIrodoriEmojiBudget(rawTtsText, 2)
           : ''
       const rawEmotion = toStr(data.emotion, '').trim()
       const labels = options.emotionLabels ?? []
       data.emotion =
         labels.length > 0 ? (labels.includes(rawEmotion) ? rawEmotion : '') : rawEmotion
+
+      // Irodori 逐句语音导演字段清洗与钳制
+      data.ttsCaption = sanitizeIrodoriCaption(toStr(data.ttsCaption, ''))
+      const isSpecialScene = toBool(data.ttsSpecialScene, false)
+      if (isSpecialScene) {
+        data.ttsSpecialScene = true
+      } else {
+        delete data.ttsSpecialScene
+      }
+      if ('ttsSpeed' in data && data.ttsSpeed !== undefined && data.ttsSpeed !== null && data.ttsSpeed !== '') {
+        const parsedSpeed = toNumber(data.ttsSpeed, Number.NaN)
+        if (Number.isFinite(parsedSpeed) && parsedSpeed > 0) {
+          const minSpeed = isSpecialScene ? 0.85 : 0.92
+          const maxSpeed = isSpecialScene ? 1.18 : 1.08
+          data.ttsSpeed = Number(Math.min(maxSpeed, Math.max(minSpeed, parsedSpeed)).toFixed(2))
+        } else {
+          delete data.ttsSpeed
+        }
+      } else {
+        delete data.ttsSpeed
+      }
 
       if ('closeWindowOnFinish' in data) {
         if (typeof data.closeWindowOnFinish === 'boolean') {
@@ -1289,6 +1311,27 @@ export function validateAndFixStory(
   compileStoryBgm(story, view, warn)
   normalizeScene(story)
   splitOverflowTalks(story)
+  // 确定性限制整场 ttsSpecialScene 占比 <= 15%，并重新钳制被降级句子的语速
+  {
+    const talkDatas = (story.snippets as JsonRecord[])
+      .filter((s) => isRecord(s) && s.type === 'Talk' && isRecord(s.data))
+      .map((s) => s.data as JsonRecord)
+    const maxSpecial = Math.floor(talkDatas.length * 0.15)
+    const specialTalks = talkDatas.filter((d) => d.ttsSpecialScene === true)
+    if (specialTalks.length > maxSpecial) {
+      let dropped = 0
+      for (let i = maxSpecial; i < specialTalks.length; i++) {
+        delete specialTalks[i].ttsSpecialScene
+        if (typeof specialTalks[i].ttsSpeed === 'number') {
+          specialTalks[i].ttsSpeed = Number(
+            Math.min(1.08, Math.max(0.92, specialTalks[i].ttsSpeed as number)).toFixed(2)
+          )
+        }
+        dropped += 1
+      }
+      warn(`ttsSpecialScene 超过 15% 上限（${specialTalks.length}/${talkDatas.length}），已收敛 ${dropped} 句`)
+    }
+  }
   const lint = enforceOfficialStoryInvariants(story, view, warn)
 
   const parsed = StorySchema.parse(story)

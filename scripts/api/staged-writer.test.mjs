@@ -8,8 +8,15 @@ import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
 import {
+  buildDialoguePrompt,
+  buildDirectionPrompt,
+  buildEmotionPrompt,
+  buildStagingPrompt,
   composeStory,
   condenseDialogue,
+  formatCanonGroundingBrief,
+  normalizeCastPlan,
+  normalizeDialogue,
   normalizeDirection,
   planPresence,
   softenPunctuation,
@@ -1122,5 +1129,97 @@ test('softenPunctuation turns some full stops into ellipses without touching wor
       line.content.replace(/……$/, '。'),
       dialogue.lines.find((item) => item.id === line.id).content
     )
+  }
+})
+
+const understandingReply = {
+  explicitRequests: ['瑞希把伞借给绘名'],
+  implicitSubtext: '绘名不想欠人情，嘴上嫌弃',
+  relationshipDynamic: '互相打趣又暗暗照顾',
+  emotionalArc: '轻快拌嘴到安静收尾',
+  turningPoint: '看见绘名抱着淋湿的画稿，瑞希收起玩笑语气',
+  openingMotif: '便利店门口的塑料伞架',
+  closingCallback: '绘名把伞收好，说明天在天台还',
+  characterGoals: [{ cast: '瑞希', wants: '把伞塞给对方', hides: '担心被说多管闲事' }],
+  canonHooks: ['神山高校天台'],
+  avoidList: ['禁止说教总结']
+}
+
+test('normalizeCastPlan parses turningPoint/motif/callback/characterGoals and stays backward compatible', () => {
+  const view = new CatalogView(catalog.get())
+  const options = { scene: '雨天放学后便利店门口', personas: [], targetMinutes: 3 }
+  const plan = normalizeCastPlan({ ...castReply, understanding: understandingReply }, view, options)
+  assert.ok(plan.understanding)
+  assert.equal(plan.understanding.turningPoint, understandingReply.turningPoint)
+  assert.equal(plan.understanding.openingMotif, understandingReply.openingMotif)
+  assert.equal(plan.understanding.closingCallback, understandingReply.closingCallback)
+  assert.deepEqual(plan.understanding.characterGoals, [
+    { cast: '瑞希', wants: '把伞塞给对方', hides: '担心被说多管闲事' }
+  ])
+
+  const legacy = normalizeCastPlan(castReply, view, options)
+  assert.equal(legacy.understanding, undefined, 'plans without understanding still parse')
+})
+
+test('formatCanonGroundingBrief keeps user prompt, drama anchors, canon facts and voice samples in clean sections', () => {
+  const view = new CatalogView(catalog.get())
+  const options = { scene: 'fill', personas: [], targetMinutes: 3 }
+  const plan = normalizeCastPlan({ ...castReply, understanding: understandingReply }, view, options)
+  const firstLine = '这是第一行完整摘录，用来确认长摘录只按整行保留，绝不在句子中间被切断。'
+  const secondLine = '这是第二行完整摘录，预算不足时整行丢弃，而不是留下半句话。'
+  const ragContext = {
+    promptBlock: 'legacy-prompt-block',
+    sections: {
+      canonPlot: [{ text: `${firstLine}\n${secondLine}` }],
+      worldviewLore: [],
+      dialogueVoice: [{ text: '瑞希：诶——？\n你怎么淋成这样。' }]
+    }
+  }
+  const scene = '雨天放学后，瑞希把伞塞给绘名。'
+  const brief = formatCanonGroundingBrief({ scene, plan, ragContext, stage: 'dialogue', maxChars: 40 })
+  assert.ok(brief.includes('## 用户原始需求'))
+  assert.ok(brief.includes(scene))
+  assert.ok(brief.includes('中段转折点'))
+  assert.ok(brief.includes('便利店门口的塑料伞架'))
+  assert.ok(brief.includes('### 相关官方剧情与事件参考'))
+  assert.ok(brief.includes(firstLine))
+  assert.ok(!brief.includes(secondLine), 'over-budget excerpt is dropped whole, never split')
+  assert.ok(!brief.includes('legacy-prompt-block'), 'sections take precedence over the legacy promptBlock')
+  for (const line of brief.split('\n')) {
+    if (!line.startsWith('这是第')) continue
+    assert.ok([firstLine, secondLine].includes(line), `partial line leaked: ${line}`)
+  }
+
+  const full = formatCanonGroundingBrief({ scene, plan, ragContext, stage: 'dialogue', maxChars: 4000 })
+  assert.ok(full.includes('### 官方对白口吻样本'))
+  assert.ok(full.includes('诶——？'))
+  assert.ok(full.includes('严禁照抄原句'))
+})
+
+test('staged prompts carry the original user request, motif anchors, and the tightened turn-length rule', () => {
+  const view = new CatalogView(catalog.get())
+  const scene = '雨天放学后，瑞希和绘名在便利店门口等雨停，瑞希把伞塞给绘名'
+  const options = { scene, personas: [], targetMinutes: 3, emotionLabels: ['平静', '开心', '伤心'] }
+  const plan = normalizeCastPlan({ ...castReply, understanding: understandingReply }, view, options)
+  const dialogue = normalizeDialogue(dialogueReply, plan, 120)
+  assert.ok(dialogue)
+
+  const dialoguePrompt = buildDialoguePrompt(view, plan, options)
+  assert.ok(dialoguePrompt.user.includes(scene), 'user prompt must survive Stage 1 paraphrasing')
+  assert.ok(dialoguePrompt.user.includes('中段转折点'))
+  assert.ok(dialoguePrompt.user.includes('5~6 条'))
+  assert.ok(!dialoguePrompt.user.includes('至少 2 个 turn 放 6 条以上'))
+  assert.ok(dialoguePrompt.user.includes('便利店门口的塑料伞架'))
+  assert.ok(dialoguePrompt.user.includes('欲言又止'))
+
+  const downstream = [
+    buildStagingPrompt(view, plan, dialogue, options),
+    buildEmotionPrompt(plan, dialogue, options),
+    buildDirectionPrompt(view, plan, dialogue, options)
+  ]
+  for (const prompt of downstream) {
+    assert.ok(prompt.user.includes('导演锚点'), 'anchor block reaches every down-stream stage')
+    assert.ok(prompt.user.includes('中段转折点'))
+    assert.ok(prompt.user.includes('瑞希把伞借给绘名'), 'explicit request reaches every down-stream stage')
   }
 })

@@ -208,6 +208,15 @@ export const SnippetSchema = z.discriminatedUnion('type', [
        * IrodoriTTS 按角色配置的 emotion 参考音频切换音色；其他 TTS 后端忽略。
        */
       emotion: z.string().default(''),
+      /**
+       * IrodoriTTS 逐句自然语言表演/韵律描述（仅描述语气、停顿、呼吸、张力，不含年龄/性别/音色词）。
+       * 留空时回退到 emotion 静态 caption 或角色默认 caption。
+       */
+      ttsCaption: z.string().default(''),
+      /** IrodoriTTS 逐句语速微调（普通场景钳制在 0.92~1.08，特殊场景 0.85~1.18） */
+      ttsSpeed: z.number().finite().optional(),
+      /** 是否为特殊戏剧高潮/崩溃/耳语场景；仅 true 时解锁 emotion 专用参考音频与更高 caption 引导 */
+      ttsSpecialScene: z.boolean().optional(),
       /** 说话时的并发身体动作（与台词同时开始，短于台词则自然淡出回基础姿态） */
       motion: z.string().default(''),
       /** 说话时的并发表情切换（可选，缺省保持当前表情） */

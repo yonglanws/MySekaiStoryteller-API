@@ -116,6 +116,11 @@ tts:
     seed: -1                      # -1 = 每次随机
     defaultLoraAdapter: ""        # 角色未填 loraAdapter 时的全局默认
     defaultCaption: ""            # 角色未填 caption 时的全局默认
+    speakerKvScale: 1.15          # 早期去噪步说话人 K/V 缩放（锁住角色底色，避免情绪导致音色漂移）
+    speakerKvMinT: 0.9            # speakerKvScale 生效的最小时间步（默认 0.9）
+    # speakerKvMaxLayers: 12      # 可选：限制 speakerKvScale 作用的最大层数
+    timbreLockMode: normal        # normal = 普通句锁定基础参考音频，仅特殊高潮句解锁；off = 按 emotion 切参考音频
+    specialSceneCfgScaleCaption: 3.6  # 特殊场景（哭喊/耳语/爆发）时的 cfg_scale_caption 引导强度
     emotionLabels: [平静, 开心, 生气, 伤心, 害羞, 惊讶]
   # 角色专属声音（未列出的角色使用上方默认值）
   characters: []
@@ -187,6 +192,45 @@ llm:
   personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（文件名或 frontmatter name 为角色名）
                                   # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
   personas: []                    # 内联人格：name / prompt / aliases / group
+  polishDialogue: true            # 启用反套路台词质检与条件外科润色
+  # 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b + SQ8 磁盘缓存 + 零网络词法回退；严格 PJSK 领域隔离）
+  rag:
+    enabled: true                 # env: MSS_RAG_ENABLED
+    baseUrl: ""                   # 留空自动继承 llm.baseUrl（env: MSS_RAG_BASE_URL）
+    apiKeyEnv: ""                 # 留空自动继承 llm.apiKeyEnv（env: MSS_RAG_API_KEY_ENV）
+    model: qwen3-embedding-8b     # Embedding 模型名（env: MSS_RAG_MODEL）
+    dimensions: 0                 # 0 = 使用模型原生维度（请求体省略 dimensions），仅 >0 时发送
+    queryInstruct: ""             # 留空时 Qwen3-Embedding 自动使用 PJSK 领域查询指令；非空则覆盖
+    timeoutMs: 30000
+    batchSize: 32
+    cacheDir: cache/rag           # 增量 chunkHash SQ8 向量缓存目录（env: MSS_RAG_CACHE_DIR）
+    fallbackLexical: true         # Embedding API 不可用时自动降级 BM25+CJK-bigram 检索
+    sekaiStorySearchUrl: https://assets.pjsk.moe/sekai-extra-assets/sekai-story-search
+    server: cn                    # cn | jp | tw | kr | en
+    localDirs: [cache/semantic-build]
+    includePersonas: true
+    rerank:
+      enabled: true               # env: MSS_RAG_RERANK_ENABLED
+      model: qwen3-reranker-8b    # Cross-Encoder 重排模型（env: MSS_RAG_RERANK_MODEL）
+      baseUrl: ""                 # 留空依次继承 llm.rag.baseUrl -> llm.baseUrl（env: MSS_RAG_RERANK_BASE_URL）
+      apiKeyEnv: ""               # 留空依次继承 llm.rag.apiKeyEnv -> llm.apiKeyEnv（env: MSS_RAG_RERANK_API_KEY_ENV）
+      endpointPath: /rerank       # 拼接在 baseUrl 后的重排路径（env: MSS_RAG_RERANK_ENDPOINT_PATH）
+      candidatePool: 32           # RRF 一阶段送入重排的候选池大小
+      topN: 32
+      timeoutMs: 30000
+      instruction: ""             # 留空自动使用 PJSK 领域默认重排指令
+    adaptive:
+      minScore: 0.42
+      highScore: 0.62
+      relativeDropRatio: 0.78
+      elbowDropDelta: 0.065
+      minChunks: 0
+      maxChunks: 12
+      softCharBudget: 1800
+      maxCharBudget: 4800
+      maxPerStory: 2
+      mergeAdjacentGap: 4
+      expandAdjacentContext: true # 对高分剧情命中块自动向同场景前后扩展 ±1 相邻块
   # personas:
   #   - name: 晓山瑞希
   #     aliases: [瑞希, mizuki]

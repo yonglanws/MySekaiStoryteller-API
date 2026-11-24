@@ -1,5 +1,5 @@
 /**
- * Irodori-TTS 请求构造（宿主与渲染端共用）。
+ * Irodori-TTS 请求构造、表演描述清洗与非语言行护栏（宿主与渲染端共用）。
  *
  * Irodori-TTS-Server 提供 OpenAI 兼容的 `POST /v1/audio/speech`：
  * 顶层是 `model` / `input` / `response_format` / `speed`，推理参数放在 `irodori` 对象里。
@@ -7,6 +7,7 @@
  */
 
 export type IrodoriResponseFormat = 'wav' | 'mp3' | 'ogg'
+export type IrodoriTimbreLockMode = 'normal' | 'off'
 
 export interface IrodoriDefaults {
   model: string
@@ -19,6 +20,16 @@ export interface IrodoriDefaults {
   chunkingEnabled: boolean
   chunkMinChars: number
   seed: number
+  /** 早期去噪步说话人 K/V 缩放（>1.0 锁定角色底色） */
+  speakerKvScale?: number
+  /** speaker_kv_scale 生效的最小时间步（默认 0.9） */
+  speakerKvMinT?: number
+  /** 可选：限制 speaker_kv_scale 作用的最大层数 */
+  speakerKvMaxLayers?: number
+  /** 音色锁模式：normal=普通句锁基础参考音频，off=允许按 emotion 切换 */
+  timbreLockMode?: IrodoriTimbreLockMode
+  /** 特殊场景（ttsSpecialScene=true）时的 cfg_scale_caption 引导强度（默认 3.6） */
+  specialSceneCfgScaleCaption?: number
 }
 
 export interface IrodoriVoiceConfig {
@@ -38,32 +49,390 @@ export interface IrodoriEmotionConfig extends IrodoriVoiceConfig {
   emotion: string
 }
 
+export interface IrodoriLineOverride {
+  ttsCaption?: string
+  ttsSpeed?: number
+  ttsSpecialScene?: boolean
+  cfgScaleCaption?: number
+}
+
+export interface ResolveIrodoriVoiceOptions {
+  timbreLockMode?: IrodoriTimbreLockMode
+  lineOverride?: IrodoriLineOverride
+}
+
+export interface NormalizedIrodoriSpeech {
+  text: string
+  caption?: string
+  skip?: boolean
+}
+
+/** 适用于 PJSK 剧情的 Irodori 官方训练内联表情白名单 */
+export const IRODORI_SAFE_EMOJIS = [
+  '🤭',
+  '😮‍💨',
+  '🥺',
+  '😰',
+  '😆',
+  '😊',
+  '😠',
+  '😭',
+  '😲',
+  '🫣',
+  '😌',
+  '🙄',
+  '😏',
+  '🫶',
+  '⏸️',
+  '⏩',
+  '🐢',
+  '😮',
+  '🌬️',
+  '👂',
+  '😟',
+  '🙏',
+  '😖',
+  '🤔',
+  '💪',
+  '💥',
+  '😱',
+  '🤧',
+  '👌',
+  '🎵'
+] as const
+
+/** 剧情中禁止出现的 ASMR/失真类表情 */
+export const IRODORI_UNSAFE_EMOJIS = [
+  '🥵',
+  '👅',
+  '💋',
+  '😴',
+  '🥤',
+  '🥴',
+  '👃',
+  '📢',
+  '📞',
+  '🤐'
+] as const
+
+const NORMAL_SPEED_MIN = 0.92
+const NORMAL_SPEED_MAX = 1.08
+const SPECIAL_SPEED_MIN = 0.85
+const SPECIAL_SPEED_MAX = 1.18
+const SPECIAL_SPEAKER_CFG_MIN = 4.5
+const DEFAULT_SPECIAL_CAPTION_CFG = 3.6
+const MAX_CAPTION_LENGTH = 120
+const MAX_EMOJIS_PER_LINE = 2
+
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
+
+const clamp = (value: number, min: number, max: number): number =>
+  Math.min(max, Math.max(min, value))
 
 const refsOf = (voice: IrodoriVoiceConfig): string[] =>
   (voice.refAudioPaths ?? []).map((item) => item.trim()).filter(Boolean)
 
 /**
- * 情绪命中时用情绪条目的非空字段覆盖角色默认值；未命中时原样返回角色默认值。
- * 空字符串表示“没有覆盖”，与 Irodori 插件的情绪条目语义一致。
+ * 说话人身份 / 年龄 / 性别 / 基础音色词（会与参考音频与 LoRA 冲突，导致音色漂移）。
+ * 按最长短语优先匹配，并顺带清理紧随其后的助词（の/が/で/として/のような/っぽい）。
+ */
+const IDENTITY_CONFLICT_PATTERN = new RegExp(
+  '(?:' +
+    [
+      '若い女性',
+      '大人の女性',
+      '成人女性',
+      '高齢女性',
+      '中年女性',
+      '若い男性',
+      '大人の男性',
+      '成人男性',
+      '高齢男性',
+      '中年男性',
+      '女子高生',
+      '女子中学生',
+      '男子高生',
+      '男子中学生',
+      '美少女',
+      '美少年',
+      '男の子',
+      '女の子',
+      'おじいさん',
+      'おばあさん',
+      'おじさん',
+      'おばさん',
+      '子供っぽい声',
+      '子どもっぽい声',
+      '子供の声',
+      '子どもの声',
+      '中性的(?:な)?声',
+      'ハスキーな声',
+      '可愛らしい声',
+      'かわいい声',
+      '透き通る声',
+      '澄んだ声',
+      'アニメ声',
+      'ロリ声',
+      'ショタ声',
+      '幼い声',
+      '低めの声',
+      '高めの声',
+      '低い声',
+      '高い声',
+      '太い声',
+      '細い声',
+      'イケボ',
+      'カワボ',
+      '少女',
+      '少年',
+      '幼女',
+      '幼児',
+      '女声',
+      '男声',
+      '女性',
+      '男性',
+      'ロリ',
+      'ショタ',
+      '年轻女性',
+      '成年女性',
+      '年轻男性',
+      '成年男性',
+      '少女音',
+      '少年音',
+      '萝莉音',
+      '御姐音',
+      '大叔音',
+      '低沉女声',
+      '低沉男声',
+      '高音女声'
+    ].join('|') +
+    ')(?:のような|みたいな|っぽい|らしい|として|による|の|が|で|は)?',
+  'gu'
+)
+
+/**
+ * 清洗 Irodori 表演描述（caption）：
+ * 1. 剥离年龄/性别/基础音色等与参考音频/LoRA 冲突的身份词；
+ * 2. 折叠多余空白与残余标点；
+ * 3. 控制长度在 120 字符以内，优先在句末标点截断。
+ */
+export function sanitizeIrodoriCaption(caption: string): string {
+  const raw = text(caption)
+  if (!raw) return ''
+
+  let cleaned = raw
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(IDENTITY_CONFLICT_PATTERN, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[、,，]{2,}/g, '、')
+    .replace(/[。\.]{2,}/g, '。')
+    .replace(/([。！？!?])[、,，]+/g, '$1')
+    .replace(/^[、,，。・/\-—–\s]+/, '')
+    .replace(/[、,，・/\-—–\s]+$/, '')
+    .trim()
+
+  if (!cleaned) return ''
+  if (cleaned.length > MAX_CAPTION_LENGTH) {
+    const slice = cleaned.slice(0, MAX_CAPTION_LENGTH)
+    const lastStop = Math.max(slice.lastIndexOf('。'), slice.lastIndexOf('、'))
+    cleaned = (lastStop >= 24 ? slice.slice(0, lastStop + 1) : slice).trim()
+  }
+  return cleaned
+}
+
+const UNSAFE_EMOJI_PATTERN = new RegExp(
+  IRODORI_UNSAFE_EMOJIS.map((e) => e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+  'gu'
+)
+
+const SAFE_EMOJI_SET = new Set<string>(IRODORI_SAFE_EMOJIS)
+
+/** 匹配单/组合 Emoji（含 ZWJ 与 FE0F 变体选择符，如 😮‍💨、⏸️、🌬️） */
+const EMOJI_TOKEN_PATTERN =
+  /(?:\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}\uFE0F?)*)/gu
+
+/** 仅含标点/省略号/破折号/叹号/孤立促音/空白的非语言行（无实词） */
+const BARE_NON_VERBAL_PATTERN = /^[\s….\-—–―ー〜～!！?？、,，。・♪っッ「」『』（）()]+$/u
+
+export function countIrodoriEmojis(input: string): number {
+  const matches = String(input ?? '').match(EMOJI_TOKEN_PATTERN)
+  return matches ? matches.length : 0
+}
+
+/**
+ * 裁剪文本中的不安全 ASMR 表情，并将单句内联表情数控制在上限（默认 2 个）以内。
+ */
+export function enforceIrodoriEmojiBudget(input: string, maxEmojis = MAX_EMOJIS_PER_LINE): string {
+  let cleaned = String(input ?? '').replace(UNSAFE_EMOJI_PATTERN, '')
+  let kept = 0
+  cleaned = cleaned.replace(EMOJI_TOKEN_PATTERN, (token) => {
+    if (kept < maxEmojis) {
+      kept += 1
+      return token
+    }
+    return ''
+  })
+  return cleaned.replace(/[ \t]{2,}/g, ' ').trim()
+}
+
+function pickNonVerbalCue(
+  rawText: string,
+  caption: string,
+  emotion: string
+): { cue: string; fallbackCaption: string } {
+  const combined = `${emotion} ${caption}`
+  if (/伤心|悲|泣|嗚咽|涙|震え|苦し|悔し|つら/.test(combined)) {
+    return {
+      cue: '😭',
+      fallbackCaption: '声を詰まらせながら、小さく嗚咽をもらす。'
+    }
+  }
+  if (/息切れ|荒い息|走|呼吸|切迫|焦|慌/.test(combined)) {
+    return {
+      cue: '🌬️',
+      fallbackCaption: '息を切らして、短く荒い呼吸をもらす。'
+    }
+  }
+  if (/ため息|溜息|吐息|安堵|疲|ほっと|落ち着/.test(combined)) {
+    return {
+      cue: '😮‍💨',
+      fallbackCaption: '小さく静かな吐息をもらす。'
+    }
+  }
+  if (
+    /惊讶|驚|ショック|怯|緊張|急/.test(combined) ||
+    /[!！?？っッ]/.test(rawText)
+  ) {
+    return {
+      cue: '😮',
+      fallbackCaption: '思わず短く息をのむ。'
+    }
+  }
+  return {
+    cue: '😮‍💨',
+    fallbackCaption: '小さく息をもらす。'
+  }
+}
+
+/**
+ * 规范化发往 IrodoriTTS 的单句文本：
+ * 1. 剥离不安全的 ASMR/失真表情（🥵/👅/💋/😴/🥤/🥴/👃 等）；
+ * 2. 限制单句表情数量 <= 2；
+ * 3. 拦截裸标点与孤立促音（如 `……っ`、`……！`、`…………っ！！`、`……`），
+ *    避免 IrodoriTTS 产生幻觉词或 0ms 静音，改为安全副语言提示或显式 skip。
+ */
+export function normalizeIrodoriSpeechText(
+  input: string,
+  caption?: string,
+  emotion?: string
+): NormalizedIrodoriSpeech {
+  const sanitizedCaption = sanitizeIrodoriCaption(caption ?? '')
+  const cleaned = enforceIrodoriEmojiBudget(input, MAX_EMOJIS_PER_LINE)
+  if (!cleaned) {
+    return {
+      text: '',
+      caption: sanitizedCaption || undefined,
+      skip: true
+    }
+  }
+
+  // 若文本已包含安全副语言表情且去掉表情后只有标点，直接保留该副语言表情
+  const tokens = cleaned.match(EMOJI_TOKEN_PATTERN) ?? []
+  const textWithoutEmojis = cleaned.replace(EMOJI_TOKEN_PATTERN, '').trim()
+  if (tokens.length > 0 && (!textWithoutEmojis || BARE_NON_VERBAL_PATTERN.test(textWithoutEmojis))) {
+    const safeTokens = tokens.filter((t) => SAFE_EMOJI_SET.has(t))
+    if (safeTokens.length > 0) {
+      return {
+        text: safeTokens.slice(0, MAX_EMOJIS_PER_LINE).join(''),
+        caption: sanitizedCaption || undefined,
+        skip: false
+      }
+    }
+  }
+
+  // 裸标点 / 孤立促音护栏
+  if (BARE_NON_VERBAL_PATTERN.test(cleaned)) {
+    const hasExpressiveMark = /[!！?？っッ]/.test(cleaned)
+    const hasEmotionalContext =
+      Boolean(sanitizedCaption) || (Boolean(text(emotion)) && text(emotion) !== '平静')
+    if (!hasExpressiveMark && !hasEmotionalContext) {
+      return {
+        text: '',
+        caption: sanitizedCaption || undefined,
+        skip: true
+      }
+    }
+    const { cue, fallbackCaption } = pickNonVerbalCue(cleaned, sanitizedCaption, text(emotion))
+    return {
+      text: cue,
+      caption: sanitizedCaption || fallbackCaption,
+      skip: false
+    }
+  }
+
+  return {
+    text: cleaned,
+    caption: sanitizedCaption || undefined,
+    skip: false
+  }
+}
+
+/**
+ * 解析当前句子的 Irodori 声线参数（双层情绪控制：常规音色锁 + 特殊场景解锁）。
+ *
+ * - `timbreLockMode !== 'off'` 且 `!lineOverride?.ttsSpecialScene`：
+ *   锁定角色基础 `refAudioPath`/`refAudioPaths`/`loraAdapter`（不切情绪参考音频），
+ *   用逐句 `ttsCaption`（回退情绪静态 `caption` / 角色默认）承载细腻表演，语速钳制在 `[0.92, 1.08]`。
+ * - `ttsSpecialScene === true` 或 `timbreLockMode === 'off'`：
+ *   允许情绪条目覆盖 `refAudioPath`/`refAudioPaths`/`loraAdapter`；
+ *   特殊场景语速钳制在 `[0.85, 1.18]`，`timbreLockMode === 'off'` 不额外钳制语速。
  */
 export function resolveIrodoriVoice(
   base: IrodoriVoiceConfig,
   emotions: IrodoriEmotionConfig[] | undefined,
-  emotion: string | undefined
+  emotion: string | undefined,
+  options?: ResolveIrodoriVoiceOptions
 ): IrodoriVoiceConfig {
+  const timbreLockMode: IrodoriTimbreLockMode = options?.timbreLockMode ?? 'normal'
+  const lineOverride = options?.lineOverride
+  const isSpecialScene = Boolean(lineOverride?.ttsSpecialScene)
+  const unlockEmotionRef = timbreLockMode === 'off' || isSpecialScene
+
   const label = text(emotion)
   const hit = label ? emotions?.find((entry) => entry.emotion === label) : undefined
-  if (!hit) return base
 
   const merged: IrodoriVoiceConfig = { ...base }
-  if (text(hit.refAudioPath)) merged.refAudioPath = hit.refAudioPath
-  const hitRefs = refsOf(hit)
-  if (hitRefs.length > 0) merged.refAudioPaths = hitRefs
-  if (text(hit.loraAdapter)) merged.loraAdapter = hit.loraAdapter
-  if (text(hit.caption)) merged.caption = hit.caption
-  if (typeof hit.speed === 'number' && Number.isFinite(hit.speed)) merged.speed = hit.speed
-  if (typeof hit.numSteps === 'number' && hit.numSteps > 0) merged.numSteps = hit.numSteps
+
+  if (hit) {
+    if (unlockEmotionRef) {
+      if (text(hit.refAudioPath)) merged.refAudioPath = hit.refAudioPath
+      const hitRefs = refsOf(hit)
+      if (hitRefs.length > 0) merged.refAudioPaths = hitRefs
+      if (text(hit.loraAdapter)) merged.loraAdapter = hit.loraAdapter
+    }
+    if (text(hit.caption)) merged.caption = hit.caption
+    if (typeof hit.speed === 'number' && Number.isFinite(hit.speed)) merged.speed = hit.speed
+    if (typeof hit.numSteps === 'number' && hit.numSteps > 0) merged.numSteps = hit.numSteps
+  }
+
+  // 逐句 caption 覆盖（清洗身份冲突词）
+  const lineCaption = sanitizeIrodoriCaption(lineOverride?.ttsCaption ?? '')
+  if (lineCaption) {
+    merged.caption = lineCaption
+  } else if (merged.caption !== undefined) {
+    merged.caption = sanitizeIrodoriCaption(merged.caption)
+  }
+
+  // 逐句语速覆盖 + 音色锁钳制
+  if (typeof lineOverride?.ttsSpeed === 'number' && Number.isFinite(lineOverride.ttsSpeed)) {
+    merged.speed = lineOverride.ttsSpeed
+  }
+  if (typeof merged.speed === 'number' && Number.isFinite(merged.speed) && timbreLockMode !== 'off') {
+    merged.speed = isSpecialScene
+      ? clamp(merged.speed, SPECIAL_SPEED_MIN, SPECIAL_SPEED_MAX)
+      : clamp(merged.speed, NORMAL_SPEED_MIN, NORMAL_SPEED_MAX)
+  }
+
   return merged
 }
 
@@ -72,22 +441,40 @@ export function resolveIrodoriVoice(
  *
  * - `ref_wav` 与 `ref_wavs` 互斥，多参考优先；
  * - 空字符串、`seed < 0`、`num_steps <= 0` 一律省略，让服务端使用自己的默认值；
- * - `speed` 取角色/情绪覆盖值，其次调用方传入值，最后 1.0。
+ * - 自动清洗 `caption`（剥离年龄/性别/基础音色词）与规范化 `input`（非语言护栏 + 表情预算）；
+ * - 透传 `speaker_kv_scale` / `speaker_kv_min_t` / `speaker_kv_max_layers`；
+ * - 特殊场景（`ttsSpecialScene: true`）提升 `cfg_scale_caption` 并保持 `cfg_scale_speaker >= 4.5`。
  */
 export function buildIrodoriSpeechRequest(
   input: string,
   voice: IrodoriVoiceConfig,
   defaults: IrodoriDefaults,
-  speedOverride?: number
+  speedOverride?: number,
+  lineOverride?: IrodoriLineOverride
 ): Record<string, unknown> {
+  const isSpecialScene = Boolean(lineOverride?.ttsSpecialScene)
+  const rawCaption = lineOverride?.ttsCaption?.trim() ? lineOverride.ttsCaption : voice.caption
+  const normalized = normalizeIrodoriSpeechText(input, rawCaption)
+  const finalInput = normalized.skip ? '' : normalized.text
+  const finalCaption = normalized.caption ?? sanitizeIrodoriCaption(rawCaption ?? '')
+
   const payload: Record<string, unknown> = {
     model: text(defaults.model) || 'irodori-tts',
-    input,
+    input: finalInput,
     response_format: defaults.responseFormat || 'wav'
   }
 
-  const speed = voice.speed ?? speedOverride ?? 1.0
-  if (typeof speed === 'number' && Number.isFinite(speed)) payload.speed = speed
+  const rawSpeed = lineOverride?.ttsSpeed ?? voice.speed ?? speedOverride ?? 1.0
+  if (typeof rawSpeed === 'number' && Number.isFinite(rawSpeed)) {
+    const shouldClamp =
+      defaults.timbreLockMode === 'normal' ||
+      (defaults.timbreLockMode !== 'off' && lineOverride !== undefined)
+    payload.speed = shouldClamp
+      ? isSpecialScene
+        ? clamp(rawSpeed, SPECIAL_SPEED_MIN, SPECIAL_SPEED_MAX)
+        : clamp(rawSpeed, NORMAL_SPEED_MIN, NORMAL_SPEED_MAX)
+      : rawSpeed
+  }
 
   const irodori: Record<string, unknown> = {}
   const refs = refsOf(voice)
@@ -97,23 +484,67 @@ export function buildIrodoriSpeechRequest(
     irodori.ref_wav = text(voice.refAudioPath)
   }
   if (text(voice.loraAdapter)) irodori.lora_adapter = text(voice.loraAdapter)
-  if (text(voice.caption)) irodori.caption = text(voice.caption)
+  if (finalCaption) irodori.caption = finalCaption
 
   const numSteps = voice.numSteps ?? defaults.numSteps
   if (Number.isFinite(numSteps) && numSteps > 0) irodori.num_steps = numSteps
   if (Number.isFinite(defaults.cfgScaleText)) irodori.cfg_scale_text = defaults.cfgScaleText
-  if (Number.isFinite(defaults.cfgScaleCaption)) {
-    irodori.cfg_scale_caption = defaults.cfgScaleCaption
+
+  // 特殊场景提升 caption 引导，同时保护 speaker 引导底线 >= 4.5
+  let cfgScaleCaption = lineOverride?.cfgScaleCaption ?? defaults.cfgScaleCaption
+  if (isSpecialScene && lineOverride?.cfgScaleCaption === undefined) {
+    const specialTarget =
+      typeof defaults.specialSceneCfgScaleCaption === 'number' &&
+      Number.isFinite(defaults.specialSceneCfgScaleCaption) &&
+      defaults.specialSceneCfgScaleCaption > 0
+        ? defaults.specialSceneCfgScaleCaption
+        : DEFAULT_SPECIAL_CAPTION_CFG
+    cfgScaleCaption = Number.isFinite(cfgScaleCaption)
+      ? Math.max(cfgScaleCaption, specialTarget)
+      : specialTarget
   }
-  if (Number.isFinite(defaults.cfgScaleSpeaker)) {
-    irodori.cfg_scale_speaker = defaults.cfgScaleSpeaker
+  if (Number.isFinite(cfgScaleCaption)) {
+    irodori.cfg_scale_caption = cfgScaleCaption
   }
+
+  let cfgScaleSpeaker = defaults.cfgScaleSpeaker
+  if (isSpecialScene && Number.isFinite(cfgScaleSpeaker)) {
+    cfgScaleSpeaker = Math.max(SPECIAL_SPEAKER_CFG_MIN, cfgScaleSpeaker)
+  }
+  if (Number.isFinite(cfgScaleSpeaker)) {
+    irodori.cfg_scale_speaker = cfgScaleSpeaker
+  }
+
   if (Number.isFinite(defaults.durationScale)) irodori.duration_scale = defaults.durationScale
   irodori.chunking_enabled = defaults.chunkingEnabled
   if (Number.isFinite(defaults.chunkMinChars) && defaults.chunkMinChars > 0) {
     irodori.chunk_min_chars = defaults.chunkMinChars
   }
   if (Number.isInteger(defaults.seed) && defaults.seed >= 0) irodori.seed = defaults.seed
+
+  // 早期去噪步说话人 K/V 缩放（锁定音色底色）
+  if (
+    typeof defaults.speakerKvScale === 'number' &&
+    Number.isFinite(defaults.speakerKvScale) &&
+    defaults.speakerKvScale > 0
+  ) {
+    irodori.speaker_kv_scale = defaults.speakerKvScale
+  }
+  if (
+    typeof defaults.speakerKvMinT === 'number' &&
+    Number.isFinite(defaults.speakerKvMinT) &&
+    defaults.speakerKvMinT >= 0 &&
+    defaults.speakerKvMinT <= 1
+  ) {
+    irodori.speaker_kv_min_t = defaults.speakerKvMinT
+  }
+  if (
+    typeof defaults.speakerKvMaxLayers === 'number' &&
+    Number.isInteger(defaults.speakerKvMaxLayers) &&
+    defaults.speakerKvMaxLayers > 0
+  ) {
+    irodori.speaker_kv_max_layers = defaults.speakerKvMaxLayers
+  }
 
   if (Object.keys(irodori).length > 0) payload.irodori = irodori
   return payload

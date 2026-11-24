@@ -21,6 +21,9 @@ import {
   resolveScenarioSe
 } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
+import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
+import type { RagRetrieveResult } from '../rag/types'
+import type { DialogueLintIssue } from './dialogueLinter'
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -71,6 +74,45 @@ export interface StagedCastMember {
   isVirtualSinger?: boolean
 }
 
+export interface StagedCharacterGoal {
+  /** 角色短名（与 cast.name 对应；模型省略时为空） */
+  cast: string
+  /** 这个角色表面想得到/想确认的东西 */
+  wants: string
+  /** 这个角色真正隐瞒、没说出口的顾虑 */
+  hides: string
+}
+
+export interface StagedPromptUnderstanding {
+  explicitRequests: string[]
+  implicitSubtext: string
+  relationshipDynamic: string
+  emotionalArc: string
+  /** 中段情绪温度发生转折的那一拍及其动因（可选，向后兼容） */
+  turningPoint?: string
+  /** 开场 1~4 句引入的具体日常意象/物件（可选，向后兼容） */
+  openingMotif?: string
+  /** 结尾 2~3 句轻描淡写回扣开场意象的方式（可选，向后兼容） */
+  closingCallback?: string
+  /** 各角色表面目的与内心隐瞒，用来驱动潜台词（可选，向后兼容） */
+  characterGoals?: StagedCharacterGoal[]
+  canonHooks: string[]
+  avoidList: string[]
+}
+
+export interface StagedPairwiseAddress {
+  from: string
+  to: string
+  zh: string
+  ja?: string
+}
+
+export interface StagedRetrievalQueries {
+  plot?: string
+  voice?: string
+  worldview?: string
+}
+
 export interface StagedCastPlan {
   title: string
   event: string
@@ -79,6 +121,12 @@ export interface StagedCastPlan {
   cast: StagedCastMember[]
   background: string
   scenes?: StagedScenePlan[]
+  /** 深度提示词理解（可选，向后兼容） */
+  understanding?: StagedPromptUnderstanding
+  /** 角色两两之间的官方称呼与敬语（可选，向后兼容） */
+  pairwiseAddress?: StagedPairwiseAddress[]
+  /** Stage 1 选角后产出的多面 RAG 检索查询（可选，向后兼容） */
+  retrievalQueries?: StagedRetrievalQueries
 }
 
 export interface StagedDialogueLine {
@@ -87,7 +135,13 @@ export interface StagedDialogueLine {
   content: string
   /** TTS 情绪标签；未配置情绪时为空 */
   emotion?: string
-  /** 日文配音文本；翻译段提前并行填写，合成时写入 Talk */
+  /** IrodoriTTS 逐句日语表演/韵律描述（仅描述语气/呼吸/停顿/节奏，不含年龄性别底色词） */
+  ttsCaption?: string
+  /** IrodoriTTS 逐句语速微调（常规 0.92~1.08，特殊高潮 0.85~1.18） */
+  ttsSpeed?: number
+  /** 是否为特殊戏剧高潮/崩溃/耳语场景（整场 <= 15%，仅 true 时解锁 emotion 参考音频） */
+  ttsSpecialScene?: boolean
+  /** 日文配音文本；翻译段在语音导演后与动作导演并行填写，合成时写入 Talk */
   ttsText?: string
   /** 所属幕次 ID（s1 / s2 / s3） */
   sceneId?: string
@@ -222,6 +276,8 @@ export interface StagedPromptOptions {
   title?: string
   /** TTS 支持的情绪标签；非空时台词稿要求每句带 emotion */
   emotionLabels?: string[]
+  /** 自适应 RAG 检索结果（Pass A / Pass B），缺省或无命中时为空 */
+  ragContext?: RagRetrieveResult | null
 }
 
 export interface StagedMessages {
@@ -978,8 +1034,51 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
         bgm: 'silence'
       }
     ],
-    outline: ['开场日常……', '小事件出现波澜……', '情绪转折/留白……', '温柔收束……']
+    outline: ['开场日常……', '小事件出现波澜……', '情绪转折/留白……', '温柔收束……'],
+    understanding: {
+      explicitRequests: ['用户明确要求的场景/事件/角色'],
+      implicitSubtext: '潜台词与角色真正想说却没直接出口的情绪',
+      relationshipDynamic: '所选角色之间当下的关系张力与相处模式',
+      emotionalArc: '从起手到高潮再到余韵收尾的情绪弧光',
+      turningPoint: '中段某一拍情绪温度转向的原因（如看见对方留下的笔记，语气从拘谨转为坦白）',
+      openingMotif: '开场 1~4 句里出现的具体日常物件或感官细节',
+      closingCallback: '结尾 2~3 句怎样轻描淡写地回扣这个意象，而不是总结道理',
+      characterGoals:
+        exampleCast.length > 0
+          ? [
+              {
+                cast: exampleCast[0].name,
+                wants: '表面上想达成的事',
+                hides: '没说出口的担心或私心'
+              }
+            ]
+          : [],
+      canonHooks: ['可自然呼应的官方设定、地点或过往事件'],
+      avoidList: ['避免 OOC、说教式总结或套路化抒情']
+    },
+    pairwiseAddress:
+      exampleCast.length >= 2
+        ? [
+            {
+              from: exampleCast[0].name,
+              to: exampleCast[1].name,
+              zh: exampleCast[1].name,
+              ja: exampleCast[1].name
+            }
+          ]
+        : [],
+    retrievalQueries: {
+      plot: '与本场核心事件相关的官方剧情或过往经历',
+      voice: `${exampleCast.slice(0, 2).map((c) => c.name).join(' ')} 日常互动对白与称呼`,
+      worldview: '相关地点、社团/团体设定或关系背景'
+    }
   }
+
+  const preCastRagBlock = formatCanonGroundingBrief({
+    ragContext: options.ragContext,
+    stage: 'cast',
+    maxChars: 1500
+  })
 
   const castRule =
     view.models.length <= 2
@@ -999,7 +1098,7 @@ ${options.scene}
 
 - 语言：中文（台词 content 用中文，日文 ttsText 由宿主另行翻译）
 - 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词
-- 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线
+- 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线${preCastRagBlock}
 
 ## 可选角色（modelId — 显示名；若角色有 [服装: 校服=ID...]，按场景时段与场合直接选对应服装 modelId）
 ${models || '（资源目录为空）'}${subModelsBlock}
@@ -1019,6 +1118,9 @@ ${bgmList || '（可使用 keep 或 silence）'}
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
   - 善用 BGM 弧光：在情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
 - title 是短标题（不超过 12 个字），logline 一句话，outline 4~6 条写“发生什么”。
+- **深度意图拆解（understanding）**：提炼显性要求（explicitRequests）、潜台词（implicitSubtext）、角色关系张力（relationshipDynamic）、情绪弧光（emotionalArc）、中段转折点（turningPoint：情绪温度在哪一拍转向及动因）、开场日常意象（openingMotif：前 1~4 句出现的具体物件或感官细节）、收尾回扣（closingCallback：结尾 2~3 句怎样轻巧呼应开场意象，替代说教总结）、各角色表里动机（characterGoals：想得到什么 vs 隐瞒什么）、官方连续性钩子（canonHooks）与禁忌避坑清单（avoidList）。
+- **两两称呼表（pairwiseAddress）**：列出入选角色彼此的准确官方中文称呼与日文称呼/敬语（如 zh/ja），供后续对白与日文配音翻译严格遵守。
+- **多面检索查询（retrievalQueries）**：给出 2~3 条简短精准的检索短语（plot 剧情事件、voice 角色互动口吻、worldview 地点/设定），用于下一阶段检索官方参考语料。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -1202,6 +1304,75 @@ export function normalizeCastPlan(
     })
   }
 
+  const parseStringList = (val: unknown, limit = 6): string[] =>
+    Array.isArray(val)
+      ? val
+          .map((item) => oneLine(item, 140))
+          .filter(Boolean)
+          .slice(0, limit)
+      : []
+
+  let understanding: StagedPromptUnderstanding | undefined
+  if (isRecord(doc.understanding)) {
+    const u = doc.understanding
+    const parsed: StagedPromptUnderstanding = {
+      explicitRequests: parseStringList(u.explicitRequests),
+      implicitSubtext: oneLine(u.implicitSubtext, 200),
+      relationshipDynamic: oneLine(u.relationshipDynamic, 200),
+      emotionalArc: oneLine(u.emotionalArc, 200),
+      turningPoint: oneLine(u.turningPoint, 200),
+      openingMotif: oneLine(u.openingMotif, 140),
+      closingCallback: oneLine(u.closingCallback, 160),
+      characterGoals: normalizeCharacterGoals(u.characterGoals),
+      canonHooks: parseStringList(u.canonHooks),
+      avoidList: parseStringList(u.avoidList)
+    }
+    if (
+      parsed.explicitRequests.length > 0 ||
+      parsed.implicitSubtext ||
+      parsed.relationshipDynamic ||
+      parsed.emotionalArc ||
+      parsed.turningPoint ||
+      parsed.openingMotif ||
+      parsed.closingCallback ||
+      (parsed.characterGoals?.length ?? 0) > 0 ||
+      parsed.canonHooks.length > 0 ||
+      parsed.avoidList.length > 0
+    ) {
+      understanding = parsed
+    }
+  }
+
+  let pairwiseAddress: StagedPairwiseAddress[] | undefined
+  if (Array.isArray(doc.pairwiseAddress)) {
+    const list: StagedPairwiseAddress[] = []
+    for (const item of doc.pairwiseAddress.slice(0, 12)) {
+      if (!isRecord(item)) continue
+      const from = oneLine(item.from, 24)
+      const to = oneLine(item.to, 24)
+      const zh = oneLine(item.zh ?? item.cn ?? item.address, 24)
+      const ja = oneLine(item.ja ?? item.jp, 24)
+      if (!from || !to || (!zh && !ja)) continue
+      list.push({ from, to, zh: zh || to, ...(ja ? { ja } : {}) })
+    }
+    if (list.length > 0) pairwiseAddress = list
+  }
+
+  let retrievalQueries: StagedRetrievalQueries | undefined
+  if (isRecord(doc.retrievalQueries)) {
+    const rq = doc.retrievalQueries
+    const plot = oneLine(rq.plot, 120)
+    const voice = oneLine(rq.voice, 120)
+    const worldview = oneLine(rq.worldview, 120)
+    if (plot || voice || worldview) {
+      retrievalQueries = {
+        ...(plot ? { plot } : {}),
+        ...(voice ? { voice } : {}),
+        ...(worldview ? { worldview } : {})
+      }
+    }
+  }
+
   return {
     title: titleOrDefault(doc.title, options.title ?? ''),
     event: oneLine(doc.event || doc.logline || options.scene, 300),
@@ -1209,7 +1380,10 @@ export function normalizeCastPlan(
     outline: outline.length > 0 ? outline : scenes.map((s) => s.summary).filter(Boolean),
     cast,
     background: scenes[0]?.background || defaultBg,
-    scenes
+    scenes,
+    ...(understanding ? { understanding } : {}),
+    ...(pairwiseAddress ? { pairwiseAddress } : {}),
+    ...(retrievalQueries ? { retrievalQueries } : {})
   }
 }
 
@@ -1265,6 +1439,203 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
 // 第二段：只写台词（writeDialogue）
 // ---------------------------------------------------------------------------
 
+/** 解析 Stage 1 输出的角色表里动机；容忍字符串条目与不同字段别名。 */
+function normalizeCharacterGoals(raw: unknown): StagedCharacterGoal[] {
+  if (!Array.isArray(raw)) return []
+  const goals: StagedCharacterGoal[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const wants = oneLine(item, 120)
+      if (wants) goals.push({ cast: '', wants, hides: '' })
+    } else if (isRecord(item)) {
+      const cast = oneLine(item.cast ?? item.name ?? item.id ?? item.speaker, 24)
+      const wants = oneLine(item.wants ?? item.goal ?? item.desire, 120)
+      const hides = oneLine(item.hides ?? item.secret ?? item.conceals, 120)
+      if (wants || hides) goals.push({ cast, wants, hides })
+    }
+    if (goals.length >= 6) break
+  }
+  return goals
+}
+
+function formatUnderstandingBlock(plan: StagedCastPlan): string {
+  const u = plan.understanding
+  if (!u) return ''
+  const parts: string[] = []
+  if (u.explicitRequests.length > 0) parts.push(`- 显性要求：${u.explicitRequests.join('；')}`)
+  if (u.implicitSubtext) parts.push(`- 潜台词：${u.implicitSubtext}`)
+  if (u.relationshipDynamic) parts.push(`- 关系张力：${u.relationshipDynamic}`)
+  if (u.emotionalArc) parts.push(`- 情绪弧光：${u.emotionalArc}`)
+  if (u.turningPoint) parts.push(`- 中段转折点：${u.turningPoint}`)
+  if (u.openingMotif || u.closingCallback) {
+    parts.push(
+      `- 意象与收尾回扣：开场「${u.openingMotif || '日常小物件'}」→ 结尾「${u.closingCallback || '轻巧呼应，不作总结'}」`
+    )
+  }
+  const goals = u.characterGoals ?? []
+  if (goals.length > 0) {
+    const rows = goals.map((goal) => {
+      const who = goal.cast || '角色'
+      return `${who}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`
+    })
+    parts.push(`- 角色表里动机：${rows.join('；')}`)
+  }
+  if (u.canonHooks.length > 0) parts.push(`- 官方呼应点：${u.canonHooks.join('；')}`)
+  if (u.avoidList.length > 0) parts.push(`- 避坑禁忌：${u.avoidList.join('；')}`)
+  return parts.length > 0
+    ? `\n## 导演意图、中段转折与意象呼应（务必落实到对话细节中，不要直白说破）\n${parts.join('\n')}\n`
+    : ''
+}
+
+function formatPairwiseAddressBlock(plan: StagedCastPlan): string {
+  const list = plan.pairwiseAddress
+  if (!list || list.length === 0) return ''
+  const rows = list.map(
+    (entry) =>
+      `- ${entry.from} 称呼 ${entry.to}：中文「${entry.zh}」${entry.ja ? ` / 日文「${entry.ja}」` : ''}`
+  )
+  return `\n## 角色两两称呼表（严格遵守，禁止随意改称呼）\n${rows.join('\n')}\n`
+}
+
+/**
+ * 按整段/整行边界装箱 RAG 摘录：宁可少给一条，也不在句子中间硬切，
+ * 避免旧实现 `promptBlock.slice(0, 1500)` 把最后一条参考拦腰截断。
+ */
+function packExcerptsCleanly(
+  items: ReadonlyArray<string | { text?: string }> | undefined,
+  budget: number
+): string {
+  if (!items || items.length === 0 || budget <= 0) return ''
+  const kept: string[] = []
+  let used = 0
+  for (const item of items) {
+    const text = (typeof item === 'string' ? item : (item.text ?? '')).trim()
+    if (!text) continue
+    if (kept.length > 0 && used + text.length + 2 > budget) break
+    if (kept.length === 0 && text.length > budget) {
+      const lines = text.split('\n')
+      const acc: string[] = []
+      let length = 0
+      for (const line of lines) {
+        if (acc.length > 0 && length + line.length + 1 > budget) break
+        acc.push(line)
+        length += line.length + 1
+      }
+      if (acc.length > 0) kept.push(acc.join('\n'))
+      break
+    }
+    kept.push(text)
+    used += text.length + 2
+  }
+  return kept.join('\n\n')
+}
+
+export interface CanonGroundingBriefOptions {
+  /** 用户原始提示词：dialogue 之后的阶段原样复述，避免被 Stage 1 的概括吃掉细节 */
+  scene?: string
+  plan?: StagedCastPlan | null
+  ragContext?: RagRetrieveResult | null
+  /** cast 阶段只给事实，不给对白样本 */
+  stage?: 'cast' | 'single' | 'dialogue' | 'polish' | 'staging' | 'direction' | 'voice'
+  maxChars?: number
+}
+
+/**
+ * 结构化 Canon & Prompt Grounding Brief：
+ * ① 用户原始需求全文 → ② 导演意图/转折/意象（plan.understanding）→ ③ 官方剧情事实与世界观 → ④ 官方对白口吻样本 + 防照抄声明。
+ * 全程按分段边界装箱，不做字符级硬截断。
+ */
+export function formatCanonGroundingBrief(options: CanonGroundingBriefOptions = {}): string {
+  const { scene = '', plan = null, ragContext = null, stage = 'dialogue', maxChars = 2400 } = options
+  const blocks: string[] = []
+
+  const prompt = scene.trim()
+  if (stage !== 'cast' && prompt) {
+    blocks.push(`## 用户原始需求（逐条核对，不要遗漏具体要求）\n${prompt}`)
+  }
+
+  const understanding = plan ? formatUnderstandingBlock(plan).trim() : ''
+  if (understanding) blocks.push(understanding)
+
+  const ragParts: string[] = []
+  let remaining = maxChars
+  if (ragContext) {
+    const sections = ragContext.sections
+    if (sections) {
+      const plotText = packExcerptsCleanly(
+        sections.canonPlot,
+        Math.min(remaining, Math.round(maxChars * 0.45))
+      )
+      if (plotText) {
+        ragParts.push(
+          `### 相关官方剧情与事件参考（尊重事实与连续性，不要当成背景解说背诵）\n${plotText}`
+        )
+        remaining -= plotText.length
+      }
+      const loreText = packExcerptsCleanly(
+        sections.worldviewLore,
+        Math.min(remaining, Math.round(maxChars * 0.35))
+      )
+      if (loreText) {
+        ragParts.push(`### 世界观、地点与角色补充设定\n${loreText}`)
+        remaining -= loreText.length
+      }
+      if (stage !== 'cast' && remaining > 120) {
+        const voiceText = packExcerptsCleanly(sections.dialogueVoice, remaining)
+        if (voiceText) {
+          ragParts.push(
+            `### 官方对白口吻样本（只学称呼、断句、停顿与互动节奏，严禁照抄原句或复述原事件）\n${voiceText}`
+          )
+        }
+      }
+    } else if (ragContext.promptBlock.trim()) {
+      // 兜底：只填了 promptBlock 的旧/测试检索结果
+      const legacy = packExcerptsCleanly([ragContext.promptBlock], maxChars)
+      if (legacy) ragParts.push(legacy)
+    }
+  }
+  if (ragParts.length > 0) {
+    blocks.push(
+      `## 官方剧情与设定参考（仅作事实、关系与口吻参考，严禁照抄原句或复述原剧情）\n${ragParts.join('\n\n')}`
+    )
+  }
+
+  return blocks.length > 0 ? `\n${blocks.join('\n\n')}\n` : ''
+}
+
+/**
+ * 导演/表演/配音阶段共用的 Stage 1 锚点：中段转折点、开场意象、收尾回扣与用户显性诉求。
+ * 让镜头、BGM 停顿、动作与声演峰值精准落在计划转折点上，而不是平均铺满全篇。
+ */
+function formatDirectingAnchorBlock(plan: StagedCastPlan): string {
+  const u = plan.understanding
+  if (!u) return ''
+  const lines: string[] = []
+  if (u.turningPoint) {
+    lines.push(`- 中段转折点（镜头/BGM/停顿/动作与声演峰值优先落在这里）：${u.turningPoint}`)
+  }
+  if (u.openingMotif) lines.push(`- 开场日常意象（前 1~4 句具体出现）：${u.openingMotif}`)
+  if (u.closingCallback) {
+    lines.push(`- 收尾回扣（结尾 2~3 句轻巧呼应，不要升华说教）：${u.closingCallback}`)
+  }
+  if (u.explicitRequests.length > 0) {
+    lines.push(`- 用户显性诉求（必须演到位）：${u.explicitRequests.join('；')}`)
+  }
+  if (u.emotionalArc) lines.push(`- 整体情绪弧光：${u.emotionalArc}`)
+  return lines.length > 0 ? `\n## 导演锚点（Stage 1 已规划，务必对齐）\n${lines.join('\n')}\n` : ''
+}
+
+function formatWorldviewCueBlock(ragContext?: RagRetrieveResult | null): string {
+  const lore = ragContext?.sections?.worldviewLore ?? []
+  if (lore.length === 0) return ''
+  const compact = lore
+    .slice(0, 3)
+    .map((item) => item.text.slice(0, 260).trim())
+    .filter(Boolean)
+    .join('\n')
+  return compact ? `\n## 场景与设定补充线索（仅用于核对环境/道具/氛围）\n${compact}\n` : ''
+}
+
 export function buildDialoguePrompt(
   view: CatalogView,
   plan: StagedCastPlan,
@@ -1305,7 +1676,36 @@ export function buildDialoguePrompt(
     ? plan.outline.map((item, index) => `${index + 1}. ${item}`).join('\n')
     : '（自由发挥，但仍要围绕这个小事件）'
 
-  const fewShotExcerpts = selectUnitFewShotExcerpts(plan.cast, options.scene)
+  const hasRagVoice = (options.ragContext?.sections?.dialogueVoice?.length ?? 0) > 0
+  const u = plan.understanding
+  const craftAnchors = [
+    u?.openingMotif
+      ? `  - 开场意象：前 1~4 句让「${u.openingMotif}」以具体的动作、声音或触感出现，让这个物件先替角色承载情绪，不要用台词解释它。`
+      : '',
+    u?.turningPoint
+      ? `  - 中段转折：在「${u.turningPoint}」这一拍让语气或话题真正拐弯（抢话、突然安静、答非所问、说出真心话又马上岔开），转折前后各留一句短反应。`
+      : '',
+    u?.closingCallback
+      ? `  - 收尾回扣：结尾 2~3 句用「${u.closingCallback}」轻巧呼应开场意象，说完就收，不做总结陈词。`
+      : '',
+    (u?.characterGoals?.length ?? 0) > 0
+      ? `  - 表里动机：${(u?.characterGoals ?? [])
+          .map((goal) => `${goal.cast || '角色'}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`)
+          .join('；')}。隐瞒的部分只能从停顿、改口、转移话题里漏出来。`
+      : ''
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  const fewShotExcerpts = hasRagVoice ? '' : selectUnitFewShotExcerpts(plan.cast, options.scene)
+  const groundingBrief = formatCanonGroundingBrief({
+    scene: options.scene,
+    plan,
+    ragContext: options.ragContext,
+    stage: 'dialogue',
+    maxChars: 2600
+  })
+  const addressBlock = formatPairwiseAddressBlock(plan)
   const hasWxs = plan.cast.some((c) =>
     /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`)
   )
@@ -1377,15 +1777,19 @@ ${plan.background ? `开场背景：${plan.background}` : ''}
 出场角色（共 ${plan.cast.length} 名）：
 ${castBlock(plan)}
 
-${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}## 大纲（参考，不必逐条对应）
+${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}${groundingBrief}${addressBlock}## 大纲（参考，不必逐条对应）
 ${outline}
 
 ## 角色（请完整阅读每个人的提示词）
 ${castLines}
-
-## 官方团体语料参考（学习断句、短反应、句中 \\n 位置与语气停顿，勿照抄剧情）
+${
+  fewShotExcerpts
+    ? `
+## 官方对白节奏样例（只学习称呼、断句、停顿、换行与互动节奏，严禁照抄原句或复述原事件）
 ${fewShotExcerpts}
-
+`
+    : ''
+}
 ## 台词要求（按 ${budget} 句的场次计算）
 - 语言：中文；总共 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句（目标约 ${budget} 句）；
   少于 ${Math.max(12, Math.round(budget * 0.88))} 句或超过 ${Math.round(budget * 1.08)} 句都视为不合格。
@@ -1393,12 +1797,17 @@ ${fewShotExcerpts}
   lines 元素优先直接写字符串；需要刻意沉默/转场收窗时可写成对象 \`{"content":"...","pauseBefore":1.0,"closeWindowAfter":true}\`（pauseBefore 仅在重大停顿或反应前用 \`1.0\` 或 \`1.5\`，其余句留空即 \`0\`）。
   整场约 ${Math.max(8, Math.round(budget / 2.1))} 个 turns，长短要有明显起伏（官方一半以上是单句）：
   约 45% 的 turn 只放 1 条（短反应、抢话、被打断），至少 ${Math.max(10, Math.round(budget * 0.4))} 个；
-  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~6 条，其中至少 2 个 turn 放 6 条以上（情绪最重、回忆或解释处）。
+  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~5 条，只有情绪最重或回忆处才允许写成 5~6 条的稍长一段（全片 1~2 处即可，禁止连排长独白）。
 - 句长与排版（对应官方 30 字宽文本框）：
   - 平均 17~20 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
   - 约 1/6 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
 - 标点：至少 ${Math.max(8, Math.round(budget * 0.5))} 句带省略号或破折号；问句约 1/5；感叹号约 1/6，不要超过 1/4。
-- 只写说出口的话或括号内心独白 \`（……）\`（约一成）；禁止写 \`（笑）\`、\`她转过头\` 之类动作叙述。${termHint}
+- 只写说出口的话或括号内心独白 \`（……）\`（约一成）；禁止写 \`（笑）\`、\`她转过头\` 之类动作叙述。
+- **反套路与官方质感（Show, Don't Tell）**：
+  - 禁止心理咨询式独白和直白情绪总结（如「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「我终于明白了」「内心深处」）。用具体物件、转移话题、打断、迟疑停顿（……、——）来侧面流露情绪。
+  - 结尾最后 2 句严禁升华说教或大团圆总结；像官方剧情一样收在一个安静的动作余韵、日常小约定、轻描淡写的吐槽或未说完的半句话里。
+  - 角色化学反应：允许抢话、听错、各说各的再重新对上、用口头禅或小名互怼；不要每句都接得严丝合缝像在念对白稿。
+  - 欲言又止：全片至少 3~4 处把话说到一半改成破折号或省略号，或先答非所问再绕回来。${craftAnchors ? `\n${craftAnchors}` : ''}${termHint}
 
 ## 写完后自检（不要输出自检过程）
 - 总句数是否在 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句？
@@ -1642,7 +2051,8 @@ export function condenseDialogue(dialogue: StagedDialogue, targetLines: number):
 }
 
 // ---------------------------------------------------------------------------
-// 第二段半：情绪分段（保留 5~10 句低频切段，守护 Irodori 音色一致性）
+// ---------------------------------------------------------------------------
+// 第二段半：语音导演（双层情绪控制：常规音色锁 + 逐句日语韵律描述 + 特殊高潮解锁）
 // ---------------------------------------------------------------------------
 
 export interface StagedEmotionSegment {
@@ -1651,13 +2061,32 @@ export interface StagedEmotionSegment {
   emotion: string
 }
 
+export interface StagedVoiceDirectionLine {
+  emotion: string
+  ttsCaption?: string
+  ttsSpeed?: number
+  ttsSpecialScene?: boolean
+}
+
+const VOICE_NORMAL_SPEED_MIN = 0.92
+const VOICE_NORMAL_SPEED_MAX = 1.08
+const VOICE_SPECIAL_SPEED_MIN = 0.85
+const VOICE_SPECIAL_SPEED_MAX = 1.18
+const VOICE_SPECIAL_SCENE_MAX_RATIO = 0.15
+
+const clampVoiceSpeed = (value: number, special: boolean): number =>
+  Math.min(
+    special ? VOICE_SPECIAL_SPEED_MAX : VOICE_NORMAL_SPEED_MAX,
+    Math.max(special ? VOICE_SPECIAL_SPEED_MIN : VOICE_NORMAL_SPEED_MIN, value)
+  )
+
 export function buildEmotionPrompt(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
   options: StagedPromptOptions
 ): StagedMessages {
   const labels = (options.emotionLabels ?? []).map((label) => label.trim()).filter(Boolean)
-  const defaultEmotion = labels.includes('平静') ? '平静' : labels[0]
+  const defaultEmotion = labels.includes('平静') ? '平静' : (labels[0] ?? '平静')
   const strongLabels = labels.filter((label) => label !== defaultEmotion)
   const lineLines = dialogue.lines
     .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
@@ -1667,26 +2096,39 @@ export function buildEmotionPrompt(
     .map((member) => `- ${member.name}：${member.role || '出场角色'}`)
     .join('\n')
 
-  const mid = Math.max(2, Math.floor(dialogue.lines.length * 0.45))
-  const late = Math.max(
-    mid + 1,
-    Math.min(dialogue.lines.length, Math.floor(dialogue.lines.length * 0.78))
-  )
-  const endId = dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'
+  const firstId = dialogue.lines[0]?.id ?? 'l1'
+  const secondId = dialogue.lines[1]?.id ?? firstId
+  const lastId = dialogue.lines[dialogue.lines.length - 1]?.id ?? firstId
+  const maxSpecialCount = Math.floor(dialogue.lines.length * VOICE_SPECIAL_SCENE_MAX_RATIO)
+
   const example = {
-    segments: [
-      { from: 'l1', to: `l${Math.max(1, mid - 1)}`, emotion: defaultEmotion },
+    lines: [
       {
-        from: `l${mid}`,
-        to: `l${Math.max(mid, late - 1)}`,
-        emotion: strongLabels[0] ?? defaultEmotion
+        id: firstId,
+        emotion: defaultEmotion,
+        ttsCaption: '少し落ち着かない様子で、柔らかい口調ながら控えめに話している。',
+        ttsSpeed: 0.98,
+        ttsSpecialScene: false
       },
-      ...(dialogue.lines.length >= 6
+      ...(secondId !== firstId
         ? [
             {
-              from: `l${late}`,
-              to: endId,
-              emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion
+              id: secondId,
+              emotion: strongLabels[0] ?? defaultEmotion,
+              ttsCaption: '少し照れながら、早口で慌てたように話している。',
+              ttsSpeed: 1.05,
+              ttsSpecialScene: false
+            }
+          ]
+        : []),
+      ...(dialogue.lines.length >= 7
+        ? [
+            {
+              id: lastId,
+              emotion: strongLabels[1] ?? strongLabels[0] ?? defaultEmotion,
+              ttsCaption: '声を震わせながら、今にも泣き出しそうな切実なトーンで訴えかける。',
+              ttsSpeed: 0.9,
+              ttsSpecialScene: true
             }
           ]
         : [])
@@ -1695,9 +2137,13 @@ export function buildEmotionPrompt(
 
   return {
     system: [
-      '你是 Project SEKAI 官方剧情的配音情绪标注员。',
-      '台词已经定稿，你只做一件事：顺着剧情起承转合把整场台词划成情绪段，每段给一个最贴合语境的 TTS 情绪标签。',
-      'TTS 切换情绪会切换参考音频，因此同一情绪拍内保持连贯，不要每句乱跳；但遇到真正的情感转折、哭诉或释怀收尾时，必须忠实标出对应情绪。只输出一个 JSON 对象。',
+      '你是 Project SEKAI 官方剧情的配音导演兼情绪标注员（Voice Director），负责为 IrodoriTTS 生成逐句情绪标签与日语表演韵律指令。',
+      '台词已经定稿，你必须为每一句台词输出 { id, emotion, ttsCaption, ttsSpeed, ttsSpecialScene }。',
+      '核心原则（双层音色保护）：',
+      '1. 普通台词保持角色基础参考音频锁定，靠精细的日语 ttsCaption（语气、呼吸、语速、停顿、情感张力）与轻微语速变化表达细腻表演，绝不改变角色音色底色。',
+      '2. ttsCaption 必须严格只写表演与韵律（2~4 个简短日语短语），严禁出现任何年龄/性别/基础声线词（如「若い女性」「少女」「少年」「低い声」「高い声」「幼い声」「アニメ声」「ロリ」等），否则会与角色 LoRA/参考音频冲突。',
+      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；遇到情绪高潮、哭诉、喊叫、耳语或崩溃时忠实标注真实情绪。',
+      '4. ttsSpecialScene 仅用于全片真正的高潮爆发/哭喊/哽咽/耳语/回忆转折（占比严格 <= 15%）。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
       .filter(Boolean)
@@ -1705,27 +2151,36 @@ export function buildEmotionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
+${formatDirectingAnchorBlock(plan)}
 角色：
 ${cast}
 
-## 台词稿（逐字，只用来判断情绪）
+## 台词稿（共 ${dialogue.lines.length} 句，请逐句给出语音导演指令）
 ${lineLines}
 
-## 情绪标签（只能从中选）
-${labels.join('、')}
+## 粗情绪标签（emotion 字段只能从中选）
+${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、害羞、惊讶'}
 
-## 标注规则
-- **按戏剧节拍（起承转合）划分**：通常同一情绪拍连续覆盖 3~10 句，避免逐句 A/B 来回震荡；但**绝不**强凑段数或硬塞配额。
-- **忠实贴合真情实感（不要被机械配额扭曲）**：
-  - 平静：日常寒暄、温和叙述、冷静思考；不必强行凑够固定比例，如果结尾已经是释怀/欢快（如带「～♪」、互相打趣、和好约定），末尾完全可以用「开心」，不要硬压回「平静」。
-  - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾。
-  - 伤心：失落、脆弱倾诉、愧疚、带泪恳求（例如吵架后的含泪挽留「别再把我推开了」应转入「伤心」，不要锁死在「生气」里）。
-  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问。
+## 逐句语音导演规则
+- **覆盖全部台词**：从 ${firstId} 到 ${lastId} 每一句都给出一项，不要漏句。
+- **emotion（粗情绪族）**：
+  - 平静：仅用于日常寒暄、温和叙述、冷静思考。**绝不要**把喊人（「瑞希っ！」）、含泪道歉（「对不起」「ごめんね」）、哽咽（「可是……可是……！」）或激动呐喊错标为「平静」。
+  - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
+  - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求。
+  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊。
   - 害羞：被夸、慌张掩饰、不好意思。
-  - 惊讶：突然的揭示、意外或惊呼。
-- **冲突场景允许不同情绪交接**：当两人情绪明显不同步（例如一人质问「生气」，另一人退缩或恳求「伤心」），可以按节拍或关键转折切段，只要同一说话人不出现无意义的逐句反复横跳。
-- **高潮/尾声短转折保留**：关键的 2~3 句含泪恳求或 2~4 句欢快尾声可以独立成段，不必强行拉长或吞并。
-- 情绪段必须从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${endId}，不重叠、不遗漏。
+  - 惊讶：突然的揭示、意外、倒吸一口气或惊呼。
+  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动；遇到真正的情感转折、哭诉或欢快收尾时忠实切换。
+- **ttsCaption（日语表演/韵律描述，必填）**：
+  - 用 2~4 个自然日语短语描述**语气、呼吸感、语速、停顿、强弱与情绪层次**（例如：「安堵して、柔らかく温かい口調でゆっくり話している。」「息を切らしながら、切羽詰まった様子で必死に呼びかける。」）。
+  - **严禁描述说话人的年龄、性别或基础音色**（禁止出现 若い女性/大人の女性/少女/少年/男の子/女の子/低い声/高い声/幼い声/アニメ声 等词）。
+- **ttsSpeed（可选语速微调）**：
+  - 普通句（ttsSpecialScene=false）：范围 **0.92 ~ 1.08**（犹豫/温柔/沉重略慢 0.92~0.97，轻快/慌张/急促略快 1.03~1.08）。
+  - 特殊高潮句（ttsSpecialScene=true）：范围 **0.85 ~ 1.18**。
+- **ttsSpecialScene（布尔值，默认 false）**：
+  - 仅在真正极端高潮（痛哭/哽咽崩溃、撕裂喊叫、极近距离耳语、关键回忆爆发）时设为 true。
+  - 整场最多允许 **${maxSpecialCount}** 句设为 true（严格 <= 15%）。
+- **对齐 Stage 1 转折点**：语速最慢、气息最不稳、\`ttsSpecialScene=true\` 的句子优先落在中段转折点附近；开场意象句与收尾回扣句保持克制（普通语速、平静或轻微情绪），不要提前把情绪拉满。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -1742,50 +2197,151 @@ const emotionIndex = (value: unknown, lines: StagedDialogueLine[]): number => {
   return lines.findIndex((line) => line.id === text)
 }
 
-export function normalizeEmotionPlan(
+function specialScenePriority(line: StagedDialogueLine, entry: StagedVoiceDirectionLine): number {
+  let score = 0
+  if (entry.emotion && entry.emotion !== '平静') score += 2
+  if (entry.emotion === '伤心' || entry.emotion === '生气') score += 2
+  if (/！！|!!|？！|\?!/.test(line.content)) score += 3
+  if (/对不起|别.*推开|不要.*走|求你|眼泪|哭|ごめん|ダメ|やめて/.test(line.content)) score += 3
+  const caption = entry.ttsCaption ?? ''
+  if (/泣|嗚咽|叫|囁|震え|切実|必死|崩|絶叫|息を切ら/.test(caption)) score += 3
+  return score
+}
+
+/**
+ * 解析并规范化 Stage 2.5 语音导演输出。
+ * 同时兼容新版逐句格式（`lines: [{ id, emotion, ttsCaption, ttsSpeed, ttsSpecialScene }]`）
+ * 与旧版分段格式（`segments: [{ from, to, emotion }]`）。
+ * 确定性执行：caption 清洗、语速钳制、`ttsSpecialScene <= 15%` 上限。
+ */
+export function normalizeVoiceDirectionPlan(
   raw: unknown,
   dialogue: StagedDialogue,
   labels: string[]
-): Map<string, string> | null {
+): Map<string, StagedVoiceDirectionLine> | null {
   const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
-  if (allowed.size === 0) return null
   const doc = isRecord(raw) ? raw : {}
-  const segmentsRaw = Array.isArray(raw)
+  const itemsRaw = Array.isArray(raw)
     ? raw
-    : Array.isArray(doc.segments)
-      ? doc.segments
-      : Array.isArray(doc.emotions)
-        ? doc.emotions
-        : []
+    : Array.isArray(doc.lines)
+      ? doc.lines
+      : Array.isArray(doc.voiceDirection)
+        ? doc.voiceDirection
+        : Array.isArray(doc.segments)
+          ? doc.segments
+          : Array.isArray(doc.emotions)
+            ? doc.emotions
+            : []
 
-  const result = new Map<string, string>()
-  for (const item of segmentsRaw) {
+  const result = new Map<string, StagedVoiceDirectionLine>()
+  const putEntry = (
+    line: StagedDialogueLine,
+    item: Record<string, unknown>,
+    emotion: string
+  ): void => {
+    const rawCaption = str(item.ttsCaption ?? item.caption ?? item.delivery).trim()
+    const ttsCaption = sanitizeIrodoriCaption(rawCaption) || undefined
+    const ttsSpecialScene =
+      typeof item.ttsSpecialScene === 'boolean'
+        ? item.ttsSpecialScene
+        : typeof item.specialScene === 'boolean'
+          ? item.specialScene
+          : false
+    const rawSpeed = item.ttsSpeed ?? item.speed
+    const parsedSpeed =
+      typeof rawSpeed === 'number' && Number.isFinite(rawSpeed)
+        ? rawSpeed
+        : typeof rawSpeed === 'string' && rawSpeed.trim() && Number.isFinite(Number(rawSpeed))
+          ? Number(rawSpeed)
+          : undefined
+    const ttsSpeed =
+      parsedSpeed !== undefined ? Number(clampVoiceSpeed(parsedSpeed, ttsSpecialScene).toFixed(2)) : undefined
+
+    result.set(line.id, {
+      emotion,
+      ...(ttsCaption ? { ttsCaption } : {}),
+      ...(ttsSpeed !== undefined ? { ttsSpeed } : {}),
+      ...(ttsSpecialScene ? { ttsSpecialScene: true } : {})
+    })
+  }
+
+  for (const item of itemsRaw) {
     if (typeof item === 'string') continue
     if (!isRecord(item)) continue
-    const emotion = str(item.emotion ?? item.label ?? item.tone).trim()
-    if (!allowed.has(emotion)) continue
+    const rawEmotion = str(item.emotion ?? item.label ?? item.tone).trim()
+    const validEmotion = allowed.size === 0 ? rawEmotion : allowed.has(rawEmotion) ? rawEmotion : ''
+    const hasRichFields = Boolean(str(item.ttsCaption ?? item.caption ?? item.delivery).trim())
+    if (!validEmotion && !hasRichFields) continue
+
     if (item.from !== undefined || item.to !== undefined) {
       const from = emotionIndex(item.from, dialogue.lines)
       const to = emotionIndex(item.to, dialogue.lines)
       if (from < 0 || to < 0 || to < from) continue
       for (let index = from; index <= Math.min(to, dialogue.lines.length - 1); index++) {
-        result.set(dialogue.lines[index].id, emotion)
+        putEntry(dialogue.lines[index], item, validEmotion)
       }
       continue
     }
     const id = str(item.id ?? item.lineId ?? item.line).trim()
     const index = emotionIndex(id, dialogue.lines)
-    if (index >= 0) result.set(dialogue.lines[index].id, emotion)
+    if (index >= 0) {
+      putEntry(dialogue.lines[index], item, validEmotion)
+    }
+  }
+
+  if (result.size < Math.ceil(dialogue.lines.length * 0.6)) return null
+
+  // 确定性限制 ttsSpecialScene 比例 <= 15%
+  const maxSpecial = Math.floor(dialogue.lines.length * VOICE_SPECIAL_SCENE_MAX_RATIO)
+  const specialCandidates: Array<{ id: string; priority: number; index: number }> = []
+  dialogue.lines.forEach((line, index) => {
+    const entry = result.get(line.id)
+    if (entry?.ttsSpecialScene) {
+      specialCandidates.push({ id: line.id, priority: specialScenePriority(line, entry), index })
+    }
+  })
+  if (specialCandidates.length > maxSpecial) {
+    specialCandidates.sort((a, b) => b.priority - a.priority || a.index - b.index)
+    const keepIds = new Set(specialCandidates.slice(0, maxSpecial).map((c) => c.id))
+    for (const candidate of specialCandidates) {
+      if (keepIds.has(candidate.id)) continue
+      const entry = result.get(candidate.id)
+      if (!entry) continue
+      delete entry.ttsSpecialScene
+      if (entry.ttsSpeed !== undefined) {
+        entry.ttsSpeed = Number(clampVoiceSpeed(entry.ttsSpeed, false).toFixed(2))
+      }
+    }
+  }
+
+  return result
+}
+
+export function normalizeEmotionPlan(
+  raw: unknown,
+  dialogue: StagedDialogue,
+  labels: string[]
+): Map<string, string> | null {
+  if (labels.map((label) => label.trim()).filter(Boolean).length === 0) return null
+  const voicePlan = normalizeVoiceDirectionPlan(raw, dialogue, labels)
+  if (!voicePlan) return null
+  const result = new Map<string, string>()
+  for (const [id, entry] of voicePlan) {
+    if (entry.emotion) result.set(id, entry.emotion)
   }
   if (result.size < Math.ceil(dialogue.lines.length * 0.6)) return null
   return result
 }
 
-export function countEmotionRuns(plan: Map<string, string>, dialogue: StagedDialogue): number {
+export function countEmotionRuns(
+  plan: Map<string, string> | Map<string, StagedVoiceDirectionLine>,
+  dialogue: StagedDialogue
+): number {
   let runs = 0
   let previous = ''
   for (const line of dialogue.lines) {
-    const emotion = plan.get(line.id) ?? ''
+    const value = plan.get(line.id)
+    const emotion = typeof value === 'string' ? value : (value?.emotion ?? '')
     if (emotion && emotion !== previous) {
       runs += 1
       previous = emotion
@@ -1806,7 +2362,7 @@ export function buildEmotionRepairPrompt(
   return {
     system: base.system,
     user: `${base.user}\n\n## 上一轮的问题
-上一轮整场只给了 ${actualSegments} 个单一情绪标签，长剧本完全没有情绪推进。请按剧情起承转合划分成自然的 2~5 个连续情绪段（保留关键转折、哭诉或欢快收尾，不要逐句跳变），并从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
+上一轮整场只给了 ${actualSegments} 个单一情绪标签，长剧本完全没有情绪推进。请按剧情起承转合给出逐句语音导演指令（emotion 体现自然的情绪起承转合，保留关键转折、哭诉或欢快收尾，同时每句都提供贴合的日语 ttsCaption），并从 ${dialogue.lines[0]?.id ?? 'l1'} 连续覆盖到 ${dialogue.lines[dialogue.lines.length - 1]?.id ?? 'l1'}。
 上一轮的输出开头如下：
 ${raw.slice(0, 3000)}
 
@@ -1815,9 +2371,10 @@ ${raw.slice(0, 3000)}
 }
 
 const isEmotionPivotCue = (text: string, emotion: string): boolean => {
-  if (emotion === '开心') return /♪|～♪|哈哈|太好了/.test(text)
-  if (emotion === '伤心') return /对不起|别.*推开|不要.*走|求你|眼泪|哭/.test(text)
-  if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然/.test(text)
+  if (emotion === '开心') return /♪|～♪|哈哈|太好了|よかった/.test(text)
+  if (emotion === '伤心') return /对不起|ごめん|别.*推开|不要.*走|求你|眼泪|哭|ダメ|呜/.test(text)
+  if (emotion === '生气') return /！！|!!|住口|够了|混蛋|やめろ|ふざけ/.test(text)
+  if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然|っ！|……！/.test(text)
   return false
 }
 
@@ -1908,17 +2465,218 @@ export function stabilizeEmotions(
   return result
 }
 
-export function applyEmotionPlan(
+export function applyVoiceDirectionPlan(
   dialogue: StagedDialogue,
-  plan: Map<string, string> | null,
+  plan: Map<string, StagedVoiceDirectionLine> | null,
   labels: string[]
 ): StagedDialogue {
   const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
+  const rawEmotions = new Map<string, string>()
+  if (plan) {
+    for (const [id, entry] of plan) {
+      if (entry.emotion) rawEmotions.set(id, entry.emotion)
+    }
+  }
+  const stableEmotions =
+    plan && allowed.size > 0 ? stabilizeEmotions(dialogue, rawEmotions, labels) : null
+
   return {
     ...dialogue,
     lines: dialogue.lines.map((line) => {
-      const emotion = plan?.get(line.id) ?? ''
+      const entry = plan?.get(line.id)
+      const emotion = stableEmotions?.get(line.id) ?? entry?.emotion ?? ''
+      const finalEmotion = allowed.size === 0 ? emotion : allowed.has(emotion) ? emotion : ''
+      const ttsCaption = entry?.ttsCaption ? sanitizeIrodoriCaption(entry.ttsCaption) : ''
+      const ttsSpecialScene = Boolean(entry?.ttsSpecialScene)
+      const ttsSpeed =
+        typeof entry?.ttsSpeed === 'number' && Number.isFinite(entry.ttsSpeed)
+          ? Number(clampVoiceSpeed(entry.ttsSpeed, ttsSpecialScene).toFixed(2))
+          : undefined
+      return {
+        ...line,
+        emotion: finalEmotion,
+        ...(ttsCaption ? { ttsCaption } : {}),
+        ...(ttsSpeed !== undefined ? { ttsSpeed } : {}),
+        ...(ttsSpecialScene ? { ttsSpecialScene: true } : {})
+      }
+    })
+  }
+}
+
+export function applyEmotionPlan(
+  dialogue: StagedDialogue,
+  plan: Map<string, string> | Map<string, StagedVoiceDirectionLine> | null,
+  labels: string[]
+): StagedDialogue {
+  if (!plan) {
+    return {
+      ...dialogue,
+      lines: dialogue.lines.map((line) => ({ ...line, emotion: '' }))
+    }
+  }
+  const firstValue = plan.values().next().value
+  if (firstValue && typeof firstValue === 'object') {
+    return applyVoiceDirectionPlan(
+      dialogue,
+      plan as Map<string, StagedVoiceDirectionLine>,
+      labels
+    )
+  }
+  const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
+  const strPlan = plan as Map<string, string>
+  return {
+    ...dialogue,
+    lines: dialogue.lines.map((line) => {
+      const emotion = strPlan.get(line.id) ?? ''
       return allowed.has(emotion) ? { ...line, emotion } : { ...line, emotion: '' }
+    })
+  }
+}
+
+export interface DialoguePolishOptions {
+  /** 用户原始提示词：外科润色时绝不能丢掉原始诉求 */
+  scene?: string
+  /** 用来把说话者的人设口吻带进润色（可选） */
+  view?: CatalogView
+  personas?: PersonaEntry[]
+  ragContext?: RagRetrieveResult | null
+}
+
+/** 只给被点名改写的说话者一小段口吻基线，避免润色把所有人改成同一种语气。 */
+function formatSpeakerVoiceBlock(
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  flaggedIds: string[],
+  options: DialoguePolishOptions
+): string {
+  if (!options.view || !options.personas || options.personas.length === 0) return ''
+  const flagged = new Set(flaggedIds)
+  const speakers = new Set(
+    dialogue.lines.filter((line) => flagged.has(line.id)).map((line) => line.speaker)
+  )
+  const rows: string[] = []
+  for (const name of speakers) {
+    const member = plan.cast.find((entry) => entry.name === name)
+    if (!member) continue
+    const model = options.view.modelById(member.modelId)
+    const persona = model ? personaFor(options.personas, model) : null
+    const prompt = dialoguePersonaPrompt(persona).replace(/\s+/g, ' ').trim()
+    if (!prompt) continue
+    rows.push(`- ${name}：${prompt.slice(0, 420)}`)
+  }
+  return rows.length > 0
+    ? `## 说话者口吻基线（改写必须保持这个人说话的样子）\n${rows.join('\n')}\n\n`
+    : ''
+}
+
+export function buildDialoguePolishPrompt(
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  issues: DialogueLintIssue[],
+  options: DialoguePolishOptions = {}
+): StagedMessages {
+  const flaggedIds = Array.from(new Set(issues.map((i) => i.lineId)))
+  const issueMap = new Map<string, string[]>()
+  for (const issue of issues) {
+    const list = issueMap.get(issue.lineId) ?? []
+    list.push(issue.message)
+    issueMap.set(issue.lineId, list)
+  }
+
+  const lineBlocks = flaggedIds
+    .map((id) => {
+      const idx = dialogue.lines.findIndex((l) => l.id === id)
+      if (idx < 0) return ''
+      const prev = idx > 0 ? dialogue.lines[idx - 1] : null
+      const curr = dialogue.lines[idx]
+      const next = idx + 1 < dialogue.lines.length ? dialogue.lines[idx + 1] : null
+      const reasons = (issueMap.get(id) ?? []).join('；')
+      return [
+        `### 目标句 ${curr.id}（${curr.speaker}）`,
+        prev ? `前一句（${prev.speaker}）：${prev.content.replace(/\n/g, ' / ')}` : '',
+        `原句：${curr.content.replace(/\n/g, ' / ')}`,
+        next ? `后一句（${next.speaker}）：${next.content.replace(/\n/g, ' / ')}` : '',
+        `问题：${reasons}`
+      ]
+        .filter(Boolean)
+        .join('\n')
+    })
+    .filter(Boolean)
+    .join('\n\n')
+
+  const addressBlock = formatPairwiseAddressBlock(plan)
+  const anchorBlock = formatDirectingAnchorBlock(plan)
+  const userPrompt = packExcerptsCleanly([options.scene ?? ''], 900)
+  const speakerVoiceBlock = formatSpeakerVoiceBlock(plan, dialogue, flaggedIds, options)
+  const voiceSamples = packExcerptsCleanly(options.ragContext?.sections?.dialogueVoice ?? [], 900)
+  const example = {
+    replacements: flaggedIds.slice(0, 2).map((id) => ({
+      id,
+      content: '改写后的自然口语台词（不含动作旁白）'
+    }))
+  }
+
+  return {
+    system: [
+      '你是 Project SEKAI 官方剧情的台词精修编辑（dialogue-polish）。',
+      '只做外科手术式逐句改写：仅改写下方点名的问题句，保持原意、角色口吻与字数规模，不增删句子，不改说话人。只输出一个 JSON 对象。'
+    ].join('\n'),
+    user: `${anchorBlock}${addressBlock}${
+      userPrompt ? `## 用户原始需求\n${userPrompt}\n\n` : ''
+    }${speakerVoiceBlock}${
+      voiceSamples
+        ? `## 官方口吻参照（只学称呼、断句、停顿与潜台词，严禁照抄原句）\n${voiceSamples}\n\n`
+        : ''
+    }## 需要改写的问题句
+${lineBlocks}
+
+## 改写要求
+- 仅输出 \`replacements\` 数组，每项含 \`id\` 与改写后的 \`content\`。
+- 去掉 AI 心理咨询套话、动作旁白与说教总结，改用具体细节、停顿（……、——）或侧面回应表达。
+- 保持该说话者的语感（口头禅、句尾习惯、称呼方式）；不要把所有人都改成同一种温和口吻。
+- 若问题写着「用户明确要求」或「官方钩子」，就把缺失的人/物/事自然带进这一句（用具体名词，不要另起一段解释）。
+- 若问题是结尾说教，就用开场意象或日常小约定轻巧回扣，不作总结陈词。
+- 严格遵守称呼表，每行不超过 30 字宽，最多 3 行。
+
+## 输出 JSON
+${JSON.stringify(example, null, 2)}
+
+只输出 JSON 对象本身，不要 markdown 或解释。`
+  }
+}
+
+export function applyDialoguePolish(
+  dialogue: StagedDialogue,
+  raw: unknown,
+  allowedIds: Set<string>
+): StagedDialogue {
+  const doc = isRecord(raw) ? raw : {}
+  const list = Array.isArray(raw)
+    ? raw
+    : Array.isArray(doc.replacements)
+      ? doc.replacements
+      : Array.isArray(doc.lines)
+        ? doc.lines
+        : []
+
+  const replacementMap = new Map<string, string>()
+  for (const item of list) {
+    if (!isRecord(item)) continue
+    const id = str(item.id ?? item.lineId).trim()
+    if (!id || !allowedIds.has(id)) continue
+    const content = normalizePjskTerminology(
+      str(item.content ?? item.text ?? item.line).replace(/\\n/g, '\n').trim()
+    )
+    if (!content) continue
+    replacementMap.set(id, content)
+  }
+  if (replacementMap.size === 0) return dialogue
+
+  return {
+    ...dialogue,
+    lines: dialogue.lines.map((line) => {
+      const updated = replacementMap.get(line.id)
+      return updated ? { ...line, content: updated } : line
     })
   }
 }
@@ -2069,8 +2827,9 @@ export function buildStagingPrompt(
       .join('\n'),
     user: `## 本场与大纲
 小事件：${plan.event || options.scene}
+${formatDirectingAnchorBlock(plan)}
 角色（共 ${plan.cast.length} 名）：
-${castList}
+${castList}${formatWorldviewCueBlock(options.ragContext)}
 
 ${plannedScenes ? `## 一阶段分幕参考\n${plannedScenes}\n` : ''}## 定稿台词（仅引用 lineId）
 ${lineList}
@@ -2094,6 +2853,7 @@ ${presenceRule}
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与场景**：可选 \`Telop\`（开场/跳时间小标题）、\`PlaceInfo\`（地点条）、\`SideFade\`（\`transitionIn: "sideFade"\`）、回忆（\`transitionIn: "flashback"\`, \`isFlashback: true\`）、出入 SEKAI（\`sekaiIn\`/\`sekaiOut\`）、天气/氛围粒子（${CURATED_SCENARIO_EFFECTS.join('/')}）。
 - **BGM 与停顿节奏**：大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
+- **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -2615,6 +3375,8 @@ export function buildDirectionPrompt(
       appearedBefore.add(line.speaker)
       const ctxTags = [
         line.emotion ? `〔${line.emotion}〕` : '',
+        line.ttsCaption ? `[声演:${line.ttsCaption}]` : '',
+        line.ttsSpecialScene ? '[高潮]' : '',
         scene
           ? `[${scene.id}${scene.isFlashback ? '/回忆' : ''}${scene.ambient !== 'normal' ? `/${scene.ambient}` : ''}]`
           : '',
@@ -2704,8 +3466,9 @@ export function buildDirectionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
+${formatDirectingAnchorBlock(plan)}
 出场角色：
-${castLines}
+${castLines}${formatWorldviewCueBlock(options.ragContext)}
 
 ## 台词稿（逐字，只能引用 id，不能改字）
 ${dialogueLines}
@@ -4302,6 +5065,9 @@ export function composeStory(
         content: line.content,
         ttsText: line.ttsText ?? '',
         emotion: line.emotion ?? '',
+        ...(line.ttsCaption ? { ttsCaption: line.ttsCaption } : {}),
+        ...(typeof line.ttsSpeed === 'number' ? { ttsSpeed: line.ttsSpeed } : {}),
+        ...(line.ttsSpecialScene ? { ttsSpecialScene: true } : {}),
         modelId: member.modelId,
         ...(closeAfter ? { closeWindowOnFinish: true } : {}),
         ...(actions.length > 0 ? { actions } : {})

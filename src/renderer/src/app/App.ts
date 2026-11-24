@@ -61,6 +61,11 @@ export interface ApiExportTtsConfig {
     seed: number
     defaultLoraAdapter: string
     defaultCaption: string
+    speakerKvScale?: number
+    speakerKvMinT?: number
+    speakerKvMaxLayers?: number
+    timbreLockMode?: 'normal' | 'off'
+    specialSceneCfgScaleCaption?: number
   }
   characters: Array<{
     characterName: string

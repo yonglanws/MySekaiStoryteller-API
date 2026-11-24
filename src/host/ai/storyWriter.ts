@@ -6,9 +6,11 @@ import { extractJson, LlmClient, type ChatMessage, type ChatResult, type ChatUsa
 import { loadPersonas, type PersonaEntry } from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
-  applyEmotionPlan,
+  applyDialoguePolish,
+  applyVoiceDirectionPlan,
   buildCastPrompt,
   buildDialoguePrompt,
+  buildDialoguePolishPrompt,
   buildDialogueRepairPrompt,
   buildDialogueLengthPrompt,
   buildDirectionPrompt,
@@ -27,20 +29,27 @@ import {
   normalizeCastPlan,
   normalizeDialogue,
   normalizeDirection,
-  normalizeEmotionPlan,
+  normalizeVoiceDirectionPlan,
   normalizeStaging,
   softenPunctuation,
-  stabilizeEmotions,
   type LlmPipeline,
   type StagedCastPlan,
   type StagedDialogue,
   type StagedDirection,
   type StagedMessages,
+  type StagedPairwiseAddress,
   type StagedPromptOptions,
-  type StagedStaging
+  type StagedStaging,
+  type StagedVoiceDirectionLine
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
-import { ensureJapaneseTtsText, type TtsBatchTranslator } from './ttsText'
+import { lintDialogueFidelity } from './dialogueLinter'
+import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
+import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
+import { RerankClient, resolveRerankConfig } from '../rag/rerankClient'
+import { AdaptiveRagRetriever } from '../rag/retriever'
+import { loadStoryCorpus } from '../rag/storyCorpus'
+import type { RagMetaSummary, RagRetrieveResult } from '../rag/types'
 
 export type StoryMode = 'story' | 'chat'
 
@@ -87,6 +96,8 @@ export interface GenerateStoryMeta {
   ttsTranslated: number
   cast: string[]
   stages?: StoryStageMeta[]
+  /** 自适应语义 RAG 检索诊断摘要（仅启用 RAG 时出现） */
+  rag?: RagMetaSummary
 }
 
 export interface GenerateStoryResult {
@@ -172,24 +183,74 @@ export class StoryWriter {
   private readonly logger: Logger<ILogObj>
   private readonly emotionLabels: string[]
   private personas: PersonaEntry[] | null = null
+  private ragRetriever: AdaptiveRagRetriever | null | undefined
 
   constructor(
     llm: LlmClient,
     settings: LlmSettings,
     catalog: ResourceCatalog,
     logger: Logger<ILogObj>,
-    emotionLabels: string[] = []
+    emotionLabels: string[] = [],
+    ragRetriever?: AdaptiveRagRetriever | null
   ) {
     this.llm = llm
     this.settings = settings
     this.catalog = catalog
     this.logger = logger
     this.emotionLabels = emotionLabels.map((label) => label.trim()).filter(Boolean)
+    this.ragRetriever = ragRetriever
   }
 
   private getPersonas(): PersonaEntry[] {
     if (!this.personas) this.personas = loadPersonas(this.settings)
     return this.personas
+  }
+
+  private getRagRetriever(): AdaptiveRagRetriever | null {
+    if (this.ragRetriever !== undefined) return this.ragRetriever
+    const rag = this.settings.rag
+    if (!rag?.enabled) {
+      this.ragRetriever = null
+      return null
+    }
+    const chunks = loadStoryCorpus({
+      localDirs: rag.localDirs,
+      personas: rag.includePersonas ? this.getPersonas() : [],
+      includePersonas: rag.includePersonas
+    })
+    if (chunks.length === 0) {
+      this.ragRetriever = null
+      return null
+    }
+    const embedConfig = resolveEmbeddingConfig(this.settings)
+    const embeddingClient = embedConfig.enabled ? new EmbeddingClient(embedConfig, this.logger) : null
+    const rerankConfig = resolveRerankConfig(this.settings)
+    const rerankClient = rerankConfig.enabled ? new RerankClient(rerankConfig, this.logger) : null
+    this.ragRetriever = new AdaptiveRagRetriever({
+      chunks,
+      settings: rag,
+      embeddingClient,
+      rerankClient,
+      logger: this.logger
+    })
+    return this.ragRetriever
+  }
+
+  private summarizeRag(result: RagRetrieveResult | null): RagMetaSummary | undefined {
+    if (!result || result.mode === 'disabled') return undefined
+    return {
+      domain: result.domain ?? 'pjsk',
+      mode: result.mode,
+      model: result.model,
+      rerankMode: result.rerankMode ?? 'disabled',
+      rerankModel: result.rerankModel ?? '',
+      rerankLatencyMs: result.rerankLatencyMs ?? 0,
+      expandedCount: result.expandedCount ?? 0,
+      selectedCount: result.selectedCount,
+      totalChars: result.totalChars,
+      topScore: result.topScore,
+      latencyMs: result.latencyMs
+    }
   }
 
   /**
@@ -323,6 +384,24 @@ export class StoryWriter {
     options: GenerateStoryOptions
   }): Promise<GenerateStoryResult> {
     const { mode, prompt, view, personas, targetMinutes, options } = args
+    let singleRag: RagRetrieveResult | null = null
+    const retriever = this.getRagRetriever()
+    if (retriever) {
+      try {
+        singleRag = await retriever.retrieve({
+          prompt,
+          stage: 'single',
+          cast: view.models.map((m) => ({
+            name: view.shortName(m),
+            fullName: m.name
+          })),
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] single 检索失败，跳过参考注入：${errorMessage(error)}`)
+      }
+    }
     const built =
       mode === 'chat'
         ? buildChatPrompt(view, {
@@ -331,14 +410,16 @@ export class StoryWriter {
             targetMinutes,
             systemPrompt: this.settings.systemPrompt,
             history: options.history,
-            emotionLabels: this.emotionLabels
+            emotionLabels: this.emotionLabels,
+            ragContext: singleRag?.promptBlock
           })
         : buildStoryPrompt(view, {
             scene: prompt,
             personas,
             targetMinutes,
             systemPrompt: this.settings.systemPrompt,
-            emotionLabels: this.emotionLabels
+            emotionLabels: this.emotionLabels,
+            ragContext: singleRag?.promptBlock
           })
 
     const messages: ChatMessage[] = [
@@ -403,7 +484,8 @@ export class StoryWriter {
             latencyMs,
             durationMs: 0,
             ttsTranslated,
-            cast: view.models.map((entry) => entry.name)
+            cast: view.models.map((entry) => entry.name),
+            ...(this.summarizeRag(singleRag) ? { rag: this.summarizeRag(singleRag) } : {})
           }
         }
       } catch (error) {
@@ -494,11 +576,29 @@ export class StoryWriter {
         maxTokens: this.settings.maxTokens
       })
 
-    // ---- 1. 选角与微事件 -----------------------------------------------------------------------------------
+    // ---- 0.5 Pass A：选角前快速检索（<= 1500 字符，0 额外 LLM 调用） -----------------------------------------
+    const retriever = this.getRagRetriever()
+    let preCastRag: RagRetrieveResult | null = null
+    if (retriever) {
+      try {
+        preCastRag = await retriever.retrieve({
+          prompt,
+          stage: 'cast',
+          maxCharBudget: 1500,
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] Pass A 选角前检索失败，继续无参考选角：${errorMessage(error)}`)
+      }
+    }
+
+    // ---- 1. 选角与微事件（含深度意图理解、称呼表与多面 RAG 查询） ----------------------------------------------
+    const castPromptOptions: StagedPromptOptions = { ...promptOptions, ragContext: preCastRag }
     let plan: StagedCastPlan | null = null
     try {
-      const result = await runStage('cast', buildCastPrompt(view, promptOptions))
-      plan = normalizeCastPlan(parseStageJson(result), view, promptOptions)
+      const result = await runStage('cast', buildCastPrompt(view, castPromptOptions))
+      plan = normalizeCastPlan(parseStageJson(result), view, castPromptOptions)
       if (!plan) {
         markStageFailed('没有返回目录中的角色')
         warnings.push('选角结果没有可用角色，已按目录顺序回退')
@@ -513,6 +613,34 @@ export class StoryWriter {
     if (plan.cast.length === 0) {
       throw new StoryGenerationError('资源目录没有可用于生成的角色', details)
     }
+    if (!plan.understanding) {
+      this.logger.warn('[AI] cast 阶段没有返回深度理解，台词阶段将只依赖用户原文与官方参考')
+    }
+
+    // ---- 1.5 Pass B：选角后多面自适应检索（结合入选角色、微事件与 Stage 1 retrievalQueries） -------------------
+    let postCastRag: RagRetrieveResult | null = preCastRag
+    if (retriever) {
+      try {
+        postCastRag = await retriever.retrieve({
+          prompt,
+          stage: 'dialogue',
+          cast: plan.cast.map((m) => ({
+            name: m.name,
+            fullName: m.fullName
+          })),
+          event: plan.event,
+          logline: plan.logline,
+          outline: plan.outline,
+          location: plan.scenes?.[0]?.placeInfo || plan.background,
+          retrievalQueries: plan.retrievalQueries,
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] Pass B 多面检索失败，回退 Pass A 结果：${errorMessage(error)}`)
+      }
+    }
+    promptOptions.ragContext = postCastRag
 
     // ---- 2. 只写台词 ---------------------------------------------------------------------------------------
     let dialogue: StagedDialogue | null = null
@@ -652,49 +780,83 @@ export class StoryWriter {
       }
     }
 
-    // ---- 2.5 情绪分段与日文翻译（与表演设计并行） ------------------------------------------------------------
-    // 情绪标签只影响 TTS 音色，表演设计按台词文本自行判断语气；两段 LLM 调用并行，
-    // 合成前再把情绪标签回填。翻译只依赖台词文本，也在同一时间启动。
+    // ---- 2.2 反套路对白质检与条件外科润色（零成本确定性 Linter + 仅在问题严格减少时采纳） --------------------
+    if (this.settings.polishDialogue === true) {
+      const lintBefore = lintDialogueFidelity(dialogue, plan)
+      if (lintBefore.shouldPolish) {
+        try {
+          const polishResult = await runStage(
+            'dialogue-polish',
+            buildDialoguePolishPrompt(plan, dialogue, lintBefore.issues, {
+              scene: prompt,
+              view,
+              personas,
+              ragContext: postCastRag
+            }),
+            { temperature: 0.35 }
+          )
+          const polished = applyDialoguePolish(
+            dialogue,
+            parseStageJson(polishResult),
+            new Set(lintBefore.flaggedLineIds)
+          )
+          const lintAfter = lintDialogueFidelity(polished, plan)
+          const beforeChars = countDialogueChars(dialogue)
+          const afterChars = countDialogueChars(polished)
+          if (
+            polished.lines.length === dialogue.lines.length &&
+            afterChars >= Math.floor(beforeChars * 0.85) &&
+            lintAfter.issues.length < lintBefore.issues.length
+          ) {
+            this.logger.info(
+              `[AI] dialogue-polish 采纳：问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}`
+            )
+            dialogue = polished
+          } else {
+            this.logger.info(
+              `[AI] dialogue-polish 未改善（问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}），保留原稿`
+            )
+          }
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          this.logger.warn(`[AI] dialogue-polish 失败，保留原稿：${errorMessage(error)}`)
+        }
+      }
+    }
+
+    // ---- 2.5 语音导演（Voice Direction）与舞台调度并行 -------------------------------------------------------
     const finalDialogue = enforceDialogueLength ? softenPunctuation(dialogue) : dialogue
     const translateForTts = options.translateForTts ?? this.settings.translateForTts
-    let dialogueTts: Promise<Map<string, string> | null> | null = null
-    if (translateForTts) {
-      dialogueTts = this.translateDialogue(finalDialogue, options.signal).catch((error) => {
-        if (options.signal?.aborted) return null
-        this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
-        return null
-      })
-    }
-    const emotionTask: Promise<Map<string, string> | null> = (async () => {
+    const emotionTask: Promise<Map<string, StagedVoiceDirectionLine> | null> = (async () => {
       if (this.emotionLabels.length === 0) return null
-      let emotionPlan: Map<string, string> | null = null
+      let voicePlan: Map<string, StagedVoiceDirectionLine> | null = null
       let emotionRaw = ''
       try {
         const result = await runStage(
           'emotion',
           buildEmotionPrompt(plan, dialogue, promptOptions),
-          { temperature: 0.2 }
+          { temperature: 0.25 }
         )
         emotionRaw = result.content
-        emotionPlan = normalizeEmotionPlan(
+        voicePlan = normalizeVoiceDirectionPlan(
           parseStageJson(result),
           dialogue,
           this.emotionLabels
         )
-        if (!emotionPlan) {
-          markStageFailed('没有返回可用的情绪段', 'emotion')
-          warnings.push('情绪标注不可用，整场使用默认情绪')
+        if (!voicePlan) {
+          markStageFailed('没有返回可用的语音导演指令', 'emotion')
+          warnings.push('语音导演标注不可用，整场使用默认情绪')
         }
       } catch (error) {
         if (options.signal?.aborted) throw error
         const message = errorMessage(error)
-        details.push(`情绪标注：${message}`)
-        warnings.push(`情绪标注失败，整场使用默认情绪：${message}`)
+        details.push(`语音导演：${message}`)
+        warnings.push(`语音导演失败，整场使用默认情绪：${message}`)
       }
 
       // 只有较长剧本完全锁死单一情绪（只有 1 段）时才低温重标一次；不再机械要求 3~4 段来回切。
-      if (emotionPlan && this.emotionLabels.length > 1 && dialogue.lines.length >= 16) {
-        const runs = countEmotionRuns(emotionPlan, dialogue)
+      if (voicePlan && this.emotionLabels.length > 1 && dialogue.lines.length >= 16) {
+        const runs = countEmotionRuns(voicePlan, dialogue)
         if (runs < 2) {
           markStageFailed(`情绪分段过于单一（仅 ${runs} 段）`, 'emotion')
           warnings.push(`长剧本情绪只有 ${runs} 段，已请求按起承转合重标`)
@@ -702,25 +864,25 @@ export class StoryWriter {
             const repaired = await runStage(
               'emotion-repair',
               buildEmotionRepairPrompt(plan, dialogue, promptOptions, emotionRaw, runs),
-              { temperature: 0.2 }
+              { temperature: 0.25 }
             )
-            const repairedPlan = normalizeEmotionPlan(
+            const repairedPlan = normalizeVoiceDirectionPlan(
               parseStageJson(repaired),
               dialogue,
               this.emotionLabels
             )
             if (repairedPlan && countEmotionRuns(repairedPlan, dialogue) > runs) {
-              emotionPlan = repairedPlan
+              voicePlan = repairedPlan
             }
           } catch (error) {
             if (options.signal?.aborted) throw error
-            details.push(`情绪重标：${errorMessage(error)}`)
+            details.push(`语音导演重标：${errorMessage(error)}`)
           }
         }
       }
-      return emotionPlan
+      return voicePlan
     })()
-    // 舞台调度/摄影策划与情绪标注、日文翻译同时启动；等待情绪回填后，再交给精细演技导演（directActing）。
+    // 舞台调度/摄影策划与语音导演同时启动；等待语音导演回填后，再并行启动精细演技导演（direction）与上下文感知日文翻译（translateDialogue）。
     const stagingTask: Promise<StagedStaging> = (async () => {
       try {
         const result = await runStage(
@@ -740,13 +902,25 @@ export class StoryWriter {
     void emotionTask.catch(() => undefined)
     void stagingTask.catch(() => undefined)
 
-    // ---- 3. 等待情绪分段与舞台调度完成，并回填情绪 -------------------------------------------------------
-    const [emotionPlan, staging] = await Promise.all([emotionTask, stagingTask])
-    dialogue = applyEmotionPlan(
-      finalDialogue,
-      emotionPlan ? stabilizeEmotions(dialogue, emotionPlan, this.emotionLabels) : null,
-      this.emotionLabels
-    )
+    // ---- 3. 等待语音导演与舞台调度完成，并回填情绪与逐句韵律指令 --------------------------------------------
+    const [voiceDirectionPlan, staging] = await Promise.all([emotionTask, stagingTask])
+    dialogue = applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
+
+    // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、称呼表、emotion 与 ttsCaption。
+    let dialogueTts: Promise<Map<string, string> | null> | null = null
+    if (translateForTts) {
+      dialogueTts = this.translateDialogue(
+        dialogue,
+        personas,
+        options.signal,
+        plan.pairwiseAddress,
+        postCastRag
+      ).catch((error) => {
+        if (options.signal?.aborted) return null
+        this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
+        return null
+      })
+    }
 
     // ---- 4. 精细演技导演（带完整情绪段与舞台/分镜上下文） -------------------------------------------------
     let direction: StagedDirection = fallbackDirection(view, plan)
@@ -846,6 +1020,7 @@ export class StoryWriter {
       'dialogue-repair',
       'dialogue-expand',
       'dialogue-expand-2',
+      'dialogue-polish',
       'emotion',
       'emotion-repair',
       'staging',
@@ -872,24 +1047,33 @@ export class StoryWriter {
         durationMs: 0,
         ttsTranslated,
         cast,
-        stages
+        stages,
+        ...(this.summarizeRag(postCastRag) ? { rag: this.summarizeRag(postCastRag) } : {})
       }
     }
   }
 
   /**
-   * 提前批量翻译一段台词稿，返回 lineId → 日文 ttsText。
+   * 批量翻译一段台词稿（携带说话人、人设口吻、日文称呼表、emotion、ttsCaption），返回 lineId → 日文 ttsText。
    *
-   * 只翻译、不校验；合成后还会走一次 ensureJapaneseTtsText 兜底（正常情况没有待翻条目）。
-   * 在情绪/表演段之前启动，让翻译和两段 LLM 调用并行，不占串行尾时间。
+   * 在语音导演完成后启动，与演技导演（direction）并行，不增加串行尾时间。
    */
   private async translateDialogue(
     dialogue: StagedDialogue,
-    signal?: AbortSignal
+    personas: PersonaEntry[],
+    signal?: AbortSignal,
+    pairwiseAddress?: StagedPairwiseAddress[],
+    ragContext?: RagRetrieveResult | null
   ): Promise<Map<string, string>> {
     const slots = dialogue.lines.map((line) => ({
       line,
-      data: { content: line.content, ttsText: '' }
+      data: {
+        speaker: line.speaker,
+        content: line.content,
+        emotion: line.emotion ?? '',
+        ttsCaption: line.ttsCaption ?? '',
+        ttsText: ''
+      }
     }))
     // 走与剧本相同的一套规则：纯标点跳过、非日文结果丢弃、失败留空。
     const story = {
@@ -905,7 +1089,7 @@ export class StoryWriter {
     const startedAt = Date.now()
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal),
+      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext),
       this.logger
     )
     const result = new Map<string, string>()
@@ -919,17 +1103,80 @@ export class StoryWriter {
     return result
   }
 
-  private ttsTranslator(signal?: AbortSignal): TtsBatchTranslator {
-    const system =
-      '你是中日翻译。只输出 JSON 字符串数组，不要解释、不要 markdown。把每条中文台词翻译成自然、口语化的日语，适合角色配音；保留原文换行位置和语气。每条译文都必须含假名，不要输出纯汉字（例如「了解」要写成「了解です」）；标点和符号可以保留。'
-    return async (texts) => {
+  private speakerStyleHint(speaker: string | undefined, personas: PersonaEntry[]): string {
+    const name = speaker?.trim()
+    if (!name) return ''
+    const lower = name.toLowerCase()
+    const matched = personas.find(
+      (entry) =>
+        entry.name.toLowerCase() === lower ||
+        entry.aliases.some((alias) => alias.toLowerCase() === lower) ||
+        entry.name.includes(name) ||
+        name.includes(entry.name)
+    )
+    if (!matched?.prompt) return ''
+    const firstLine = matched.prompt
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^#+\s*/, '').trim())
+      .find((line) => line.length >= 6)
+    return firstLine ? firstLine.slice(0, 60) : ''
+  }
+
+  private ttsTranslator(
+    signal?: AbortSignal,
+    personas: PersonaEntry[] = this.getPersonas(),
+    pairwiseAddress?: StagedPairwiseAddress[],
+    ragContext?: RagRetrieveResult | null
+  ): TtsBatchTranslator {
+    const addressLines = (pairwiseAddress ?? [])
+      .map((a) => `${a.from}→${a.to}: ${a.ja || a.zh}`)
+      .slice(0, 10)
+    const jpSamples = [
+      ...(ragContext?.sections?.dialogueVoice ?? []),
+      ...(ragContext?.sections?.canonPlot ?? [])
+    ]
+      .map((ex) => ex.jpText?.trim())
+      .filter((t): t is string => Boolean(t))
+      .slice(0, 2)
+      .map((t) => t.slice(0, 280))
+
+    const system = [
+      '你是 Project SEKAI 二次元剧情的中日翻译（配音台词专精），为 IrodoriTTS 生成自然、贴合角色人设的日语配音文本。',
+      '只输出与输入等长的 JSON 字符串数组，不要解释、不要 markdown。',
+      '翻译规则：',
+      '1. 严格结合每句提供的说话人、口吻提示、日文称呼约定、情绪标签（emotion）与日语声演指令（ttsCaption），翻出地道、口语化、符合角色人称与敬语习惯的日语。',
+      '2. 每条译文都必须含假名，不要输出纯汉字（例如「了解」写成「了解だよ」「了解です」）。保留自然的停顿与语气（……、っ、！、？、——）。',
+      '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
+      '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。',
+      ...(addressLines.length > 0 ? [`5. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`] : []),
+      ...(jpSamples.length > 0
+        ? [`6. 官方日文口吻参考（仅学语气与人称，严禁照抄）：\n${jpSamples.join('\n---\n')}`]
+        : [])
+    ].join('\n')
+
+    return async (texts, items?: TtsTranslationItem[]) => {
+      const hasContext = Boolean(
+        items?.some((item) => item.speaker || item.emotion || item.ttsCaption)
+      )
+      const userContent = hasContext && items
+        ? `把下面 ${items.length} 条台词结合角色与声演指令翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(
+            items.map((item) => {
+              const style = this.speakerStyleHint(item.speaker, personas)
+              return {
+                text: item.text,
+                ...(item.speaker ? { speaker: item.speaker } : {}),
+                ...(style ? { style } : {}),
+                ...(item.emotion ? { emotion: item.emotion } : {}),
+                ...(item.ttsCaption ? { ttsCaption: item.ttsCaption } : {})
+              }
+            })
+          )}`
+        : `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
+
       const { data } = await this.llm.chatJson<string[]>(
         [
           { role: 'system', content: system },
-          {
-            role: 'user',
-            content: `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
-          }
+          { role: 'user', content: userContent }
         ],
         { temperature: 0.3, signal }
       )
