@@ -193,14 +193,14 @@ llm:
                                   # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
   personas: []                    # 内联人格：name / prompt / aliases / group
   polishDialogue: true            # 启用反套路台词质检与条件外科润色
-  # 自适应语义 RAG（bge-m3 + SQ8 向量磁盘缓存 + 零网络词法回退）
+  # 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b + SQ8 磁盘缓存 + 零网络词法回退；严格 PJSK 领域隔离）
   rag:
     enabled: true                 # env: MSS_RAG_ENABLED
     baseUrl: ""                   # 留空自动继承 llm.baseUrl（env: MSS_RAG_BASE_URL）
     apiKeyEnv: ""                 # 留空自动继承 llm.apiKeyEnv（env: MSS_RAG_API_KEY_ENV）
-    model: bge-m3                 # Embedding 模型名（env: MSS_RAG_MODEL）
-    dimensions: 0                 # 0 = 自动探测维度，仅 >0 时发送给 API
-    queryInstruct: ""             # bge-m3 留空；Qwen3-Embedding 等指令型模型可按需配置
+    model: qwen3-embedding-8b     # Embedding 模型名（env: MSS_RAG_MODEL）
+    dimensions: 0                 # 0 = 使用模型原生维度（请求体省略 dimensions），仅 >0 时发送
+    queryInstruct: ""             # 留空时 Qwen3-Embedding 自动使用 PJSK 领域查询指令；非空则覆盖
     timeoutMs: 30000
     batchSize: 32
     cacheDir: cache/rag           # 增量 chunkHash SQ8 向量缓存目录（env: MSS_RAG_CACHE_DIR）
@@ -209,6 +209,16 @@ llm:
     server: cn                    # cn | jp | tw | kr | en
     localDirs: [cache/semantic-build]
     includePersonas: true
+    rerank:
+      enabled: true               # env: MSS_RAG_RERANK_ENABLED
+      model: qwen3-reranker-8b    # Cross-Encoder 重排模型（env: MSS_RAG_RERANK_MODEL）
+      baseUrl: ""                 # 留空依次继承 llm.rag.baseUrl -> llm.baseUrl（env: MSS_RAG_RERANK_BASE_URL）
+      apiKeyEnv: ""               # 留空依次继承 llm.rag.apiKeyEnv -> llm.apiKeyEnv（env: MSS_RAG_RERANK_API_KEY_ENV）
+      endpointPath: /rerank       # 拼接在 baseUrl 后的重排路径（env: MSS_RAG_RERANK_ENDPOINT_PATH）
+      candidatePool: 32           # RRF 一阶段送入重排的候选池大小
+      topN: 32
+      timeoutMs: 30000
+      instruction: ""             # 留空自动使用 PJSK 领域默认重排指令
     adaptive:
       minScore: 0.42
       highScore: 0.62
@@ -220,6 +230,7 @@ llm:
       maxCharBudget: 4800
       maxPerStory: 2
       mergeAdjacentGap: 4
+      expandAdjacentContext: true # 对高分剧情命中块自动向同场景前后扩展 ±1 相邻块
   # personas:
   #   - name: 晓山瑞希
   #     aliases: [瑞希, mizuki]

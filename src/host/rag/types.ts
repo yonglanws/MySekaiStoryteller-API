@@ -2,10 +2,16 @@
  * 自适应语义 RAG 类型定义（与 StarMoe-org/sekai-story-search 兼容）。
  */
 
+export type RagDomain = 'pjsk'
+
 export type RagSourceKind = 'canon_story' | 'dialogue_voice' | 'worldview_lore'
+
+export type RerankMode = 'reranked' | 'fallback' | 'disabled'
 
 export interface RagChunk {
   id: string
+  /** 领域隔离标记：MSST 仅接受 Project SEKAI ('pjsk') */
+  domain?: RagDomain
   /** sha256(text).slice(0, 32)，用于 bit-for-bit 增量向量缓存复用 */
   chunkHash: string
   sourceKind: RagSourceKind
@@ -40,6 +46,7 @@ export interface RagExcerpt {
   denseScore: number
   lexicalScore: number
   charScore: number
+  rerankScore?: number
 }
 
 export interface RagCastMemberHint {
@@ -78,8 +85,13 @@ export interface RagSections {
 export type RagMode = 'hybrid' | 'lexical_fallback' | 'disabled'
 
 export interface RagRetrieveResult {
+  domain?: RagDomain
   mode: RagMode
   model: string
+  rerankMode?: RerankMode
+  rerankModel?: string
+  rerankLatencyMs?: number
+  expandedCount?: number
   queries: string[]
   candidateCount: number
   selectedCount: number
@@ -93,8 +105,13 @@ export interface RagRetrieveResult {
 }
 
 export interface RagMetaSummary {
+  domain?: RagDomain
   mode: RagMode
   model: string
+  rerankMode?: RerankMode
+  rerankModel?: string
+  rerankLatencyMs?: number
+  expandedCount?: number
   selectedCount: number
   totalChars: number
   topScore: number
@@ -118,6 +135,7 @@ export interface Sq8VectorMatrix {
 
 export interface EmbedCacheIndexFile {
   schemaVersion: number
+  domain?: RagDomain
   model: string
   dims: number
   quant: 'sq8_sym'

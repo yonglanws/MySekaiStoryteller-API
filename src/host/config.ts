@@ -211,7 +211,27 @@ const RagAdaptiveSchema = z.object({
   /** 同一 storyId 最多保留的合并场景数 */
   maxPerStory: z.number().int().min(1).default(2),
   /** 同 scenarioId 相邻行间距 <= mergeAdjacentGap 时合并为连续场景 */
-  mergeAdjacentGap: z.number().int().min(0).default(4)
+  mergeAdjacentGap: z.number().int().min(0).default(4),
+  /** 是否对高分命中块自动向同 scenarioId 前后扩展 ±1 相邻块 */
+  expandAdjacentContext: z.boolean().default(true)
+})
+
+const RagRerankSchema = z.object({
+  enabled: z.boolean().default(true),
+  model: z.string().default('qwen3-reranker-8b'),
+  /** 留空依次继承 llm.rag.baseUrl -> llm.baseUrl */
+  baseUrl: z.string().default(''),
+  /** 留空依次继承 llm.rag.apiKeyEnv -> llm.apiKeyEnv */
+  apiKeyEnv: z.string().default(''),
+  /** 拼接到 baseUrl 后的重排路径（默认 /rerank） */
+  endpointPath: z.string().default('/rerank'),
+  /** 进入二阶段 Cross-Encoder 重排的 RRF 候选池上限 */
+  candidatePool: z.number().int().min(1).max(128).default(32),
+  /** 向重排 API 请求返回的 top_n（默认与 candidatePool 一致） */
+  topN: z.number().int().min(1).max(128).default(32),
+  timeoutMs: z.number().int().positive().default(30_000),
+  /** 留空自动使用 PJSK 领域默认重排指令 */
+  instruction: z.string().default('')
 })
 
 const RagSchema = z.object({
@@ -220,11 +240,11 @@ const RagSchema = z.object({
   baseUrl: z.string().default(''),
   /** 留空时自动继承 llm.apiKeyEnv */
   apiKeyEnv: z.string().default(''),
-  /** OpenAI 兼容 /embeddings 模型名（默认 bge-m3） */
-  model: z.string().default('bge-m3'),
+  /** OpenAI 兼容 /embeddings 模型名（默认 qwen3-embedding-8b） */
+  model: z.string().default('qwen3-embedding-8b'),
   /** 0 = 由服务端决定维度，仅 >0 时在请求体中发送 dimensions */
   dimensions: z.number().int().min(0).default(0),
-  /** 查询前缀指令；bge-m3 留空，Qwen3-Embedding 等指令型模型可按需填写 */
+  /** 查询前缀指令；留空时 Qwen3-Embedding 自动使用 PJSK 领域指令，非空则显式覆盖 */
   queryInstruct: z.string().default(''),
   timeoutMs: z.number().int().positive().default(30_000),
   batchSize: z.number().int().min(1).max(128).default(32),
@@ -242,6 +262,7 @@ const RagSchema = z.object({
   localDirs: z.array(z.string()).default(['cache/semantic-build']),
   /** 是否把完整角色人设 Markdown 分节纳入世界观/设定检索 */
   includePersonas: z.boolean().default(true),
+  rerank: RagRerankSchema.default(RagRerankSchema.parse({})),
   adaptive: RagAdaptiveSchema.default(RagAdaptiveSchema.parse({}))
 })
 
@@ -347,6 +368,7 @@ export type TtsSettings = z.infer<typeof TtsSchema>
 export type BgmSettings = z.infer<typeof BgmSchema>
 export type LlmPersona = z.infer<typeof LlmPersonaSchema>
 export type RagAdaptiveSettings = z.infer<typeof RagAdaptiveSchema>
+export type RagRerankSettings = z.infer<typeof RagRerankSchema>
 export type RagSettings = z.infer<typeof RagSchema>
 export type LlmSettings = z.infer<typeof LlmSchema>
 export type AssetsSettings = z.infer<typeof AssetsSchema>
@@ -578,6 +600,19 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_RAG_API_KEY_ENV) config.llm.rag.apiKeyEnv = env.MSS_RAG_API_KEY_ENV
   if (env.MSS_RAG_MODEL) config.llm.rag.model = env.MSS_RAG_MODEL
   if (env.MSS_RAG_CACHE_DIR) config.llm.rag.cacheDir = env.MSS_RAG_CACHE_DIR
+  if (env.MSS_RAG_RERANK_ENABLED !== undefined) {
+    config.llm.rag.rerank.enabled = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_RAG_RERANK_ENABLED.toLowerCase()
+    )
+  }
+  if (env.MSS_RAG_RERANK_MODEL) config.llm.rag.rerank.model = env.MSS_RAG_RERANK_MODEL
+  if (env.MSS_RAG_RERANK_BASE_URL) config.llm.rag.rerank.baseUrl = env.MSS_RAG_RERANK_BASE_URL
+  if (env.MSS_RAG_RERANK_API_KEY_ENV) {
+    config.llm.rag.rerank.apiKeyEnv = env.MSS_RAG_RERANK_API_KEY_ENV
+  }
+  if (env.MSS_RAG_RERANK_ENDPOINT_PATH) {
+    config.llm.rag.rerank.endpointPath = env.MSS_RAG_RERANK_ENDPOINT_PATH
+  }
 
   // assets
   if (env.MSS_ASSETS_REGION) {
@@ -685,6 +720,7 @@ export function loadHostConfig(): HostConfig {
   config.llm.personaDirs = config.llm.personaDirs.map((p) => path.resolve(rootDir, p))
   config.llm.baseUrl = config.llm.baseUrl.replace(/\/+$/, '')
   config.llm.rag.baseUrl = config.llm.rag.baseUrl.replace(/\/+$/, '')
+  config.llm.rag.rerank.baseUrl = config.llm.rag.rerank.baseUrl.replace(/\/+$/, '')
   config.llm.rag.sekaiStorySearchUrl = config.llm.rag.sekaiStorySearchUrl.replace(/\/+$/, '')
   config.llm.rag.cacheDir = path.resolve(rootDir, config.llm.rag.cacheDir)
   config.llm.rag.localDirs = config.llm.rag.localDirs.map((p) => path.resolve(rootDir, p))

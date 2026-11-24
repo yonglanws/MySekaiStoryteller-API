@@ -22,26 +22,40 @@ interface OpenAiEmbeddingResponse {
 }
 
 const QUERY_LRU_MAX = 256
+const QWEN3_EMBED_PATTERN = /qwen3.*embed/i
+export const PJSK_DEFAULT_QUERY_INSTRUCT =
+  'Given a Project SEKAI story writing prompt or scene query, retrieve relevant official Project SEKAI story scenes, character dialogues, and worldview details'
 
 /**
  * 合并 `llm.rag` 与 `llm` 的继承项：
  * `rag.baseUrl` / `rag.apiKeyEnv` 留空时自动复用 `llm.baseUrl` / `llm.apiKeyEnv`。
+ * 默认模型升级为 `qwen3-embedding-8b`，并在未显式设置 `queryInstruct` 时自动启用 PJSK 领域查询指令。
  */
 export function resolveEmbeddingConfig(
-  llm: Pick<LlmSettings, 'baseUrl' | 'apiKeyEnv' | 'rag'> | { baseUrl: string; apiKeyEnv: string; rag?: Partial<RagSettings> }
+  llm:
+    | Pick<LlmSettings, 'baseUrl' | 'apiKeyEnv' | 'rag'>
+    | { baseUrl: string; apiKeyEnv: string; rag?: Partial<RagSettings> }
 ): EmbeddingClientConfig {
   const rag = llm.rag ?? {}
   const baseUrl = (rag.baseUrl?.trim() || llm.baseUrl || '').replace(/\/+$/, '')
   const apiKeyEnv = rag.apiKeyEnv?.trim() || llm.apiKeyEnv || 'MSS_LLM_API_KEY'
+  const model = rag.model?.trim() || 'qwen3-embedding-8b'
+  const explicitInstruct = typeof rag.queryInstruct === 'string' ? rag.queryInstruct.trim() : ''
+  const queryInstruct =
+    explicitInstruct || (QWEN3_EMBED_PATTERN.test(model) ? PJSK_DEFAULT_QUERY_INSTRUCT : '')
   return {
     enabled: rag.enabled !== false,
     baseUrl,
     apiKeyEnv,
-    model: rag.model?.trim() || 'bge-m3',
-    dimensions: typeof rag.dimensions === 'number' && rag.dimensions > 0 ? Math.floor(rag.dimensions) : 0,
-    queryInstruct: rag.queryInstruct ?? '',
+    model,
+    dimensions:
+      typeof rag.dimensions === 'number' && rag.dimensions > 0 ? Math.floor(rag.dimensions) : 0,
+    queryInstruct,
     timeoutMs: typeof rag.timeoutMs === 'number' && rag.timeoutMs > 0 ? rag.timeoutMs : 30_000,
-    batchSize: typeof rag.batchSize === 'number' && rag.batchSize >= 1 ? Math.min(128, Math.floor(rag.batchSize)) : 32
+    batchSize:
+      typeof rag.batchSize === 'number' && rag.batchSize >= 1
+        ? Math.min(128, Math.floor(rag.batchSize))
+        : 32
   }
 }
 
@@ -80,7 +94,11 @@ export class EmbeddingClient {
 
   formatQuery(query: string): string {
     const clean = query.trim()
-    const instruct = this.config.queryInstruct.trim()
+    if (!clean) return ''
+    if (/^Instruct:/i.test(clean)) return clean
+    const instruct =
+      this.config.queryInstruct.trim() ||
+      (QWEN3_EMBED_PATTERN.test(this.config.model) ? PJSK_DEFAULT_QUERY_INSTRUCT : '')
     if (!instruct) return clean
     return `Instruct: ${instruct}\nQuery: ${clean}`
   }

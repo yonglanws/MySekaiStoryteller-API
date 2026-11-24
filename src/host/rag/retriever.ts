@@ -280,7 +280,8 @@ const DEFAULT_ADAPTIVE: RagAdaptiveSettings = {
   softCharBudget: 1800,
   maxCharBudget: 4800,
   maxPerStory: 2,
-  mergeAdjacentGap: 4
+  mergeAdjacentGap: 4,
+  expandAdjacentContext: true
 }
 
 /**
