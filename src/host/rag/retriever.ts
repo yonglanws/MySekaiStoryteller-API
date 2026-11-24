@@ -99,6 +99,7 @@ function scoreBm25(index: LexicalIndex, queryTokens: string[], chunks: RagChunk[
   const k1 = 1.2
   const b = 0.75
   const avgdl = Math.max(1, index.avgDocLen)
+  const docHits = new Uint16Array(chunks.length)
 
   for (const tok of uniqueTokens) {
     const list = index.postings.get(tok)
@@ -109,6 +110,15 @@ function scoreBm25(index: LexicalIndex, queryTokens: string[], chunks: RagChunk[
       const dl = index.docLengths[idx]
       const denom = tf + k1 * (1 - b + (b * dl) / avgdl)
       scores[idx] += termIdf * ((tf * (k1 + 1)) / denom)
+      docHits[idx] += 1
+    }
+  }
+  // 小语料（如仅 1~3 条 chunk）下 IDF 偏低，叠加查询词覆盖率补偿
+  if (uniqueTokens.length > 0) {
+    for (let i = 0; i < chunks.length; i++) {
+      if (docHits[i] > 0) {
+        scores[i] += (docHits[i] / uniqueTokens.length) * 2.0
+      }
     }
   }
   return scores

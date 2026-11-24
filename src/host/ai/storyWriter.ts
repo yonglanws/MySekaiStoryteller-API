@@ -769,7 +769,7 @@ export class StoryWriter {
     }
 
     // ---- 2.2 反套路对白质检与条件外科润色（零成本确定性 Linter + 仅在问题严格减少时采纳） --------------------
-    if (this.settings.polishDialogue !== false) {
+    if (this.settings.polishDialogue === true) {
       const lintBefore = lintDialogueFidelity(dialogue, plan)
       if (lintBefore.shouldPolish) {
         try {
