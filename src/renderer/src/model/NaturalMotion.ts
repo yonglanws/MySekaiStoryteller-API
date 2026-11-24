@@ -53,6 +53,18 @@ export interface BlinkState {
   nextRandom: () => number
 }
 
+/**
+ * 每模型自然动作种子。
+ *
+ * 官方 `Baker::character_seed` 把共享 RNG 的一次 `Range(0,360)` 抽取与角色 id 混合成
+ * per-character seed（`sse-bake/src/lib.rs:1388`）。MSST 没有 Unity 的共享随机流，
+ * 改用 id 的 Knuth 乘法散列：同一 id 每次导出得到同一序列，不同 id 彼此独立，
+ * 眨眼间隔与呼吸初相位都从这个种子派生。
+ */
+export function naturalMotionSeed(modelId: number): number {
+  return Math.imul(modelId, 2654435761) >>> 0
+}
+
 /** 确定性 RNG（mulberry32）：同一模型 id 的眨眼间隔在每次导出中一致。 */
 export function createSeededRandom(seed: number): () => number {
   let state = seed >>> 0

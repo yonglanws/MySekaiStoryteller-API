@@ -44,6 +44,8 @@ import {
   SILENT_PUNCTUATION_HOLD_MS,
   STORY_FPS,
   TALK_WINDOW_OPEN_CLOSE_MS,
+  framesForSeconds,
+  framesToMs,
   storyFrameForVideoFrame,
   storyFrameTweenForVideoFrame,
   videoFrameCountForStoryFrames
@@ -93,8 +95,13 @@ export default class VideoExportManager {
   private readonly app: App
   private isAborted: boolean = false
   private abortController: AbortController | null = null
-  /** Talk 索引 -> 动作收尾时间（ms，相对 Talk 开始），用于 diagnostics 的逐帧计划。 */
-  private talkSettleMsByIndex = new Map<number, number>()
+  /** Talk 索引 -> 动作收尾帧数（相对 Talk 开始），用于 diagnostics 的逐帧计划。 */
+  private talkSettleFramesByIndex = new Map<number, number>()
+  /**
+   * 导出计划用的角色 shown 状态：按剧本顺序维护，避免 Now 布局片段尚未
+   * await 时 `layerModel.isModelShown` 还是旧值（Appear 与 Talk 同帧时尤其明显）。
+   */
+  private exportModelShown = new Map<number, boolean>()
   private lipSyncCache = new Map<number, ReturnType<typeof buildLipSyncEnvelope> | null>()
   private pendingLipSync = new Map<
     number,
@@ -274,29 +281,49 @@ export default class VideoExportManager {
   }
 
   /**
-   * 官方 AUTO 模式在语音结束后还要等身体动作播完，再停留 0.5s。
-   * 动作剪辑时长来自已预加载的 motionGroups；循环动作/未加载动作不参与（返回 0）。
+   * 参考 `motions_settled` 只看 `CurrentDisplayStatus == Appear` 的角色：
+   * 已 Clear（shown=false）的角色即使同帧 `set_body` 了也不阻塞 Talk
+   * （片尾 HideTalk/BlackOut 前的两句实测被隐藏角色的动作多拖了 97/12 帧）。
+   * 这里用布局层的 shown 状态，不用 alpha：Appear 与 Talk 同帧启动时 alpha 还是 0。
    */
+  private motionGateCounts(modelId: number): boolean {
+    const scripted = this.exportModelShown.get(modelId)
+    if (scripted !== undefined) return scripted
+    const layer = this.app.layerModel as unknown as {
+      isModelShown?: (id: number) => boolean
+    }
+    return typeof layer?.isModelShown === 'function' ? layer.isModelShown(modelId) : true
+  }
+
   /**
-   * 跟随 Talk 同帧启动的 Now 片段（例如 delay=1.75s 的 Motion）会在 Talk 的
+   * 跟随 Talk 同帧注册的 Now 片段（例如 delay=1.75s 的 Motion）会在 Talk 的
    * 语音结束前开始身体动作；官方 `motions_settled` 会等它播完再进入停留。
    * 导出必须在算 Talk 目标时长时预读这些并发动作，否则计划会比参考短。
+   *
+   * 帧数按参考的方式分段换算：`frames_for(delay)` + `frames_for(clip 秒)`。
+   * 合成一段毫秒再 `frames_for` 会少一帧（1s + 2.033s = 61+122 = 183 帧，
+   * 而 3.033s 只有 182 帧）。Now 片段与 Talk 在同一帧注册，delay 也各自从
+   * 注册帧起算；换成相对 Talk act 的偏移要 `frames_for(现在) − frames_for(Talk delay)`
+   * 再相减（Talk delay=2s、Motion delay=6s 时是 361−121=240，不是 frames_for(4s)=241）。
    */
-  private concurrentMotionSettleMs(
+  private concurrentMotionSettleFrames(
     snippets: readonly SnippetData[],
     index: number,
-    talkDelayMs: number,
-    windowMs: number
+    talkDelayFrames: number,
+    windowFrames: number
   ): number {
     if (index < 0 || index >= snippets.length) return 0
-    let settleMs = 0
-    const consider = (modelId: number, motion: string | undefined, startMs: number): void => {
+    let settleFrames = 0
+    const consider = (modelId: number, motion: string | undefined, startFrames: number): void => {
       if (!motion) return
+      if (!this.motionGateCounts(modelId)) return
       try {
         const model = this.app.getModelById(modelId)
         if (model.isMotionLooping?.(motion)) return
         const clipMs = model.getMotionDurationMs?.(motion) ?? 0
-        if (clipMs > 0) settleMs = Math.max(settleMs, startMs + clipMs)
+        if (clipMs > 0) {
+          settleFrames = Math.max(settleFrames, startFrames + framesForSeconds(clipMs / 1000))
+        }
       } catch {
         /* model not loaded; the gate cannot be planned */
       }
@@ -311,19 +338,91 @@ export default class VideoExportManager {
         duration?: number
         actions?: Array<{ at?: number; modelId?: number; motion?: string }>
       }
-      const startMs = Math.max(0, (Number(next.delay) || 0) * 1000 - talkDelayMs)
-      if (startMs > windowMs + FRAME_MS) continue
-      consider(Number(data.modelId) || -1, data.motion, startMs)
-      const actionWindowMs = (Number(data.duration) || 2) * 1000
+      const delayFrames = framesForSeconds(Number(next.delay) || 0)
+      const startFrames = Math.max(0, delayFrames - talkDelayFrames)
+      if (startFrames > windowFrames + 1) continue
+      consider(Number(data.modelId) || -1, data.motion, startFrames)
+      const actionWindowFrames = framesForSeconds(Number(data.duration) || 2)
       for (const action of data.actions ?? []) {
         consider(
           Number(action.modelId ?? data.modelId) || -1,
           action.motion,
-          startMs + Math.max(0, Number(action.at) || 0) * actionWindowMs
+          startFrames + Math.max(0, Math.round((Number(action.at) || 0) * actionWindowFrames))
         )
       }
     }
-    return settleMs
+    return settleFrames
+  }
+
+  /**
+   * 计划层用的 `modelId|motion` -> clip 帧数表。计划自己按剧本帧推导 Talk gate，
+   * 不再把运行时时间戳（带 1–3 帧启动漂移）回灌进计划。
+   */
+  private buildMotionClipFrames(snippets: readonly SnippetData[]): Map<string, number> {
+    const frames = new Map<string, number>()
+    const add = (modelRaw: unknown, motionRaw: unknown): void => {
+      const motion = typeof motionRaw === 'string' ? motionRaw.trim() : ''
+      if (!motion) return
+      const modelId = Number(modelRaw) || -1
+      const key = `${modelId}|${motion}`
+      if (frames.has(key)) return
+      try {
+        const model = this.app.getModelById(modelId)
+        if (model.isMotionLooping?.(motion)) {
+          frames.set(key, 0)
+          return
+        }
+        const clipMs = model.getMotionDurationMs(motion)
+        frames.set(key, clipMs > 0 ? framesForSeconds(clipMs / 1000) : 0)
+      } catch {
+        frames.set(key, 0)
+      }
+    }
+    for (const snippet of snippets) {
+      const data = ((snippet as { data?: unknown }).data ?? {}) as {
+        modelId?: number
+        motion?: string
+        actions?: Array<{ modelId?: number; motion?: string }>
+      }
+      add(data.modelId, data.motion)
+      for (const action of data.actions ?? []) {
+        add(action.modelId ?? data.modelId, action.motion)
+      }
+    }
+    return frames
+  }
+
+  /**
+   * 本句 Talk 自己的动作（顶层 motion 与 actions）的收尾帧数（相对 act）。
+   *
+   * 官方 `talk_start` 在同帧 `set_body`，`motions_settled` 会一直等到该 clip 结束；
+   * 计划与运行时都要算进来，否则会把动作提前掐断（snippets[19] 的 215ms 打断就是
+   * 这类）。这里不看当前 alpha/visible：Appear 与 Talk 同帧启动时角色还没淡入，
+   * 但 `set_body` 已经生效。
+   */
+  private talkOwnMotionSettleFrames(talk: TalkSnippetLike, baseDurationMs = 0): number {
+    const cues: Array<{ at: number; modelId: number; motion?: string }> = []
+    if (talk.motion) cues.push({ at: 0, modelId: talk.modelId, motion: talk.motion })
+    for (const action of talk.actions ?? []) {
+      if (action.motion) cues.push(action)
+    }
+    let settleFrames = 0
+    for (const cue of cues) {
+      if (!cue.motion) continue
+      if (!this.motionGateCounts(cue.modelId)) continue
+      try {
+        const model = this.app.getModelById(cue.modelId)
+        if (model.isMotionLooping?.(cue.motion)) continue
+        const clipMs = model.getMotionDurationMs(cue.motion)
+        if (clipMs > 0) {
+          const startFrames = cue.at > 0 ? framesForSeconds((cue.at * baseDurationMs) / 1000) : 0
+          settleFrames = Math.max(settleFrames, startFrames + framesForSeconds(clipMs / 1000))
+        }
+      } catch {
+        /* model not loaded; the gate cannot be planned */
+      }
+    }
+    return settleFrames
   }
 
   private talkDurationWithMotionGate(
@@ -343,64 +442,49 @@ export default class VideoExportManager {
         ? talk.voiceDurationMs
         : 0
     const timingVoiceMs = officialVoiceMs > 0 ? officialVoiceMs : ttsDurationMs
+    const existingSettleFrames =
+      existingMotionSettleMs > 0 ? framesForSeconds(existingMotionSettleMs / 1000) : 0
     const base = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
       voiceDurationMs: officialVoiceMs,
       typingText: talk.typingText,
       windowOpenMs,
       layoutRunningMs,
-      motionSettleMs: existingMotionSettleMs,
+      motionSettleFrames: existingSettleFrames,
       silentHoldMs
     })
     if (!(timingVoiceMs > 0)) return base
-    const cues: Array<{ at: number; modelId: number; motion?: string }> = []
-    if (talk.motion) cues.push({ at: 0, modelId: talk.modelId, motion: talk.motion })
-    for (const action of talk.actions ?? []) {
-      if (action.motion) cues.push(action)
-    }
-    let settleMs = existingMotionSettleMs
-    for (const cue of cues) {
-      const visible =
-        this.app.layerModel.isModelVisible(cue.modelId) ||
-        Boolean(this.app.layerModel.isModelShown?.(cue.modelId))
-      if (!cue.motion || !visible) continue
-      try {
-        const model = this.app.getModelById(cue.modelId)
-        if (model.isMotionLooping?.(cue.motion)) continue
-        const clipMs = model.getMotionDurationMs(cue.motion)
-        if (clipMs > 0) settleMs = Math.max(settleMs, cue.at * base + clipMs)
-      } catch {
-        /* model not loaded; the gate cannot be planned */
-      }
-    }
+    let settleFrames = Math.max(existingSettleFrames, this.talkOwnMotionSettleFrames(talk, base))
     const snippets = this.app.storyManager?.snippets ?? []
+    const talkDelayFrames = framesForSeconds(talkDelayMs / 1000)
     let duration = base
     // 最多两轮：第一轮找到语音窗内启动的并发动作，第二轮把因动作延长后
     // 才落入窗口的后续动作也算进去。
     for (let pass = 0; pass < 2; pass++) {
-      const concurrentMs = this.concurrentMotionSettleMs(
+      const concurrentFrames = this.concurrentMotionSettleFrames(
         snippets,
         snippetIndex,
-        talkDelayMs,
-        duration
+        talkDelayFrames,
+        framesForSeconds(duration / 1000)
       )
-      const mergedSettleMs = Math.max(settleMs, concurrentMs)
-      if (mergedSettleMs <= settleMs + 0.5) break
-      settleMs = mergedSettleMs
+      if (concurrentFrames <= settleFrames) break
+      settleFrames = concurrentFrames
       duration = calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
         voiceDurationMs: officialVoiceMs,
         typingText: talk.typingText,
-        motionSettleMs: settleMs,
+        motionSettleFrames: settleFrames,
         layoutRunningMs,
         windowOpenMs,
         silentHoldMs
       })
     }
-    if (settleMs > 0 && snippetIndex >= 0) this.talkSettleMsByIndex.set(snippetIndex, settleMs)
-    return settleMs > 0 || layoutRunningMs > 0
+    if (settleFrames > 0 && snippetIndex >= 0) {
+      this.talkSettleFramesByIndex.set(snippetIndex, settleFrames)
+    }
+    return settleFrames > 0 || layoutRunningMs > 0
       ? calculateTalkDurationMs(talk.content, timingVoiceMs, talk.ttsText, {
           voiceDurationMs: officialVoiceMs,
           typingText: talk.typingText,
-          motionSettleMs: settleMs,
+          motionSettleFrames: settleFrames,
           layoutRunningMs,
           windowOpenMs,
           silentHoldMs
@@ -457,7 +541,8 @@ export default class VideoExportManager {
     exportLogBus.reset()
     motionTrace.reset()
     exportTraceContext.reset()
-    this.talkSettleMsByIndex.clear()
+    this.talkSettleFramesByIndex.clear()
+    this.exportModelShown.clear()
     this.lipSyncCache.clear()
     this.pendingLipSync.clear()
     this.pcmCache.clear()
@@ -507,7 +592,11 @@ export default class VideoExportManager {
       provider: this.app.ttsManager?.getConfig().provider,
       ttsEnabled,
       storyCounts: story ? { models: story.models.length, images: story.images.length } : undefined,
-      motionSettleMs: this.talkSettleMsByIndex
+      // 诊断沿用毫秒口径；内部计划用帧数（分段 frames_for 相加）。
+      motionSettleMs: new Map(
+        [...this.talkSettleFramesByIndex].map(([index, frames]) => [index, framesToMs(frames)])
+      ),
+      motionClipFrames: this.buildMotionClipFrames(snippets)
     })
     // 日志 data 里可能有 Map/Error/循环引用；必须在通过 WebSocket 回传宿主前拍平。
     result.diagnostics = sanitizeDiagnostics(diagnostics)
@@ -833,6 +922,32 @@ export default class VideoExportManager {
       ) => SnippetTimelineEntry[]
     )(snippets, timelineOptions)
     this.app.ttsManager.setTimeline(timeline)
+    // 以确定性帧计划预排 Talk 时长与整条时间线：运行时的 stageTiming settle 会带
+    // 1–3 帧启动漂移，逐句累积后成片 act 会偏离计划（实测片尾早 68 帧）。
+    // plan 帧号含 PlayCore 前 10 帧，时间线的 0 对应故事帧 10。
+    const plannedTalkDurationMs = new Map<number, number>()
+    const plannedEntries = bakeStoryPlan(snippets, timeline, {
+      motionClipFrames: this.buildMotionClipFrames(snippets),
+      exportFps: encodeFps,
+      ttsEnabled
+    }).entries
+    for (const entry of plannedEntries) {
+      if (entry.type === 'Talk') {
+        plannedTalkDurationMs.set(entry.index, framesToMs(entry.durationFrames))
+      }
+      const t = timeline[entry.index]
+      if (!t) continue
+      const startMs = Math.max(0, (entry.startFrame - PLAYCORE_WARMUP_FRAMES) * (1000 / STORY_FPS))
+      const delayStartMs = Math.max(
+        0,
+        (entry.delayStartFrame - PLAYCORE_WARMUP_FRAMES) * (1000 / STORY_FPS)
+      )
+      const durationMs = entry.durationFrames * (1000 / STORY_FPS)
+      if (t.delayStartTimeMs !== undefined) t.delayStartTimeMs = delayStartMs
+      t.startTimeMs = startMs
+      t.durationMs = durationMs
+      t.endTimeMs = startMs + durationMs
+    }
 
     const virtualClock = new VirtualClockController()
     const timestampRecorder = new SnippetTimestampRecorder()
@@ -1275,15 +1390,45 @@ export default class VideoExportManager {
         }
 
         exportTraceContext.setSnippet(i, snippet.type)
+        // 参考 `CurrentDisplayStatus`：布局片段的 shown 在 act 生效，不等淡入结束。
+        // 计划层按剧本顺序记状态，避免 Now Appear 与 Talk 同帧时运行时状态滞后。
+        {
+          const layoutModelId =
+            Number(((snippet as { data?: { modelId?: number } }).data ?? {}).modelId) || -1
+          if (layoutModelId >= 0) {
+            if (snippet.type === 'LayoutAppear') this.exportModelShown.set(layoutModelId, true)
+            else if (snippet.type === 'LayoutClear') this.exportModelShown.set(layoutModelId, false)
+          }
+        }
         const isTalk = snippet.type === 'Talk'
         const talkData = snippet.type === 'Talk' ? snippet.data : undefined
         const nowMs = performance.now()
-        const layoutRunningMs = isTalk ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs) : 0
+        // 片段 delay 从当前时刻开始，Talk 的 act 在 delay 之后；gate 用的是相对 act
+        // 的剩余时间，必须先把 delay 帧减掉。否则 delay=2s 的 Talk 会把上一段动作
+        // 的剩余时间多算 121 帧（片尾 HideTalk 前的两句实测多出 97 帧）。
+        const snippetDelayMs = Math.max(0, Number(snippet.delay) || 0) * 1000
+        const actOffsetMs = framesForSeconds(snippetDelayMs / 1000) * FRAME_MS
+        const layoutRunningMs = isTalk
+          ? Math.max(0, getLayoutRunningEndMs(this.app) - nowMs - actOffsetMs)
+          : 0
         const existingMotionSettleMs = isTalk
-          ? Math.max(0, getMotionSettledEndMs(this.app) - nowMs)
+          ? Math.max(0, getMotionSettledEndMs(this.app) - nowMs - actOffsetMs)
           : 0
 
         let resolvedTalkDurationMs: number | undefined
+        // 自身动作的收尾与 TTS 是否开启无关：官方 `talk_start` 同帧 set_body，
+        // 计划层的 Talk gate 必须等它结束（否则动作会被提前掐断）。
+        if (talkData) {
+          const ownSettleFrames = this.talkOwnMotionSettleFrames(
+            talkData as unknown as TalkSnippetLike
+          )
+          if (ownSettleFrames > 0) {
+            this.talkSettleFramesByIndex.set(
+              i,
+              Math.max(this.talkSettleFramesByIndex.get(i) ?? 0, ownSettleFrames)
+            )
+          }
+        }
         if (ttsEnabled && talkData) {
           const ttsReadyNow = concurrentPipeline.isTTSReady(i)
           if (!ttsReadyNow) {
@@ -1309,20 +1454,24 @@ export default class VideoExportManager {
             !hasSpeakableSpeechText(talkData.content ?? '')
               ? SILENT_PUNCTUATION_HOLD_MS
               : undefined
+          const officialVoiceMs =
+            Number((talkData as { voiceDurationMs?: number }).voiceDurationMs) || 0
+          const plannedMs = officialVoiceMs > 0 ? plannedTalkDurationMs.get(i) : undefined
           resolvedTalkDurationMs = applyTalkPatch(
             timeline,
             i,
             ttsDurationMs,
-            this.talkDurationWithMotionGate(
-              talkData as unknown as TalkSnippetLike,
-              ttsDurationMs,
-              this.talkWindowOpenMs(snippets, i, timeline),
-              i,
-              layoutRunningMs,
-              existingMotionSettleMs,
-              silentHoldMs,
-              (snippet.delay || 0) * 1000
-            )
+            plannedMs ??
+              this.talkDurationWithMotionGate(
+                talkData as unknown as TalkSnippetLike,
+                ttsDurationMs,
+                this.talkWindowOpenMs(snippets, i, timeline),
+                i,
+                layoutRunningMs,
+                existingMotionSettleMs,
+                silentHoldMs,
+                (snippet.delay || 0) * 1000
+              )
           )
           if (ttsDurationMs > 0) {
             const rawAudioBuffer = this.app.ttsManager.getAudioBufferForSnippet(i)
@@ -1362,8 +1511,36 @@ export default class VideoExportManager {
           if (pumpPaused) {
             setPumpPaused(false)
           }
-        } else if (isTalk) {
+        } else if (isTalk && talkData) {
           this.app.currentTalkLipSync = null
+          // 没有 TTS 时也要按官方 gate 时长播放（含官方 voiceDurationMs 与动作收尾），
+          // 并把后续时间线一起平移，否则运行时比计划早结束、动作被掐断。
+          const silentHoldMs =
+            !(talkData as { voice?: string }).voice &&
+            !hasSpeakableSpeechText(talkData.ttsText ?? '') &&
+            !hasSpeakableSpeechText(talkData.content ?? '')
+              ? SILENT_PUNCTUATION_HOLD_MS
+              : undefined
+          const officialVoiceMs =
+            Number((talkData as { voiceDurationMs?: number }).voiceDurationMs) || 0
+          const plannedMs = officialVoiceMs > 0 ? plannedTalkDurationMs.get(i) : undefined
+          resolvedTalkDurationMs = applyTalkPatch(
+            timeline,
+            i,
+            0,
+            plannedMs ??
+              this.talkDurationWithMotionGate(
+                talkData as unknown as TalkSnippetLike,
+                0,
+                this.talkWindowOpenMs(snippets, i, timeline),
+                i,
+                layoutRunningMs,
+                existingMotionSettleMs,
+                silentHoldMs,
+                (snippet.delay || 0) * 1000
+              )
+          )
+          this.app.ttsManager.setTimeline(timeline)
         }
 
         const timelineEntry = timeline[i]
@@ -1478,7 +1655,8 @@ export default class VideoExportManager {
       // 因为前置栅栏会让 plan 的最后一个片段排在 timeline 末尾之后（effects 实测
       // 753 vs 814 帧），帧泵会提前停、收尾黑幕计时器再也得不到步进。
       const finalPlan = bakeStoryPlan(snippets, timeline, {
-        motionSettleMs: this.talkSettleMsByIndex,
+        motionSettleFrames: this.talkSettleFramesByIndex,
+        motionClipFrames: this.buildMotionClipFrames(snippets),
         exportFps: encodeFps,
         ttsEnabled
       })

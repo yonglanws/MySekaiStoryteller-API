@@ -1,7 +1,7 @@
 import { Container, Graphics, Sprite, Text, TextStyle } from 'pixi.js'
 import { inappUrl, loadInappTexture } from '../effects/InappTextures'
 import AnimationManager from '../managers/AnimationManager'
-import { framesForSeconds, framesToMs } from '../../../common/official/timing'
+import { FRAME_MS, framesForSeconds, framesToMs } from '../../../common/official/timing'
 import {
   SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS,
   SIMPLE_SELECTABLE_CLOSE_SECONDS,
@@ -11,7 +11,13 @@ import {
 const DIALOG_SCALE_DURATION_MS = SIMPLE_SELECTABLE_OPEN_SECONDS * 1000
 const EXPORT_CHOICE_WAIT_MS = SIMPLE_SELECTABLE_AUTO_WAIT_SECONDS * 1000
 const EXPORT_CHOICE_PRESS_MS = 100
-const ANSWER_FINISH_DELAY_MS = SIMPLE_SELECTABLE_CLOSE_SECONDS * 1000
+
+/** 官方 `ExportChoice`：作答 = act + frames_for(1.5) = 91，按压 = 作答 − frames_for(0.1) = 85。 */
+const EXPORT_CHOICE_ANSWER_FRAMES = framesForSeconds(EXPORT_CHOICE_WAIT_MS / 1000)
+const EXPORT_CHOICE_PRESS_FRAMES = framesForSeconds(EXPORT_CHOICE_PRESS_MS / 1000)
+/** 作答后 `AnswerChoiceDialog.onFinishAnswerDialog` 等 0.5s = 30 帧；收起缩放占 8 帧。 */
+const ANSWER_FINISH_FRAMES = framesForSeconds(SIMPLE_SELECTABLE_CLOSE_SECONDS)
+const DIALOG_SCALE_FRAMES = framesForSeconds(DIALOG_SCALE_DURATION_MS / 1000)
 
 interface ChoiceButtonView {
   root: Container
@@ -127,13 +133,10 @@ export default class UIChoiceDialog extends Container {
     this.windowRoot.alpha = 1
     this.playUiSe('audio/MenuCommon/SE_UI_CHOICES_OPEN.wav')
 
-    // 官方时序：打开动画与 1.5s 作答等待并行；pressed = answered − 0.1s；
-    // 作答后关闭动画在这 0.5s 内跑完。片段 act→finish = 91+30 = 121 帧。
-    const answeredMs = framesToMs(framesForSeconds(EXPORT_CHOICE_WAIT_MS / 1000))
-    const pressedMs = framesToMs(
-      framesForSeconds(EXPORT_CHOICE_WAIT_MS / 1000) -
-        framesForSeconds(EXPORT_CHOICE_PRESS_MS / 1000)
-    )
+    // 官方时序：打开动画与 1.5s 作答等待并行；pressed = answered − 0.1s = 85 帧；
+    // 作答 = act+91；作答后收起 8 帧 + 剩余 22 帧，片段 act→finish = 91+30 = 121 帧。
+    const pressedMs = framesToMs(EXPORT_CHOICE_ANSWER_FRAMES - EXPORT_CHOICE_PRESS_FRAMES)
+    const pressToAnswerMs = framesToMs(EXPORT_CHOICE_PRESS_FRAMES)
     void AnimationManager.linear((p) => {
       if (gen !== this.animGen) return
       this.windowRoot.scale.set(p)
@@ -149,7 +152,7 @@ export default class UIChoiceDialog extends Container {
     this.playUiSe('audio/MenuCommon_Built_in/SE_DECIDE1.wav')
     this.playUiSe('audio/MenuCommon/SE_UI_CHOICES_DECIDE.wav')
 
-    await AnimationManager.delay(Math.max(0, answeredMs - pressedMs))
+    await AnimationManager.delay(Math.max(0, pressToAnswerMs))
     if (gen !== this.animGen) return clampedIndex
 
     await AnimationManager.linear((p) => {
@@ -157,7 +160,9 @@ export default class UIChoiceDialog extends Container {
       this.windowRoot.scale.set(1 - p)
       this.windowRoot.alpha = 1 - p
     }, DIALOG_SCALE_DURATION_MS)
-    await AnimationManager.delay(Math.max(0, ANSWER_FINISH_DELAY_MS - DIALOG_SCALE_DURATION_MS))
+    await AnimationManager.delay(
+      framesToMs(Math.max(0, ANSWER_FINISH_FRAMES - DIALOG_SCALE_FRAMES))
+    )
     if (gen !== this.animGen) return clampedIndex
 
     if (gen === this.animGen) {

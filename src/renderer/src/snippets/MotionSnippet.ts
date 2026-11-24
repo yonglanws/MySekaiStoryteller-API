@@ -7,6 +7,7 @@ export default class MotionSnippet extends BaseSnippet {
   protected async handleSnippet(): Promise<void> {
     if (this.data.type !== 'Motion') return
 
+    const motionStartMs = nowMs()
     const data = this.data.data
     if (data.actions !== undefined) {
       const actions: CharacterAction[] = []
@@ -35,7 +36,10 @@ export default class MotionSnippet extends BaseSnippet {
             if (action.motion && !model.isMotionLooping?.(action.motion)) {
               const clipMs = model.getMotionDurationMs?.(action.motion) ?? 0
               if (clipMs > 0) {
-                recordMotionSettledAt(this.app, action.modelId, nowMs() + clipMs)
+                // 计划帧 = act + at×窗口；await 的耗时不能算进 settle。
+                const actionStartMs =
+                  motionStartMs + Math.max(0, Number(action.at) || 0) * (data.duration ?? 2) * 1000
+                recordMotionSettledAt(this.app, action.modelId, actionStartMs + clipMs)
               }
             }
           },
@@ -65,7 +69,7 @@ export default class MotionSnippet extends BaseSnippet {
     if (data.motion && !model.isMotionLooping?.(data.motion)) {
       const clipMs = model.getMotionDurationMs?.(data.motion) ?? 0
       if (clipMs > 0) {
-        recordMotionSettledAt(this.app, data.modelId, nowMs() + clipMs)
+        recordMotionSettledAt(this.app, data.modelId, motionStartMs + clipMs)
       }
     }
   }

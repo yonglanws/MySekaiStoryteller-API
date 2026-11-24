@@ -57,7 +57,7 @@ export default class LayoutClearSnippet extends BaseSnippet {
       if (exit_motion && !model.isMotionLooping?.(exit_motion)) {
         const clipMs = model.getMotionDurationMs?.(exit_motion) ?? 0
         if (clipMs > 0) {
-          recordMotionSettledAt(this.app, this.data.data.modelId, nowMs() + clipMs)
+          recordMotionSettledAt(this.app, this.data.data.modelId, clearStartMs + clipMs)
         }
       }
     }

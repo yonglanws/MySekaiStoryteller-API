@@ -18,6 +18,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     if (this.data.type !== 'LayoutAppear') return
 
     const model = this.app.getModelById(this.data.data.modelId)
+    const appearStartMs = nowMs()
     // 官方显示状态才是 Appear 分支的依据：后台还没淡完的 HideCharacter 已经
     // 把 shown 置 false，此时 Appear 必须是 7 帧淡入，而不是按 alpha 走 0.2s 移动。
     const wasShown = this.app.layerModel.markModelShown
@@ -65,7 +66,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       if (entryMotion && !model.isMotionLooping?.(entryMotion)) {
         const clipMs = model.getMotionDurationMs?.(entryMotion) ?? 0
         if (clipMs > 0) {
-          recordMotionSettledAt(this.app, this.data.data.modelId, nowMs() + clipMs)
+          recordMotionSettledAt(this.app, this.data.data.modelId, appearStartMs + clipMs)
         }
       }
     }
@@ -76,7 +77,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     if (wasShown) {
       // 官方 AppearCharacter 对已在场的 view 走 CharacterMoveToCoroutine(side, 0.2)：
       // 不淡入，片段等这 0.2s 的滑动完成。
-      recordLayoutRunningEnd(this.app, nowMs() + APPEAR_SHOWN_MOVE_MS)
+      recordLayoutRunningEnd(this.app, appearStartMs + APPEAR_SHOWN_MOVE_MS)
       model.setOpacity?.(1)
       model.setPositionRel(this.app.stage_size, from)
       if (is_moved) {
@@ -103,7 +104,9 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       APPEAR_FADE_TOTAL_FRAMES - framesForSeconds(CHARACTER_FADE_MS / 1000)
     )
     const fadeTotalMs = holdFrames * FRAME_MS + fadeMs
-    recordLayoutRunningEnd(this.app, nowMs() + branchDelayMs + Math.max(fadeTotalMs, moveMs))
+    // Talk 的布局门只等片段本身（淡入结束）；后台滑入不阻塞下一句
+    // （参考 `layout_running` 只看片段，`motions_settled` 只看 body motion）。
+    recordLayoutRunningEnd(this.app, appearStartMs + branchDelayMs + fadeTotalMs)
 
     if (branchDelayMs > 0) await AnimationManager.delay(branchDelayMs)
     const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null

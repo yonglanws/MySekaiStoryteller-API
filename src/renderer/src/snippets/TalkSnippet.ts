@@ -212,7 +212,11 @@ export default class TalkSnippet extends BaseSnippet {
           if (action.motion && !model.isMotionLooping?.(action.motion)) {
             const clipMs = model.getMotionDurationMs?.(action.motion) ?? 0
             if (clipMs > 0) {
-              recordMotionSettledAt(this.app, action.modelId, nowMs() + clipMs)
+              // 官方 `set_body` 在 action 的计划帧立即生效；`applyCharacterAction`
+              // 的 await 可能跨几帧，不能用 nowMs()，否则 gate 会被推后。
+              const actionStartMs =
+                snippetStartTime + Math.max(0, Number(action.at) || 0) * targetDurationMs
+              recordMotionSettledAt(this.app, action.modelId, actionStartMs + clipMs)
             }
           }
         },

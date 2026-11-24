@@ -1,10 +1,14 @@
 import { Container, Graphics, Text, TextStyle } from 'pixi.js'
-import { runEasedTween } from '../effects/Ease'
+import { evaluateEase } from '../effects/Ease'
 import AnimationManager from '../managers/AnimationManager'
 import {
-  FULLSCREEN_BARS_MS,
-  FULLSCREEN_CHAR_FADE_MS,
-  FULLSCREEN_TEXT_PRE_DELAY_MS
+  FRAME_MS,
+  FST_BARS_FRAMES,
+  FST_FADE_FRAMES,
+  FST_HOLD_FRAMES,
+  FST_OPEN_DELAY_FRAMES,
+  FST_SLOT_FRAMES,
+  fullScreenTextSlots
 } from '../../../common/official/timing'
 
 const FST_BASE_ALPHA = 0.5
@@ -12,7 +16,8 @@ const FST_CINEMASCOPE_HEIGHT = 240
 
 /**
  * 官方 `ScenarioFullScreenTextDialog`（`EffectType 24`）：
- * 上下 `240px` 黑边（OutQuad `1.0s`），`0.5` 半透底幕，居中叙事文字逐段渐现，支持 `keepBars` 连续播放。
+ * 上下 `240px` 黑边（OutQuad 61 帧），`0.5` 半透底幕，居中叙事文字逐槽
+ * 0.125s（8 帧）显示；槽数取 `max(8, UTF-32 长度)`，跨行只增不减。
  */
 export default class UIFullScreenText extends Container {
   private readonly k: number
@@ -23,6 +28,8 @@ export default class UIFullScreenText extends Container {
   private readonly bottomBar: Graphics
   private readonly label: Text
   private barsOpen = false
+  /** TMP `characterInfo` 槽数：新对话重置为 8，跨行只增不减。 */
+  private slots = 0
   private animGen = 0
 
   constructor(screen_width: number, screen_height: number) {
@@ -74,16 +81,61 @@ export default class UIFullScreenText extends Container {
     this.bottomBar.endFill()
   }
 
-  public async show(opts: { text: string; durationMs?: number; keepBars?: boolean }): Promise<void> {
+  /** 按故事帧等待：`frames×FRAME_MS` 且提前 1µs，避免正好落在帧边界时多等一 tick。 */
+  private waitFrames(frames: number): Promise<void> {
+    const ms = frames * FRAME_MS - 0.001
+    return ms > 0 ? AnimationManager.delay(ms) : Promise.resolve()
+  }
+
+  /** 按故事帧求值的缓动（与 `runEasedTween` 相同，但时长来自整数帧而不是毫秒）。 */
+  private async tweenFrames(
+    frames: number,
+    ease: string,
+    onProgress: (eased: number) => void,
+    isCancelled?: () => boolean
+  ): Promise<void> {
+    if (frames <= 0) {
+      if (!isCancelled?.()) onProgress(1)
+      return
+    }
+    const startMs = typeof performance !== 'undefined' ? performance.now() : 0
+    await AnimationManager.linear(
+      (raw) => {
+        if (isCancelled?.()) return
+        onProgress(evaluateEase(ease, raw))
+      },
+      frames * FRAME_MS,
+      false,
+      { startMs, frames }
+    )
+    if (!isCancelled?.()) onProgress(1)
+  }
+
+  /**
+   * 官方 `ScenarioFullScreenTextDialog.PlayCore`：
+   * 新对话先黑边 1s + 0.5s，随后逐槽 0.125s 显示（槽数 `max(8, UTF-32 长度)`，
+   * 新对话初值 8、跨行只增不减），停留 1s；最后一行再淡出 1s。
+   * 单行 8 槽 = 61+30+64+61+61 = 277 帧。`durationMs` 属于旧扩展，不再参与官方时长。
+   */
+  public async show(opts: {
+    text: string
+    durationMs?: number
+    keepBars?: boolean
+    slots?: number
+  }): Promise<void> {
     const gen = ++this.animGen
     const targetBarH = FST_CINEMASCOPE_HEIGHT * this.k
+    const text = opts.text ?? ''
+    const shownText = text.replace(/^[\n\r]+/, '')
+    const chars = Array.from(shownText)
     this.visible = true
-    this.label.text = opts.text
+    this.label.text = ''
     this.label.alpha = 0
 
     if (!this.barsOpen) {
-      await runEasedTween(
-        FULLSCREEN_BARS_MS,
+      this.slots = 0
+      await this.tweenFrames(
+        FST_BARS_FRAMES,
         'OutQuad',
         (p) => {
           if (gen !== this.animGen) return
@@ -94,42 +146,40 @@ export default class UIFullScreenText extends Container {
       )
       if (gen !== this.animGen) return
       this.barsOpen = true
-      await AnimationManager.delay(FULLSCREEN_TEXT_PRE_DELAY_MS)
+      await this.waitFrames(FST_OPEN_DELAY_FRAMES)
       if (gen !== this.animGen) return
     } else {
       this.backdrop.alpha = FST_BASE_ALPHA
       this.drawBars(targetBarH)
     }
 
-    // 文字渐现（按文本长度分片 0.125s/段，最长不超过 600ms 保证流畅）
-    const fadeInMs = Math.min(600, Math.max(200, Math.ceil(opts.text.length / 8) * FULLSCREEN_CHAR_FADE_MS))
-    await AnimationManager.linear((p) => {
-      if (gen !== this.animGen) return
-      this.label.alpha = p
-    }, fadeInMs)
-    if (gen !== this.animGen) return
+    const slots = fullScreenTextSlots(this.slots, text)
+    this.slots = slots
     this.label.alpha = 1
-
-    const holdMs = opts.durationMs !== undefined ? Math.max(0, opts.durationMs) : Math.max(1200, opts.text.length * 67)
-    if (holdMs > 0) {
-      await AnimationManager.delay(holdMs)
+    for (let slot = 1; slot <= slots; slot++) {
+      this.label.text = chars.slice(0, Math.min(chars.length, slot)).join('')
+      await this.waitFrames(FST_SLOT_FRAMES)
       if (gen !== this.animGen) return
     }
 
+    await this.waitFrames(FST_HOLD_FRAMES)
+    if (gen !== this.animGen) return
+
     if (!opts.keepBars) {
-      await this.hide()
+      await this.hideFrames(FST_FADE_FRAMES)
     }
   }
 
-  public async hide(durationMs = FULLSCREEN_BARS_MS): Promise<void> {
+  /** 片尾 `FadeOutAll(1) ∥ bars out`：按故事帧淡出并收起黑边。 */
+  public async hideFrames(frames = FST_FADE_FRAMES): Promise<void> {
     if (!this.visible && !this.barsOpen) return
     const gen = ++this.animGen
     const targetBarH = FST_CINEMASCOPE_HEIGHT * this.k
     const startLabelAlpha = this.label.alpha
     const startBackdropAlpha = this.backdrop.alpha
 
-    await runEasedTween(
-      durationMs,
+    await this.tweenFrames(
+      frames,
       'OutQuad',
       (p) => {
         if (gen !== this.animGen) return
@@ -147,5 +197,10 @@ export default class UIFullScreenText extends Container {
       this.backdrop.alpha = 0
       this.drawBars(0)
     }
+  }
+
+  /** 兼容 layer API：默认按最后一行淡出的 61 帧收起。 */
+  public async hide(frames = FST_FADE_FRAMES): Promise<void> {
+    await this.hideFrames(frames)
   }
 }

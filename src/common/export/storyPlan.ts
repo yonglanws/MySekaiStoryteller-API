@@ -14,6 +14,8 @@ import {
   TALK_WINDOW_OPEN_CLOSE_FRAMES,
   framesForSeconds,
   framesToMs,
+  fullScreenTextFrames,
+  fullScreenTextSlots,
   msToFrameCount,
   normalizeEffectDurationMs,
   msToFrames,
@@ -51,6 +53,10 @@ export interface StoryPlanTalk {
   typingStartFrame: number
   typingEndFrame: number
   voiceEndFrame: number | null
+  /** 仍在跑的布局片段结束帧（绝对）；0 表示没有。 */
+  layoutGateFrame: number
+  /** 本句动作收尾帧数（相对 act）；0 表示没有。 */
+  settleFrames: number
   gateEndFrame: number
   computedEndFrame: number
 }
@@ -60,6 +66,17 @@ export interface StoryPlanLayout {
   fadeStartFrame: number | null
   fadeEndFrame: number | null
   moveEndFrame: number
+}
+
+/** `ScenarioFullScreenTextDialog.PlayCore` 的逐槽/停留/淡出帧（槽数跨行只增不减）。 */
+export interface StoryPlanFullScreenText {
+  first: boolean
+  last: boolean
+  slots: number
+  textStartFrame: number
+  textEndFrame: number
+  holdFrames: number
+  fadeFrames: number
 }
 
 export interface StoryPlanEntry {
@@ -73,6 +90,7 @@ export interface StoryPlanEntry {
   blocking: boolean
   talk?: StoryPlanTalk
   layout?: StoryPlanLayout
+  fst?: StoryPlanFullScreenText
   actions: StoryPlanActionCue[]
 }
 
@@ -89,6 +107,13 @@ export interface StoryPlanOptions {
   windowOpenMs?: ReadonlyMap<number, number>
   /** Talk 内身体动作的最晚结束时间（相对 Talk 开始），用于官方 gate。 */
   motionSettleMs?: ReadonlyMap<number, number>
+  /** 同上，但已经是帧数（延迟与 clip 分别 `frames_for` 后相加）。优先于 `motionSettleMs`。 */
+  motionSettleFrames?: ReadonlyMap<number, number>
+  /**
+   * `modelId|motion` -> 非循环 clip 帧数。提供时计划层自己按剧本帧推导 Talk gate
+   * （含后续 Now 片段），不再依赖运行时的时间戳 settle（后者会带上 1–3 帧启动漂移）。
+   */
+  motionClipFrames?: ReadonlyMap<string, number>
   /** 导出编码帧率（传入时与 30fps 导出淡入/静默节拍时长对齐）。 */
   exportFps?: number
   ttsEnabled?: boolean
@@ -156,16 +181,23 @@ export function bakeStoryPlan(
   const timelineByIndex = new Map(timeline.map((entry) => [entry.snippetIndex, entry]))
   const entries: StoryPlanEntry[] = []
   const visibleModels = new Set<number>()
+  // 每个角色当前 body 动作的绝对结束帧（只增；隐藏时 gate 不看它）。
+  const bodyEndByModel = new Map<number, number>()
   // `PlayCore` 前 10 帧不放任何 snippet。
   let cursorFrame = PLAYCORE_WARMUP_FRAMES
   let activeLayoutEndFrame = 0
   let lastEndFrame = 0
+  // 全屏文字对话框的 TMP characterInfo 槽数：初值 8，跨行只增不减。
+  let fstSlots = 0
+  // 全屏文字对话框是否仍开着（连续/keepBars 的行共用黑边；关掉后下一行重新播开）。
+  let fstDialogOpen = false
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
     const data = snippetData(snippet)
     const timing = timelineByIndex.get(i)
     const blocking = snippetBlocksTimeline(snippet)
+    const nextType = i + 1 < snippets.length ? snippets[i + 1].type : ''
 
     // PlayCore 前置栅栏：WaitFinished 在 delay 开始前先等所有在跑任务完成。
     if (blocking) {
@@ -252,13 +284,66 @@ export function bakeStoryPlan(
         !talkData.voice &&
         !hasSpeakableSpeechText(content) &&
         !hasSpeakableSpeechText(ttsText)
+      const layoutGateFrame = activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0
+      let settleFrames: number
+      if (options.motionClipFrames) {
+        const clipFrames = options.motionClipFrames
+        let planned = 0
+        // 之前片段留下的 body 动作（只算 shown 的角色）。
+        for (const [modelId, endFrame] of bodyEndByModel) {
+          if (!visibleModels.has(modelId)) continue
+          if (endFrame > startFrame) planned = Math.max(planned, endFrame - startFrame)
+        }
+        // 本句自己的动作：`actions` 的帧已经按计划算好。
+        for (const action of actions) {
+          if (!action.motion || !visibleModels.has(action.modelId)) continue
+          const clip = clipFrames.get(`${action.modelId}|${action.motion}`) ?? 0
+          if (clip > 0) planned = Math.max(planned, action.frame - startFrame + clip)
+        }
+        // 与 Talk 同注册帧的后续 Now 片段也会 `set_body` 并阻塞 gate。
+        for (let j = i + 1; j < snippets.length; j++) {
+          const next = snippets[j]
+          if (snippetBlocksTimeline(next)) break
+          const nextData = snippetData(next) as {
+            modelId?: number
+            motion?: unknown
+            duration?: unknown
+            actions?: Array<{ at?: unknown; modelId?: unknown; motion?: unknown }>
+          }
+          const startRel = framesForSeconds(next.delay) - delayFrames
+          const consider = (modelRaw: unknown, motionRaw: unknown, atRaw: unknown): void => {
+            const motionName = typeof motionRaw === 'string' ? motionRaw.trim() : ''
+            if (!motionName) return
+            const modelId = resolveActionModelId(modelRaw)
+            if (!visibleModels.has(modelId)) return
+            const clip = clipFrames.get(`${modelId}|${motionName}`) ?? 0
+            if (clip <= 0) return
+            const at = Math.max(0, Math.min(1, Number(atRaw) || 0))
+            // Motion 片段用 `duration` 做 cue 窗口；其它类型的动作都是 act 帧。
+            const atFrames =
+              at > 0
+                ? Math.round(at * planDurationFrames((Number(nextData.duration) || 2) * 1000))
+                : 0
+            planned = Math.max(planned, startRel + atFrames + clip)
+          }
+          consider(nextData.modelId, nextData.motion, 0)
+          for (const action of nextData.actions ?? []) {
+            consider(action.modelId ?? nextData.modelId, action.motion, action.at)
+          }
+        }
+        settleFrames = Math.max(0, planned)
+      } else {
+        settleFrames =
+          options.motionSettleFrames?.get(i) ??
+          framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000)
+      }
       const timingFrames = talkAutoFrameTiming({
         startFrame,
         windowFrames: windowOpenFrames,
         length: visibleTextLength(typingText || content),
         voiceSeconds: timingVoiceMs / 1000,
-        layoutEndFrame: activeLayoutEndFrame > startFrame ? activeLayoutEndFrame : 0,
-        settleFrames: framesForSeconds((options.motionSettleMs?.get(i) ?? 0) / 1000),
+        layoutEndFrame: layoutGateFrame,
+        settleFrames,
         silentHoldFrames: isSilentPunctuationBeat ? SILENT_PUNCTUATION_HOLD_FRAMES : undefined
       })
       talk = {
@@ -266,6 +351,8 @@ export function bakeStoryPlan(
         typingStartFrame: timingFrames.typingStartFrame,
         typingEndFrame: timingFrames.typingEndFrame,
         voiceEndFrame: timingFrames.voiceEndFrame,
+        layoutGateFrame,
+        settleFrames,
         gateEndFrame: timingFrames.gateEndFrame,
         computedEndFrame: timingFrames.endFrame
       }
@@ -314,10 +401,9 @@ export function bakeStoryPlan(
             fadeEndFrame: fadeEnd,
             moveEndFrame: layoutAt + moveFrames
           }
-          activeLayoutEndFrame = Math.max(
-            activeLayoutEndFrame,
-            Math.max(fadeEnd, moved ? layoutAt + moveFrames : 0)
-          )
+          // Talk 的布局门只等片段本身（淡入结束）；后台滑入不阻塞下一句
+          // （参考 `motions_settled` 只看 body motion，`layout_running` 只看片段）。
+          activeLayoutEndFrame = Math.max(activeLayoutEndFrame, fadeEnd)
         }
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
@@ -359,11 +445,36 @@ export function bakeStoryPlan(
       }
     }
 
-    // 参考实现里各片段的实际等待帧数。Talk/布局用各自的逐帧公式；
+    let fst: StoryPlanFullScreenText | undefined
+    if (snippet.type === 'FullScreenText') {
+      // 参考按相邻 instruction 判定 first/last：连续的全屏文字共用一个对话框，
+      // 槽数（TMP characterInfo）跨行只增不减。
+      const first = !fstDialogOpen
+      const last = nextType !== 'FullScreenText' && data.keepBars !== true
+      if (first) fstSlots = 0
+      fstDialogOpen = !last
+      const text = typeof data.text === 'string' ? data.text : ''
+      const slots = fullScreenTextSlots(fstSlots, text)
+      fstSlots = slots
+      const frames = fullScreenTextFrames({ first, last, slots })
+      fst = {
+        first,
+        last,
+        slots,
+        textStartFrame: startFrame + frames.textStartFrame,
+        textEndFrame: startFrame + frames.textEndFrame,
+        holdFrames: frames.holdFrames,
+        fadeFrames: frames.fadeFrames
+      }
+    }
+
+    // 参考实现里各片段的实际等待帧数。Talk/布局/全屏文字用各自的逐帧公式；
     // 剧本秒数驱动的效果与 Wait 用 f32 `frames_for`；其余沿用已量化的时间线值。
     let waitFrames: number
     if (talk) {
       waitFrames = talk.computedEndFrame - startFrame
+    } else if (fst) {
+      waitFrames = fst.textEndFrame + fst.holdFrames + fst.fadeFrames - startFrame
     } else if (layout && snippet.type === 'LayoutAppear') {
       waitFrames =
         layout.fadeEndFrame !== null ? layout.fadeEndFrame - startFrame : APPEAR_SHOWN_MOVE_FRAMES
@@ -387,6 +498,20 @@ export function bakeStoryPlan(
     const endFrame = finishFrame + (i < snippets.length - 1 ? 1 : 0)
     const durationFrames = waitFrames
 
+    // 记录本片段动作的 body 收尾帧，供后续 Talk 的 `motions_settled` 使用。
+    if (options.motionClipFrames) {
+      for (const action of actions) {
+        if (!action.motion) continue
+        const clip = options.motionClipFrames.get(`${action.modelId}|${action.motion}`) ?? 0
+        if (clip > 0) {
+          bodyEndByModel.set(
+            action.modelId,
+            Math.max(bodyEndByModel.get(action.modelId) ?? 0, action.frame + clip)
+          )
+        }
+      }
+    }
+
     entries.push({
       index: i,
       type: snippet.type,
@@ -397,6 +522,7 @@ export function bakeStoryPlan(
       blocking,
       ...(talk ? { talk } : {}),
       ...(layout ? { layout } : {}),
+      ...(fst ? { fst } : {}),
       actions
     })
 

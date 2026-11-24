@@ -354,7 +354,8 @@ test('LayoutAppear finishes after 7 frames while async slide continues, and re-a
   assert.equal(round(app.getModelById(1).calls.shows[0].startAt), 16.667)
   assert.equal(round(app.getModelById(1).calls.shows[0].endAt), 116.667)
   assert.equal(app.getModelById(1).calls.moves.length, 0, 'slide is still running in background')
-  assert.equal(stageTiming.getLayoutRunningEndMs(app), 500)
+  // Talk 的布局门只等片段本身（淡入结束）；后台滑入不参与。
+  assert.equal(round(stageTiming.getLayoutRunningEndMs(app)), 116.667)
 
   // 让后台 500ms 滑动自然走完
   await clock.drive(clock.sleep(400))

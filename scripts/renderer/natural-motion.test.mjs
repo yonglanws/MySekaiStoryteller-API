@@ -441,3 +441,33 @@ test('text lip levels follow the speaker slot and close one whole char early', (
   assert.equal(sixChars.targets[19] > 0, true)
   assert.equal(sixChars.targets[20], 0)
 })
+
+test('per-model blink/breath seeds are derived from the model id and stable', () => {
+  const natural = loadNatural()
+  // `naturalMotionSeed` 是 id 的 Knuth 乘法散列：同一 id 每次导出得到同一序列。
+  assert.equal(natural.naturalMotionSeed(1), (1 * 2654435761) >>> 0)
+  assert.equal(natural.naturalMotionSeed(22), (22 * 2654435761) >>> 0)
+  assert.equal(natural.naturalMotionSeed(22), natural.naturalMotionSeed(22))
+  assert.notEqual(natural.naturalMotionSeed(22), natural.naturalMotionSeed(23))
+  const intervals = (seed) => {
+    const state = natural.createBlinkState(seed)
+    natural.wakeBlink(state)
+    const out = []
+    for (let n = 0; n < 3; n++) {
+      natural.stepBlink(state, DT)
+      while (state.status !== 'ready') natural.stepBlink(state, DT)
+      out.push(state.untilTime)
+    }
+    return out
+  }
+  // 同一模型 id 的眨眼间隔序列逐位一致；不同 id 不同。
+  const a = intervals(natural.naturalMotionSeed(22))
+  const b = intervals(natural.naturalMotionSeed(22))
+  assert.deepEqual(a, b)
+  assert.notDeepEqual(a, intervals(natural.naturalMotionSeed(23)))
+  // 呼吸初相位同样由种子派生且落在 [0, 360) 的整数。
+  const degree = natural.createBreathDegree(natural.naturalMotionSeed(22))
+  assert.equal(degree, natural.createBreathDegree(natural.naturalMotionSeed(22)))
+  assert.equal(Number.isInteger(degree), true)
+  assert.ok(degree >= 0 && degree < 360)
+})

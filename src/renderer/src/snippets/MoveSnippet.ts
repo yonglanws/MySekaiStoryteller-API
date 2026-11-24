@@ -48,7 +48,7 @@ export default class MoveSnippet extends BaseSnippet {
       if (this.data.data.motion && !model.isMotionLooping?.(this.data.data.motion)) {
         const clipMs = model.getMotionDurationMs?.(this.data.data.motion) ?? 0
         if (clipMs > 0) {
-          recordMotionSettledAt(this.app, this.data.data.modelId, nowMs() + clipMs)
+          recordMotionSettledAt(this.app, this.data.data.modelId, moveStartMs + clipMs)
         }
       }
     }

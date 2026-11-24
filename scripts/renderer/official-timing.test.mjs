@@ -161,6 +161,42 @@ test('video frame n maps to story frame floor(n×60/fps) and steps by floor diff
   assert.equal(timing.storyStepsForVideoFrame(Number.NaN, 24), 2)
 })
 
+test('full screen text slots are max(8, UTF-32 length) and 8 slots take 277 frames', () => {
+  const { load } = fixture()
+  const timing = load(path.join(root, 'src/common/official/timing.ts'))
+  // 参考 `PlayCore`：黑边 61 + 开窗 30 + 逐槽 8 + 停留 61 + 淡出 61。
+  assert.equal(timing.FST_BARS_FRAMES, 61)
+  assert.equal(timing.FST_OPEN_DELAY_FRAMES, 30)
+  assert.equal(timing.FST_SLOT_FRAMES, 8)
+  assert.equal(timing.FST_HOLD_FRAMES, 61)
+  assert.equal(timing.FST_FADE_FRAMES, 61)
+  // `tmp_character_info_len`：初值 8、只增不减、按 UTF-32 计数（含富文本标签）。
+  assert.equal(timing.fullScreenTextSlots(0, '独白'), 8)
+  assert.equal(timing.fullScreenTextSlots(0, '\n0123456789'), 10)
+  assert.equal(timing.fullScreenTextSlots(8, 'short'), 8)
+  assert.equal(timing.fullScreenTextSlots(8, '<b>ab</b>'), 9)
+  assert.equal(timing.fullScreenTextSlots(38, 'short'), 38)
+  // 单行、8 槽、首尾同一片段：91 + 64 + 61 + 61 = 277。
+  const single = timing.fullScreenTextFrames({ first: true, last: true, slots: 8 })
+  assert.equal(single.textStartFrame, 91)
+  assert.equal(single.textEndFrame, 155)
+  assert.equal(single.totalFrames, 277)
+  // 连续对话：首行不淡出 216；中间行不黑边不淡出 125；末行不黑边 186。
+  assert.equal(timing.fullScreenTextFrames({ first: true, last: false, slots: 8 }).totalFrames, 216)
+  assert.equal(
+    timing.fullScreenTextFrames({ first: false, last: false, slots: 8 }).totalFrames,
+    125
+  )
+  assert.equal(timing.fullScreenTextFrames({ first: false, last: true, slots: 8 }).totalFrames, 186)
+  // 长首行 10 槽、下一行仍按 10 槽计时。
+  const longFirst = timing.fullScreenTextFrames({
+    first: true,
+    last: false,
+    slots: timing.fullScreenTextSlots(0, '0123456789')
+  })
+  assert.equal(longFirst.totalFrames, 91 + 80 + 61)
+})
+
 test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion gate', () => {
   const { load } = fixture()
   const talk = load('utils/TalkTiming.ts')
@@ -196,6 +232,16 @@ test('talk body uses 4 frames per char, voice + 0.5s, silence + 2s, and motion g
     4683.333
   )
   assert.equal(round(talk.talkTypingDurationMs(twenty)), 1333.333)
+  // 动作收尾按参考分段换算：`frames_for(1s 延迟) + frames_for(2.033s clip)`
+  // = 61 + 122 = 183 帧；合成 3.033s 再换算只有 182 帧。
+  assert.equal(
+    round(talk.calculateTalkDurationMs(twenty, 2860, '', { motionSettleFrames: 183 })),
+    3550
+  )
+  assert.equal(
+    round(talk.calculateTalkDurationMs(twenty, 2860, '', { motionSettleMs: 3033 })),
+    3533.333
+  )
   const described = talk.describeTalkTiming(twenty, 2860)
   assert.equal(round(described.typingMs), 1333.333)
   assert.equal(round(described.voiceEndMs), 2916.667)

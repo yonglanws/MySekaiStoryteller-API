@@ -799,6 +799,22 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
     ),
     4516.667
   )
+  // 参考 `motions_settled` 只看 shown 的角色：已隐藏角色的动作不阻塞 Talk。
+  appMock.layerModel.isModelShown = () => false
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ'.repeat(20), ttsText: '', modelId: 1, motion: 'nod' },
+        2860,
+        200,
+        0,
+        1500,
+        0
+      )
+    ),
+    3416.667
+  )
+  appMock.layerModel.isModelShown = () => true
   assert.equal(
     round(
       mgr.talkDurationWithMotionGate(
@@ -814,7 +830,8 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
   )
 
   // 与 Talk 同帧启动的 Now Motion（delay=1.5s）在语音结束后仍在播：
-  // 官方 Gate 等它到 4.5s，再停 0.5s = 300 帧。
+  // 官方 Gate 等它到 frames_for(1.5)+frames_for(3.0)=91+181=272 帧，再停 0.5s
+  // = 302 帧；整段 4.5s 换算只有 270 帧，会少 2 帧。
   appMock.storyManager.snippets = [
     { type: 'Talk', wait: true, delay: 0, data: { content: 'あ'.repeat(20), modelId: 1 } },
     {
@@ -837,7 +854,7 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
         0
       )
     ),
-    5000
+    5033.333
   )
   // 延迟晚于 Talk 自身结束的动作不会把这一句拖长。
   appMock.storyManager.snippets[1].delay = 10
@@ -855,6 +872,27 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
       )
     ),
     4566.667
+  )
+  // Talk 自身 delay=2s 时，Now 片段 delay=6s 相对 act 是
+  // frames_for(6)−frames_for(2)=360−121=239 帧（不是 frames_for(4s)=240）。
+  appMock.storyManager.snippets = [
+    { type: 'Talk', wait: true, delay: 2, data: { content: 'あ'.repeat(20), modelId: 1 } },
+    { type: 'Motion', wait: false, delay: 6, data: { modelId: 1, motion: 'relief' } }
+  ]
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ'.repeat(20), ttsText: '', modelId: 1, voiceDurationMs: 4000 },
+        0,
+        0,
+        0,
+        0,
+        0,
+        undefined,
+        2000
+      )
+    ),
+    7500
   )
   appMock.storyManager.snippets = []
 

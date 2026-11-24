@@ -456,6 +456,58 @@ export const FST_OPEN_DELAY_SECONDS = 0.5
 export const FST_VOICE_TIMEOUT_SECONDS = 10
 export const FST_TMP_CHARACTER_INFO_INITIAL = 8
 
+/**
+ * `ScenarioFullScreenTextDialog.PlayCore` 的帧数（`sse-timeline/src/lib.rs:1395-1460`）。
+ *
+ * - 新对话：黑边 `PlayCinemascope(true)` 61 帧 + `UniTask.Delay(0.5)` 30 帧；
+ * - 逐槽 0.125s = 8 帧，槽数 = `max(8, UTF-32 长度)`（TMP `characterInfo` 分配 8，
+ *   只在更长的文本上增长，整个对话跨行保持同一槽数）；
+ * - 停留 `PlayDuration(1.0)` = 61 帧；最后一个片段再叠 61 帧淡出。
+ *
+ * 单行、8 槽、首尾同一片段：91 + 64 + 61 + 61 = **277 帧**。
+ */
+export const FST_BARS_FRAMES = framesForSeconds(FST_PLAY_DURATION_SECONDS)
+export const FST_OPEN_DELAY_FRAMES = framesForSeconds(FST_OPEN_DELAY_SECONDS)
+export const FST_SLOT_FRAMES = framesForSeconds(FST_TEXT_WAIT_SECONDS)
+export const FST_HOLD_FRAMES = framesForSeconds(FST_PLAY_DURATION_SECONDS)
+export const FST_FADE_FRAMES = framesForSeconds(FST_PLAY_DURATION_SECONDS)
+
+/** `TMP_Text.SetArraySizes`：`characterInfo` 只增不减；初值 8。 */
+export function fullScreenTextSlots(current: number, text: string): number {
+  const trimmed = text.replace(/^[\n\r]+/, '')
+  return Math.max(current, FST_TMP_CHARACTER_INFO_INITIAL, Array.from(trimmed).length)
+}
+
+export interface FullScreenTextFrames {
+  slots: number
+  textStartFrame: number
+  textEndFrame: number
+  holdFrames: number
+  fadeFrames: number
+  /** 片段 act 到 finish 的帧数。 */
+  totalFrames: number
+}
+
+/** 全屏文字片段的参考帧数；`first`/`last` 由相邻片段是否同类决定。 */
+export function fullScreenTextFrames(input: {
+  first: boolean
+  last: boolean
+  slots: number
+}): FullScreenTextFrames {
+  const slots = Math.max(FST_TMP_CHARACTER_INFO_INITIAL, Math.floor(input.slots))
+  const textStartFrame = input.first ? FST_BARS_FRAMES + FST_OPEN_DELAY_FRAMES : 0
+  const textEndFrame = textStartFrame + slots * FST_SLOT_FRAMES
+  const fadeFrames = input.last ? FST_FADE_FRAMES : 0
+  return {
+    slots,
+    textStartFrame,
+    textEndFrame,
+    holdFrames: FST_HOLD_FRAMES,
+    fadeFrames,
+    totalFrames: textEndFrame + FST_HOLD_FRAMES + fadeFrames
+  }
+}
+
 /** `ScenarioPlayer.movieResolution`。 */
 export const MOVIE_RESOLUTION = [2338, 1080] as const
 export const MOVIE_FADE_SECONDS = 0.5

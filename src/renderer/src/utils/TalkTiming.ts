@@ -31,6 +31,12 @@ export interface TalkDurationOptions {
    */
   motionSettleMs?: number
   /**
+   * 同上，但已经是帧数。参考实现把「动作启动延迟」和「clip 长度」分别 `frames_for`
+   * 后相加（1s 延迟 + 2.033s clip = 61 + 122 = 183 帧）；整段毫秒再换算会少一帧
+   * （3.033s → 182 帧）。
+   */
+  motionSettleFrames?: number
+  /**
    * 仍在后台滑动/退场的 Layout 任务的剩余结束时间（相对 Talk 开始）。
    * 官方 Talk Gate：`while (layoutRunning || !motionsSettled) wait`。
    */
@@ -123,9 +129,11 @@ function talkAutoTiming(
         ? msToFrameCount(options.layoutRunningMs as number)
         : 0,
     settleFrames:
-      Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
-        ? framesForSeconds((options.motionSettleMs as number) / 1000)
-        : 0,
+      Number.isFinite(options.motionSettleFrames) && (options.motionSettleFrames ?? 0) > 0
+        ? Math.round(options.motionSettleFrames as number)
+        : Number.isFinite(options.motionSettleMs) && (options.motionSettleMs ?? 0) > 0
+          ? framesForSeconds((options.motionSettleMs as number) / 1000)
+          : 0,
     silentHoldFrames
   })
 }

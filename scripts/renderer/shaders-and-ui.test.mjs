@@ -298,11 +298,19 @@ test('OfficialFilters match SSE WGSL constants and use deterministic virtual clo
   assert.equal(dolly.uniforms.uDistortion, 0.25)
 
   // Verify no real-time wall-clock rAF or performance.now calls inside deterministic effect modules.
-  for (const rel of ['effects/HologramEffect.ts', 'effects/TriangleParticleEffect.ts', 'effects/OfficialFilters.ts']) {
+  for (const rel of [
+    'effects/HologramEffect.ts',
+    'effects/TriangleParticleEffect.ts',
+    'effects/OfficialFilters.ts'
+  ]) {
     const js = ts.transpileModule(fs.readFileSync(path.join(rendererSrc, rel), 'utf8'), {
       compilerOptions: { removeComments: true, target: ts.ScriptTarget.ES2022 }
     }).outputText
-    assert.equal(/\brequestAnimationFrame\b/.test(js), false, `${rel} must not use requestAnimationFrame`)
+    assert.equal(
+      /\brequestAnimationFrame\b/.test(js),
+      false,
+      `${rel} must not use requestAnimationFrame`
+    )
     assert.equal(/\bperformance\.now\b/.test(js), false, `${rel} must not use performance.now`)
   }
 })
@@ -411,7 +419,10 @@ test('UIText, UISpeakerText, UITextBackground, and UITextUnderline restore 53100
   assert.equal(textUl.x, 1920 / 10)
   assert.equal(textUl.y, 1080 / 1.3)
 
-  const bgSvg = fs.readFileSync(path.join(root, 'src/renderer/assets/ui/ui_text_background.svg'), 'utf8')
+  const bgSvg = fs.readFileSync(
+    path.join(root, 'src/renderer/assets/ui/ui_text_background.svg'),
+    'utf8'
+  )
   assert.match(bgSvg, /width="1920"/)
   assert.match(bgSvg, /height="1080"/)
 })
@@ -504,15 +515,31 @@ test('HologramEffect stays lazy until enabled, UIWatermark restores corner posit
   const model = { filters: [alphaFilter] }
   const effect = new HologramEffect(model, 1920, 1080)
 
-  assert.equal(model.filters.length, 1, 'constructing HologramEffect must not apply hologram shader to non-hologram models')
+  assert.equal(
+    model.filters.length,
+    1,
+    'constructing HologramEffect must not apply hologram shader to non-hologram models'
+  )
   assert.equal(model.filters[0], alphaFilter)
-  assert.equal(effect.parentFilters.length, 1, 'parentFilters exposes hologram shader only when applied by VisualEffectManager')
+  assert.equal(
+    effect.parentFilters.length,
+    1,
+    'parentFilters exposes hologram shader only when applied by VisualEffectManager'
+  )
   const beforeScroll = effect.parentFilters[0].uniforms.uScroll
   effect.update(60)
-  assert.equal(effect.parentFilters[0].uniforms.uScroll, beforeScroll, 'disabled HologramEffect ignores ticker steps')
+  assert.equal(
+    effect.parentFilters[0].uniforms.uScroll,
+    beforeScroll,
+    'disabled HologramEffect ignores ticker steps'
+  )
   effect.enabled = true
   effect.update(60)
-  assert.notEqual(effect.parentFilters[0].uniforms.uScroll, beforeScroll, 'enabled HologramEffect steps shader')
+  assert.notEqual(
+    effect.parentFilters[0].uniforms.uScroll,
+    beforeScroll,
+    'enabled HologramEffect steps shader'
+  )
 
   const { default: UIWatermark } = load('components/UIWatermark.ts')
   const watermark = new UIWatermark(1920, 1080)
@@ -522,8 +549,18 @@ test('HologramEffect stays lazy until enabled, UIWatermark restores corner posit
   assert.equal(watermark.y, 1080 / 36)
 
   const uiLayerSource = fs.readFileSync(path.join(rendererSrc, 'layers/UILayer.ts'), 'utf8')
-  for (const forbidden of ['menuContainer', 'autoContainer', 'endSignContainer', 'loadInappTexture', 'Ticker.shared']) {
-    assert.equal(uiLayerSource.includes(forbidden), false, `UILayer.ts must not contain ${forbidden}`)
+  for (const forbidden of [
+    'menuContainer',
+    'autoContainer',
+    'endSignContainer',
+    'loadInappTexture',
+    'Ticker.shared'
+  ]) {
+    assert.equal(
+      uiLayerSource.includes(forbidden),
+      false,
+      `UILayer.ts must not contain ${forbidden}`
+    )
   }
 
   const stage = new pixi.Container()
@@ -532,7 +569,11 @@ test('HologramEffect stays lazy until enabled, UIWatermark restores corner posit
   const layerUI = new UILayer(mockApp)
 
   assert.equal(layerUI.UITalkShowed, false)
-  assert.equal(stage.children.length, 2, 'stage only contains UILayer container and watermarkSprite')
+  assert.equal(
+    stage.children.length,
+    2,
+    'stage only contains UILayer container and watermarkSprite'
+  )
   const watermarkOnStage = stage.children[1]
   assert.equal(watermarkOnStage.zIndex, 4)
   assert.equal(watermarkOnStage.visible, false)
@@ -542,7 +583,10 @@ test('HologramEffect stays lazy until enabled, UIWatermark restores corner posit
   linearCalls.length = 0
   await layerUI.hideTextBackground()
   assert.equal(layerUI.UITalkShowed, false)
-  assert.ok(linearCalls.length > 0 && linearCalls.every((ms) => ms === 0), 'default hideTextBackground() must use immediate 0ms timing')
+  assert.ok(
+    linearCalls.length > 0 && linearCalls.every((ms) => ms === 0),
+    'default hideTextBackground() must use immediate 0ms timing'
+  )
 
   assert.equal(typeof layerUI.shakeWindow, 'function')
   assert.equal(typeof layerUI.stopShakeWindow, 'function')
@@ -551,4 +595,92 @@ test('HologramEffect stays lazy until enabled, UIWatermark restores corner posit
   assert.equal(typeof layerUI.showFullScreenText, 'function')
   assert.equal(typeof layerUI.hideFullScreenText, 'function')
   assert.equal(typeof layerUI.showChoiceDialog, 'function')
+})
+
+test('full screen text reveals per slot: 61+30+8×8+61+61 = 277 frames', async () => {
+  const delays = []
+  const tweenFrames = []
+  const anim = {
+    __esModule: true,
+    default: {
+      isExporting: () => true,
+      delay: async (ms) => {
+        delays.push(ms)
+      },
+      linear: async (onUpdate, _durationMs, _elegant, opts) => {
+        tweenFrames.push(opts?.frames)
+        onUpdate(0)
+        onUpdate(1)
+      }
+    }
+  }
+  const inappMock = {
+    inappUrl: (rel) => `/resources/inapp/jp-7.0.0/${rel}`,
+    loadInappTexture: () => Promise.resolve(null),
+    preloadCommonInappTextures: () => Promise.resolve()
+  }
+  const { load } = createRendererLoader(
+    new Map([
+      ['managers/AnimationManager.ts', anim],
+      ['effects/InappTextures.ts', inappMock]
+    ])
+  )
+  const timing = load(path.join(root, 'src/common/official/timing.ts'))
+  const { default: UIFullScreenText } = load('components/UIFullScreenText.ts')
+  const fst = new UIFullScreenText(1920, 1080)
+  await fst.show({ text: '独白' })
+
+  // 黑边 61 帧 + 片尾淡出 61 帧都走绝对帧模式。
+  assert.deepEqual(tweenFrames, [61, 61])
+  // 开窗 0.5s（30 帧）→ 8 个槽 × 0.125s（8 帧）→ 停留 1s（61 帧）。
+  assert.equal(delays.length, 1 + 8 + 1)
+  const frameMs = 1000 / timing.STORY_FPS
+  assert.ok(Math.abs(delays[0] - (30 * frameMs - 0.001)) < 1e-6, `open ${delays[0]}`)
+  for (let i = 1; i <= 8; i++) {
+    assert.ok(Math.abs(delays[i] - (8 * frameMs - 0.001)) < 1e-6, `slot ${i} ${delays[i]}`)
+  }
+  assert.ok(Math.abs(delays[9] - (61 * frameMs - 0.001)) < 1e-6, `hold ${delays[9]}`)
+  assert.equal(fst.visible, false, 'last line fades out and hides')
+})
+
+test('choice dialog answers at act+91, presses 6 frames earlier, and ends at act+121', async () => {
+  const delays = []
+  const anim = {
+    __esModule: true,
+    default: {
+      isExporting: () => true,
+      delay: async (ms) => {
+        delays.push(ms)
+      },
+      linear: async (onUpdate) => {
+        onUpdate(0)
+        onUpdate(1)
+      }
+    }
+  }
+  const inappMock = {
+    inappUrl: (rel) => `/resources/inapp/jp-7.0.0/${rel}`,
+    loadInappTexture: () => Promise.resolve(null),
+    preloadCommonInappTextures: () => Promise.resolve()
+  }
+  const { load } = createRendererLoader(
+    new Map([
+      ['managers/AnimationManager.ts', anim],
+      ['effects/InappTextures.ts', inappMock]
+    ])
+  )
+  const timing = load(path.join(root, 'src/common/official/timing.ts'))
+  const { default: UIChoiceDialog } = load('components/UIChoiceDialog.ts')
+  const dialog = new UIChoiceDialog(1920, 1080)
+  await dialog.show(['A', 'B'], 1)
+
+  const frameMs = 1000 / timing.STORY_FPS
+  const frames = delays.map((ms) => Math.round(ms / frameMs))
+  // 按压 = answered − 6 = 85；按压→作答 6；作答后收起余下 30−8 = 22（8 帧缩放另计）。
+  assert.equal(frames[0], 85)
+  assert.equal(frames[1], 6)
+  assert.equal(frames[2], 22)
+  assert.equal(timing.framesForSeconds(1.5), 91)
+  assert.equal(timing.framesForSeconds(0.5), 30)
+  assert.equal(frames[0] + frames[1] + timing.framesForSeconds(0.125) + frames[2], 121)
 })

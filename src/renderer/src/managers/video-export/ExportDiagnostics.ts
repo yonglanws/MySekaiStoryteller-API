@@ -32,6 +32,8 @@ export interface ExportDiagnosticsInput {
   ttsEnabled?: boolean
   storyCounts?: { models: number; images: number }
   motionSettleMs?: Map<number, number>
+  /** 计划层确定性 gate：`modelId|motion` -> clip 帧数（优先于运行时 settle）。 */
+  motionClipFrames?: ReadonlyMap<string, number>
 }
 
 function snippetActions(snippet: SnippetData, durationMs: number): DiagnosticAction[] {
@@ -207,6 +209,7 @@ export function buildExportDiagnostics(input: ExportDiagnosticsInput): ExportDia
 
   const plan = bakeStoryPlan(input.snippets, input.timeline, {
     motionSettleMs: input.motionSettleMs,
+    motionClipFrames: input.motionClipFrames,
     exportFps: input.exportMeta.fps,
     ttsEnabled: input.ttsEnabled
   })

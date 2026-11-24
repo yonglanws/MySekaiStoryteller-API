@@ -22,6 +22,7 @@ import {
   createBreathDegree,
   invokeBlinkUserData,
   missingBodyMotionBlink,
+  naturalMotionSeed,
   sleepBlink,
   stepBlink,
   type BlinkState
@@ -234,7 +235,7 @@ export default class AdvancedModel extends Live2DModel {
     const internalWithBlink = this.internalModel as unknown as { eyeBlink?: unknown }
     internalWithBlink.eyeBlink = undefined
 
-    const seed = (metadata.id * 2654435761) >>> 0
+    const seed = naturalMotionSeed(metadata.id)
     this.blinkState = createBlinkState(seed)
     // `BuildModelComponent`: `breathDegree = Random.Range(0, 360)`（int 重载），整数初值。
     this.breathDegree = createBreathDegree(seed)

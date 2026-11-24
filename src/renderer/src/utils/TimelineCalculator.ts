@@ -30,6 +30,8 @@ import {
   TELOP_TOTAL_MS,
   framesForSeconds,
   framesToMs,
+  fullScreenTextFrames,
+  fullScreenTextSlots,
   normalizeEffectDurationMs,
   quantizeMsToFrame,
   resolveCharacterFadeMs
@@ -703,6 +705,9 @@ export function calculateTimeline(
   // 官方 Appear/Hide 分支依赖角色当前是否在场：已在场 Appear 只滑 0.2s，
   // 未在场 Clear 直接 onFinished。时间线必须和运行时使用同一份在场状态。
   const visibleModels = new Set<number>()
+  // 全屏文字对话框的 TMP characterInfo 槽数：初值 8，跨行只增不减。
+  let fstSlots = 0
+  let fstDialogOpen = false
 
   if (snippets.length === 0) {
     return {
@@ -815,11 +820,6 @@ export function calculateTimeline(
     if (snippet.type === 'LayoutAppear') {
       const modelId = Number(getSnippetDataField(snippet, 'modelId'))
       const shown = visibleModels.has(modelId)
-      const speed = getSnippetDataField(snippet, 'moveSpeed')
-      const from = getSnippetDataField(snippet, 'from')
-      const to = getSnippetDataField(snippet, 'to')
-      const moved = layoutPositionMoved(from, to)
-      const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
       // 官方 `at = frame + (hidden && motion)`：隐藏角色的类型分支（淡入与滑入）
       // 带 motion 时延后一帧。片段只等淡入 0.1s，滑入在后台继续。
       const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
@@ -828,12 +828,12 @@ export function calculateTimeline(
       layoutDecision = shown
         ? 'LayoutAppear: character already shown, CharacterMoveTo 0.2s'
         : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade, slide in background'
-      const slideMs = shown
-        ? APPEAR_SHOWN_MOVE_MS
-        : forcedMs + Math.max(APPEAR_FADE_TOTAL_MS, moved ? moveMs : 0)
+      // Talk 的布局门只等片段本身（淡入结束）；后台滑入不阻塞下一句
+      // （参考 `layout_running` 只看片段，`motions_settled` 只看 body motion）。
+      const layoutGateMs = shown ? APPEAR_SHOWN_MOVE_MS : forcedMs + APPEAR_FADE_TOTAL_MS
       activeLayoutEndMs = Math.max(
         activeLayoutEndMs,
-        startTimeMs + (slideMs >= 30 ? quantizeMsToFrame(slideMs) : slideMs)
+        startTimeMs + (layoutGateMs >= 30 ? quantizeMsToFrame(layoutGateMs) : layoutGateMs)
       )
       visibleModels.add(modelId)
     } else if (snippet.type === 'LayoutClear') {
@@ -864,7 +864,24 @@ export function calculateTimeline(
       activeLayoutEndMs = Math.max(activeLayoutEndMs, startTimeMs + moveMs)
     }
 
-    const baseDurationMs = layoutDurationMs ?? crossResult.finalDurationMs
+    // 全屏文字按参考 `PlayCore` 计时：新对话 61+30 帧、逐槽 0.125s（槽数取
+    // max(8, UTF-32 长度)，跨行不缩）、停留 61 帧、最后一行再 61 帧淡出。
+    // 数据里的 `duration` 是早期扩展，不再参与官方时长。
+    let fstDurationMs: number | null = null
+    if (snippet.type === 'FullScreenText') {
+      const nextType = i + 1 < snippets.length ? snippets[i + 1].type : ''
+      const first = !fstDialogOpen
+      if (first) fstSlots = 0
+      const text = String(getSnippetDataField(snippet, 'text') ?? '')
+      const slots = fullScreenTextSlots(fstSlots, text)
+      fstSlots = slots
+      const keepBars = getSnippetDataField(snippet, 'keepBars') === true
+      const last = nextType !== 'FullScreenText' && !keepBars
+      fstDialogOpen = !last
+      const frames = fullScreenTextFrames({ first, last, slots })
+      fstDurationMs = framesToMs(frames.totalFrames)
+    }
+    const baseDurationMs = fstDurationMs ?? layoutDurationMs ?? crossResult.finalDurationMs
     // 秒数驱动的效果/等待按参考 f32 `frames_for` 计时；已帧量化的时长仍走
     // quantizeMsToFrame，避免 766.667ms 被 f32 累加算成 47 帧。
     const finalDurationMs =

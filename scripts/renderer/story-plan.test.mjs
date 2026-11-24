@@ -370,13 +370,272 @@ test('Talk closeWindowOnFinish and async LayoutAppear slide end gate in storyPla
   const timeline = calculator.calculateTimeline(snippets, tts)
   const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
 
-  // Appear 7f 完成后启动有声 Talk (frame 17)，后台滑行到 frame 40 > max(typing=21, voice=38) -> gateEnd=40
+  // Appear 7f 完成后启动有声 Talk (frame 18)；后台滑行到 frame 40 不再阻塞门，
+  // gate = max(typing_end=34, voice_end=39) = 39（参考 `layout_running` 只看片段本身）。
   assert.equal(plan.entries[0].startFrame, 10)
   assert.equal(plan.entries[0].endFrame, 18)
   assert.equal(plan.entries[1].startFrame, 18)
-  assert.equal(plan.entries[1].talk.gateEndFrame, 40)
-  assert.equal(plan.entries[1].talk.computedEndFrame, 70)
-  assert.equal(plan.entries[1].durationFrames, 52)
+  assert.equal(plan.entries[1].talk.gateEndFrame, 39)
+  assert.equal(plan.entries[1].talk.computedEndFrame, 69)
+  assert.equal(plan.entries[1].durationFrames, 51)
   // 参考 end_talk 在台词结束 0.2s 后才关窗；紧接着开始的下一句仍算窗口打开。
   assert.equal(plan.entries[2].talk.windowOpenFrames, 0)
+})
+
+test('full screen text, choice and black fades use the official frame counts', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    { type: 'FullScreenText', wait: true, delay: 0, data: { text: '独白' } },
+    {
+      type: 'SimpleSelectable',
+      wait: true,
+      delay: 0,
+      data: { choices: ['A', 'B'], pickedIndex: 1 }
+    },
+    { type: 'BlackOut', wait: true, delay: 0, data: { duration: 3000 } },
+    { type: 'BlackIn', wait: true, delay: 0, data: { duration: 2000 } }
+  ]
+  const timeline = calculator.calculateTimeline(snippets)
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+
+  const fst = plan.entries[0]
+  assert.equal(fst.type, 'FullScreenText')
+  assert.equal(fst.durationFrames, 277, '8 slots: 91 + 64 + 61 + 61')
+  assert.equal(fst.fst.first, true)
+  assert.equal(fst.fst.last, true)
+  assert.equal(fst.fst.slots, 8)
+  assert.equal(fst.fst.textStartFrame, 10 + 91)
+  assert.equal(fst.fst.textEndFrame, 10 + 155)
+  assert.equal(fst.fst.holdFrames, 61)
+  assert.equal(fst.fst.fadeFrames, 61)
+
+  const choice = plan.entries[1]
+  assert.equal(choice.type, 'SimpleSelectable')
+  assert.equal(choice.durationFrames, 121, 'answered act+91 + ANSWER_FINISH_DELAY 30')
+
+  assert.equal(plan.entries[2].type, 'BlackOut')
+  assert.equal(plan.entries[2].durationFrames, 181, 'frames_for(3.0)')
+  assert.equal(plan.entries[3].type, 'BlackIn')
+  assert.equal(plan.entries[3].durationFrames, 121, 'frames_for(2.0)')
+})
+
+test('consecutive full screen text keeps one dialog and grows its TMP slots', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    { type: 'FullScreenText', wait: true, delay: 0, data: { text: '独白' } },
+    { type: 'FullScreenText', wait: true, delay: 0, data: { text: '一二三四五六七八九十' } },
+    { type: 'FullScreenText', wait: true, delay: 0, data: { text: '短' } }
+  ]
+  const timeline = calculator.calculateTimeline(snippets)
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+
+  // 首行 8 槽、不淡出：91 + 64 + 61 = 216。
+  assert.equal(plan.entries[0].durationFrames, 216)
+  assert.equal(plan.entries[0].fst.first, true)
+  assert.equal(plan.entries[0].fst.last, false)
+  assert.equal(plan.entries[0].fst.slots, 8)
+  // 第二行 10 槽、中间行：80 + 61 = 141。
+  assert.equal(plan.entries[1].durationFrames, 141)
+  assert.equal(plan.entries[1].fst.first, false)
+  assert.equal(plan.entries[1].fst.last, false)
+  assert.equal(plan.entries[1].fst.slots, 10)
+  // 第三行仍按 10 槽（只增不减）、末行淡出：80 + 61 + 61 = 202。
+  assert.equal(plan.entries[2].durationFrames, 202)
+  assert.equal(plan.entries[2].fst.first, false)
+  assert.equal(plan.entries[2].fst.last, true)
+  assert.equal(plan.entries[2].fst.slots, 10)
+  // 时间线也要与 plan 一致（下一片段起点依赖它）。
+  const timelineFrames = (index) => Math.round(timeline.entries[index].durationMs / (1000 / 60))
+  assert.equal(timelineFrames(0), 216)
+  assert.equal(timelineFrames(1), 141)
+  assert.equal(timelineFrames(2), 202)
+})
+
+test('LayoutAppear hands over at act+7 / act+8 and the Talk follows at finish+1', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const appear = (motion, modelId) => ({
+    type: 'LayoutAppear',
+    wait: true,
+    delay: 0,
+    data: {
+      modelId,
+      from: { side: 'Center', offset: 0 },
+      to: { side: 'Right', offset: 0 },
+      motion,
+      facial: '',
+      moveSpeed: 'Slow',
+      hologram: false
+    }
+  })
+  const snippets = [
+    appear('', 1),
+    talk({ content: 'あ', motion: '', modelId: 1 }),
+    appear('m1', 2),
+    talk({ content: 'あ', motion: '', modelId: 2 })
+  ]
+  const timeline = calculator.calculateTimeline(snippets)
+  const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+
+  // 无 motion：act 10、fade 从 act+1 起、到 act+7；片段 finish=17，下一句 start=18。
+  assert.equal(plan.entries[0].startFrame, 10)
+  assert.equal(plan.entries[0].layout.fadeStartFrame, 11)
+  assert.equal(plan.entries[0].layout.fadeEndFrame, 17)
+  assert.equal(plan.entries[0].durationFrames, 7)
+  assert.equal(plan.entries[0].endFrame, 18)
+  assert.equal(plan.entries[1].startFrame, 18)
+
+  // 有 motion：类型分支 act+1、opacity 从 act+2 起 6 帧、until=act+8。
+  const withMotion = plan.entries[2]
+  assert.equal(withMotion.startFrame, withMotion.delayStartFrame)
+  assert.equal(withMotion.layout.fadeStartFrame, withMotion.startFrame + 2)
+  assert.equal(withMotion.layout.fadeEndFrame, withMotion.startFrame + 8)
+  assert.equal(withMotion.durationFrames, 8)
+  // 后台 Slow 滑入（46 帧）不阻塞下一条。
+  assert.equal(withMotion.layout.moveEndFrame, withMotion.startFrame + 1 + 46)
+  assert.equal(plan.entries[3].startFrame, withMotion.endFrame)
+})
+
+test('plan uses per-snippet motion settle frames without collapsing them into seconds', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const snippets = [
+    {
+      type: 'Talk',
+      wait: true,
+      delay: 0,
+      data: {
+        speaker: '瑞希',
+        content: 'あ'.repeat(16),
+        typingText: 'あ'.repeat(16),
+        modelId: 1,
+        voiceDurationMs: 1819.637
+      }
+    }
+  ]
+  const timeline = calculator.calculateTimeline(snippets)
+  // 参考：set_body 在 act 同帧，收尾 = frames_for(2.033s) = 122 帧；
+  // 若动作带 1s 栅栏，则是 frames_for(1.0)+frames_for(2.033) = 61+122 = 183 帧。
+  const byFrames = planModule.bakeStoryPlan(snippets, timeline.entries, {
+    motionSettleFrames: new Map([[0, 183]])
+  }).entries[0]
+  const byMs = planModule.bakeStoryPlan(snippets, timeline.entries, {
+    motionSettleMs: new Map([[0, 3033]])
+  }).entries[0]
+  assert.equal(byFrames.talk.gateEndFrame - byFrames.startFrame, 183)
+  assert.equal(byFrames.durationFrames, 213)
+  assert.equal(byMs.talk.gateEndFrame - byMs.startFrame, 182)
+  assert.equal(byMs.durationFrames, 212)
+  // 诊断里能看到 gate 的两个来源：动作收尾帧数与仍在跑的布局结束帧。
+  assert.equal(byFrames.talk.settleFrames, 183)
+  assert.equal(byFrames.talk.layoutGateFrame, 0)
+  assert.equal(byMs.talk.settleFrames, 182)
+  // 183 = 1s(61) + 2.033s(122)，逐段换算比整段毫秒多一帧。
+  assert.equal(byFrames.durationFrames - byMs.durationFrames, 1)
+})
+
+test('plan derives Talk gate from script frames and clip lengths, skipping hidden characters', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const appear = {
+    type: 'LayoutAppear',
+    wait: true,
+    delay: 0,
+    data: {
+      modelId: 1,
+      from: { side: 'Center', offset: 0 },
+      to: { side: 'Center', offset: 0 },
+      moveSpeed: 'Normal',
+      motion: 'm-long'
+    }
+  }
+  const talk = {
+    type: 'Talk',
+    wait: true,
+    delay: 0,
+    data: {
+      content: 'あ'.repeat(10),
+      typingText: 'あ'.repeat(10),
+      modelId: 1,
+      voiceDurationMs: 500,
+      actions: [{ at: 0, modelId: 1, motion: 'm-own' }]
+    }
+  }
+  const clear = {
+    type: 'LayoutClear',
+    wait: true,
+    delay: 0,
+    data: {
+      modelId: 1,
+      from: { side: 'Center', offset: 0 },
+      to: { side: 'Center', offset: 0 },
+      moveSpeed: 'Normal'
+    }
+  }
+  const clips = new Map([
+    ['1|m-long', 20],
+    ['1|m-own', 90]
+  ])
+  const shownSnippets = [appear, talk]
+  const shown = planModule.bakeStoryPlan(
+    shownSnippets,
+    calculator.calculateTimeline(shownSnippets).entries,
+    { motionClipFrames: clips }
+  )
+  // 本句自己的动作在 act 帧 set_body，gate = act + 90。
+  assert.equal(shown.entries[1].talk.settleFrames, 90)
+  const hiddenSnippets = [appear, clear, talk]
+  const hidden = planModule.bakeStoryPlan(
+    hiddenSnippets,
+    calculator.calculateTimeline(hiddenSnippets).entries,
+    { motionClipFrames: clips }
+  )
+  assert.equal(hidden.entries[2].talk.settleFrames, 0)
+})
+
+test('Talk auto advance is max(typing_end, voice_end) + 30 / typing_end + 121', () => {
+  const { load } = fixture()
+  const calculator = load('utils/TimelineCalculator.ts')
+  const planModule = load(path.join(root, 'src/common/export/storyPlan.ts'))
+  const make = (voiceMs) => ({
+    type: 'Talk',
+    wait: true,
+    delay: 0,
+    data: {
+      speaker: '瑞希',
+      content: 'あ'.repeat(10),
+      typingText: 'あ'.repeat(10),
+      modelId: 1,
+      ...(voiceMs > 0 ? { voiceDurationMs: voiceMs } : {})
+    }
+  })
+  // 10 字 = 40 帧；首句窗口 12 帧。
+  // 无语音：act 10 + 12 + 40 + 121 = 183 finish。
+  // 语音 2.0s = 121 帧（act+12+121=143? 语音结束 = act + frames_for(2.05) = act+124）
+  // 语音 0.5s 在打字前结束：仍 typing_end + 121。
+  const cases = [
+    { voiceMs: 0, finish: 183 },
+    { voiceMs: 500, finish: 183 },
+    { voiceMs: 2000, finish: 10 + 12 + 40 + 124 - 41 + 30 }
+  ]
+  for (const c of cases) {
+    const snippets = [make(c.voiceMs)]
+    const timeline = calculator.calculateTimeline(snippets)
+    const plan = planModule.bakeStoryPlan(snippets, timeline.entries)
+    const entry = plan.entries[0]
+    const talk = entry.talk
+    const voiceEnd = c.voiceMs > 0 ? talk.voiceEndFrame : null
+    const expectedGate =
+      voiceEnd !== null && voiceEnd > talk.typingEndFrame ? voiceEnd : talk.typingEndFrame
+    const expectedTail = voiceEnd !== null && voiceEnd > talk.typingEndFrame ? 30 : 121
+    assert.equal(talk.gateEndFrame, expectedGate, `voice=${c.voiceMs} gate`)
+    assert.equal(talk.computedEndFrame, expectedGate + expectedTail, `voice=${c.voiceMs} finish`)
+  }
 })
