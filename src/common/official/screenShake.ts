@@ -114,6 +114,14 @@ export function shakeOffsetAt(plan: ShakePlan, seconds: number): [number, number
   return shakeSegmentAt(ends, plan.offsets, low, seconds)
 }
 
+/**
+ * 官方 `screen_root_y` / DOShake 偏移是 Unity 坐标（+y 向上）；
+ * 合成到目标像素时 `root_xf` 写 `offset[1] = -sy`（`sse-render/src/lib.rs:1725-1732`）。
+ */
+export function shakeOffsetToScreen(offset: readonly [number, number]): [number, number] {
+  return [offset[0], -offset[1]]
+}
+
 function shakeSegmentAt(
   ends: readonly number[],
   tos: readonly (readonly [number, number])[],

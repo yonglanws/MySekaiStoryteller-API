@@ -8,6 +8,8 @@
  */
 export const SIDE_FADE_EDGE_PX = 512
 export const SIDE_FADE_PANEL_PAD_PX = 32
+/** `tex_transition_left/top` 的 UGUI tiled textureRect 从 128px 开始。 */
+export const SIDE_FADE_TRIM_PX = 128
 
 export type SideFadeEdge = 'left' | 'right' | 'top' | 'bottom'
 export type SideFadeMode = 'in' | 'out'
@@ -128,6 +130,99 @@ export function sideFadePanelRect(plan: SideFadePlan, eased: number): SideFadePa
 
 export function sideFadeLeadingEdgeAt(plan: SideFadePlan, eased: number): number {
   return sideFadePanelRect(plan, eased).leading
+}
+
+/** 参考 `SideFadePlayer` 根面板外的一枚 512px `tex_transition_*` tile。 */
+export interface SideFadeEdgeTile {
+  side: 'top' | 'bottom' | 'left' | 'right'
+  /** 相对根面板左上角的逻辑坐标。 */
+  x: number
+  y: number
+  width: number
+  height: number
+  texture: 'top' | 'left'
+  /** 纹理像素矩形（512×512 原图坐标）。 */
+  frame: { x: number; y: number; width: number; height: number }
+  flipX: boolean
+  flipY: boolean
+}
+
+/**
+ * `sse-render/src/lib.rs:1288-1342`：根面板四周各铺 512px tile。
+ * 顶部/底部按 x 从左到右平铺（最后一块可窄），左侧/右侧按 Unity y 从根底部
+ * 向上平铺（最后一块可矮）；UV 只取 textureRect 的 128..512。
+ */
+export function sideFadeEdgeTiles(plan: SideFadePlan): SideFadeEdgeTile[] {
+  const scale = plan.unitScale
+  const edge = SIDE_FADE_EDGE_PX * scale
+  const trim = SIDE_FADE_TRIM_PX
+  const width = plan.panel.width
+  const height = plan.panel.height
+  const tiles: SideFadeEdgeTile[] = []
+
+  for (let offset = 0; offset < width; offset += edge) {
+    const tileWidth = Math.min(edge, width - offset)
+    const frameWidth = tileWidth / scale
+    const frame = { x: 0, y: trim, width: frameWidth, height: SIDE_FADE_EDGE_PX - trim }
+    tiles.push({
+      side: 'top',
+      x: offset,
+      y: -edge,
+      width: tileWidth,
+      height: edge,
+      texture: 'top',
+      frame,
+      flipX: false,
+      flipY: false
+    })
+    tiles.push({
+      side: 'bottom',
+      x: offset,
+      y: height,
+      width: tileWidth,
+      height: edge,
+      texture: 'top',
+      frame,
+      flipX: false,
+      flipY: true
+    })
+  }
+
+  for (let offset = 0; offset < height; offset += edge) {
+    const tileHeight = Math.min(edge, height - offset)
+    const frameHeight = tileHeight / scale
+    const frame = {
+      x: trim,
+      y: SIDE_FADE_EDGE_PX - frameHeight,
+      width: SIDE_FADE_EDGE_PX - trim,
+      height: frameHeight
+    }
+    const y = height - offset - tileHeight
+    tiles.push({
+      side: 'left',
+      x: -edge,
+      y,
+      width: edge,
+      height: tileHeight,
+      texture: 'left',
+      frame,
+      flipX: false,
+      flipY: false
+    })
+    tiles.push({
+      side: 'right',
+      x: width,
+      y,
+      width: edge,
+      height: tileHeight,
+      texture: 'left',
+      frame,
+      flipX: true,
+      flipY: false
+    })
+  }
+
+  return tiles
 }
 
 export interface SideFadePositions {

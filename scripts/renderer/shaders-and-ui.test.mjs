@@ -472,10 +472,11 @@ test('StageUtils resolves Normal, Three, LeftOver/RightOver and Under positions'
 
   const leftNormal = StageUtils.side_to_position('Left', 'Normal', 0)
   assert.ok(Math.abs(leftNormal.x - (0.5 - 350 / 1920)) < 1e-6)
-  assert.equal(leftNormal.y, 0.5)
+  assert.ok(Math.abs(leftNormal.y - 0.8085) < 1e-6, `Normal origin y ${leftNormal.y}`)
 
   const leftThree = StageUtils.side_to_position('Left', 'Three', 0)
   assert.ok(Math.abs(leftThree.x - (0.5 - 550 / 1920)) < 1e-6)
+  assert.ok(Math.abs(leftThree.y - 0.82765) < 1e-6, `Three origin y ${leftThree.y}`)
 
   const leftOver = StageUtils.side_to_position('LeftOver', 'Normal', 0)
   assert.ok(Math.abs(leftOver.x - (0.5 - 1779.2 / 1920)) < 1e-6)

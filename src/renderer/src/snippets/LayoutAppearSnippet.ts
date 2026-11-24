@@ -29,12 +29,6 @@ export default class LayoutAppearSnippet extends BaseSnippet {
 
     this.app.layerModel.addModelToLayer(model)
 
-    // 确保模型内部已完全初始化
-    if (!model.internalModel) {
-      this.logger.warn('Model internalModel not ready, waiting...')
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
       this.app.layerModel.layoutMode,
@@ -47,8 +41,16 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       this.data.data.to.offset,
       this.data.data.to.under
     )
-
     const is_moved = from.x !== to.x || from.y !== to.y
+    // 新 view 在 act 帧就落到 SideFrom（参考 `CharacterRt::new` 的 x/y 初值），
+    // 必须早于动作 await，否则同帧的 Move 会从旧位置起步。
+    if (!wasShown) model.setPositionRel(this.app.stage_size, is_moved ? from : to)
+
+    // 确保模型内部已完全初始化
+    if (!model.internalModel) {
+      this.logger.warn('Model internalModel not ready, waiting...')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
 
     // 先把动作真正启动（此时模型 alpha=0，观众看不到），再开始淡入/滑入。
     const entryMotion =
@@ -76,22 +78,31 @@ export default class LayoutAppearSnippet extends BaseSnippet {
 
     if (wasShown) {
       // 官方 AppearCharacter 对已在场的 view 走 CharacterMoveToCoroutine(side, 0.2)：
-      // 不淡入，片段等这 0.2s 的滑动完成。
+      // 不淡入，片段等这 0.2s 的滑动完成。move_view 从当前 x/y 起步。
       recordLayoutRunningEnd(this.app, appearStartMs + APPEAR_SHOWN_MOVE_MS)
       model.setOpacity?.(1)
-      model.setPositionRel(this.app.stage_size, from)
-      if (is_moved) {
-        await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS)
+      const moveToCurrent = (
+        model as unknown as {
+          moveToCurrent?: (stage: [number, number], to: PositionRel, ms: number) => Promise<boolean>
+        }
+      ).moveToCurrent
+      if (typeof moveToCurrent === 'function') {
+        const moved = await moveToCurrent.call(model, this.app.stage_size, to, APPEAR_SHOWN_MOVE_MS)
+        if (!moved) await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
       } else {
-        await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
+        model.setPositionRel(this.app.stage_size, from)
+        if (is_moved) {
+          await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS)
+        } else {
+          await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
+        }
       }
       model.startBodyIdleLoop()
       return
     }
 
-    // 新 view：AppearCharacter(SideFrom) 先落到 from，CharacterMoveTo(SideTo)
-    // 与淡入并发，片段只等淡入（滑入继续在后台）。
-    model.setPositionRel(this.app.stage_size, is_moved ? from : to)
+    // 新 view：AppearCharacter(SideFrom) 先落到 from（已在 act 帧设置），
+    // CharacterMoveTo(SideTo) 与淡入并发，片段只等淡入（滑入继续在后台）。
 
     const isExporting = Boolean(AnimationManager.isExporting?.())
     const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS)

@@ -18,7 +18,8 @@ import {
   SHAKE_RANDOMNESS,
   SHAKE_VIBRATO,
   buildShakePlan,
-  shakeOffsetAt
+  shakeOffsetAt,
+  shakeOffsetToScreen
 } from '../../../common/official/screenShake'
 import { recordEffectProbe } from '../utils/EffectProbe'
 import {
@@ -207,7 +208,7 @@ export default class UILayer extends BaseLayer {
     await AnimationManager.linear(
       (progress) => {
         if (gen !== this.windowShakeGen) return
-        const [x, y] = shakeOffsetAt(plan, progress * clampedSec)
+        const [x, y] = shakeOffsetToScreen(shakeOffsetAt(plan, progress * clampedSec))
         this.wordsContainer.position.set(x, y)
       },
       Math.max(1, durationMs),

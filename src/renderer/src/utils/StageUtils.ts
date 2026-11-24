@@ -12,6 +12,7 @@ import {
   SIDE_X_DEFAULT,
   SIDE_X_THREE
 } from '../../../common/official/timing'
+import { live2dCharacterOriginY } from '../../../common/official/live2dStage'
 
 export const LAYOUT_REFERENCE_HEIGHT = 1080
 export { SIDE_OVER_X, SIDE_UNDER_Y }
@@ -38,16 +39,32 @@ export default class StageUtils {
       xPx = -SIDE_OVER_X
     } else if (sideStr === Sides.RightOver) {
       xPx = SIDE_OVER_X
-    } else if (sideStr === Sides.Left || sideStr === 'LeftInside' || sideStr === 'LeftUnder' || sideStr === 'LeftInsideUnder') {
+    } else if (
+      sideStr === Sides.Left ||
+      sideStr === 'LeftInside' ||
+      sideStr === 'LeftUnder' ||
+      sideStr === 'LeftInsideUnder'
+    ) {
       xPx = -sideX
-    } else if (sideStr === Sides.Right || sideStr === 'RightInside' || sideStr === 'RightUnder' || sideStr === 'RightInsideUnder') {
+    } else if (
+      sideStr === Sides.Right ||
+      sideStr === 'RightInside' ||
+      sideStr === 'RightUnder' ||
+      sideStr === 'RightInsideUnder'
+    ) {
       xPx = sideX
     }
 
     const isUnder = under === true || sideStr === Sides.Under || /Under$/i.test(sideStr)
+    // 官方模型画布中心在 RT 里的位置（`sse-render/src/gpu.rs:1140-1155`），
+    // 不是旧的 0.5+0.3 近似：Normal 为 0.8085H，Three 为 0.8277H。
+    const originY = live2dCharacterOriginY(
+      LAYOUT_REFERENCE_HEIGHT,
+      StageUtils.modeScale(layout_mode)
+    )
     return {
       x: 0.5 + (xPx + offset) / LAYOUT_REFERENCE_WIDTH,
-      y: isUnder ? 0.5 + Math.abs(SIDE_UNDER_Y) / LAYOUT_REFERENCE_HEIGHT : 0.5
+      y: (originY + (isUnder ? Math.abs(SIDE_UNDER_Y) : 0)) / LAYOUT_REFERENCE_HEIGHT
     }
   }
 

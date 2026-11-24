@@ -98,6 +98,9 @@ test('shake plan reproduces DOTween 8-segment decay, angle walk and rest offset'
     const [x, y] = plan.offsets[i]
     assert.ok(close(Math.hypot(x, y), 10 - i * 1.25, 1e-9), `segment ${i} magnitude`)
   }
+  const screen = shake.shakeOffsetToScreen([3, 4])
+  assert.equal(screen[0], 3)
+  assert.equal(screen[1], -4)
   const atRest = (value) => close(value[0], 0) && close(value[1], 0)
   assert.ok(atRest(plan.offsets[7]))
   assert.ok(atRest(shake.shakeOffsetAt(plan, 0)))
@@ -145,6 +148,31 @@ test('post effect slot is single-owner: blur wins while active, off clears it', 
   // CameraColorOff 无条件清空：残留的 blur 也一起结束（下一帧 blur setter 可重写）。
   owner = slot.nextPostEffectOwner('blur', 'no-color-filters', true)
   assert.equal(owner, 'none')
+})
+
+test('reference Live2D origin and 2338×1440 background stage rect match SSE', () => {
+  const live2d = load()('src/common/official/live2dStage.ts')
+  assert.ok(close(live2d.live2dCharacterOriginY(1080, 1), 873.18, 1e-9))
+  assert.ok(close(live2d.live2dCharacterOriginY(1080, 0.9), 893.862, 1e-9))
+
+  const bg = load()('src/common/official/backgroundStage.ts')
+  assert.deepEqual(
+    { ...bg.backgroundStageRect(1920, 1080) },
+    {
+      x: -209,
+      y: -180,
+      width: 2338,
+      height: 1440
+    }
+  )
+  const logical = bg.backgroundStageRect(1280, 720)
+  assert.ok(close(logical.x, -418 / 3))
+  assert.ok(close(logical.y, -120))
+  assert.ok(close(logical.width, (2338 * 2) / 3))
+  assert.ok(close(logical.height, 960))
+  // 参考的 scale 规则：content 小于基准时为 1，不会按图片像素 cover。
+  assert.equal(bg.backgroundBaseScale(1920, 1080), 1)
+  assert.ok(close(bg.backgroundBaseScale(2560, 1080), 2560 / 2338))
 })
 
 test('seconds-based fade/effect frame counts use f32 frames_for', () => {

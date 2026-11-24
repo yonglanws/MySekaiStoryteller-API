@@ -29,7 +29,8 @@ import {
   SHAKE_RANDOMNESS,
   SHAKE_VIBRATO,
   buildShakePlan,
-  shakeOffsetAt
+  shakeOffsetAt,
+  shakeOffsetToScreen
 } from '../../../common/official/screenShake'
 import { nextPostEffectOwner, type PostEffectOwner } from '../effects/PostEffectSlot'
 import { recordEffectProbe } from '../utils/EffectProbe'
@@ -501,15 +502,17 @@ export class App {
     await AnimationManager.linear(
       (progress) => {
         if (generation !== this.shakeGeneration) return
-        const [offsetX, offsetY] = shakeOffsetAt(plan, progress * clampedSec)
+        const [offsetX, screenOffsetY] = shakeOffsetToScreen(
+          shakeOffsetAt(plan, progress * clampedSec)
+        )
         this.shakeOffsetX = offsetX
-        this.shakeOffsetY = offsetY
+        this.shakeOffsetY = screenOffsetY
         if (fadeOut) {
-          // 父节点基线：从 -8 用 OutQuad 升到 0（与持续时间的进度同步）。
+          // 父节点基线：Unity y 从 -8 用 OutQuad 升到 0；屏幕 y 取反。
           const eased = -progress * (progress - 2)
-          this.shakeOffsetY += baseStart * (1 - eased)
+          this.shakeOffsetY += -baseStart * (1 - eased)
         } else {
-          this.shakeOffsetY += baseStart
+          this.shakeOffsetY += -baseStart
         }
         this.applyViewTransform()
       },

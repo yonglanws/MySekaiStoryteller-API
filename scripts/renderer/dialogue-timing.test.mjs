@@ -1319,12 +1319,27 @@ test('SpecialEffectLayer fadeGen prevents setOpeningCover vs BlackOut fade colli
   assert.equal(layer.seBlackSprite.filters[0].alpha, 1, 'Second BlackOut must end fully opaque')
 })
 
-test('SideFade hard-edge panel uses content+64, reference from/to and In deactivates', async (t) => {
+test('SideFade panel uses content+64, reference from/to and In deactivates', async (t) => {
   const f = fixture(t)
   class Sprite {
     constructor() {
       this.anchor = { set: noop }
-      this.position = { set: noop }
+      this.position = {
+        x: 0,
+        y: 0,
+        set(x, y) {
+          this.x = x
+          this.y = y
+        }
+      }
+      this.scale = {
+        x: 1,
+        y: 1,
+        set(x, y) {
+          this.x = x
+          this.y = y
+        }
+      }
       this.visible = true
       this.alpha = 1
       this.width = 0
@@ -1335,6 +1350,15 @@ test('SideFade hard-edge panel uses content+64, reference from/to and In deactiv
   }
   class Container {
     children = []
+    position = {
+      x: 0,
+      y: 0,
+      set(x, y) {
+        this.x = x
+        this.y = y
+      }
+    }
+    visible = true
     addChild(...items) {
       this.children.push(...items)
     }
@@ -1343,6 +1367,11 @@ test('SideFade hard-edge panel uses content+64, reference from/to and In deactiv
   f.mocks.set('pixi.js', {
     Application: class {},
     Container,
+    Rectangle: class {
+      constructor(x, y, width, height) {
+        Object.assign(this, { x, y, width, height })
+      }
+    },
     Sprite,
     Texture: {
       from: () => ({ valid: true, baseTexture: { valid: true } }),
@@ -1384,16 +1413,17 @@ test('SideFade hard-edge panel uses content+64, reference from/to and In deactiv
   const ox = 1280 + 512 * scale
 
   await layer.playSideFade('Out', 'Left', 500)
-  assert.equal(layer.wipeSprite.visible, true, 'Out keeps the panel')
-  assert.ok(Math.abs(layer.wipeSprite.width - panelWidth) < 1e-6)
-  assert.ok(Math.abs(layer.wipeSprite.height - (720 + pad * 2)) < 1e-6)
-  assert.ok(Math.abs(layer.wipeSprite.x - -pad) < 1e-6, 'Out ends covering at -pad')
-  assert.ok(Math.abs(layer.wipeSprite.y - -pad) < 1e-6)
+  assert.equal(layer.sideFadeContainer.visible, true, 'Out keeps the panel')
+  const root = layer.sideFadeContainer.children[0]
+  assert.ok(Math.abs(root.width - panelWidth) < 1e-6)
+  assert.ok(Math.abs(root.height - (720 + pad * 2)) < 1e-6)
+  assert.ok(Math.abs(layer.sideFadeContainer.position.x - -pad) < 1e-6, 'Out ends at -pad')
+  assert.ok(Math.abs(layer.sideFadeContainer.position.y - -pad) < 1e-6)
 
   await layer.playSideFade('In', 'Left', 500)
-  assert.equal(layer.wipeSprite.visible, false, 'In deactivates at the end')
-  assert.ok(Math.abs(layer.wipeSprite.x - (-pad + ox)) < 1e-6, 'In ends at content+512')
-  assert.ok(Math.abs(layer.wipeSprite.y - -pad) < 1e-6)
+  assert.equal(layer.sideFadeContainer.visible, false, 'In deactivates at the end')
+  assert.ok(Math.abs(layer.sideFadeContainer.position.x - (-pad + ox)) < 1e-6)
+  assert.ok(Math.abs(layer.sideFadeContainer.position.y - -pad) < 1e-6)
 })
 
 test('AdvancedModel channel 0 skips duplicate active body cues without false interrupted or motion-refused errors', async (t) => {

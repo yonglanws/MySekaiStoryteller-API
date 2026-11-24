@@ -1,4 +1,4 @@
-import { Application, Container, Sprite, Texture, Ticker, type Filter } from 'pixi.js'
+import { Application, Container, Rectangle, Sprite, Texture, Ticker, type Filter } from 'pixi.js'
 import BaseLayer from './BaseLayer'
 import ui_se_black from '../../assets/ui/ui_se_black.svg'
 import SEBlack from '../components/SEBlack'
@@ -15,9 +15,12 @@ import {
 } from '../../../common/official/timing'
 import { cameraBlurSpread } from '../../../common/official/cameraBlur'
 import {
+  sideFadeEdgeTiles,
   sideFadePlan,
   sideFadePanelRect,
-  type SideFadeEdge
+  type SideFadeEdge,
+  type SideFadeEdgeTile,
+  type SideFadePlan
 } from '../../../common/official/sideFade'
 import { recordEffectProbe } from '../utils/EffectProbe'
 
@@ -56,6 +59,11 @@ export default class SpecialEffectLayer extends BaseLayer {
   private readonly seWhiteSprite: SEBlack
   private readonly wipeSprite: Sprite
   private readonly wipeBlackTexture: Texture
+  private readonly sideFadeContainer = new Container()
+  private readonly sideFadeSubtextures = new Map<string, Texture>()
+  private sideFadeSprites: Sprite[] = []
+  private sideFadeEdgeLeft: Texture | null = null
+  private sideFadeEdgeTop: Texture | null = null
   private readonly fxContainer: Container
   private readonly movieSprite: Sprite
   private readonly cameraBlurFilter = new CameraBlurFilter(0)
@@ -100,17 +108,24 @@ export default class SpecialEffectLayer extends BaseLayer {
     this.seBlackSprite.zIndex = 3
     this.seWhiteSprite.zIndex = 4
     this.wipeSprite.zIndex = 5
+    this.sideFadeContainer.zIndex = 6
+    this.sideFadeContainer.visible = false
 
     this.layerContainer.addChild(
       this.fxContainer,
       this.movieSprite,
       this.seBlackSprite,
       this.seWhiteSprite,
-      this.wipeSprite
+      this.wipeSprite,
+      this.sideFadeContainer
     )
 
-    void loadInappTexture('player/loose/Texture2D/tex_transition_left.png')
-    void loadInappTexture('player/loose/Texture2D/tex_transition_top.png')
+    void loadInappTexture('player/loose/Texture2D/tex_transition_left.png').then((tex) => {
+      this.sideFadeEdgeLeft = tex
+    })
+    void loadInappTexture('player/loose/Texture2D/tex_transition_top.png').then((tex) => {
+      this.sideFadeEdgeTop = tex
+    })
   }
 
   public getContainer(): Container {
@@ -343,11 +358,63 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
   }
 
+  private sideFadeSubtexture(base: Texture, tile: SideFadeEdgeTile): Texture {
+    const frame = tile.frame
+    const key = `${tile.texture}:${Math.round(frame.x)}:${Math.round(frame.y)}:${Math.round(
+      frame.width
+    )}:${Math.round(frame.height)}`
+    const cached = this.sideFadeSubtextures.get(key)
+    if (isTextureUsable(cached)) return cached
+    const texture = new Texture(
+      base.baseTexture,
+      new Rectangle(frame.x, frame.y, frame.width, frame.height)
+    )
+    this.sideFadeSubtextures.set(key, texture)
+    return texture
+  }
+
+  /** 根黑面板 + 四周 512px `tex_transition_*` tile（参考 `sse-render/src/lib.rs:1288-1342`）。 */
+  private rebuildSideFade(plan: SideFadePlan): void {
+    for (const sprite of this.sideFadeSprites) {
+      this.sideFadeContainer.removeChild(sprite)
+    }
+    this.sideFadeSprites = []
+
+    const root = new Sprite(this.wipeBlackTexture)
+    root.anchor.set(0)
+    root.width = plan.panel.width
+    root.height = plan.panel.height
+    root.position.set(0, 0)
+    this.sideFadeContainer.addChild(root)
+    this.sideFadeSprites.push(root)
+
+    const left = this.sideFadeEdgeLeft
+    const top = this.sideFadeEdgeTop
+    if (!left || !top || !isTextureUsable(left) || !isTextureUsable(top)) return
+
+    for (const tile of sideFadeEdgeTiles(plan)) {
+      const base = tile.texture === 'top' ? top : left
+      const sprite = new Sprite(this.sideFadeSubtexture(base, tile))
+      sprite.anchor.set(0)
+      // 翻转时把 sprite 放到 tile 的另一边，再取负 scale 回到 tile 区域。
+      sprite.position.set(
+        tile.flipX ? tile.x + tile.width : tile.x,
+        tile.flipY ? tile.y + tile.height : tile.y
+      )
+      sprite.width = tile.width
+      sprite.height = tile.height
+      if (tile.flipX) sprite.scale.x *= -1
+      if (tile.flipY) sprite.scale.y *= -1
+      this.sideFadeContainer.addChild(sprite)
+      this.sideFadeSprites.push(sprite)
+    }
+  }
+
   /**
    * 官方 `ScenarioSideFadePlayer` (`EffectType 29~36`)：根节点是
-   * `contentSize + 64` 的纯黑硬边面板，`anchoredPosition` 按参考表 from→to
-   * （OutQuad）移动 `contentSize + 512`；In 类型在结束时 deactivate。
-   * 前沿就是面板边（`sse-render/src/lib.rs:1288-1310`），不再额外铺羽化条。
+   * `contentSize + 64` 的纯黑面板，`anchoredPosition` 按参考表 from→to
+   * （OutQuad）移动 `contentSize + 512`；四周铺 512px `tex_transition_*` 羽化 tile，
+   * In 类型在结束时 deactivate（`sse-render/src/lib.rs:1288-1342`）。
    */
   public async playSideFade(
     mode: 'In' | 'Out' | 'in' | 'out',
@@ -364,12 +431,9 @@ export default class SpecialEffectLayer extends BaseLayer {
     const start = sideFadePanelRect(plan, 0)
     const end = sideFadePanelRect(plan, 1)
 
-    this.wipeSprite.texture = this.wipeBlackTexture
-    this.wipeSprite.width = plan.panel.width
-    this.wipeSprite.height = plan.panel.height
-    this.wipeSprite.x = start.x
-    this.wipeSprite.y = start.y
-    this.wipeSprite.visible = true
+    this.rebuildSideFade(plan)
+    this.sideFadeContainer.position.set(start.x, start.y)
+    this.sideFadeContainer.visible = true
     recordEffectProbe('sidefade', {
       effectType: plan.effectType,
       edge: plan.edge,
@@ -383,7 +447,8 @@ export default class SpecialEffectLayer extends BaseLayer {
       from: plan.from,
       to: plan.to,
       startLeading: start.leading,
-      endLeading: end.leading
+      endLeading: end.leading,
+      edgeTiles: sideFadeEdgeTiles(plan).length
     })
 
     await runEasedTween(
@@ -392,17 +457,15 @@ export default class SpecialEffectLayer extends BaseLayer {
       (p) => {
         if (gen !== this.sideFadeGen) return
         const rect = sideFadePanelRect(plan, p)
-        this.wipeSprite.x = rect.x
-        this.wipeSprite.y = rect.y
+        this.sideFadeContainer.position.set(rect.x, rect.y)
       },
       () => gen !== this.sideFadeGen
     )
 
     if (gen !== this.sideFadeGen) return
-    this.wipeSprite.x = end.x
-    this.wipeSprite.y = end.y
+    this.sideFadeContainer.position.set(end.x, end.y)
     // In 类型在结束时 deactivate；Out 类型保留面板盖住画面。
-    this.wipeSprite.visible = !plan.hide
+    this.sideFadeContainer.visible = !plan.hide
   }
 
   /** 向后兼容旧签名 `(edge, mode, duration)`。 */
@@ -533,6 +596,7 @@ export default class SpecialEffectLayer extends BaseLayer {
     this.setSpriteAlpha(this.seWhiteSprite, 0)
     this.seWhiteSprite.zIndex = 4
     this.wipeSprite.visible = false
+    this.sideFadeContainer.visible = false
     this.movieSprite.visible = false
     for (const burst of this.activeTransitions) {
       this.fxContainer.removeChild(burst)
@@ -554,5 +618,9 @@ export default class SpecialEffectLayer extends BaseLayer {
     }
     this.filterSyncCallback = null
     this.cameraBlurFilter.destroy()
+    for (const texture of this.sideFadeSubtextures.values()) {
+      texture.destroy(false)
+    }
+    this.sideFadeSubtextures.clear()
   }
 }

@@ -59,18 +59,34 @@ export default class MoveSnippet extends BaseSnippet {
         : StageUtils.move_speed_to_num(this.data.data.moveSpeed)
     recordLayoutRunningEnd(this.app, moveStartMs + moveMs)
 
+    if (moveMs === 0) {
+      model.setPositionRel(this.app.stage_size, to)
+      return
+    }
+
+    // 官方 `move_view` 从当前 x/y 起步，而不是 snippet 里的 from；
+    // 同一帧的 LayoutAppear 可能已把角色放到 to，此时 Move 是 0 位移但仍等满 duration。
+    const moveToCurrent = (
+      model as unknown as {
+        moveToCurrent?: (
+          stage: [number, number],
+          to: PositionRel,
+          ms: number,
+          start?: number
+        ) => Promise<boolean>
+      }
+    ).moveToCurrent
+    if (typeof moveToCurrent === 'function') {
+      const moved = await moveToCurrent.call(model, this.app.stage_size, to, moveMs, moveStartMs)
+      if (!moved) await AnimationManager.delay(moveMs)
+      return
+    }
+
     if (from.x === to.x && from.y === to.y) {
-      // 官方 layout 片段按 CharacterMoveTo 的 duration 完成，即使位置没变也要等。
       model.setPositionRel(this.app.stage_size, to)
-      if (moveMs > 0) await AnimationManager.delay(moveMs)
+      await AnimationManager.delay(moveMs)
       return
     }
-
-    if (this.data.data.moveSpeed === MoveSpeed.Immediate) {
-      model.setPositionRel(this.app.stage_size, to)
-      return
-    }
-
     await model.move(this.app.stage_size, from, to, moveMs, moveStartMs)
   }
 }

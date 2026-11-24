@@ -1887,22 +1887,19 @@ export default class AdvancedModel extends Live2DModel {
   public setPositionRel(stage_size: [number, number], position: PositionRel): void {
     this.shakeGeneration++
     this.basePositionBeforeShake = null
-    this.position.set(stage_size[0] * position.x, stage_size[1] * (position.y + 0.3))
+    this.position.x = stage_size[0] * position.x
+    this.position.y = stage_size[1] * position.y
   }
 
-  public async move(
-    stage_size: [number, number],
-    from: PositionRel,
-    to: PositionRel,
+  private async runMove(
+    abs_from: [number, number],
+    abs_to: [number, number],
     time_ms: number,
     startMs?: number
-  ): Promise<void> {
-    if (from.x === to.x && from.y === to.y) return
+  ): Promise<boolean> {
+    if (abs_from[0] === abs_to[0] && abs_from[1] === abs_to[1]) return false
     this.shakeGeneration++
     this.basePositionBeforeShake = null
-
-    const abs_from: [number, number] = [stage_size[0] * from.x, stage_size[1] * (from.y + 0.3)]
-    const abs_to: [number, number] = [stage_size[0] * to.x, stage_size[1] * (to.y + 0.3)]
 
     // 官方 `CharacterMoveTo` 是 `DOLocalMove(...).SetEase(Linear)`：位置按进度线性插值。
     // 按故事帧求值（act 帧取 from，act+frames 取 to），避免片段先于帧泵启动时
@@ -1920,6 +1917,40 @@ export default class AdvancedModel extends Live2DModel {
       time_ms,
       false,
       { startMs: tweenStartMs, frames: msToFrameCount(time_ms) }
+    )
+    return true
+  }
+
+  public async move(
+    stage_size: [number, number],
+    from: PositionRel,
+    to: PositionRel,
+    time_ms: number,
+    startMs?: number
+  ): Promise<boolean> {
+    return this.runMove(
+      [stage_size[0] * from.x, stage_size[1] * from.y],
+      [stage_size[0] * to.x, stage_size[1] * to.y],
+      time_ms,
+      startMs
+    )
+  }
+
+  /**
+   * 官方 `move_view` 从角色**当前**位置开始（忽略 layout 的 from 字段）：
+   * 同一帧排在 Move 前面的 Appear/Clear 已经改过位置时，Move 不得把它拉回旧点。
+   */
+  public async moveToCurrent(
+    stage_size: [number, number],
+    to: PositionRel,
+    time_ms: number,
+    startMs?: number
+  ): Promise<boolean> {
+    return this.runMove(
+      [this.position.x, this.position.y],
+      [stage_size[0] * to.x, stage_size[1] * to.y],
+      time_ms,
+      startMs
     )
   }
 

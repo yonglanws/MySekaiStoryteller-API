@@ -153,10 +153,10 @@ function makeModel(loader) {
 test('move lands exactly on the destination in both axes', async () => {
   const loader = loadAdvancedModel()
   const { model } = makeModel(loader)
-  // 参考宽 1000：Left = 200px，Right = 800px。
+  // 参考宽 1000：Left = 200px，Right = 800px；y 是模型画布中心的归一化位置。
   await model.move([1000, 1000], { x: 0.2, y: 0.5 }, { x: 0.8, y: 0.5 }, 500)
   assert.equal(model.position.x, 800)
-  assert.equal(model.position.y, 800)
+  assert.equal(model.position.y, 500)
 })
 
 test('move x samples the official linear curve at each frame', async () => {
@@ -180,6 +180,25 @@ test('move x samples the official linear curve at each frame', async () => {
     )
   }
   assert.equal(xs[2], 500, 'linear midpoint at 50% time')
+})
+
+test('moveToCurrent starts at the current position, not a stale layout from', async () => {
+  const loader = loadAdvancedModel()
+  const { model, positions } = makeModel(loader)
+  // 角色已经在一帧 Appear 里落到 0.5；Move 的 from 字段仍是旧值，不能把它拉回去。
+  model.setPositionRel([1000, 1000], { x: 0.5, y: 0.8085 })
+  positions.length = 0
+  const moved = await model.moveToCurrent([1000, 1000], { x: 0.2, y: 0.8085 }, 500)
+  assert.equal(moved, true)
+  assert.equal(positions[0].x, 500)
+  assert.equal(positions[0].y, 808.5)
+  assert.equal(positions.at(-1).x, 200)
+  assert.equal(positions.at(-1).y, 808.5)
+
+  positions.length = 0
+  const noop = await model.moveToCurrent([1000, 1000], { x: 0.2, y: 0.8085 }, 500)
+  assert.equal(noop, false, 'already at target: no tween, caller still waits the duration')
+  assert.equal(positions.length, 0)
 })
 
 test('show fades from the current alpha instead of always restarting at 0', async () => {

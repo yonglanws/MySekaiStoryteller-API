@@ -1,6 +1,7 @@
 import { Application, Assets, Container, Sprite, Texture } from 'pixi.js'
 import { UI_GAUSSIAN_BLUR_DEFAULT_DISTANCE, UIGaussianBlurFilter } from '../effects/OfficialFilters'
 import AnimationManager from '../managers/AnimationManager'
+import { backgroundStageRect } from '../../../common/official/backgroundStage'
 import BaseLayer from './BaseLayer'
 
 export default class BackgroundLayer extends BaseLayer {
@@ -14,14 +15,12 @@ export default class BackgroundLayer extends BaseLayer {
     super(app, -1)
 
     this.sprite = new Sprite()
-    this.sprite.x = this.app.screen.width / 2
-    this.sprite.y = this.app.screen.height / 2
     this.sprite.anchor.set(0.5)
+    this.applyStageRect(this.sprite)
 
     this.fadeSprite = new Sprite()
-    this.fadeSprite.x = this.app.screen.width / 2
-    this.fadeSprite.y = this.app.screen.height / 2
     this.fadeSprite.anchor.set(0.5)
+    this.applyStageRect(this.fadeSprite)
     this.fadeSprite.visible = false
     this.fadeSprite.alpha = 0
 
@@ -40,20 +39,26 @@ export default class BackgroundLayer extends BaseLayer {
   public async setBackgroundBlur(active: boolean, level = 1, durationMs = 0): Promise<void> {
     const generation = ++this.blurGeneration
     const refScale = this.app.screen.width / 1920
-    const targetDistance = active ? UI_GAUSSIAN_BLUR_DEFAULT_DISTANCE * Math.max(0.25, level) * refScale : 0
+    const targetDistance = active
+      ? UI_GAUSSIAN_BLUR_DEFAULT_DISTANCE * Math.max(0.25, level) * refScale
+      : 0
     const startDistance =
       this.layerContainer.filters && this.layerContainer.filters.includes(this.blurFilter)
         ? this.blurFilter.samplingDistance
         : 0
 
-    if (active && (!this.layerContainer.filters || !this.layerContainer.filters.includes(this.blurFilter))) {
+    if (
+      active &&
+      (!this.layerContainer.filters || !this.layerContainer.filters.includes(this.blurFilter))
+    ) {
       this.layerContainer.filters = [this.blurFilter]
     }
 
     if (durationMs > 0) {
       await AnimationManager.linear((progress) => {
         if (generation !== this.blurGeneration) return
-        this.blurFilter.samplingDistance = startDistance + (targetDistance - startDistance) * progress
+        this.blurFilter.samplingDistance =
+          startDistance + (targetDistance - startDistance) * progress
       }, durationMs)
     }
 
@@ -64,13 +69,12 @@ export default class BackgroundLayer extends BaseLayer {
     }
   }
 
-  private calcScale(texture: Texture): number {
-    const w = Math.max(1, texture.width)
-    const h = Math.max(1, texture.height)
-    if (w / h > this.app.screen.width / this.app.screen.height) {
-      return this.app.screen.height / h
-    }
-    return this.app.screen.width / w
+  /** 官方背景固定铺进 2338×1440 的居中矩形，不按图片自身像素 cover。 */
+  private applyStageRect(sprite: Sprite): void {
+    const rect = backgroundStageRect(this.app.screen.width, this.app.screen.height)
+    sprite.width = rect.width
+    sprite.height = rect.height
+    sprite.position.set(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
   }
 
   private async resolveTexture(imageOrUrl: Texture | string): Promise<Texture> {
@@ -88,8 +92,8 @@ export default class BackgroundLayer extends BaseLayer {
     this.changeGeneration++
     this.fadeSprite.visible = false
     this.fadeSprite.alpha = 0
-    this.sprite.scale.set(this.calcScale(texture))
     this.sprite.texture = texture
+    this.applyStageRect(this.sprite)
   }
 
   /** 官方 `ChangeBackground`：支持平滑线性交叉淡化（durationMs=0 立即切换）。 */
@@ -104,7 +108,7 @@ export default class BackgroundLayer extends BaseLayer {
     }
 
     this.fadeSprite.texture = nextTex
-    this.fadeSprite.scale.set(this.calcScale(nextTex))
+    this.applyStageRect(this.fadeSprite)
     this.fadeSprite.alpha = 0
     this.fadeSprite.visible = true
 
@@ -115,7 +119,7 @@ export default class BackgroundLayer extends BaseLayer {
 
     if (generation !== this.changeGeneration) return
     this.sprite.texture = nextTex
-    this.sprite.scale.set(this.calcScale(nextTex))
+    this.applyStageRect(this.sprite)
     this.fadeSprite.visible = false
     this.fadeSprite.alpha = 0
   }

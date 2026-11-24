@@ -315,6 +315,55 @@ test('SideFade panel converts 512/32 reference pixels to the 1280x720 export can
   assert.ok(Math.abs(vertical.panel.height * 1.5 - 1144) < 1e-9)
 })
 
+test('SideFade edge tiles reproduce the reference 512px trimmed tiling', () => {
+  const { sideFadePlan, sideFadeEdgeTiles } = runtime.sideFade
+  const plan = sideFadePlan('right', 'out', 1920, 1080)
+  const tiles = sideFadeEdgeTiles(plan)
+  const top = tiles.filter((tile) => tile.side === 'top')
+  const bottom = tiles.filter((tile) => tile.side === 'bottom')
+  const left = tiles.filter((tile) => tile.side === 'left')
+  const right = tiles.filter((tile) => tile.side === 'right')
+
+  // 根面板 1984×1144：横向 512+512+512+448，纵向 512+512+120。
+  assert.deepEqual([...top.map((tile) => tile.width)], [512, 512, 512, 448])
+  assert.deepEqual([...top.map((tile) => tile.frame.width)], [512, 512, 512, 448])
+  assert.deepEqual([...left.map((tile) => tile.height)], [512, 512, 120])
+  assert.deepEqual([...left.map((tile) => tile.frame.height)], [512, 512, 120])
+  assert.deepEqual([...left.map((tile) => tile.frame.y)], [0, 0, 392])
+
+  // textureRect：顶部/底部取 image rows 128–512，左右取 image x 128–512。
+  assert.deepEqual({ ...top[0].frame }, { x: 0, y: 128, width: 512, height: 384 })
+  assert.deepEqual({ ...left[0].frame }, { x: 128, y: 0, width: 384, height: 512 })
+  assert.equal(top[0].texture, 'top')
+  assert.equal(left[0].texture, 'left')
+  assert.equal(
+    bottom.every((tile) => tile.flipY),
+    true
+  )
+  assert.equal(
+    right.every((tile) => tile.flipX),
+    true
+  )
+
+  // 四个方向都覆盖到面板外 512px。
+  assert.deepEqual([...new Set(tiles.map((tile) => tile.side))].sort(), [
+    'bottom',
+    'left',
+    'right',
+    'top'
+  ])
+  assert.equal(Math.min(...tiles.map((tile) => tile.x)), -512)
+  assert.equal(Math.max(...tiles.map((tile) => tile.x + tile.width)), plan.panel.width + 512)
+  assert.equal(Math.min(...tiles.map((tile) => tile.y)), -512)
+  assert.equal(Math.max(...tiles.map((tile) => tile.y + tile.height)), plan.panel.height + 512)
+
+  // 1280×720 导出画布：逻辑 tile 尺寸按 2/3 缩放，纹理矩形仍是 512px 原图。
+  const scaled = sideFadeEdgeTiles(sideFadePlan('right', 'out', 1280, 720, 1280 / 1920))
+  const scaledTop = scaled.filter((tile) => tile.side === 'top')
+  assert.ok(Math.abs(scaledTop[0].width - (512 * 2) / 3) < 1e-9)
+  assert.deepEqual({ ...scaledTop[0].frame }, { x: 0, y: 128, width: 512, height: 384 })
+})
+
 test('new effect snippets take their exact official duration', () => {
   const snippets = [
     { type: 'Telop', wait: true, delay: 0, data: { content: 'x' } },
