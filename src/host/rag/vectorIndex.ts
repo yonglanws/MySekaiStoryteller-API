@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import type { EmbedCacheIndexFile, Sq8IndexHeader, Sq8VectorMatrix } from './types'
+import type { EmbedCacheIndexFile, RagDomain, Sq8IndexHeader, Sq8VectorMatrix } from './types'
 
 const PJSK_MAGIC = 'PJSK'
 const PJSK_VERSION = 1
@@ -158,6 +158,7 @@ export function readPjskSq8File(filePath: string): Sq8VectorMatrix {
 export class IncrementalSq8Cache {
   readonly baseDir: string
   readonly model: string
+  readonly domain: RagDomain
   private dims: number
   private entries = new Map<string, number>()
   private scales: number[] = []
@@ -165,9 +166,10 @@ export class IncrementalSq8Cache {
   private dirty = false
   private loaded = false
 
-  constructor(cacheDir: string, model: string, dims = 0) {
+  constructor(cacheDir: string, model: string, dims = 0, domain: RagDomain = 'pjsk') {
     this.baseDir = cacheDir
     this.model = model
+    this.domain = domain
     this.dims = dims > 0 ? dims : 0
   }
 
@@ -180,11 +182,11 @@ export class IncrementalSq8Cache {
   }
 
   private resolveDir(): string {
-    const slug = modelSlug(this.model)
+    const slug = `${this.domain}-${modelSlug(this.model)}`
     if (this.dims > 0) {
       return path.join(this.baseDir, `${slug}-${this.dims}d`)
     }
-    // 自动发现已有 `<slug>-*d` 目录
+    // 自动发现已有 `<domain>-<slug>-*d` 目录
     if (fs.existsSync(this.baseDir)) {
       const prefix = `${slug}-`
       const candidates = fs
@@ -208,6 +210,7 @@ export class IncrementalSq8Cache {
 
     try {
       const meta = JSON.parse(fs.readFileSync(indexPath, 'utf8')) as EmbedCacheIndexFile
+      if (meta.domain && meta.domain !== this.domain) return false
       if (meta.schemaVersion !== 1 || meta.model !== this.model || !meta.entries) return false
       const matrix = readPjskSq8File(binPath)
       if (matrix.dims !== meta.dims) return false
@@ -297,6 +300,7 @@ export class IncrementalSq8Cache {
     }
     const indexDoc: EmbedCacheIndexFile = {
       schemaVersion: 1,
+      domain: this.domain,
       model: this.model,
       dims: this.dims,
       quant: 'sq8_sym',
