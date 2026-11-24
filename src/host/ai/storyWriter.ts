@@ -41,6 +41,10 @@ import {
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
+import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
+import { AdaptiveRagRetriever } from '../rag/retriever'
+import { loadStoryCorpus } from '../rag/storyCorpus'
+import type { RagMetaSummary, RagRetrieveResult } from '../rag/types'
 
 export type StoryMode = 'story' | 'chat'
 
@@ -87,6 +91,8 @@ export interface GenerateStoryMeta {
   ttsTranslated: number
   cast: string[]
   stages?: StoryStageMeta[]
+  /** 自适应语义 RAG 检索诊断摘要（仅启用 RAG 时出现） */
+  rag?: RagMetaSummary
 }
 
 export interface GenerateStoryResult {
@@ -172,24 +178,66 @@ export class StoryWriter {
   private readonly logger: Logger<ILogObj>
   private readonly emotionLabels: string[]
   private personas: PersonaEntry[] | null = null
+  private ragRetriever: AdaptiveRagRetriever | null | undefined
 
   constructor(
     llm: LlmClient,
     settings: LlmSettings,
     catalog: ResourceCatalog,
     logger: Logger<ILogObj>,
-    emotionLabels: string[] = []
+    emotionLabels: string[] = [],
+    ragRetriever?: AdaptiveRagRetriever | null
   ) {
     this.llm = llm
     this.settings = settings
     this.catalog = catalog
     this.logger = logger
     this.emotionLabels = emotionLabels.map((label) => label.trim()).filter(Boolean)
+    this.ragRetriever = ragRetriever
   }
 
   private getPersonas(): PersonaEntry[] {
     if (!this.personas) this.personas = loadPersonas(this.settings)
     return this.personas
+  }
+
+  private getRagRetriever(): AdaptiveRagRetriever | null {
+    if (this.ragRetriever !== undefined) return this.ragRetriever
+    const rag = this.settings.rag
+    if (!rag?.enabled) {
+      this.ragRetriever = null
+      return null
+    }
+    const chunks = loadStoryCorpus({
+      localDirs: rag.localDirs,
+      personas: rag.includePersonas ? this.getPersonas() : [],
+      includePersonas: rag.includePersonas
+    })
+    if (chunks.length === 0) {
+      this.ragRetriever = null
+      return null
+    }
+    const embedConfig = resolveEmbeddingConfig(this.settings)
+    const embeddingClient = embedConfig.enabled ? new EmbeddingClient(embedConfig, this.logger) : null
+    this.ragRetriever = new AdaptiveRagRetriever({
+      chunks,
+      settings: rag,
+      embeddingClient,
+      logger: this.logger
+    })
+    return this.ragRetriever
+  }
+
+  private summarizeRag(result: RagRetrieveResult | null): RagMetaSummary | undefined {
+    if (!result || result.mode === 'disabled') return undefined
+    return {
+      mode: result.mode,
+      model: result.model,
+      selectedCount: result.selectedCount,
+      totalChars: result.totalChars,
+      topScore: result.topScore,
+      latencyMs: result.latencyMs
+    }
   }
 
   /**
@@ -323,6 +371,24 @@ export class StoryWriter {
     options: GenerateStoryOptions
   }): Promise<GenerateStoryResult> {
     const { mode, prompt, view, personas, targetMinutes, options } = args
+    let singleRag: RagRetrieveResult | null = null
+    const retriever = this.getRagRetriever()
+    if (retriever) {
+      try {
+        singleRag = await retriever.retrieve({
+          prompt,
+          stage: 'single',
+          cast: view.models.map((m) => ({
+            name: view.shortName(m),
+            fullName: m.name
+          })),
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] single 检索失败，跳过参考注入：${errorMessage(error)}`)
+      }
+    }
     const built =
       mode === 'chat'
         ? buildChatPrompt(view, {
@@ -331,14 +397,16 @@ export class StoryWriter {
             targetMinutes,
             systemPrompt: this.settings.systemPrompt,
             history: options.history,
-            emotionLabels: this.emotionLabels
+            emotionLabels: this.emotionLabels,
+            ragContext: singleRag?.promptBlock
           })
         : buildStoryPrompt(view, {
             scene: prompt,
             personas,
             targetMinutes,
             systemPrompt: this.settings.systemPrompt,
-            emotionLabels: this.emotionLabels
+            emotionLabels: this.emotionLabels,
+            ragContext: singleRag?.promptBlock
           })
 
     const messages: ChatMessage[] = [
@@ -403,7 +471,8 @@ export class StoryWriter {
             latencyMs,
             durationMs: 0,
             ttsTranslated,
-            cast: view.models.map((entry) => entry.name)
+            cast: view.models.map((entry) => entry.name),
+            ...(this.summarizeRag(singleRag) ? { rag: this.summarizeRag(singleRag) } : {})
           }
         }
       } catch (error) {
@@ -494,11 +563,29 @@ export class StoryWriter {
         maxTokens: this.settings.maxTokens
       })
 
-    // ---- 1. 选角与微事件 -----------------------------------------------------------------------------------
+    // ---- 0.5 Pass A：选角前快速检索（<= 1500 字符，0 额外 LLM 调用） -----------------------------------------
+    const retriever = this.getRagRetriever()
+    let preCastRag: RagRetrieveResult | null = null
+    if (retriever) {
+      try {
+        preCastRag = await retriever.retrieve({
+          prompt,
+          stage: 'cast',
+          maxCharBudget: 1500,
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] Pass A 选角前检索失败，继续无参考选角：${errorMessage(error)}`)
+      }
+    }
+
+    // ---- 1. 选角与微事件（含深度意图理解、称呼表与多面 RAG 查询） ----------------------------------------------
+    const castPromptOptions: StagedPromptOptions = { ...promptOptions, ragContext: preCastRag }
     let plan: StagedCastPlan | null = null
     try {
-      const result = await runStage('cast', buildCastPrompt(view, promptOptions))
-      plan = normalizeCastPlan(parseStageJson(result), view, promptOptions)
+      const result = await runStage('cast', buildCastPrompt(view, castPromptOptions))
+      plan = normalizeCastPlan(parseStageJson(result), view, castPromptOptions)
       if (!plan) {
         markStageFailed('没有返回目录中的角色')
         warnings.push('选角结果没有可用角色，已按目录顺序回退')
@@ -513,6 +600,31 @@ export class StoryWriter {
     if (plan.cast.length === 0) {
       throw new StoryGenerationError('资源目录没有可用于生成的角色', details)
     }
+
+    // ---- 1.5 Pass B：选角后多面自适应检索（结合入选角色、微事件与 Stage 1 retrievalQueries） -------------------
+    let postCastRag: RagRetrieveResult | null = preCastRag
+    if (retriever) {
+      try {
+        postCastRag = await retriever.retrieve({
+          prompt,
+          stage: 'dialogue',
+          cast: plan.cast.map((m) => ({
+            name: m.name,
+            fullName: m.fullName
+          })),
+          event: plan.event,
+          logline: plan.logline,
+          outline: plan.outline,
+          location: plan.scenes?.[0]?.placeInfo || plan.background,
+          retrievalQueries: plan.retrievalQueries,
+          signal: options.signal
+        })
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[RAG] Pass B 多面检索失败，回退 Pass A 结果：${errorMessage(error)}`)
+      }
+    }
+    promptOptions.ragContext = postCastRag
 
     // ---- 2. 只写台词 ---------------------------------------------------------------------------------------
     let dialogue: StagedDialogue | null = null
@@ -868,7 +980,8 @@ export class StoryWriter {
         durationMs: 0,
         ttsTranslated,
         cast,
-        stages
+        stages,
+        ...(this.summarizeRag(postCastRag) ? { rag: this.summarizeRag(postCastRag) } : {})
       }
     }
   }

@@ -1451,6 +1451,8 @@ export interface PromptOptions {
   history?: Array<{ role: string; content: string }>
   /** TTS 支持的情绪标签；非空时要求每条 Talk 写 data.emotion */
   emotionLabels?: string[]
+  /** 自适应 RAG 检索块（可选） */
+  ragContext?: string
 }
 
 function emotionInstruction(labels: string[] | undefined): string {
@@ -1483,9 +1485,10 @@ export function buildStoryPrompt(
     '{se_list}': view.seList(options.scene),
     '{scene}': options.scene
   })
+  const ragBlock = options.ragContext?.trim() ? `\n\n${options.ragContext.trim()}` : ''
   return {
     system: options.systemPrompt?.trim() || STORY_SYSTEM_PROMPT,
-    user: user + emotionInstruction(options.emotionLabels)
+    user: user + ragBlock + emotionInstruction(options.emotionLabels)
   }
 }
 
@@ -1514,8 +1517,9 @@ export function buildChatPrompt(
     '{chat_history}': history || '（首次对话）',
     '{scene}': options.scene
   })
+  const ragBlock = options.ragContext?.trim() ? `\n\n${options.ragContext.trim()}` : ''
   return {
     system: options.systemPrompt?.trim() || CHAT_SYSTEM_PROMPT,
-    user: user + emotionInstruction(options.emotionLabels)
+    user: user + ragBlock + emotionInstruction(options.emotionLabels)
   }
 }

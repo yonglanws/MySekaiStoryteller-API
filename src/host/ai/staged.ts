@@ -22,6 +22,7 @@ import {
 } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
 import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
+import type { RagRetrieveResult } from '../rag/types'
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -72,6 +73,28 @@ export interface StagedCastMember {
   isVirtualSinger?: boolean
 }
 
+export interface StagedPromptUnderstanding {
+  explicitRequests: string[]
+  implicitSubtext: string
+  relationshipDynamic: string
+  emotionalArc: string
+  canonHooks: string[]
+  avoidList: string[]
+}
+
+export interface StagedPairwiseAddress {
+  from: string
+  to: string
+  zh: string
+  ja?: string
+}
+
+export interface StagedRetrievalQueries {
+  plot?: string
+  voice?: string
+  worldview?: string
+}
+
 export interface StagedCastPlan {
   title: string
   event: string
@@ -80,6 +103,12 @@ export interface StagedCastPlan {
   cast: StagedCastMember[]
   background: string
   scenes?: StagedScenePlan[]
+  /** 深度提示词理解（可选，向后兼容） */
+  understanding?: StagedPromptUnderstanding
+  /** 角色两两之间的官方称呼与敬语（可选，向后兼容） */
+  pairwiseAddress?: StagedPairwiseAddress[]
+  /** Stage 1 选角后产出的多面 RAG 检索查询（可选，向后兼容） */
+  retrievalQueries?: StagedRetrievalQueries
 }
 
 export interface StagedDialogueLine {
@@ -229,6 +258,8 @@ export interface StagedPromptOptions {
   title?: string
   /** TTS 支持的情绪标签；非空时台词稿要求每句带 emotion */
   emotionLabels?: string[]
+  /** 自适应 RAG 检索结果（Pass A / Pass B），缺省或无命中时为空 */
+  ragContext?: RagRetrieveResult | null
 }
 
 export interface StagedMessages {
@@ -985,8 +1016,36 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
         bgm: 'silence'
       }
     ],
-    outline: ['开场日常……', '小事件出现波澜……', '情绪转折/留白……', '温柔收束……']
+    outline: ['开场日常……', '小事件出现波澜……', '情绪转折/留白……', '温柔收束……'],
+    understanding: {
+      explicitRequests: ['用户明确要求的场景/事件/角色'],
+      implicitSubtext: '潜台词与角色真正想说却没直接出口的情绪',
+      relationshipDynamic: '所选角色之间当下的关系张力与相处模式',
+      emotionalArc: '从起手到高潮再到余韵收尾的情绪弧光',
+      canonHooks: ['可自然呼应的官方设定、地点或过往事件'],
+      avoidList: ['避免 OOC、说教式总结或套路化抒情']
+    },
+    pairwiseAddress:
+      exampleCast.length >= 2
+        ? [
+            {
+              from: exampleCast[0].name,
+              to: exampleCast[1].name,
+              zh: exampleCast[1].name,
+              ja: exampleCast[1].name
+            }
+          ]
+        : [],
+    retrievalQueries: {
+      plot: '与本场核心事件相关的官方剧情或过往经历',
+      voice: `${exampleCast.slice(0, 2).map((c) => c.name).join(' ')} 日常互动对白与称呼`,
+      worldview: '相关地点、社团/团体设定或关系背景'
+    }
   }
+
+  const preCastRagBlock = options.ragContext?.promptBlock
+    ? `\n\n${options.ragContext.promptBlock.slice(0, 1500)}`
+    : ''
 
   const castRule =
     view.models.length <= 2
@@ -1006,7 +1065,7 @@ ${options.scene}
 
 - 语言：中文（台词 content 用中文，日文 ttsText 由宿主另行翻译）
 - 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词
-- 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线
+- 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线${preCastRagBlock}
 
 ## 可选角色（modelId — 显示名；若角色有 [服装: 校服=ID...]，按场景时段与场合直接选对应服装 modelId）
 ${models || '（资源目录为空）'}${subModelsBlock}
@@ -1026,6 +1085,9 @@ ${bgmList || '（可使用 keep 或 silence）'}
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
   - 善用 BGM 弧光：在情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
 - title 是短标题（不超过 12 个字），logline 一句话，outline 4~6 条写“发生什么”。
+- **深度意图拆解（understanding）**：提炼显性要求（explicitRequests）、潜台词（implicitSubtext）、角色关系张力（relationshipDynamic）、情绪弧光（emotionalArc）、官方连续性钩子（canonHooks）与禁忌避坑清单（avoidList）。
+- **两两称呼表（pairwiseAddress）**：列出入选角色彼此的准确官方中文称呼与日文称呼/敬语（如 zh/ja），供后续对白与日文配音翻译严格遵守。
+- **多面检索查询（retrievalQueries）**：给出 2~3 条简短精准的检索短语（plot 剧情事件、voice 角色互动口吻、worldview 地点/设定），用于下一阶段检索官方参考语料。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -1209,6 +1271,67 @@ export function normalizeCastPlan(
     })
   }
 
+  const parseStringList = (val: unknown, limit = 6): string[] =>
+    Array.isArray(val)
+      ? val
+          .map((item) => oneLine(item, 140))
+          .filter(Boolean)
+          .slice(0, limit)
+      : []
+
+  let understanding: StagedPromptUnderstanding | undefined
+  if (isRecord(doc.understanding)) {
+    const u = doc.understanding
+    const parsed: StagedPromptUnderstanding = {
+      explicitRequests: parseStringList(u.explicitRequests),
+      implicitSubtext: oneLine(u.implicitSubtext, 200),
+      relationshipDynamic: oneLine(u.relationshipDynamic, 200),
+      emotionalArc: oneLine(u.emotionalArc, 200),
+      canonHooks: parseStringList(u.canonHooks),
+      avoidList: parseStringList(u.avoidList)
+    }
+    if (
+      parsed.explicitRequests.length > 0 ||
+      parsed.implicitSubtext ||
+      parsed.relationshipDynamic ||
+      parsed.emotionalArc ||
+      parsed.canonHooks.length > 0 ||
+      parsed.avoidList.length > 0
+    ) {
+      understanding = parsed
+    }
+  }
+
+  let pairwiseAddress: StagedPairwiseAddress[] | undefined
+  if (Array.isArray(doc.pairwiseAddress)) {
+    const list: StagedPairwiseAddress[] = []
+    for (const item of doc.pairwiseAddress.slice(0, 12)) {
+      if (!isRecord(item)) continue
+      const from = oneLine(item.from, 24)
+      const to = oneLine(item.to, 24)
+      const zh = oneLine(item.zh ?? item.cn ?? item.address, 24)
+      const ja = oneLine(item.ja ?? item.jp, 24)
+      if (!from || !to || (!zh && !ja)) continue
+      list.push({ from, to, zh: zh || to, ...(ja ? { ja } : {}) })
+    }
+    if (list.length > 0) pairwiseAddress = list
+  }
+
+  let retrievalQueries: StagedRetrievalQueries | undefined
+  if (isRecord(doc.retrievalQueries)) {
+    const rq = doc.retrievalQueries
+    const plot = oneLine(rq.plot, 120)
+    const voice = oneLine(rq.voice, 120)
+    const worldview = oneLine(rq.worldview, 120)
+    if (plot || voice || worldview) {
+      retrievalQueries = {
+        ...(plot ? { plot } : {}),
+        ...(voice ? { voice } : {}),
+        ...(worldview ? { worldview } : {})
+      }
+    }
+  }
+
   return {
     title: titleOrDefault(doc.title, options.title ?? ''),
     event: oneLine(doc.event || doc.logline || options.scene, 300),
@@ -1216,7 +1339,10 @@ export function normalizeCastPlan(
     outline: outline.length > 0 ? outline : scenes.map((s) => s.summary).filter(Boolean),
     cast,
     background: scenes[0]?.background || defaultBg,
-    scenes
+    scenes,
+    ...(understanding ? { understanding } : {}),
+    ...(pairwiseAddress ? { pairwiseAddress } : {}),
+    ...(retrievalQueries ? { retrievalQueries } : {})
   }
 }
 
