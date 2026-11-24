@@ -4196,7 +4196,7 @@ export function composeStory(
             facial: moveFacial
           }
         })
-        trackActorBodyMotion(st, moveMotion)
+        if (moveMotion) trackActorBodyMotion(st, moveMotion)
         if (moveFacial) st.lastFacial = moveFacial
         st.side = targetSide
         st.offset = 0
@@ -4744,9 +4744,13 @@ export function composeStory(
         closeWindowBeforeBreak()
         const lineDir = directionById.get(line.id)
         const avoidTalkMotion = lineDir?.beats?.[0]?.motion ?? lineDir?.motion
-        const moveMotion =
-          ev.move.motion ||
-          pickMoveMotion(view, ev.move.modelId, avoidTalkMotion, new Set(st.recentBodyMotions))
+        // Move 紧跟同一条台词的 Talk；谈台词的动作会在 Move 结束后立刻接管同一通道，
+        // 若 Move 也配 body motion，后者只能播 ~330ms 就被打断（实测 nod02 350ms）。
+        // 位移本身已经提供表演感，这里只保留 facial。
+        const moveMotion = avoidTalkMotion
+          ? undefined
+          : ev.move.motion ||
+            pickMoveMotion(view, ev.move.modelId, undefined, new Set(st.recentBodyMotions))
         const moveFacial =
           ev.move.facial || pickMoveFacial(view, ev.move.modelId, st.lastFacial || st.appearFacial)
         snippets.push({
@@ -4763,7 +4767,7 @@ export function composeStory(
             facial: moveFacial
           }
         })
-        trackActorBodyMotion(st, moveMotion)
+        if (moveMotion) trackActorBodyMotion(st, moveMotion)
         if (moveFacial) st.lastFacial = moveFacial
         st.side = targetSide
         st.offset = nextOffset
