@@ -3061,16 +3061,25 @@ export function fallbackDirection(view: CatalogView, plan: StagedCastPlan): Stag
 function activeCast(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
-  direction: StagedDirection
+  direction: StagedDirection,
+  staging?: StagedStaging
 ): StagedCastMember[] {
   const listeners = new Set(
     direction.lines
       .map((line) => line.listener?.modelId)
       .filter((id): id is number => typeof id === 'number')
   )
+  // 听者动作被预算裁掉后，人仍按分幕 activeCast 留在台上安静倾听；
+  // 出场名单以分幕为准，不能因为少了一个 listener 动作就把同台演员从画面里拿掉。
+  const staged = new Set<number>()
+  for (const scene of staging?.scenes ?? []) {
+    for (const id of scene.activeCast) staged.add(id)
+  }
   return plan.cast.filter(
     (member) =>
-      listeners.has(member.modelId) || dialogue.lines.some((line) => line.speaker === member.name)
+      staged.has(member.modelId) ||
+      listeners.has(member.modelId) ||
+      dialogue.lines.some((line) => line.speaker === member.name)
   )
 }
 
@@ -3148,11 +3157,10 @@ export function composeStory(
   direction: StagedDirection,
   staging?: StagedStaging
 ): JsonRecord {
-  const cast = activeCast(plan, dialogue, direction)
-  if (cast.length === 0) throw new Error('台词稿没有可用的出场角色')
-
   const effectiveStaging =
     staging && staging.scenes.length > 0 ? staging : fallbackStaging(view, plan, dialogue)
+  const cast = activeCast(plan, dialogue, direction, effectiveStaging)
+  if (cast.length === 0) throw new Error('台词稿没有可用的出场角色')
 
   // 如果 direction 指定了 background2 / ambient / bgm2（旧单测或 3 段路径），合并入分幕表
   if (!staging) {

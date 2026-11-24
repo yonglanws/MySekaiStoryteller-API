@@ -1059,6 +1059,70 @@ test('composed staging keeps solo Center entries in place', () => {
   )
 })
 
+test('keeps the silent scene cast on stage when no listener actions remain', () => {
+  const view = new CatalogView(catalog.get())
+  const [first, second] = view.models
+  const plan = {
+    title: '',
+    event: '',
+    logline: '',
+    outline: [],
+    cast: [first, second].map((model) => ({
+      modelId: model.id,
+      name: view.shortName(model),
+      fullName: model.name,
+      path: model.path,
+      role: ''
+    })),
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '',
+    lines: Array.from({ length: 12 }, (_, index) => ({
+      id: `l${index + 1}`,
+      speaker: plan.cast[0].name,
+      content: '独白的一句台词。',
+      emotion: '平静'
+    }))
+  }
+  const direction = normalizeDirection(
+    {
+      background: 'bg_room.jpg',
+      bgm: '',
+      lines: dialogue.lines.map((line) => ({ id: line.id, facial: 'face_normal_01' }))
+    },
+    view,
+    plan,
+    dialogue
+  )
+  // 12 句独白的听者反应预算为 0；第二个人仍然按分幕 activeCast 留在台上。
+  const staging = {
+    scenes: [
+      {
+        id: 's1',
+        fromLineId: 'l1',
+        fromIndex: 0,
+        background: 'bg_room.jpg',
+        ambient: 'normal',
+        transitionIn: 'black',
+        activeCast: [first.id, second.id]
+      }
+    ],
+    events: []
+  }
+  const story = composeStory(view, plan, dialogue, direction, staging)
+  assert.deepEqual(
+    story.models.map((model) => model.id).sort((a, b) => a - b),
+    [first.id, second.id].sort((a, b) => a - b),
+    'the planned scene cast keeps both models even without listener actions'
+  )
+  const validated = validateAndFixStory(story, view, new Logger({ type: 'hidden' }))
+  const appeared = validated.story.snippets
+    .filter((snippet) => snippet.type === 'LayoutAppear')
+    .map((snippet) => snippet.data.modelId)
+  assert.ok(appeared.includes(first.id) && appeared.includes(second.id), 'both planned actors appear')
+})
+
 test('staged pipeline expands a too-short dialogue once', async (t) => {
   let dialogueCalls = 0
   const mock = await startMockLlm(({ system }) => {
