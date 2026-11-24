@@ -2533,10 +2533,47 @@ export function applyEmotionPlan(
   }
 }
 
+export interface DialoguePolishOptions {
+  /** 用户原始提示词：外科润色时绝不能丢掉原始诉求 */
+  scene?: string
+  /** 用来把说话者的人设口吻带进润色（可选） */
+  view?: CatalogView
+  personas?: PersonaEntry[]
+  ragContext?: RagRetrieveResult | null
+}
+
+/** 只给被点名改写的说话者一小段口吻基线，避免润色把所有人改成同一种语气。 */
+function formatSpeakerVoiceBlock(
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  flaggedIds: string[],
+  options: DialoguePolishOptions
+): string {
+  if (!options.view || !options.personas || options.personas.length === 0) return ''
+  const flagged = new Set(flaggedIds)
+  const speakers = new Set(
+    dialogue.lines.filter((line) => flagged.has(line.id)).map((line) => line.speaker)
+  )
+  const rows: string[] = []
+  for (const name of speakers) {
+    const member = plan.cast.find((entry) => entry.name === name)
+    if (!member) continue
+    const model = options.view.modelById(member.modelId)
+    const persona = model ? personaFor(options.personas, model) : null
+    const prompt = dialoguePersonaPrompt(persona).replace(/\s+/g, ' ').trim()
+    if (!prompt) continue
+    rows.push(`- ${name}：${prompt.slice(0, 420)}`)
+  }
+  return rows.length > 0
+    ? `## 说话者口吻基线（改写必须保持这个人说话的样子）\n${rows.join('\n')}\n\n`
+    : ''
+}
+
 export function buildDialoguePolishPrompt(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
-  issues: DialogueLintIssue[]
+  issues: DialogueLintIssue[],
+  options: DialoguePolishOptions = {}
 ): StagedMessages {
   const flaggedIds = Array.from(new Set(issues.map((i) => i.lineId)))
   const issueMap = new Map<string, string[]>()
@@ -2568,7 +2605,10 @@ export function buildDialoguePolishPrompt(
     .join('\n\n')
 
   const addressBlock = formatPairwiseAddressBlock(plan)
-  const understandingBlock = formatUnderstandingBlock(plan)
+  const anchorBlock = formatDirectingAnchorBlock(plan)
+  const userPrompt = packExcerptsCleanly([options.scene ?? ''], 900)
+  const speakerVoiceBlock = formatSpeakerVoiceBlock(plan, dialogue, flaggedIds, options)
+  const voiceSamples = packExcerptsCleanly(options.ragContext?.sections?.dialogueVoice ?? [], 900)
   const example = {
     replacements: flaggedIds.slice(0, 2).map((id) => ({
       id,
@@ -2581,12 +2621,21 @@ export function buildDialoguePolishPrompt(
       '你是 Project SEKAI 官方剧情的台词精修编辑（dialogue-polish）。',
       '只做外科手术式逐句改写：仅改写下方点名的问题句，保持原意、角色口吻与字数规模，不增删句子，不改说话人。只输出一个 JSON 对象。'
     ].join('\n'),
-    user: `${understandingBlock}${addressBlock}## 需要改写的问题句
+    user: `${anchorBlock}${addressBlock}${
+      userPrompt ? `## 用户原始需求\n${userPrompt}\n\n` : ''
+    }${speakerVoiceBlock}${
+      voiceSamples
+        ? `## 官方口吻参照（只学称呼、断句、停顿与潜台词，严禁照抄原句）\n${voiceSamples}\n\n`
+        : ''
+    }## 需要改写的问题句
 ${lineBlocks}
 
 ## 改写要求
 - 仅输出 \`replacements\` 数组，每项含 \`id\` 与改写后的 \`content\`。
 - 去掉 AI 心理咨询套话、动作旁白与说教总结，改用具体细节、停顿（……、——）或侧面回应表达。
+- 保持该说话者的语感（口头禅、句尾习惯、称呼方式）；不要把所有人都改成同一种温和口吻。
+- 若问题写着「用户明确要求」或「官方钩子」，就把缺失的人/物/事自然带进这一句（用具体名词，不要另起一段解释）。
+- 若问题是结尾说教，就用开场意象或日常小约定轻巧回扣，不作总结陈词。
 - 严格遵守称呼表，每行不超过 30 字宽，最多 3 行。
 
 ## 输出 JSON

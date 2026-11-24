@@ -787,7 +787,12 @@ export class StoryWriter {
         try {
           const polishResult = await runStage(
             'dialogue-polish',
-            buildDialoguePolishPrompt(plan, dialogue, lintBefore.issues),
+            buildDialoguePolishPrompt(plan, dialogue, lintBefore.issues, {
+              scene: prompt,
+              view,
+              personas,
+              ragContext: postCastRag
+            }),
             { temperature: 0.35 }
           )
           const polished = applyDialoguePolish(
