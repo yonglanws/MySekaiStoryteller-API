@@ -49,28 +49,43 @@ const THERAPY_CLICHE_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /只要不放弃/, label: '励志口号「只要不放弃」' },
   { re: /这正是我们的/, label: '升华总结「这正是我们的……」' },
   { re: /脸上露出了笑容/, label: '旁白式表情描写「脸上露出了笑容」' },
-  { re: /敞开心扉|不再迷茫|共同成长/, label: 'AI 心理成长套话' }
+  { re: /敞开心扉|不再迷茫|共同成长/, label: 'AI 心理成长套话' },
+  { re: /治愈了我的心|我们之间的羁绊|今后也要携手|心意相通/, label: 'AI 鸡汤抒情套话' }
 ]
 
 const STAGE_ACTION_CORE_RE =
-  /^(?:轻笑|大笑|微笑|苦笑|冷笑|坏笑|干笑|嗤笑|偷笑|尴尬地笑|笑着|笑|叹气|轻叹|长叹|叹息|叹了口气|深吸一口气|沉默|沉默片刻|顿了顿|停顿|稍作停顿|点头|点点头|微微点头|摇头|摇摇头|低头|低下头|垂眸|抬头|抬起头|歪头|歪了歪头|脸红|耳根微红|红着脸|撇嘴|鼓脸|嘟嘴|转身|转过身|转过头|背过身|挥手|招手|摆手|挠头|挠了挠头|摸头|抓头发|耸肩|摊手|握拳|攥紧拳头|咬唇|咬住下唇|眨眼|眨眨眼|瞪眼|瞪大眼睛|揉眼睛|擦眼泪|抽泣|哽咽|移开视线|别过视线|别开视线|环顾四周|走近|走上前|后退|退后一步|站起身|起身|坐下|俯身|前倾|抱臂|双手抱胸|摊开双手|伸懒腰|打哈欠|拍拍肩|拍了拍|敲了敲|竖起食指|捂脸|捂嘴|捂住嘴|托腮|叉腰|小声|轻声|低声|压低声音|喃喃|自言自语|干咳|咳嗽|清了清嗓子|深呼吸)$/
+  /^(?:轻笑|大笑|微笑|苦笑|冷笑|坏笑|干笑|嗤笑|偷笑|尴尬地笑|笑着|笑|叹气|轻叹|长叹|叹息|叹了口气|深吸一口气|沉默|沉默片刻|顿了顿|停顿|稍作停顿|点头|点点头|微微点头|摇头|摇摇头|低头|低下头|垂眸|抬头|抬起头|歪头|歪了歪头|脸红|耳根微红|红着脸|撇嘴|鼓脸|嘟嘴|转身|转过身|转过头|背过身|挥手|招手|摆手|挠头|挠了挠头|摸头|抓头发|耸肩|摊手|握拳|攥紧拳头|咬唇|咬住下唇|眨眼|眨眨眼|瞪眼|瞪大眼睛|揉眼睛|擦眼泪|抽泣|哽咽|移开视线|别过视线|别开视线|环顾四周|走近|走上前|后退|退后一步|站起身|起身|坐下|俯身|前倾|抱臂|双手抱胸|摊开双手|伸懒腰|打哈欠|拍拍肩|拍了拍|敲了敲|竖起食指|捂脸|捂嘴|捂住嘴|托腮|叉腰|小声|轻声|低声|压低声音|喃喃|自言自语|干咳|咳嗽|清了清嗓子|深呼吸|耸耸肩|摊摊手|摸摸鼻子|鼓起腮帮|皱眉|皱起眉|瞪了一眼)$/
 
 const STAGE_ACTION_MODIFIED_RE =
-  /^(?:微微|轻轻|无奈地?|苦笑着?|笑着|冷冷地?|温柔地?|认真地?|小声地?|轻声地?|低声地?|慌忙地?|犹豫地?|平静地?|若有所思地?|尴尬地?|突然|停下来)?(?:一笑|笑了一声|笑了笑|叹了口气|叹了声|点点头|摇摇头|低下头|抬起头|歪了歪头|转过头|转过身|挠了挠头|耸了耸肩|摊了摊手|眨了眨眼|移开了?视线|别过头|看向[^，。！？]{1,8}|望向[^，。！？]{1,8}|盯向[^，。！？]{1,8}|看着[^，。！？]{1,8}|举起[^，。！？]{1,8}|递出[^，。！？]{1,8}|伸出手|缩回手|握紧[^，。！？]{1,8}|压低声音|拉了拉[^，。！？]{1,8}|跺了跺脚|拍了拍[^，。！？]{1,8})$/
+  /^(?:微微|轻轻|无奈地?|苦笑着?|笑着|冷冷地?|温柔地?|认真地?|小声地?|轻声地?|低声地?|慌忙地?|犹豫地?|平静地?|若有所思地?|尴尬地?|突然|停下来|忍不住|悄悄)?(?:一笑|笑了一声|笑了笑|笑出声|露出微笑|叹了口气|叹了声|点点头|摇摇头|低下头|抬起头|歪了歪头|转过头|转过身|挠了挠头|摸了摸鼻子|耸了耸肩|摊了摊手|眨了眨眼|移开了?视线|别过头|擦了擦眼角|咬了咬嘴唇|皱了皱眉|双手合十|看向[^，。！？]{1,8}|望向[^，。！？]{1,8}|盯向[^，。！？]{1,8}|看着[^，。！？]{1,8}|举起[^，。！？]{1,8}|递出[^，。！？]{1,8}|伸出手|缩回手|握紧[^，。！？]{1,8}|压低声音|拉了拉[^，。！？]{1,8}|跺了跺脚|拍了拍[^，。！？]{1,8})$/
+
+const STAGE_DIRECTION_BODY_CUE_RE =
+  /^(?:眼神|目光|视线|声音|嘴角|脸上|耳根|双手|手指|眉头)(?:微动|一顿|闪烁|飘向别处|躲闪|柔和下来|冷了下来|压低|上扬|微红|紧握|交叠|紧锁|微蹙)/
 
 const STAGE_DIRECTION_LEAK_PATTERNS: RegExp[] = [
-  /(?:^|[，。！？\s])(?:她|他)(?:转过头|低下头|笑了笑|叹了口气|轻声说道|小声嘀咕|沉默了片刻)/
+  /(?:^|[，。！？\s])(?:她|他)(?:转过头|低下头|笑了笑|叹了口气|轻声说道|小声嘀咕|沉默了片刻|移开视线|摇了摇头|点了点头)/
 ]
 
 /** 判断括号内部文本是否属于舞台动作/神态提示，而非角色心里话。 */
 export function isStageDirectionParenthetical(inner: string): boolean {
-  const clean = inner.trim().replace(/[。，、,.！!？?~～…]+$/g, '').trim()
-  if (!clean || clean.length > 18) return false
+  const clean = inner
+    .trim()
+    .replace(/[。，、,.！!？?~～…]+$/g, '')
+    .trim()
+  if (!clean || clean.length > 22) return false
   // 含明显内心独白口吻/疑问/第一人称思考时保留为心里话
-  if (/[？?]|^(?:……|难道|怎么|为什么|还是|要是|如果|糟了|不对|算了|真是|该不会|果然|我|她|他|这|那)/.test(clean)) {
+  if (
+    /[？?]|^(?:……|难道|怎么|为什么|还是|要是|如果|糟了|不对|算了|真是|该不会|果然|我|她|他|这|那|好想|真希望|不会吧|居然|原来)/.test(
+      clean
+    )
+  ) {
     return false
   }
-  return STAGE_ACTION_CORE_RE.test(clean) || STAGE_ACTION_MODIFIED_RE.test(clean)
+  return (
+    STAGE_ACTION_CORE_RE.test(clean) ||
+    STAGE_ACTION_MODIFIED_RE.test(clean) ||
+    STAGE_DIRECTION_BODY_CUE_RE.test(clean)
+  )
 }
 
 /** 检测台词中是否夹带括号动作提示或第三人称动作旁白。 */
@@ -96,7 +111,12 @@ export function repairSpokenStageDirections(content: string): string {
   if (!changed) return content
   const cleaned = replaced
     .split('\n')
-    .map((line) => line.replace(/[ \t]{2,}/g, ' ').replace(/^[，,、]\s*/, '').trim())
+    .map((line) =>
+      line
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/^[，,、]\s*/, '')
+        .trim()
+    )
     .filter((line, idx, arr) => line.length > 0 || (arr.length === 1 && idx === 0))
     .join('\n')
     .trim()
@@ -425,9 +445,7 @@ export function lintDialogueFidelity(
       const from = rule.from?.trim()
       if (!from || !to || !zh || zh === to) continue
       const member = cast.find((entry) => entry.name === to)
-      const familyName = member
-        ? member.fullName.replace(member.name, '').trim()
-        : ''
+      const familyName = member ? member.fullName.replace(member.name, '').trim() : ''
       for (const line of lines) {
         if (line.speaker !== from) continue
         if (line.content.includes(zh)) continue
@@ -456,7 +474,9 @@ export function lintDialogueFidelity(
   const understanding = plan?.understanding
   if (understanding) {
     const castNames = (plan?.cast ?? []).flatMap((member) =>
-      [member.name, member.fullName].filter((value) => typeof value === 'string' && value.length >= 2)
+      [member.name, member.fullName].filter(
+        (value) => typeof value === 'string' && value.length >= 2
+      )
     )
     issues.push(...promptCoverageIssues(dialogue, understanding, castNames))
   }

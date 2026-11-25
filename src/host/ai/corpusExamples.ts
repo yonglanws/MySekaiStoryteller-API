@@ -6,7 +6,7 @@
  */
 
 interface UnitExcerpt {
-  id: 'lnf' | 'mmj' | 'vbs' | 'wxs' | 'n25' | 'general'
+  id: 'lnf' | 'mmj' | 'vbs' | 'wxs' | 'n25' | 'vs' | 'general'
   label: string
   keywords: RegExp
   excerpt: string
@@ -83,6 +83,17 @@ const UNIT_EXCERPTS: readonly UnitExcerpt[] = [
 笑梦：咦？司，你今天特别有干劲呢！\n是发生了什么好事吗？`
   },
   {
+    id: 'vs',
+    label: 'Virtual Singer / SEKAI',
+    keywords: /初音|未来|镜音|铃|连|巡音|流歌|miku|rin|len|luka|meiko|kaito|sekai|世界/i,
+    excerpt: `### 样例 F（SEKAI 陪伴与微观察）
+未来：欢迎回来。大家今天看上去，好像比平时安静一点呢。
+奏：……嗯，副歌那一段，总觉得还差了一点什么。
+未来：这样啊。要不要先喝口热茶，再试着哼一遍给我听？
+铃：对啊对啊！硬盯着乐谱看的话，连我也跟着着急起来啦——！
+连：铃你别催得太紧嘛。\n不过，刚才那几个和弦的衔接，确实听起来有些犹豫呢。`
+  },
+  {
     id: 'general',
     label: 'PJSK 通用对白节奏',
     keywords: /.*/,
@@ -111,7 +122,10 @@ export function selectUnitFewShotExcerpts(
     }
   }
   if (picked.length === 0) {
-    picked.push(UNIT_EXCERPTS.find((u) => u.id === 'n25')!, UNIT_EXCERPTS.find((u) => u.id === 'lnf')!)
+    picked.push(
+      UNIT_EXCERPTS.find((u) => u.id === 'n25')!,
+      UNIT_EXCERPTS.find((u) => u.id === 'lnf')!
+    )
   } else if (picked.length === 1) {
     const general = UNIT_EXCERPTS.find((u) => u.id === 'general')!
     picked.push(general)
@@ -150,4 +164,35 @@ export function buildCanonDialogueReferenceBlock(
     return `${ragBlock}\n\n${guardrail}`
   }
   return `${ragBlock}\n\n${guardrail}\n\n${selectUnitFewShotExcerpts(cast, scene)}`
+}
+
+/**
+ * 返回非机械的 PJSK 官方演出准则摘要（结构留白、solo 内心戏切镜、动作交替与情绪对位）。
+ */
+export function getOfficialActingGuidelines(
+  options: { castCount?: number; isSekai?: boolean; isFlashback?: boolean } = {}
+): string {
+  const parts: string[] = [
+    '1. 结构自然：同一时间地点保持 1 幕连贯推进，不硬凑多幕；只有真正换地点、跳时间、回忆（WhiteOut -> FlashbackIn -> WhiteIn）或出入 SEKAI（SekaiOut / SekaiIn）时才做转场。',
+    '2. 台词与心里话：spoken 台词不写（微笑）/（叹气）等动作括号；纯内心独白用完整括号行「（……原来如此）」，并可配 Center 单人镜头留白后切回 Left/Right。',
+    '3. 动作密度与听者呼应：约 75%~80% 台词在句首配 1 个贴合语气的身体动作，严禁说话者与听者同瞬碰撞；可通过听者静止句回应或独立 Motion 节拍让双方都有自然表演。',
+    '4. 表情对位剧情：道歉、犹豫、嘴硬、克制人物（如真冬）禁用真笑/wink；表面强颜欢笑用 wry_smile（苦笑）或阴郁表情，情绪高点再切换强表情，避免连卡 face_normal_01。',
+    '5. 声画氛围：入退场默认槽位原地淡入淡出，物理走近/离开才用 LeftOver/RightOver 配脚步/开门 SE；情绪转折前可用 ChangeBgm stop 留白一拍。'
+  ]
+  if ((options.castCount ?? 2) >= 3) {
+    parts.push(
+      '6. 群像轮换：全片保持 Normal 模式（最多 2 人同台），通过 LayoutClear(Now) + LayoutAppear 平滑交叠切换在场组合。'
+    )
+  }
+  if (options.isSekai) {
+    parts.push(
+      '7. SEKAI 场景：虚拟歌手多以温柔观察或具体建议陪伴主角，不直接代替主角做决定或长篇说教。'
+    )
+  }
+  if (options.isFlashback) {
+    parts.push(
+      '8. 回忆片段：进入前配 WhiteOut + se00053_b + FlashbackIn + WhiteIn，结束前务必 FlashbackOut 闭合。'
+    )
+  }
+  return parts.join('\n')
 }

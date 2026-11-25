@@ -207,3 +207,97 @@ export function dialoguePersonaPrompt(
 
   return output.length >= 600 ? output : truncateAtLine(text, maxChars)
 }
+
+export interface CharacterActingProfile {
+  restrained: boolean
+  temperament: 'restrained' | 'earnest' | 'expressive' | 'theatrical' | 'playful' | 'gentle'
+  actingNote: string
+}
+
+const CHARACTER_ACTING_RULES: Array<{
+  pattern: RegExp
+  profile: CharacterActingProfile
+}> = [
+  {
+    pattern: /真冬|mafuyu|朝比奈/,
+    profile: {
+      restrained: true,
+      temperament: 'restrained',
+      actingNote:
+        '表面礼貌温和（face_normal/smallmouth/苦笑），私下或 Nightcord 内流露空洞、疲惫与隐忍，忌大幅度雀跃或大笑。'
+    }
+  },
+  {
+    pattern: /奏|kanade|宵崎|志步|shiho|冬弥|touya|toya/,
+    profile: {
+      restrained: true,
+      temperament: 'restrained',
+      actingNote:
+        '说话与动作偏沉稳内敛，情绪通过微垂眼、轻点头或安静停顿表达，仅在触动内心时才露出浅笑或明显波动。'
+    }
+  },
+  {
+    pattern: /宁宁|nene|草薙|绘名|ena|东云|彰人|akito|一歌|ichika/,
+    profile: {
+      restrained: false,
+      temperament: 'earnest',
+      actingNote:
+        '平时直率或略带别扭，情绪来得真实且有克制转折；嘴硬或被戳中心事时常伴移开视线、微脸红或皱眉。'
+    }
+  },
+  {
+    pattern: /司|tsukasa|天马司/,
+    profile: {
+      restrained: false,
+      temperament: 'theatrical',
+      actingNote:
+        '台词与肢体富有舞台张力（pose/forward/smug/glad），但在独处或安抚同伴时会收起夸张姿势转为认真沉稳。'
+    }
+  },
+  {
+    pattern: /笑梦|emu|凤笑梦|咲希|saki|实乃理|minori|杏|an|瑞希|mizuki|晓山/,
+    profile: {
+      restrained: false,
+      temperament: 'expressive',
+      actingNote: '外在表情丰富明快；其中瑞希在触及秘密或独白时会突然收敛笑容转为低落/苦笑/闪避。'
+    }
+  },
+  {
+    pattern: /类|rui|神代|爱莉|airi|铃|rin|连|len/,
+    profile: {
+      restrained: false,
+      temperament: 'playful',
+      actingNote:
+        '语气常带俏皮或调侃余韵（tilthead/smug/wink），切换认真话题时动作转为前倾或闭眼沉吟。'
+    }
+  },
+  {
+    pattern: /穗波|honami|遥|haruka|雫|shizuku|心羽|kohane|初音|miku|巡音|luka|meiko|kaito/,
+    profile: {
+      restrained: false,
+      temperament: 'gentle',
+      actingNote:
+        '气质柔和包容，常用温和浅笑、点头倾听与轻声安慰；不安或犹豫时以小幅度害羞/困扰动作表现。'
+    }
+  }
+]
+
+/** 根据官方 PJSK 角色性格返回演戏基调（克制程度、气质与选表情/动作提示）。 */
+export function characterActingProfile(nameOrPath: string, roleHint = ''): CharacterActingProfile {
+  const hay = `${nameOrPath} ${roleHint}`
+  for (const rule of CHARACTER_ACTING_RULES) {
+    if (rule.pattern.test(hay)) return rule.profile
+  }
+  if (/克制|冷静|寡言|内敛|沉默/.test(roleHint)) {
+    return {
+      restrained: true,
+      temperament: 'restrained',
+      actingNote: '言行偏克制，优先中性、认真与微表情，避免过度夸张动作。'
+    }
+  }
+  return {
+    restrained: false,
+    temperament: 'earnest',
+    actingNote: '随剧情情绪自然起伏，平时以点头、歪头、倾听为主，情绪高点再切换强表情。'
+  }
+}

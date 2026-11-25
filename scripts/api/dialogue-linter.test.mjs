@@ -79,7 +79,12 @@ test('buildDialoguePolishPrompt and applyDialoguePolish perform surgical line-le
   const dialogue = {
     title: '测试',
     lines: [
-      { id: 'l1', speaker: '瑞希', content: '其实我一直想说，谢谢你总是这么温柔。', pauseBefore: 1.0 },
+      {
+        id: 'l1',
+        speaker: '瑞希',
+        content: '其实我一直想说，谢谢你总是这么温柔。',
+        pauseBefore: 1.0
+      },
       { id: 'l2', speaker: '绘名', content: '……少贫嘴了。' }
     ]
   }
@@ -265,8 +270,7 @@ test('buildDialoguePolishPrompt carries the user prompt, persona voice baseline,
     }
   ]
   const view = {
-    modelById: (id) =>
-      id === 1 ? { id: 1, name: '晓山瑞希', shortName: '瑞希', path: '' } : null
+    modelById: (id) => (id === 1 ? { id: 1, name: '晓山瑞希', shortName: '瑞希', path: '' } : null)
   }
   const ragContext = {
     sections: { dialogueVoice: [{ text: '瑞希：诶——？\n你又在便利店站着发呆啊。' }] }
@@ -279,7 +283,10 @@ test('buildDialoguePolishPrompt carries the user prompt, persona voice baseline,
     ragContext
   })
   assert.ok(prompt.user.includes('## 用户原始需求'))
-  assert.ok(prompt.user.includes('瑞希把伞塞给绘名'), 'verbatim user prompt must reach the polish stage')
+  assert.ok(
+    prompt.user.includes('瑞希把伞塞给绘名'),
+    'verbatim user prompt must reach the polish stage'
+  )
   assert.ok(prompt.user.includes('## 说话者口吻基线'))
   assert.ok(prompt.user.includes('瑞希说话轻快'), 'persona voice baseline for the flagged speaker')
   assert.ok(prompt.user.includes('便利店门口的塑料伞架'), 'opening motif anchor')
@@ -289,4 +296,36 @@ test('buildDialoguePolishPrompt carries the user prompt, persona voice baseline,
   assert.ok(prompt.user.includes('目标句 l1'))
   assert.ok(!prompt.user.includes('目标句 l2'))
   assert.ok(prompt.system.includes('保持原意'))
+})
+
+import {
+  hasSpokenStageDirectionLeak,
+  isStageDirectionParenthetical,
+  repairSpokenStageDirections
+} from '../../out-host/host/ai/dialogueLinter.js'
+
+test('isStageDirectionParenthetical and repairSpokenStageDirections strip expanded physical cues while keeping inner monologues', () => {
+  const leaks = [
+    '（轻轻一笑）那就算了吧。',
+    '（无奈地摇摇头）你还是老样子。',
+    '这个嘛……（眼神飘向别处）我不太确定。',
+    '（双手合十）拜托了！',
+    '（擦了擦眼角）没什么，风吹的。'
+  ]
+  for (const line of leaks) {
+    assert.equal(hasSpokenStageDirectionLeak(line), true, `expected leak: ${line}`)
+    assert.equal(hasSpokenStageDirectionLeak(repairSpokenStageDirections(line)), false)
+  }
+
+  const monologues = [
+    '（……难道她早就知道了？）',
+    '（……好想快点结束排练回去休息）',
+    '（如果当时我没有逃走的话，现在会不会不一样……）'
+  ]
+  for (const line of monologues) {
+    assert.equal(hasSpokenStageDirectionLeak(line), false, `must keep monologue: ${line}`)
+    assert.equal(repairSpokenStageDirections(line), line)
+  }
+  assert.equal(isStageDirectionParenthetical('嘴角上扬'), true)
+  assert.equal(isStageDirectionParenthetical('……原来如此'), false)
 })

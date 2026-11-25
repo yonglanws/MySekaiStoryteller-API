@@ -28,6 +28,13 @@ import {
 import type { StoryData } from '../../common/types/Story'
 import type { CatalogView } from './prompt'
 import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
+import { hasSpokenStageDirectionLeak } from './dialogueLinter'
+import {
+  evaluateActingLineMatch,
+  isSpecialOrStandingMotion,
+  type DramaticContextMood
+} from './facialSemantics'
+import { characterActingProfile } from './personas'
 
 type JsonRecord = Record<string, unknown>
 
@@ -309,11 +316,7 @@ export function lintOfficialStory(
       const mid = num(data.modelId, -1)
       if (str(data.motion).trim()) {
         const appearInfo = lastAppearMotion.get(mid)
-        if (
-          appearInfo &&
-          appearInfo.motion &&
-          startSec - appearInfo.timeSec < 0.4 - 1e-6
-        ) {
+        if (appearInfo && appearInfo.motion && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
           appearMotionClashCount += 1
         }
       }
@@ -523,11 +526,7 @@ export function enforceOfficialStoryInvariants(
       const speakerId = num(data.modelId, -1)
       if (str(data.motion).trim()) {
         const appearInfo = lastAppearMotion.get(speakerId)
-        if (
-          appearInfo &&
-          appearInfo.motion &&
-          startSec - appearInfo.timeSec < 0.4 - 1e-6
-        ) {
+        if (appearInfo && appearInfo.motion && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
           data.motion = ''
           dedupedClashes += 1
         }
@@ -711,4 +710,380 @@ export function enforceOfficialStoryInvariants(
     warn(`[Linter] ${issue}`)
   }
   return report
+}
+
+export interface ActingFidelityDiagnostic {
+  snippetIndex: number
+  lineNumber: number
+  modelId: number
+  speaker: string
+  content: string
+  emotion: string
+  facial: string
+  motion: string
+  inferredMood: DramaticContextMood
+  field: 'facial' | 'motion' | 'repetition' | 'staging' | 'dialogue'
+  code: string
+  severity: 'high' | 'medium'
+  message: string
+  recommendedFacials: string[]
+  recommendedMotions: string[]
+}
+
+export interface ActingFidelityReport {
+  passed: boolean
+  score: number
+  talkCount: number
+  diagnostics: ActingFidelityDiagnostic[]
+  zeroMotionModelIds: number[]
+  repeatedFacialRunCount: number
+  facialMismatchCount: number
+  motionMismatchCount: number
+  simultaneousCollisionCount: number
+  stageDirectionLeakCount: number
+  officialReport: OfficialLintReport
+}
+
+/**
+ * 逐句诊断整部剧本的演技贴合度与官方剧本规范：
+ * - 表情（facial）与动作（motion）是否贴合台词剧情、情绪、听者视角及角色气质
+ * - 是否连续多句僵硬重复同一表情或动作
+ * - 同句内是否出现双人同瞬动作碰撞、在场角色全程零动作、spoken 括号动作泄露
+ * - 为每条诊断附带可直接替换的 recommendedFacials / recommendedMotions
+ */
+export function auditStoryActingAndFidelity(
+  story: StoryData | JsonRecord,
+  view?: CatalogView,
+  options: { restrainedNames?: string[] } = {}
+): ActingFidelityReport {
+  const officialReport = lintOfficialStory(story, view)
+  const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+  const models = Array.isArray(story.models) ? (story.models as JsonRecord[]) : []
+  const extraRestrained = new Set(
+    (options.restrainedNames ?? []).map((n) => n.trim()).filter(Boolean)
+  )
+
+  const modelMeta = new Map<
+    number,
+    { path?: string; name: string; facials: string[]; motions: string[]; restrained: boolean }
+  >()
+  for (const m of models) {
+    const id = num(m.id, -1)
+    if (id === -1) continue
+    const catalogModel = view?.modelById(id)
+    const modelPath = str(m.model) || catalogModel?.path
+    const name = catalogModel ? view!.shortName(catalogModel) : str(m.name, `model${id}`)
+    const facials = catalogModel ? [...catalogModel.facials] : []
+    const motions = catalogModel ? [...catalogModel.motions] : []
+    const restrained =
+      extraRestrained.has(name) || characterActingProfile(`${name} ${modelPath ?? ''}`).restrained
+    modelMeta.set(id, { path: modelPath, name, facials, motions, restrained })
+  }
+
+  const diagnostics: ActingFidelityDiagnostic[] = []
+  const bodyMotionCounts = new Map<number, number>()
+  for (const id of modelMeta.keys()) bodyMotionCounts.set(id, 0)
+
+  interface ActorTrackState {
+    prevFacial: string
+    sameFacialCount: number
+    prevMotion: string
+    sameMotionCount: number
+  }
+  const actorTracking = new Map<number, ActorTrackState>()
+  const getTracker = (id: number): ActorTrackState => {
+    let t = actorTracking.get(id)
+    if (!t) {
+      t = { prevFacial: '', sameFacialCount: 0, prevMotion: '', sameMotionCount: 0 }
+      actorTracking.set(id, t)
+    }
+    return t
+  }
+
+  let talkCount = 0
+  let prevContent = ''
+  let prevEmotion = ''
+  let prevTense = false
+  let repeatedFacialRunCount = 0
+  let facialMismatchCount = 0
+  let motionMismatchCount = 0
+  let simultaneousCollisionCount = 0
+  let stageDirectionLeakCount = 0
+
+  for (let i = 0; i < snippets.length; i++) {
+    const snippet = snippets[i]
+    const kind = str(snippet.type)
+    const data = isRecord(snippet.data) ? snippet.data : {}
+
+    if (kind === 'LayoutAppear' || kind === 'Move') {
+      const mid = num(data.modelId, -1)
+      const motion = str(data.motion).trim()
+      const facial = str(data.facial).trim()
+      const meta = modelMeta.get(mid)
+      if (kind === 'Move' && motion) {
+        bodyMotionCounts.set(mid, (bodyMotionCounts.get(mid) ?? 0) + 1)
+      }
+      if (motion && isSpecialOrStandingMotion(motion)) {
+        const evalRes = evaluateActingLineMatch({
+          motion,
+          facials: meta?.facials ?? [],
+          motions: meta?.motions ?? [],
+          modelPath: meta?.path,
+          content: '',
+          isEntryExit: true,
+          restrainedRole: meta?.restrained
+        })
+        motionMismatchCount += 1
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkCount,
+          modelId: mid,
+          speaker: meta?.name ?? `model${mid}`,
+          content: '',
+          emotion: '',
+          facial,
+          motion,
+          inferredMood: 'entry_exit',
+          field: 'motion',
+          code: 'standing_or_special_entry_motion',
+          severity: 'medium',
+          message: `${kind} 不宜使用静态站姿或特殊清场动作 ${motion}`,
+          recommendedFacials: evalRes.recommendedFacials,
+          recommendedMotions: evalRes.recommendedMotions
+        })
+      }
+      if (facial) getTracker(mid).prevFacial = facial
+      if (motion) getTracker(mid).prevMotion = motion
+      continue
+    }
+
+    if (kind === 'Motion') {
+      const mid = num(data.modelId, -1)
+      const actions = Array.isArray(data.actions) ? (data.actions as JsonRecord[]) : []
+      if (str(data.motion).trim()) {
+        bodyMotionCounts.set(mid, (bodyMotionCounts.get(mid) ?? 0) + 1)
+      }
+      for (const act of actions) {
+        if (!isRecord(act)) continue
+        const aid = num(act.modelId, mid)
+        if (str(act.motion).trim()) {
+          bodyMotionCounts.set(aid, (bodyMotionCounts.get(aid) ?? 0) + 1)
+        }
+      }
+      continue
+    }
+
+    if (kind !== 'Talk') continue
+    talkCount += 1
+    const speakerId = num(data.modelId, -1)
+    const speakerName = str(data.speaker, modelMeta.get(speakerId)?.name ?? '')
+    const content = str(data.content)
+    const emotion = str(data.emotion)
+
+    if (hasSpokenStageDirectionLeak(content)) {
+      stageDirectionLeakCount += 1
+      diagnostics.push({
+        snippetIndex: i,
+        lineNumber: talkCount,
+        modelId: speakerId,
+        speaker: speakerName,
+        content,
+        emotion,
+        facial: '',
+        motion: '',
+        inferredMood: 'neutral',
+        field: 'dialogue',
+        code: 'stage_direction_leak',
+        severity: 'high',
+        message:
+          '台词文本夹带了舞台动作括号或第三人称叙述，应删去动作描写，改由 motion/facial 表现',
+        recommendedFacials: [],
+        recommendedMotions: []
+      })
+    }
+
+    const actions: Array<{ at: number; modelId: number; motion: string; facial: string }> = []
+    if (Array.isArray(data.actions)) {
+      for (const rawAct of data.actions) {
+        if (!isRecord(rawAct)) continue
+        actions.push({
+          at: num(rawAct.at, 0),
+          modelId: num(rawAct.modelId, speakerId),
+          motion: str(rawAct.motion).trim(),
+          facial: str(rawAct.facial).trim()
+        })
+      }
+    }
+    if (actions.length === 0 && (str(data.motion).trim() || str(data.facial).trim())) {
+      actions.push({
+        at: 0,
+        modelId: speakerId,
+        motion: str(data.motion).trim(),
+        facial: str(data.facial).trim()
+      })
+    }
+
+    // 检查同句双人同瞬身体动作碰撞
+    for (let a = 0; a < actions.length; a++) {
+      for (let b = a + 1; b < actions.length; b++) {
+        if (
+          actions[a].modelId !== actions[b].modelId &&
+          actions[a].motion &&
+          actions[b].motion &&
+          Math.abs(actions[a].at - actions[b].at) < 0.25 - 1e-6
+        ) {
+          simultaneousCollisionCount += 1
+          diagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkCount,
+            modelId: actions[b].modelId,
+            speaker: speakerName,
+            content,
+            emotion,
+            facial: actions[b].facial,
+            motion: actions[b].motion,
+            inferredMood: 'neutral',
+            field: 'staging',
+            code: 'simultaneous_dual_motion',
+            severity: 'high',
+            message: `第 ${talkCount} 句内说话者与听者在相近时刻同时触发身体动作，易造成舞台撞拍`,
+            recommendedFacials: [],
+            recommendedMotions: []
+          })
+        }
+      }
+    }
+
+    for (const act of actions) {
+      if (act.modelId === -1) continue
+      const isListener = act.modelId !== speakerId
+      if (act.motion) {
+        bodyMotionCounts.set(act.modelId, (bodyMotionCounts.get(act.modelId) ?? 0) + 1)
+      }
+      const meta = modelMeta.get(act.modelId)
+      const tracker = getTracker(act.modelId)
+      const nextSameFacial =
+        act.facial && act.facial === tracker.prevFacial
+          ? tracker.sameFacialCount + 1
+          : act.facial
+            ? 1
+            : 0
+      const nextSameMotion =
+        act.motion && act.motion === tracker.prevMotion
+          ? tracker.sameMotionCount + 1
+          : act.motion
+            ? 1
+            : 0
+
+      const evalRes = evaluateActingLineMatch({
+        facial: act.facial,
+        motion: act.motion,
+        facials: meta?.facials ?? [],
+        motions: meta?.motions ?? [],
+        modelPath: meta?.path,
+        content,
+        emotion,
+        prevContent,
+        prevEmotion,
+        prevTense,
+        isListener,
+        restrainedRole: meta?.restrained,
+        prevFacial: tracker.prevFacial,
+        prevMotion: tracker.prevMotion,
+        consecutiveSameFacialCount: nextSameFacial,
+        consecutiveSameMotionCount: nextSameMotion
+      })
+
+      for (const issue of evalRes.issues) {
+        if (issue.field === 'facial') facialMismatchCount += 1
+        else if (issue.field === 'motion') motionMismatchCount += 1
+        else if (issue.field === 'repetition') repeatedFacialRunCount += 1
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkCount,
+          modelId: act.modelId,
+          speaker: isListener ? `${meta?.name ?? act.modelId}(听者)` : speakerName,
+          content,
+          emotion,
+          facial: act.facial,
+          motion: act.motion,
+          inferredMood: evalRes.inferredMood,
+          field: issue.field,
+          code: issue.code,
+          severity: issue.severity,
+          message: issue.message,
+          recommendedFacials: evalRes.recommendedFacials,
+          recommendedMotions: evalRes.recommendedMotions
+        })
+      }
+
+      if (act.facial) {
+        tracker.prevFacial = act.facial
+        tracker.sameFacialCount = nextSameFacial
+      }
+      if (act.motion) {
+        tracker.prevMotion = act.motion
+        tracker.sameMotionCount = nextSameMotion
+      }
+    }
+
+    prevContent = content
+    prevEmotion = emotion
+    prevTense = emotion === '生气' || emotion === '伤心' || emotion === '害怕'
+  }
+
+  const zeroMotionModelIds: number[] = []
+  if (talkCount >= 6) {
+    for (const [mid, count] of bodyMotionCounts) {
+      if (count === 0) {
+        zeroMotionModelIds.push(mid)
+        const meta = modelMeta.get(mid)
+        const rec = evaluateActingLineMatch({
+          facials: meta?.facials ?? [],
+          motions: meta?.motions ?? [],
+          modelPath: meta?.path,
+          content: '',
+          restrainedRole: meta?.restrained
+        })
+        diagnostics.push({
+          snippetIndex: Math.max(0, snippets.length - 1),
+          lineNumber: talkCount,
+          modelId: mid,
+          speaker: meta?.name ?? `model${mid}`,
+          content: '',
+          emotion: '',
+          facial: '',
+          motion: '',
+          inferredMood: 'neutral',
+          field: 'motion',
+          code: 'actor_zero_motions',
+          severity: 'high',
+          message: `在场角色 ${meta?.name ?? mid} 全场共有 0 个身体动作，站桩过僵，请在承接句或独立 Motion 节拍补充动作`,
+          recommendedFacials: rec.recommendedFacials,
+          recommendedMotions: rec.recommendedMotions
+        })
+      }
+    }
+  }
+
+  let penalty = officialReport.issues.length * 10
+  for (const d of diagnostics) {
+    penalty += d.severity === 'high' ? 12 : 5
+  }
+  const score = Math.max(0, Math.min(100, 100 - penalty))
+  const hasHigh = diagnostics.some((d) => d.severity === 'high')
+
+  return {
+    passed: officialReport.passed && !hasHigh && zeroMotionModelIds.length === 0,
+    score,
+    talkCount,
+    diagnostics,
+    zeroMotionModelIds,
+    repeatedFacialRunCount,
+    facialMismatchCount,
+    motionMismatchCount,
+    simultaneousCollisionCount,
+    stageDirectionLeakCount,
+    officialReport
+  }
 }

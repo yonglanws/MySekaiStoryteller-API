@@ -5,8 +5,22 @@ import type {
   ResourceCatalogData
 } from '../resources/resourceCatalog'
 import { normalizeBgmFile } from '../../common/audio/bgm'
-import { GENERIC_PROFILE, dialoguePersonaPrompt, personaFor, type PersonaEntry } from './personas'
-import { annotateFacialName, pickNeutralFacial } from './facialSemantics'
+import {
+  GENERIC_PROFILE,
+  characterActingProfile,
+  dialoguePersonaPrompt,
+  personaFor,
+  type PersonaEntry
+} from './personas'
+import {
+  annotateFacialName,
+  annotateMotionName,
+  isSpecialOrStandingMotion,
+  pickNeutralFacial,
+  recommendActingForLine,
+  type DramaticContextMood
+} from './facialSemantics'
+import { getOfficialActingGuidelines } from './corpusExamples'
 import { CURATED_SCENARIO_SES, resolveScenarioSe, sePromptList } from './scenarioCues'
 
 // 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
@@ -17,9 +31,9 @@ const FACIAL_PROMPT_LIMIT = 28
 const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['nod', 2],
   ['tilthead', 2],
-  ['glad', 2],
-  ['sad', 2],
-  ['trouble', 2],
+  ['glad', 1],
+  ['sad', 1],
+  ['trouble', 1],
   ['shakehead', 1],
   ['surprise', 1],
   ['shy', 1],
@@ -36,6 +50,17 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['greeting', 1],
   ['smug', 1],
   ['wink', 1],
+  ['purpose', 1],
+  ['regret', 1],
+  ['guts', 1],
+  ['pride', 1],
+  ['disgust', 1],
+  ['posenod', 1],
+  ['posetilthead', 1],
+  ['posesad', 1],
+  ['posetrouble', 1],
+  ['poseangry', 1],
+  ['wandahoi', 1],
   ['scared', 1],
   ['serious', 1],
   ['sleep', 1],
@@ -49,8 +74,10 @@ const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
   ['face_smile', 2],
   ['face_closeeye', 1],
   ['face_serious', 1],
+  ['face_purpose', 1],
   ['face_trouble', 1],
   ['face_sad', 1],
+  ['face_regret', 1],
   ['face_angry', 1],
   ['face_lookaway', 1],
   ['face_worry', 1],
@@ -67,11 +94,19 @@ const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
   ['face_blushed', 1],
   ['face_sleepy', 1],
   ['face_darknormal', 1],
+  ['face_darksmile', 1],
   ['face_darksad', 1],
   ['face_darkangry', 1],
   ['face_darkcloseeye', 1],
   ['face_darktrouble', 1],
+  ['face_darkserious', 1],
   ['face_darksmallmouth', 1],
+  ['face_ncsmile', 1],
+  ['face_ncsad', 1],
+  ['face_ncangry', 1],
+  ['face_nctrouble', 1],
+  ['face_night_smile', 1],
+  ['face_night_sad', 1],
   ['face_sharp', 1],
   ['face_coldeyes', 1],
   ['face_emptiness', 1],
@@ -885,8 +920,12 @@ export class CatalogView {
   }
 
   promptMotions(model: CatalogModel): string[] {
+    const filtered = (model.motions ?? []).filter(
+      (name) => !isSpecialOrStandingMotion(name) || motionKind(name) === 'default'
+    )
+    const source = filtered.length > 0 ? filtered : (model.motions ?? [])
     return curateNames(
-      model.motions ?? [],
+      source,
       motionKind,
       MOTION_PROMPT_KINDS,
       MOTION_PROMPT_LIMIT,
@@ -904,19 +943,17 @@ export class CatalogView {
     )
   }
 
-  /** 示例/入场兜底动作：优先语义明确的小动作，绝不选 default 站姿。 */
+  /** 示例/入场兜底动作：优先语义明确的小动作，绝不选 default 站姿或清场特殊动作。 */
   exampleMotion(modelId: number): string {
     const model = this.modelById(modelId) ?? this.defaultModel()
     if (!model) return ''
     const names = this.promptMotions(model)
     for (const kind of ['nod', 'tilthead', 'glad']) {
       for (const name of names) {
-        if (motionKind(name) === kind && !name.toLowerCase().includes('default')) return name
+        if (motionKind(name) === kind && !isSpecialOrStandingMotion(name)) return name
       }
     }
-    return (
-      names.find((name) => !name.toLowerCase().includes('default')) ?? this.defaultMotion(modelId)
-    )
+    return names.find((name) => !isSpecialOrStandingMotion(name)) ?? this.defaultMotion(modelId)
   }
 
   /** 示例表情：优先温和微笑或自然神情，避免开场全员死板挂着面无表情的 face_normal_01。 */
@@ -962,6 +999,50 @@ export class CatalogView {
         return `${this.shortName(model)}(${model.id})：${annotated.length ? annotated.join('，') : '（目录暂未提供）'}`
       })
       .join('\n')
+  }
+
+  /** 带剧情语义简注的身体动作清单，帮助模型按情境选出点头/叹气/前倾/害羞/思索等动作。 */
+  annotatedMotionList(modelIds?: number[]): string {
+    const scope = modelIds?.length
+      ? this.promptScopeModels().filter((model) => modelIds.includes(model.id))
+      : this.promptScopeModels()
+    return scope
+      .map((model) => {
+        const names = this.promptMotions(model)
+        const annotated = names.map((name) => annotateMotionName(model.path, name))
+        return `${this.shortName(model)}(${model.id})：${annotated.length ? annotated.join('，') : '（目录暂未提供）'}`
+      })
+      .join('\n')
+  }
+
+  /** 按具体台词情绪、说话/倾听身份与历史动作，从全量目录推荐最贴合的表情与身体动作候选。 */
+  recommendActingChoices(
+    modelId: number,
+    params: {
+      content: string
+      emotion?: string
+      isListener?: boolean
+      prevFacial?: string
+      prevMotion?: string
+      restrainedRole?: boolean
+    }
+  ): { mood: DramaticContextMood; facials: string[]; motions: string[] } {
+    const model = this.modelById(modelId)
+    if (!model) return { mood: 'neutral', facials: [], motions: [] }
+    const profile = characterActingProfile(`${this.shortName(model)} ${model.path}`)
+    const facials = model.facials?.length ? model.facials : this.promptFacials(model)
+    const motions = model.motions?.length ? model.motions : this.promptMotions(model)
+    return recommendActingForLine({
+      facials,
+      motions,
+      modelPath: model.path,
+      content: params.content,
+      emotion: params.emotion,
+      isListener: params.isListener,
+      prevFacial: params.prevFacial,
+      prevMotion: params.prevMotion,
+      restrainedRole: params.restrainedRole ?? profile.restrained
+    })
   }
 
   imageList(limit = 80, query = ''): string {
@@ -1319,14 +1400,15 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 ## 开场与转场序列
 
 ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可选 Telop / PlaceInfo）→ LayoutAppear...
-- 支持 Telop（居中小标题，如时间/地点/回忆提示）、PlaceInfo（左上角地点条，下句说完自动关闭）、SideFade（Out/In 方向擦除转场）、WhiteOut -> FlashbackIn -> WhiteIn（回忆滤镜，结束前必配 FlashbackOut）、SekaiOut/SekaiIn（出入 SEKAI）、ShakeWindow / ShakeScreen + StopShakeScreen、CameraZoom / CameraMove（转场或结尾前复位）。
+- **自然分幕（不强制拆幕）**：同一时间地点的连续对话保持 1 幕即可；仅在换地点、跳时间、回忆或出入 SEKAI 时才换背景/分幕。
+- 支持 Telop（居中小标题，如时间/地点/回忆提示）、PlaceInfo（左上角地点条，下句说完自动关闭）、SideFade（Out/In 方向擦除转场）、BlackOut(white) -> FlashbackIn -> BlackIn(white)（回忆滤镜，结束前必配 FlashbackOut）、SekaiOut/SekaiIn（出入 SEKAI）、ShakeWindow / ShakeScreen + StopShakeScreen、CameraZoom / CameraMove（转场或结尾前复位）。
 - 转场、Telop 或静默 Move/Motion 前的最后一句 Talk 必须设 \`closeWindowOnFinish: true\`（或插 HideTalk）。
 
 ## 对话与表演规范
 
 - **每句台词最多 1 个身体动作**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。常规句动作在 at=0 触发；禁止同句里让说话者和听者在同一瞬间一起做身体动作。
 - **双人动作轮替与短促反应**：哪怕只有两三个字的短反应（如「……嗯？」「啊。」）也应保持 facial 表情贴合语境；只把约 20%~25% 的承接句或刚入场首句设为无动作。**务必让在场双方各自都有自然的动作切换**，避免一个人全程僵立；可在对方说话前的间隙用独立 Motion 片段或对方无动作的接话句安排回应动作。
-- **表情严格贴合剧情情绪**：仔细核对表情括号语义（例如分清真笑、苦笑、闭眼微笑、闭眼隐忍、阴沉冷脸），悲伤/生气/紧张/道歉语境严禁误选开心笑脸。**朝比奈真冬 / 真冬**保持克制神情。
+- **动作与表情双重对位剧情**：仔细核对动作与表情括号语义（区分点头/歪头/前倾/叹气/害羞/思索与真笑/苦笑/闭眼微笑/阴沉冷脸），禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug 动作或真笑表情，也禁止连续多句卡死在同一表情或 default 站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
 - **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
 - **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
@@ -1541,19 +1623,25 @@ export function buildStoryPrompt(
     '{model_table}': view.modelTable(),
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),
-    '{motion_list}': view.motionList(),
+    '{motion_list}': view.annotatedMotionList(),
     '{facial_list}': view.annotatedFacialList(),
     '{image_list}': view.imageList(80, options.scene),
     '{bgm_list}': view.bgmList(36, options.scene),
     '{se_list}': view.seList(options.scene),
     '{scene}': options.scene
   })
+  const guidelines = `\n\n## 官方演出补充准则\n${getOfficialActingGuidelines({
+    castCount: view.models.length,
+    isSekai: /sekai|世界/i.test(options.scene),
+    isFlashback: /回忆|闪回/.test(options.scene)
+  })}`
   return {
     system: options.systemPrompt?.trim() || STORY_SYSTEM_PROMPT,
     user:
       user +
       canonGroundingBlock(options.ragContext) +
       SINGLE_MODE_FIDELITY_RULES +
+      guidelines +
       emotionInstruction(options.emotionLabels)
   }
 }

@@ -198,6 +198,38 @@ export const CURATED_SCENARIO_SES: readonly ScenarioSeCue[] = [
     description: '脚步骤停 / 气氛凝滞轻响',
     tags: ['stop', 'hesitate', 'tension'],
     defaultVolume: 0.8
+  },
+  {
+    id: 'se00005_b',
+    file: 'se00005_b.mp3',
+    category: 'drink',
+    description: '端放茶杯 / 饮品桌面轻响',
+    tags: ['drink', 'tea', 'coffee', 'cup', 'table'],
+    defaultVolume: 0.85
+  },
+  {
+    id: 'se00027',
+    file: 'se00027.mp3',
+    category: 'instrument',
+    description: '乐器拨弦 / 试音 / 练习室乐器声',
+    tags: ['guitar', 'instrument', 'music', 'practice', 'tuning'],
+    defaultVolume: 0.85
+  },
+  {
+    id: 'se00019',
+    file: 'se00019.mp3',
+    category: 'stage',
+    description: '演出掌声 / 欢呼 / 舞台喝彩声',
+    tags: ['applause', 'cheer', 'stage', 'live', 'clap'],
+    defaultVolume: 0.85
+  },
+  {
+    id: 'se00037',
+    file: 'se00037.mp3',
+    category: 'weather',
+    description: '雨声 / 风声 / 室外天气环境音',
+    tags: ['rain', 'wind', 'weather', 'outdoor'],
+    defaultVolume: 0.75
   }
 ]
 
@@ -205,6 +237,7 @@ const KEYWORD_SE_MAP: Array<[RegExp, string]> = [
   [/回忆|闪回|白光|flashback|memory/i, 'se00053_b'],
   [/门开|开门|门.*打开|打开门|推门|拉门|进屋|进门|敲门|door.*open/i, 'se00043_b'],
   [/关门|出门|带上门|door.*close/i, 'se00044_b'],
+  [/玄关|回家|出门鞋/i, 'se00001_b'],
   [/奔跑|跑来|跑过|飞奔|冲进|run/i, 'se_run_women_001_1'],
   [/男.*走|走近.*男|男.*脚步|walk_men/i, 'se_walk_men_001_1'],
   [/走近|走来|脚步|walkin|walk/i, 'se_walk_women_001_1'],
@@ -216,6 +249,10 @@ const KEYWORD_SE_MAP: Array<[RegExp, string]> = [
   [/翻|纸|乐谱|曲谱|速写本|笔记本|本子|日程|paper|sketchbook|score/i, 'se00122_b'],
   [/编曲|音轨|demo|daw/i, 'se00320_b'],
   [/键盘|电脑|鼠标|点击|文件|keyboard|pc|click/i, 'se00007_b'],
+  [/热饮|茶杯|咖啡|奶茶|饮料|倒水|杯子|tea|coffee|drink|cup/i, 'se00005_b'],
+  [/吉他|贝斯|鼓|钢琴|试音|调音|弹奏|guitar|instrument|tuning/i, 'se00027'],
+  [/掌声|欢呼|鼓掌|喝彩|applause|cheer/i, 'se00019'],
+  [/下雨|雨声|暴雨|雨天|吹风|大风|rain|wind/i, 'se00037'],
   [/衣料|起身|拿|递|收拾|包|袋|cloth|grab|rustle/i, 'se00055_b'],
   [/铃声|上课铃|下课铃|钟声|bell|chime/i, 'se00249_b'],
   [/快门|拍照|相机|camera|shutter/i, 'se00075_b'],
@@ -289,9 +326,25 @@ export function normalizeScenarioEffectName(value: unknown): string {
   return trimmed
 }
 
-const VIRTUAL_SINGER_KEYS = ['miku', 'hatsune', 'rin', 'len', 'luka', 'meiko', 'kaito', '初音', '镜音', '巡音']
+const VIRTUAL_SINGER_KEYS = [
+  'miku',
+  'hatsune',
+  'rin',
+  'len',
+  'luka',
+  'meiko',
+  'kaito',
+  '初音',
+  '镜音',
+  '巡音'
+]
 
-export function isVirtualSingerModel(model: { id?: number; name?: string; shortName?: string; path?: string }): boolean {
+export function isVirtualSingerModel(model: {
+  id?: number
+  name?: string
+  shortName?: string
+  path?: string
+}): boolean {
   const haystack = `${model.name ?? ''} ${model.shortName ?? ''} ${model.path ?? ''}`.toLowerCase()
   if (VIRTUAL_SINGER_KEYS.some((key) => haystack.includes(key))) return true
   if (typeof model.id === 'number') {
@@ -299,4 +352,69 @@ export function isVirtualSingerModel(model: { id?: number; name?: string; shortN
     if (base >= 21 && base <= 26) return true
   }
   return false
+}
+
+export interface ScenarioCueRecommendation {
+  ambient: 'normal' | 'evening' | 'night'
+  transition: 'black' | 'sideFade' | 'flashback' | 'sekaiIn' | 'sekaiOut'
+  seCues: ScenarioSeCue[]
+  effects: CuratedScenarioEffect[]
+}
+
+/**
+ * 根据场景文本与剧情标签推荐贴合官方演出的时段环境色、转场、SE 音效与天气特效。
+ */
+export function recommendScenarioCues(
+  sceneText: string,
+  options: { isFlashback?: boolean; isSekai?: boolean; isMonologue?: boolean } = {}
+): ScenarioCueRecommendation {
+  const text = sceneText.trim()
+  const ambient: 'normal' | 'evening' | 'night' =
+    /深夜|凌晨|半夜|25点|夜里|夜晚|今晚|熬夜|星空/.test(text)
+      ? 'night'
+      : /黄昏|傍晚|夕阳|晚霞|放学后/.test(text)
+        ? 'evening'
+        : 'normal'
+
+  const transition: ScenarioCueRecommendation['transition'] =
+    options.isFlashback || /回忆|闪回|以前|小时候|想起/.test(text)
+      ? 'flashback'
+      : options.isSekai || /进入\s*sekai|进入世界|来到\s*sekai/i.test(text)
+        ? 'sekaiIn'
+        : /离开\s*sekai|回到现实/i.test(text)
+          ? 'sekaiOut'
+          : /与此同时|换到|另一边|走廊|转眼|几天后/.test(text)
+            ? 'sideFade'
+            : 'black'
+
+  const seCues: ScenarioSeCue[] = []
+  const seenSe = new Set<string>()
+  for (const [pattern, cueId] of KEYWORD_SE_MAP) {
+    if (!pattern.test(text)) continue
+    if (seenSe.has(cueId)) continue
+    const hit = CURATED_SCENARIO_SES.find((cue) => cue.id === cueId)
+    if (hit) {
+      seenSe.add(cueId)
+      seCues.push(hit)
+      if (seCues.length >= 4) break
+    }
+  }
+
+  const effects: CuratedScenarioEffect[] = []
+  const pushEffect = (eff: CuratedScenarioEffect): void => {
+    if (!effects.includes(eff)) effects.push(eff)
+  }
+  if (/下雨|雨天|淋雨|暴雨|躲雨/.test(text)) pushEffect('rain')
+  if (/下雪|雪夜|冬雪|积雪/.test(text)) pushEffect('snow')
+  if (/樱花|春风|落樱|开学/.test(text)) pushEffect('sakura')
+  if (options.isFlashback || /回忆|闪回/.test(text)) pushEffect('memories')
+  if (/霓虹|雾|迷茫|清晨雾|夜晚雾/.test(text)) pushEffect('mist')
+  if (/星光|舞台灯光|闪耀|奇幻|sekai/i.test(text)) pushEffect('sparkle')
+
+  if (options.isMonologue && seCues.length === 0) {
+    const pauseSe = CURATED_SCENARIO_SES.find((cue) => cue.id === 'se00097')
+    if (pauseSe) seCues.push(pauseSe)
+  }
+
+  return { ambient, transition, seCues, effects }
 }
