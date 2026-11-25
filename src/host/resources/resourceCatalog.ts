@@ -170,6 +170,12 @@ export class ResourceCatalog {
     this.cloud = cloud
   }
 
+  invalidate(): void {
+    this.cache = null
+    this.cacheTime = 0
+    this.cacheCloudGeneratedAt = null
+  }
+
   get(): ResourceCatalogData {
     const now = Date.now()
     const cloudGeneratedAt = this.cloud?.()?.generatedAt ?? null
@@ -194,6 +200,162 @@ export class ResourceCatalog {
       }
       return { models: [], images: [], imageDetails: [], voices: [], bgm: [], bgmDetails: [] }
     }
+  }
+
+  /** 按角色名、简称、cloudId 或数字 id 精确/模糊查找目录模型（默认服装优先）。 */
+  findModel(query: string | number): CatalogModel | null {
+    const data = this.get()
+    if (typeof query === 'number' && Number.isFinite(query)) {
+      return data.models.find((m) => m.id === query) ?? null
+    }
+    const q = String(query ?? '').trim().toLowerCase()
+    if (!q) return null
+    const exact = data.models.find(
+      (m) =>
+        String(m.id) === q ||
+        (m.cloudId ?? '').toLowerCase() === q ||
+        m.path.toLowerCase() === q
+    )
+    if (exact) return exact
+
+    const byName = data.models
+      .filter(
+        (m) =>
+          m.name.toLowerCase() === q ||
+          (m.shortName ?? '').toLowerCase() === q ||
+          `${m.name} ${m.outfitLabel ?? ''}`.trim().toLowerCase() === q ||
+          `${m.shortName ?? m.name} ${m.outfitCategory ?? ''}`.trim().toLowerCase() === q
+      )
+      .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+    if (byName.length > 0) return byName[0]
+
+    const fuzzy = data.models
+      .filter((m) =>
+        `${m.id} ${m.cloudId ?? ''} ${m.name} ${m.shortName ?? ''} ${m.outfitLabel ?? ''}`
+          .toLowerCase()
+          .includes(q)
+      )
+      .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id - b.id)
+    return fuzzy[0] ?? null
+  }
+
+  /** 按 id / 文件名 / 中文名 / 别名 / 标签检索背景。 */
+  findBackground(query: string): CatalogImage | null {
+    const q = query.trim().toLowerCase()
+    if (!q) return null
+    const details = this.get().imageDetails
+    return (
+      details.find(
+        (d) =>
+          d.id?.toLowerCase() === q ||
+          d.file.toLowerCase() === q ||
+          fileStem(d.file).toLowerCase() === q ||
+          d.name.toLowerCase() === q
+      ) ??
+      details.find(
+        (d) =>
+          (d.aliases ?? []).some((a) => a.toLowerCase() === q) ||
+          d.name.toLowerCase().includes(q) ||
+          (d.tags ?? []).some((t) => t.toLowerCase() === q)
+      ) ??
+      null
+    )
+  }
+
+  /** 按 id / 文件名 / 曲名检索 BGM。 */
+  findBgm(query: string): CatalogBgm | null {
+    const q = query.trim().toLowerCase()
+    if (!q) return null
+    const details = this.get().bgmDetails
+    return (
+      details.find(
+        (d) =>
+          d.id?.toLowerCase() === q ||
+          d.file.toLowerCase() === q ||
+          fileStem(d.file).toLowerCase() === q ||
+          d.name.toLowerCase() === q
+      ) ??
+      details.find((d) => d.name.toLowerCase().includes(q) || d.description.toLowerCase().includes(q)) ??
+      null
+    )
+  }
+
+  /** 按 cue id / 文件名 / 语义描述检索 SE。 */
+  findSe(query: string): CatalogSeItem | null {
+    const q = query.trim().toLowerCase()
+    if (!q) return null
+    const stemQ = q.replace(/^cloud\//, '').replace(/\.(mp3|wav|ogg|flac|hca)$/i, '')
+    const baseStemQ = stemQ.replace(/(?:_b)?_\d+$/, '')
+    const details = this.get().seDetails ?? []
+    return (
+      details.find((d) => d.id?.toLowerCase() === stemQ || d.file.toLowerCase() === q) ??
+      details.find((d) => d.id?.toLowerCase() === stemQ.replace(/_b$/, '') || d.id?.toLowerCase() === baseStemQ) ??
+      details.find(
+        (d) =>
+          d.description.toLowerCase().includes(q) ||
+          (d.tags ?? []).some((t) => t.toLowerCase() === stemQ || t.toLowerCase().includes(q))
+      ) ??
+      null
+    )
+  }
+
+  /** 统一检索当前全量目录中的模型、背景、BGM 与 SE。 */
+  searchAssets(options: {
+    kind?: 'model' | 'background' | 'bgm' | 'se' | 'all'
+    query?: string
+    limit?: number
+  } = {}): {
+    models?: CatalogModel[]
+    backgrounds?: CatalogImage[]
+    bgm?: CatalogBgm[]
+    se?: CatalogSeItem[]
+  } {
+    const kind = options.kind ?? 'all'
+    const q = (options.query ?? '').trim().toLowerCase()
+    const limit = Math.max(1, Math.min(100, Math.round(options.limit ?? 20)))
+    const data = this.get()
+    const tokens = q.split(/[\s,，/]+/).filter(Boolean)
+    const matches = (haystack: string): boolean => {
+      if (tokens.length === 0) return true
+      const lower = haystack.toLowerCase()
+      return tokens.every((tok) => lower.includes(tok))
+    }
+
+    const out: {
+      models?: CatalogModel[]
+      backgrounds?: CatalogImage[]
+      bgm?: CatalogBgm[]
+      se?: CatalogSeItem[]
+    } = {}
+    if (kind === 'model' || kind === 'all') {
+      out.models = data.models
+        .filter((m) =>
+          matches(`${m.cloudId ?? ''} ${m.name} ${m.shortName ?? ''} ${m.unit ?? ''} ${m.outfitCategory ?? ''} ${m.outfitLabel ?? ''}`)
+        )
+        .slice(0, limit)
+    }
+    if (kind === 'background' || kind === 'all') {
+      out.backgrounds = data.imageDetails
+        .filter((b) =>
+          matches(`${b.id ?? ''} ${b.name} ${(b.aliases ?? []).join(' ')} ${b.category ?? ''} ${b.timeOfDay ?? ''} ${b.indoor ?? ''} ${(b.tags ?? []).join(' ')}`)
+        )
+        .slice(0, limit)
+    }
+    if (kind === 'bgm' || kind === 'all') {
+      out.bgm = data.bgmDetails
+        .filter((b) =>
+          matches(`${b.id ?? ''} ${b.name} ${b.mood ?? ''} ${b.category ?? ''} ${b.unit ?? ''} ${b.description} ${(b.tags ?? []).join(' ')}`)
+        )
+        .slice(0, limit)
+    }
+    if (kind === 'se' || kind === 'all') {
+      out.se = (data.seDetails ?? [])
+        .filter((s) =>
+          matches(`${s.id ?? ''} ${s.name} ${s.category ?? ''} ${s.description} ${(s.tags ?? []).join(' ')}`)
+        )
+        .slice(0, limit)
+    }
+    return out
   }
 
   private build(): ResourceCatalogData {

@@ -1,12 +1,13 @@
 /**
- * moesekai / SekaiStoryRipper 的 sse-motion.json -> Cubism motion3.json。
+ * moesekai / SekaiStoryRipper 的 sse-motion.json 及 sekai-serve canonical live2d-motion
+ * -> Cubism motion3.json 转换器。
  *
- * 游戏资产里没有 motion3：动作是 Unity AnimationClip 导出的 sse-motion，
- * 每条曲线是若干段三次多项式。这里按 Unity 的求值方式还原曲线，再把每段
- * 三次多项式精确转成 Cubism 的 Bezier 段（不是采样、也不是把曲线拉直），
- * 端点与现有第三方转换结果逐点一致。
+ * 游戏资产里没有 motion3：动作是 Unity AnimationClip 导出的 sse-motion 或
+ * canonical `live2d-motion`（clip v2 + CRC-32 path/attribute 绑定）。
+ * 这里按 Unity 的求值方式还原曲线，再把每段三次多项式精确转成 Cubism 的 Bezier 段
+ * （不是采样、也不是把曲线拉直），端点与现有第三方转换结果逐点一致。
  *
- * sse 段的 coeff 顺序是 [d, c, b, a]，即：
+ * sse / clip v2 段的 coeff 顺序是 [d, c, b, a]，即：
  *   value(dt) = a + b*dt + c*dt^2 + d*dt^3, dt = t - segment.t
  */
 
@@ -46,6 +47,109 @@ export interface SseMotion {
   fade?: { in?: number; out?: number }
   curves?: SseCurve[]
   events?: SseMotionEvent[]
+}
+
+export interface Live2DClipCurve {
+  path: number
+  attribute: number
+  class_id?: number
+  script?: string | null
+  custom_type?: number
+  component?: number
+  kind?: string
+  value?: number
+  segments?: number[][]
+  begin_time?: number
+  sample_rate?: number
+  samples?: number[]
+}
+
+export interface Live2DClip {
+  format?: string
+  version?: number
+  name?: string
+  sample_rate?: number
+  start_time?: number
+  stop_time?: number
+  loop?: boolean
+  curves?: Live2DClipCurve[]
+  events?: SseMotionEvent[]
+}
+
+export interface Live2DMotionDocument {
+  format?: string
+  version?: number
+  fade_in?: number | null
+  fade_out?: number | null
+  clip?: Live2DClip
+}
+
+export interface Moc3BindingResolver {
+  resolve: (
+    pathHash: number,
+    attributeHash: number
+  ) => { target: 'Parameter' | 'PartOpacity'; id: string } | null
+}
+
+/** `crc32("Value")`: 驱动 Live2D Parameter 的属性哈希 */
+export const LIVE2D_PARAMETER_ATTRIBUTE_HASH = 0xdcb67730
+/** `crc32("Opacity")`: 驱动 Live2D PartOpacity 的属性哈希 */
+export const LIVE2D_PART_ATTRIBUTE_HASH = 0x8c4054fa
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    }
+    table[i] = c >>> 0
+  }
+  return table
+})()
+
+/** 计算标准 IEEE CRC-32（与 Unity AnimationClip path/attribute 哈希一致）。 */
+export function crc32Utf8(value: string): number {
+  let crc = 0xffffffff
+  const bytes = Buffer.from(value, 'utf8')
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8)
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+/** 从 `.moc3` 二进制（或已知参数/部件 ID 列表）构建 CRC-32 绑定解析器。 */
+export function buildMoc3BindingResolver(
+  moc3OrIds: Buffer | readonly string[]
+): Moc3BindingResolver {
+  const ids = Array.isArray(moc3OrIds)
+    ? moc3OrIds
+    : (Buffer.from(moc3OrIds as Buffer)
+        .toString('latin1')
+        .match(/[A-Za-z0-9_.-]{2,64}/g) ?? [])
+
+  const paramByHash = new Map<number, string>()
+  const partByHash = new Map<number, string>()
+  for (const rawId of ids) {
+    const id = String(rawId).trim()
+    if (!id) continue
+    paramByHash.set(crc32Utf8(`Parameters/${id}`), id)
+    partByHash.set(crc32Utf8(`Parts/${id}`), id)
+  }
+
+  return {
+    resolve(pathHash: number, attributeHash: number) {
+      if (attributeHash === LIVE2D_PARAMETER_ATTRIBUTE_HASH) {
+        const id = paramByHash.get(pathHash >>> 0)
+        return id ? { target: 'Parameter', id } : null
+      }
+      if (attributeHash === LIVE2D_PART_ATTRIBUTE_HASH) {
+        const id = partByHash.get(pathHash >>> 0)
+        return id ? { target: 'PartOpacity', id } : null
+      }
+      return null
+    }
+  }
 }
 
 export interface Motion3Curve {
@@ -107,6 +211,34 @@ function isLinear(coeff: number[]): boolean {
 /** 该段是否完全静止 */
 function isConstant(coeff: number[]): boolean {
   return isLinear(coeff) && Math.abs(coeff[2] ?? 0) < 1e-12
+}
+
+function buildDenseSegments(
+  beginTimeRaw: number | undefined,
+  sampleRateRaw: number | undefined,
+  samplesRaw: number[] | undefined,
+  duration: number
+): number[] {
+  const samples = Array.isArray(samplesRaw) ? samplesRaw.map(Number) : []
+  if (samples.length === 0) return [0, 0]
+  const beginTime = Math.max(0, Number(beginTimeRaw ?? 0) || 0)
+  const sampleRate = Math.max(1e-6, Number(sampleRateRaw ?? 60) || 60)
+  const step = 1 / sampleRate
+  const firstVal = round(samples[0] ?? 0)
+  const segments: number[] = [0, firstVal]
+  if (beginTime > 0) {
+    segments.push(2, round(beginTime), firstVal)
+  }
+  for (let i = 1; i < samples.length; i++) {
+    const t = beginTime + i * step
+    if (t > duration) break
+    segments.push(0, round(t), round(samples[i] ?? 0))
+  }
+  const lastT = beginTime + (samples.length - 1) * step
+  if (lastT < duration) {
+    segments.push(2, round(duration), round(samples[samples.length - 1] ?? 0))
+  }
+  return segments
 }
 
 function buildSegments(curve: SseCurve, duration: number): number[] {
@@ -214,6 +346,63 @@ function countRecords(segments: number[]): { records: number; points: number } {
   return { records, points }
 }
 
+function buildMotion3File(params: {
+  name: string
+  duration: number
+  fps: number
+  loop: boolean
+  fadeIn: number
+  fadeOut: number
+  curves: Map<string, Motion3Curve>
+  events?: SseMotionEvent[]
+}): ConvertedMotion {
+  const list = [...params.curves.values()]
+  let records = 0
+  let points = 0
+  for (const curve of list) {
+    const counted = countRecords(curve.Segments)
+    records += counted.records
+    points += counted.points
+  }
+
+  // `OnLive2DInvokeUserData` 事件 -> motion3 `UserData`（pixi 以 `motion:<Value>` 发出，
+  // AdvancedModel 的眨眼控制器消费其中的 `eyeblink,...`）。
+  const userData: Motion3UserData[] = (params.events ?? [])
+    .filter(
+      (event) =>
+        event &&
+        String(event.function ?? '') === 'OnLive2DInvokeUserData' &&
+        event.data !== undefined
+    )
+    .map((event) => ({
+      Time: round(Math.max(0, Number(event.time ?? 0) || 0)),
+      Value: String(event.data ?? '')
+    }))
+    .sort((a, b) => a.Time - b.Time)
+
+  return {
+    name: params.name,
+    fadeIn: params.fadeIn,
+    fadeOut: params.fadeOut,
+    motion3: {
+      Version: 3,
+      Meta: {
+        Duration: round(params.duration),
+        Fps: params.fps,
+        Loop: params.loop,
+        AreBeziersRestricted: true,
+        CurveCount: list.length,
+        TotalSegmentCount: records,
+        TotalPointCount: points,
+        UserDataCount: userData.length,
+        TotalUserDataSize: userData.reduce((sum, entry) => sum + entry.Value.length, 0)
+      },
+      Curves: list,
+      UserData: userData
+    }
+  }
+}
+
 /**
  * 把一条 sse-motion 转成 Cubism motion3。
  *
@@ -252,49 +441,95 @@ export function convertSseMotion(raw: unknown): ConvertedMotion {
     })
   }
 
-  const list = [...curves.values()]
-  let records = 0
-  let points = 0
-  for (const curve of list) {
-    const counted = countRecords(curve.Segments)
-    records += counted.records
-    points += counted.points
-  }
-
-  // `OnLive2DInvokeUserData` 事件 -> motion3 `UserData`（pixi 以 `motion:<Value>` 发出，
-  // AdvancedModel 的眨眼控制器消费其中的 `eyeblink,...`）。
-  const userData: Motion3UserData[] = (sse.events ?? [])
-    .filter(
-      (event) =>
-        event &&
-        String(event.function ?? '') === 'OnLive2DInvokeUserData' &&
-        event.data !== undefined
-    )
-    .map((event) => ({
-      Time: round(Math.max(0, Number(event.time ?? 0) || 0)),
-      Value: String(event.data ?? '')
-    }))
-    .sort((a, b) => a.Time - b.Time)
-
-  return {
+  return buildMotion3File({
     name,
+    duration,
+    fps: Number(sse.sampleRate ?? 60) || 60,
+    loop: Boolean(sse.loopTime),
     fadeIn: Number(sse.fade?.in ?? 0.5),
     fadeOut: Number(sse.fade?.out ?? 0.5),
-    motion3: {
-      Version: 3,
-      Meta: {
-        Duration: round(duration),
-        Fps: Number(sse.sampleRate ?? 60) || 60,
-        Loop: Boolean(sse.loopTime),
-        AreBeziersRestricted: true,
-        CurveCount: list.length,
-        TotalSegmentCount: records,
-        TotalPointCount: points,
-        UserDataCount: userData.length,
-        TotalUserDataSize: userData.reduce((sum, entry) => sum + entry.Value.length, 0)
-      },
-      Curves: list,
-      UserData: userData
-    }
+    curves,
+    events: sse.events
+  })
+}
+
+/**
+ * 把 sekai-serve canonical `live2d-motion`（clip v2 + CRC-32 绑定）转成 Cubism motion3。
+ */
+export function convertLive2DMotion(
+  raw: unknown,
+  resolver: Moc3BindingResolver,
+  fallbackName = 'motion'
+): ConvertedMotion {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('live2d-motion: expected an object')
   }
+  const doc = raw as Live2DMotionDocument
+  if (doc.format !== 'live2d-motion' || !doc.clip || typeof doc.clip !== 'object') {
+    throw new Error(`live2d-motion: unsupported format ${String(doc.format)}`)
+  }
+  const clip = doc.clip
+  const name = String(clip.name ?? fallbackName)
+  const duration = Math.max(0.001, Number(clip.stop_time ?? 0) || 0)
+  const curves = new Map<string, Motion3Curve>()
+
+  for (const curve of clip.curves ?? []) {
+    const resolved = resolver.resolve(curve.path, curve.attribute)
+    if (!resolved) continue
+    let segments: number[]
+    if (curve.kind === 'dense') {
+      segments = buildDenseSegments(curve.begin_time, curve.sample_rate, curve.samples, duration)
+    } else if (curve.kind === 'streamed') {
+      const sseLike: SseCurve = {
+        kind: 'streamed',
+        segments: (curve.segments ?? []).map((seg) => ({
+          t: Number(seg[0] ?? 0),
+          coeff: [
+            Number(seg[1] ?? 0),
+            Number(seg[2] ?? 0),
+            Number(seg[3] ?? 0),
+            Number(seg[4] ?? 0)
+          ]
+        }))
+      }
+      segments = buildSegments(sseLike, duration)
+    } else if (curve.kind === 'constant') {
+      segments = buildSegments({ kind: 'constant', value: curve.value }, duration)
+    } else {
+      throw new Error(`unsupported live2d-motion curve kind: ${String(curve.kind)}`)
+    }
+
+    const key = `${resolved.target}:${resolved.id}`
+    curves.set(key, {
+      Target: resolved.target,
+      Id: resolved.id,
+      Segments: segments
+    })
+  }
+
+  return buildMotion3File({
+    name,
+    duration,
+    fps: Number(clip.sample_rate ?? 60) || 60,
+    loop: Boolean(clip.loop),
+    fadeIn: typeof doc.fade_in === 'number' && Number.isFinite(doc.fade_in) ? doc.fade_in : 0.5,
+    fadeOut: typeof doc.fade_out === 'number' && Number.isFinite(doc.fade_out) ? doc.fade_out : 0.5,
+    curves,
+    events: clip.events
+  })
+}
+
+/** 自动识别 `live2d-motion` 与 `sse-motion` 并转换为 Cubism motion3。 */
+export function convertAnyMotion(
+  raw: unknown,
+  resolver?: Moc3BindingResolver,
+  fallbackName = 'motion'
+): ConvertedMotion {
+  if (raw && typeof raw === 'object' && (raw as { format?: unknown }).format === 'live2d-motion') {
+    if (!resolver) {
+      throw new Error('live2d-motion requires a Moc3BindingResolver')
+    }
+    return convertLive2DMotion(raw, resolver, fallbackName)
+  }
+  return convertSseMotion(raw)
 }

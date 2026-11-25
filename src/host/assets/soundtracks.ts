@@ -13,12 +13,15 @@ import path from 'node:path'
 import { assetUrl, atomicWrite, fetchJson, withSlash } from './http'
 import type { RequestOptions } from './http'
 
-export const DEFAULT_SOUNDTRACK_BASE =
-  'https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master/'
+export const DEFAULT_SOUNDTRACK_BASE = 'https://metadata.pjsk.moe/jp/master/'
+
+export const METADATA_BACKUP_SOUNDTRACK_BASE = 'https://metadata.exmeaning.com/jp/master/'
 
 /** jsDelivr 不通时的直连回退（部分地区需要代理才能访问 raw.githubusercontent.com） */
 export const FALLBACK_SOUNDTRACK_BASE =
   'https://raw.githubusercontent.com/Sekai-World/sekai-master-db-diff/master/'
+
+const LEGACY_OVERLIMIT_SOUNDTRACK_RE = /cdn\.jsdelivr\.net\/gh\/Sekai-World\/sekai-master-db-diff/i
 
 /** master data 的分类名（日文）→ 提示词里使用的中文标签 */
 const CATEGORY_LABELS: Record<number, string> = {
@@ -272,7 +275,13 @@ export async function loadSoundtrackIndex(
     timeoutMs: Math.min(options.timeoutMs ?? 20_000, 20_000),
     retries: Math.min(options.retries ?? 1, 1)
   }
-  const bases = [options.baseUrl || DEFAULT_SOUNDTRACK_BASE, FALLBACK_SOUNDTRACK_BASE]
+  const configured = (options.baseUrl ?? '').trim()
+  const bases = [
+    ...(configured && !LEGACY_OVERLIMIT_SOUNDTRACK_RE.test(configured) ? [configured] : []),
+    DEFAULT_SOUNDTRACK_BASE,
+    METADATA_BACKUP_SOUNDTRACK_BASE,
+    FALLBACK_SOUNDTRACK_BASE
+  ]
     .map(withSlash)
     .filter((base, index, all) => all.indexOf(base) === index)
 

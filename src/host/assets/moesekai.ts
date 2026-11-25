@@ -3,10 +3,15 @@ import path from 'node:path'
 import type { AssetsSettings } from '../config'
 import { assetUrl, atomicWrite, fetchJson, request, withSlash, type RequestOptions } from './http'
 import { appendModelsManifest, readModelsManifest, type ModelManifestEntry } from './manifest'
-import { convertSseMotion } from './motion3'
+import { buildMoc3BindingResolver, convertAnyMotion, type Moc3BindingResolver } from './motion3'
 import { characterById, CHARACTERS, resolveCharacterToken } from './names'
 
 export type AssetRegion = AssetsSettings['region']
+
+export const CANONICAL_ASSET_SITES = [
+  'https://storage.pjsk.moe',
+  'https://storage.exmeaning.com'
+] as const
 
 export interface MoesekaiIndexEntry {
   id: string
@@ -22,6 +27,10 @@ export interface MoesekaiIndexEntry {
   bytes?: number
   files?: number
   textures?: number
+  /** sekai-serve canonical 资产名（如 live2d/model/.../buildmodeldata） */
+  canonicalAsset?: string
+  /** sekai-serve canonical 动作包资产名映射 */
+  canonicalMotionAssets?: Record<string, string>
 }
 
 export interface MoesekaiIndex {
@@ -37,6 +46,8 @@ interface RipperFile {
   path: string
   kind?: string
   container?: string
+  canonicalUrl?: string
+  storageUrl?: string
 }
 
 interface RipperManifest {
@@ -44,6 +55,47 @@ interface RipperManifest {
   version?: number
   bundle?: string
   files: RipperFile[]
+  canonicalBase?: string
+  canonicalAsset?: string
+  members?: CanonicalAssetMember[]
+}
+
+interface CanonicalFormAsset {
+  name: string
+  fingerprint?: string
+  size?: number
+}
+
+interface CanonicalFormListing {
+  format?: string
+  version?: number
+  published_version?: string
+  form?: string
+  assets?: CanonicalFormAsset[]
+}
+
+interface CanonicalDirectoryListing {
+  format?: string
+  version?: number
+  published_version?: string
+  directories?: string[]
+  files?: Array<{ name: string; extension?: string; size?: number }>
+}
+
+interface CanonicalAssetMember {
+  role: string
+  sha256?: string
+  size?: number
+  extension: string
+  media_type?: string
+}
+
+interface CanonicalAssetDocument {
+  format?: string
+  version?: number
+  name?: string
+  form?: string
+  members?: CanonicalAssetMember[]
 }
 
 export interface FetchAssetsOptions {
@@ -131,6 +183,118 @@ async function withKeyLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+const REGIONS = new Set<string>(['jp', 'cn', 'tw', 'kr', 'en'])
+const MAIN_CHARACTER_PREFIX_RE = /^(?:v2_)?(?:clb\d+_)?(0[1-9]|1\d|2[0-6])[a-z]+/
+const MODEL_FORM_ASSET_RE = /^live2d\/model\/([^/]+)(?:\/.+)?$/
+const MOTION_FORM_ASSET_RE = /^live2d\/motion\/([^/]+)(?:\/.+)?$/
+
+interface CanonicalFormCacheEntry {
+  version: string
+  models: Map<string, { assetName: string; size?: number }>
+  motions: Map<string, { assetName: string; size?: number }>
+}
+
+const canonicalFormCache = new Map<string, CanonicalFormCacheEntry>()
+
+export function isLegacyDeadMoesekaiUrl(url: string): boolean {
+  return /assets\.pjsk\.moe\/sekai-extra-assets\//i.test(url)
+}
+
+function isCanonicalSiteHost(url: string): boolean {
+  return /^https?:\/\/(storage\.pjsk\.moe|storage\.exmeaning\.com)(\/|$)/i.test(url.trim())
+}
+
+function canonicalSitesFor(preferredUrl?: string): string[] {
+  const trimmed = (preferredUrl ?? '').trim()
+  if (trimmed && isCanonicalSiteHost(trimmed)) {
+    const origin = new URL(trimmed).origin
+    return [origin, ...CANONICAL_ASSET_SITES.filter((site) => site !== origin)]
+  }
+  return [...CANONICAL_ASSET_SITES]
+}
+
+function parseCanonicalLibraryRoot(
+  libraryRoot: string
+): { site: string; region: AssetRegion; version?: string } | null {
+  const trimmed = libraryRoot.trim()
+  if (!trimmed) return null
+  if (isLegacyDeadMoesekaiUrl(trimmed)) {
+    const regionMatch = /\/ripper\/(jp|cn|tw|kr|en)\b/i.exec(trimmed)
+    const region = (regionMatch?.[1]?.toLowerCase() ?? 'jp') as AssetRegion
+    return { site: CANONICAL_ASSET_SITES[0], region }
+  }
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    return null
+  }
+  const match = /^\/(jp|cn|tw|kr|en)(?:@([^/]+))?\/?$/.exec(url.pathname)
+  if (match && REGIONS.has(match[1])) {
+    return {
+      site: url.origin,
+      region: match[1] as AssetRegion,
+      ...(match[2] ? { version: decodeURIComponent(match[2]) } : {})
+    }
+  }
+  if (isCanonicalSiteHost(trimmed)) {
+    const seg = url.pathname.replace(/^\/+/, '').split('/')[0]?.split('@')[0]?.toLowerCase()
+    const region = (seg && REGIONS.has(seg) ? seg : 'jp') as AssetRegion
+    return { site: url.origin, region }
+  }
+  return null
+}
+
+function isBuildDataLeaf(assetName: string): boolean {
+  const leaf = assetName.split('/').pop() ?? ''
+  return /^build\w*data$/i.test(leaf)
+}
+
+function preferCanonicalAsset(existing: string | undefined, candidate: string): string {
+  if (!existing) return candidate
+  const existingBuild = isBuildDataLeaf(existing)
+  const candidateBuild = isBuildDataLeaf(candidate)
+  if (candidateBuild !== existingBuild) return candidateBuild ? candidate : existing
+  return candidate.length < existing.length ? candidate : existing
+}
+
+export function live2dMotionSetCandidateNames(modelId: string): string[] {
+  const id = modelId.trim()
+  if (!id) return []
+  const generation = id.startsWith('v2_') ? 'v2_' : ''
+  const rest = id.slice(generation.length)
+  const prefixes = generation ? [generation, ''] : ['']
+  const trimmed = (stem: string): string => stem.replace(/(?:black\d*|young|\d+)+$/, '')
+  const character = /^(?:clb\d+_)?(\d{2}[a-z]+)/.exec(rest)
+  const parts = rest.split('_')
+  const stems = character
+    ? [character[1], trimmed(character[1])]
+    : parts.flatMap((_, index) => {
+        const stem = parts.slice(0, parts.length - index).join('_')
+        const stripped = trimmed(stem)
+        return stripped && stripped !== stem ? [stem, stripped] : [stem]
+      })
+
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const stem of stems) {
+    if (!stem || stem === 'sub') continue
+    for (const prefix of prefixes) {
+      const name = `${prefix}${stem}_motion_base`
+      if (!seen.has(name)) {
+        seen.add(name)
+        out.push(name)
+      }
+    }
+  }
+  return out
+}
+
+function parseCharacterIdFromModelId(id: string): number | null {
+  const match = MAIN_CHARACTER_PREFIX_RE.exec(id)
+  return match ? Number(match[1]) : null
+}
+
 function indexUrlFor(settings: AssetsSettings, region: AssetRegion): string {
   return `${withSlash(settings.indexBase)}${region}/models.json`
 }
@@ -140,11 +304,92 @@ export function libraryRootFor(
   settings: AssetsSettings,
   region: AssetRegion
 ): string {
-  // index.library 是区服目录（<base>/<region>/），实际文件在它的 library/ 下
-  if (index.library && index.library.trim()) {
-    return withSlash(`${withSlash(index.library.trim())}library`)
+  const lib = index.library?.trim() ?? ''
+  if (lib && !isLegacyDeadMoesekaiUrl(lib)) {
+    if (parseCanonicalLibraryRoot(lib)) {
+      return withSlash(lib)
+    }
+    // 旧版 index.library 是区服目录（<base>/<region>/），实际文件在它的 library/ 下
+    return withSlash(`${withSlash(lib)}library`)
   }
-  return withSlash(`${withSlash(settings.libraryBase)}${region}/library`)
+  const cfgLib = settings.libraryBase?.trim() ?? ''
+  if (cfgLib && !isLegacyDeadMoesekaiUrl(cfgLib) && !isCanonicalSiteHost(cfgLib)) {
+    return withSlash(`${withSlash(cfgLib)}${region}/library`)
+  }
+  return `${CANONICAL_ASSET_SITES[0]}/${region}/`
+}
+
+async function fetchCanonicalListingsOnSite(
+  site: string,
+  region: AssetRegion,
+  options: RequestOptions
+): Promise<{
+  version: string
+  models: Map<string, { assetName: string; size?: number }>
+  motions: Map<string, { assetName: string; size?: number }>
+  indexUrl: string
+}> {
+  const modelListingUrl = `${site}/listings/${region}/canonical/live2d-model`
+  const motionListingUrl = `${site}/listings/${region}/canonical/live2d-motions`
+
+  const [modelListing, motionListing] = await Promise.all([
+    fetchJson<CanonicalFormListing>(modelListingUrl, options),
+    fetchJson<CanonicalFormListing>(motionListingUrl, options).catch(() => null)
+  ])
+
+  if (modelListing.format !== 'form-listing' || !Array.isArray(modelListing.assets)) {
+    throw new Error(`${modelListingUrl}: invalid form-listing`)
+  }
+
+  const models = new Map<string, { assetName: string; size?: number }>()
+  for (const item of modelListing.assets) {
+    const match = MODEL_FORM_ASSET_RE.exec(item.name)
+    if (!match) continue
+    const id = match[1]
+    const prev = models.get(id)
+    const preferred = preferCanonicalAsset(prev?.assetName, item.name)
+    if (!prev || preferred === item.name) {
+      models.set(id, { assetName: preferred, size: item.size })
+    }
+  }
+
+  const motions = new Map<string, { assetName: string; size?: number }>()
+  if (motionListing?.format === 'form-listing' && Array.isArray(motionListing.assets)) {
+    for (const item of motionListing.assets) {
+      const match = MOTION_FORM_ASSET_RE.exec(item.name)
+      if (!match) continue
+      const setId = match[1]
+      const prev = motions.get(setId)
+      const preferred = preferCanonicalAsset(prev?.assetName, item.name)
+      if (!prev || preferred === item.name) {
+        motions.set(setId, { assetName: preferred, size: item.size })
+      }
+    }
+  } else {
+    const dirListing = await fetchJson<CanonicalDirectoryListing>(
+      `${site}/${region}/live2d/motion/`,
+      options
+    ).catch(() => null)
+    for (const setId of dirListing?.directories ?? []) {
+      motions.set(setId, { assetName: '' })
+    }
+  }
+
+  const version = modelListing.published_version || motionListing?.published_version || ''
+  canonicalFormCache.set(`${site}|${region}`, { version, models, motions })
+  return { version, models, motions, indexUrl: modelListingUrl }
+}
+
+async function ensureCanonicalFormCache(
+  site: string,
+  region: AssetRegion,
+  options: RequestOptions
+): Promise<CanonicalFormCacheEntry> {
+  const key = `${site}|${region}`
+  const cached = canonicalFormCache.get(key)
+  if (cached && cached.models.size > 0 && cached.motions.size > 0) return cached
+  const fetched = await fetchCanonicalListingsOnSite(site, region, options)
+  return { version: fetched.version, models: fetched.models, motions: fetched.motions }
 }
 
 export async function loadMoesekaiIndex(
@@ -152,16 +397,81 @@ export async function loadMoesekaiIndex(
   region: AssetRegion = settings.region,
   options: { timeoutMs?: number; retries?: number; signal?: AbortSignal } = {}
 ): Promise<{ index: MoesekaiIndex; indexUrl: string }> {
-  const indexUrl = indexUrlFor(settings, region)
-  const index = await fetchJson<MoesekaiIndex>(indexUrl, {
+  const requestOptions: RequestOptions = {
     timeoutMs: options.timeoutMs ?? settings.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     retries: options.retries ?? settings.retries ?? DEFAULT_RETRIES,
     signal: options.signal
-  })
-  if (index.format !== 1 || !Array.isArray(index.models)) {
-    throw new Error(`${indexUrl}: unsupported model index format`)
   }
-  return { index, indexUrl }
+
+  const configuredBase = settings.indexBase?.trim() ?? ''
+  if (
+    configuredBase &&
+    !isLegacyDeadMoesekaiUrl(configuredBase) &&
+    !isCanonicalSiteHost(configuredBase)
+  ) {
+    const indexUrl = indexUrlFor(settings, region)
+    const index = await fetchJson<MoesekaiIndex>(indexUrl, requestOptions)
+    if (index.format !== 1 || !Array.isArray(index.models)) {
+      throw new Error(`${indexUrl}: unsupported model index format`)
+    }
+    return { index, indexUrl }
+  }
+
+  const sites = canonicalSitesFor(configuredBase)
+  let lastError: unknown = null
+  for (const site of sites) {
+    try {
+      const { version, models, motions, indexUrl } = await fetchCanonicalListingsOnSite(
+        site,
+        region,
+        requestOptions
+      )
+      const motionSetIds = new Set(motions.keys())
+      const entries: MoesekaiIndexEntry[] = []
+      for (const [id, info] of [...models.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+        const characterId = parseCharacterIdFromModelId(id)
+        const kind: 'character' | 'sub' | 'mob' =
+          characterId !== null ? 'character' : /^(?:v2_)?sub_/.test(id) ? 'sub' : 'mob'
+        const candidateNames = live2dMotionSetCandidateNames(id)
+        const matchedSets = candidateNames.filter((name) => motionSetIds.has(name))
+        const motionBundles = matchedSets.map((name) => `live2d/motion/${name}`)
+        const canonicalMotionAssets: Record<string, string> = {}
+        for (const name of matchedSets) {
+          const mInfo = motions.get(name)
+          if (mInfo?.assetName) canonicalMotionAssets[`live2d/motion/${name}`] = mInfo.assetName
+        }
+        entries.push({
+          id,
+          bundle: `live2d/model/${id}`,
+          motion: motionBundles[0] ?? null,
+          motions: motionBundles,
+          kind,
+          characterId,
+          ...(typeof info.size === 'number' ? { bytes: info.size } : {}),
+          canonicalAsset: info.assetName,
+          ...(Object.keys(canonicalMotionAssets).length > 0 ? { canonicalMotionAssets } : {})
+        })
+      }
+      const library = version
+        ? `${site}/${region}@${encodeURIComponent(version)}/`
+        : `${site}/${region}/`
+      return {
+        index: {
+          format: 1,
+          region,
+          library,
+          ...(version ? { assetVersion: version } : {}),
+          models: entries
+        },
+        indexUrl
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError ?? 'failed to load model index'))
 }
 
 const COSTUME_ORDER = [
@@ -326,11 +636,149 @@ export function selectModels(
   return [...selected.values()]
 }
 
+async function fetchCanonicalAssetDocument(
+  sites: string[],
+  region: AssetRegion,
+  version: string | undefined,
+  bundle: string,
+  options: RequestOptions
+): Promise<{ site: string; baseUrl: string; assetName: string; doc: CanonicalAssetDocument }> {
+  const isModel = bundle.startsWith('live2d/model/')
+  const isMotion = bundle.startsWith('live2d/motion/')
+  const id = bundle.split('/')[2] ?? ''
+  let lastError: unknown = null
+
+  for (const site of sites) {
+    try {
+      const formCache = await ensureCanonicalFormCache(site, region, options)
+      const effectiveVer = version || formCache.version
+      const baseUrl = effectiveVer
+        ? `${site}/${region}@${encodeURIComponent(effectiveVer)}`
+        : `${site}/${region}`
+
+      let assetName = isModel
+        ? formCache.models.get(id)?.assetName
+        : isMotion
+          ? formCache.motions.get(id)?.assetName
+          : undefined
+
+      if (!assetName) {
+        // 回退到目录逐级查找 build*data.asset.json
+        let dirPath = bundle.replace(/\/+$/, '') + '/'
+        for (let depth = 0; depth < 8; depth++) {
+          const listing = await fetchJson<CanonicalDirectoryListing>(
+            `${baseUrl}/${dirPath}`,
+            options
+          )
+          const assetFile = (listing.files ?? []).find((f) => f.name.endsWith('.asset.json'))
+          if (assetFile) {
+            assetName = `${dirPath}${assetFile.name.slice(0, -'.asset.json'.length)}`
+            break
+          }
+          const nextDir = (listing.directories ?? [])[0]
+          if (!nextDir) break
+          dirPath += `${nextDir}/`
+        }
+      }
+
+      if (!assetName) {
+        throw new Error(`${baseUrl}/${bundle}: canonical .asset.json not found`)
+      }
+
+      const docUrl = assetUrl(baseUrl, `${assetName}.asset.json`)
+      const doc = await fetchJson<CanonicalAssetDocument>(docUrl, options)
+      if (doc.format !== 'asset' || !Array.isArray(doc.members)) {
+        throw new Error(`${docUrl}: invalid canonical asset document`)
+      }
+      return { site, baseUrl, assetName: doc.name || assetName, doc }
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError ?? `canonical asset failed: ${bundle}`))
+}
+
 export async function ripperManifest(
   libraryRoot: string,
   bundle: string,
   options: RequestOptions
 ): Promise<RipperManifest> {
+  const canonical = parseCanonicalLibraryRoot(libraryRoot)
+  if (canonical) {
+    const sites = canonicalSitesFor(canonical.site)
+    const { site, baseUrl, assetName, doc } = await fetchCanonicalAssetDocument(
+      sites,
+      canonical.region,
+      canonical.version,
+      bundle,
+      options
+    )
+    const members = doc.members ?? []
+    const files: RipperFile[] = []
+
+    if (bundle.startsWith('live2d/motion/')) {
+      for (const member of members) {
+        if (!member.role.startsWith('motion/') && !member.role.startsWith('facial/')) continue
+        files.push({
+          path: `${member.role}.sse-motion.json`,
+          kind: 'live2d-motion',
+          canonicalUrl: assetUrl(
+            baseUrl,
+            `${assetName}/${member.role}.${member.extension || 'json'}`
+          )
+        })
+      }
+      return {
+        format: 'sekai-serve-canonical',
+        version: 1,
+        bundle,
+        files,
+        canonicalBase: baseUrl,
+        canonicalAsset: assetName,
+        members
+      }
+    }
+
+    // live2d/model/<id>: 先查 storage 视图取真实 .model3.json 名（保留版本后缀以对齐已有静态路径）
+    const storageListing = await fetchJson<CanonicalDirectoryListing>(
+      `${site}/sekai-${canonical.region}-assets/${bundle}/`,
+      options
+    ).catch(() => null)
+    const model3Storage = storageListing?.files?.find((f) => f.name.endsWith('.model3.json'))
+    const modelId = bundle.split('/')[2] ?? 'model'
+    const model3Name = model3Storage?.name ?? `${modelId}.model3.json`
+    files.push({
+      path: model3Name,
+      kind: 'model3',
+      ...(model3Storage
+        ? {
+            storageUrl: assetUrl(
+              `${site}/sekai-${canonical.region}-assets/`,
+              `${bundle}/${model3Storage.name}`
+            )
+          }
+        : {})
+    })
+    for (const member of members) {
+      files.push({
+        path: `${member.role}.${member.extension}`,
+        kind: member.role,
+        canonicalUrl: assetUrl(baseUrl, `${assetName}/${member.role}.${member.extension}`)
+      })
+    }
+    return {
+      format: 'sekai-serve-canonical',
+      version: 1,
+      bundle,
+      files,
+      canonicalBase: baseUrl,
+      canonicalAsset: assetName,
+      members
+    }
+  }
+
   const url = assetUrl(libraryRoot, `${bundle}/_ripper.json`)
   const manifest = await fetchJson<RipperManifest>(url, options)
   if (!Array.isArray(manifest.files)) {
@@ -346,21 +794,31 @@ async function downloadBundle(
   options: RequestOptions & { force?: boolean; concurrency?: number }
 ): Promise<{ files: number; bytes: number }> {
   const manifest = await ripperManifest(libraryRoot, bundle, options)
+  const isCanonical = manifest.format === 'sekai-serve-canonical'
   const files = manifest.files.filter(
     (file) => typeof file.path === 'string' && file.path.length > 0
   )
   let downloaded = 0
   let bytes = 0
 
-  await mapPool(files, options.concurrency ?? DEFAULT_CONCURRENCY, async (file) => {
-    const dest = path.join(destDir, ...file.path.split('/'))
-    if (!options.force && fs.existsSync(dest)) return
-    const url = assetUrl(libraryRoot, `${bundle}/${file.path}`)
-    const data = await fetchBuffer(url, options)
-    atomicWrite(dest, data)
-    downloaded += 1
-    bytes += data.length
-  })
+  await mapPool(
+    files,
+    options.concurrency ?? (isCanonical ? 8 : DEFAULT_CONCURRENCY),
+    async (file) => {
+      const targetRel =
+        isCanonical && file.kind === 'live2d-motion'
+          ? file.path.replace(/\.sse-motion\.json$/, '.live2d-motion.json')
+          : file.path
+      const dest = path.join(destDir, ...targetRel.split('/'))
+      if (!options.force && fs.existsSync(dest)) return
+      const url =
+        file.canonicalUrl ?? file.storageUrl ?? assetUrl(libraryRoot, `${bundle}/${file.path}`)
+      const data = await fetchBuffer(url, options)
+      atomicWrite(dest, data)
+      downloaded += 1
+      bytes += data.length
+    }
+  )
 
   return { files: downloaded, bytes }
 }
@@ -375,6 +833,123 @@ function displayFor(entry: MoesekaiIndexEntry): { name: string; shortName: strin
   return character
     ? { name: character.name, shortName: character.shortName }
     : { name: entry.id, shortName: entry.id }
+}
+
+interface Model3JsonShape {
+  Version?: number
+  FileReferences?: {
+    Moc?: string
+    Textures?: string[]
+    Physics?: string
+    Motions?: Record<string, Array<{ File: string; FadeInTime: number; FadeOutTime: number }>>
+  }
+  Groups?: Array<{ Target: string; Name: string; Ids: string[] }>
+}
+
+async function downloadCanonicalModelBundle(
+  entry: MoesekaiIndexEntry,
+  manifest: RipperManifest,
+  modelsDir: string,
+  options: RequestOptions & { force?: boolean; concurrency?: number },
+  progress: (message: string) => void
+): Promise<{
+  destDir: string
+  modelJsonPath: string
+  mocBuffer: Buffer
+  bytes: number
+}> {
+  const model3File = manifest.files.find((file) => file.path.endsWith('.model3.json'))
+  if (!model3File) {
+    throw new Error(`${entry.id}: no .model3.json in ${entry.bundle}`)
+  }
+  const variant = path.basename(model3File.path, '.model3.json')
+  const destDir = path.join(modelsDir, entry.id, variant)
+  const modelJsonPath = path.join(destDir, model3File.path)
+  progress(`模型 ${entry.id} → ${path.relative(modelsDir, destDir)}`)
+
+  let bytes = 0
+  let model3: Model3JsonShape | null = null
+  if (!options.force && fs.existsSync(modelJsonPath)) {
+    try {
+      model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as Model3JsonShape
+    } catch {
+      model3 = null
+    }
+  }
+  if (!model3 && model3File.storageUrl) {
+    try {
+      const buf = await fetchBuffer(model3File.storageUrl, options)
+      bytes += buf.length
+      model3 = JSON.parse(buf.toString('utf-8')) as Model3JsonShape
+    } catch {
+      model3 = null
+    }
+  }
+
+  const members = manifest.members ?? []
+  const mocMember = members.find((m) => m.role === 'moc')
+  if (!mocMember) throw new Error(`${entry.id}: missing moc member in canonical asset`)
+  const physicsMember = members.find((m) => m.role === 'physics')
+  const textureMembers = members
+    .filter((m) => /^texture\/\d+$/.test(m.role))
+    .sort((a, b) => Number(a.role.split('/')[1]) - Number(b.role.split('/')[1]))
+
+  if (!model3) {
+    model3 = {
+      Version: 3,
+      FileReferences: {
+        Moc: `${variant}.moc3`,
+        Textures: textureMembers.map(
+          (_, idx) => `${variant}.2048/texture_${String(idx).padStart(2, '0')}.png`
+        ),
+        ...(physicsMember ? { Physics: `${variant}.physics3.json` } : {})
+      },
+      Groups: [
+        { Target: 'Parameter', Name: 'EyeBlink', Ids: [] },
+        { Target: 'Parameter', Name: 'LipSync', Ids: [] }
+      ]
+    }
+  }
+
+  const refs = model3.FileReferences ?? {}
+  const mocRel = refs.Moc || `${variant}.moc3`
+  const mocDest = path.join(destDir, ...mocRel.split('/'))
+  let mocBuffer: Buffer
+  if (!options.force && fs.existsSync(mocDest)) {
+    mocBuffer = fs.readFileSync(mocDest)
+  } else {
+    const mocFile = manifest.files.find((f) => f.kind === 'moc')
+    if (!mocFile?.canonicalUrl) throw new Error(`${entry.id}: missing moc URL`)
+    mocBuffer = await fetchBuffer(mocFile.canonicalUrl, options)
+    atomicWrite(mocDest, mocBuffer)
+    bytes += mocBuffer.length
+  }
+
+  const downloads: Array<{ url: string; dest: string }> = []
+  if (physicsMember) {
+    const phyRel = refs.Physics || `${variant}.physics3.json`
+    const phyFile = manifest.files.find((f) => f.kind === 'physics')
+    if (phyFile?.canonicalUrl) {
+      downloads.push({ url: phyFile.canonicalUrl, dest: path.join(destDir, ...phyRel.split('/')) })
+    }
+  }
+  for (let i = 0; i < textureMembers.length; i++) {
+    const texRel = refs.Textures?.[i] ?? `${variant}.2048/texture_${String(i).padStart(2, '0')}.png`
+    const texFile = manifest.files.find((f) => f.kind === textureMembers[i].role)
+    if (texFile?.canonicalUrl) {
+      downloads.push({ url: texFile.canonicalUrl, dest: path.join(destDir, ...texRel.split('/')) })
+    }
+  }
+
+  await mapPool(downloads, options.concurrency ?? DEFAULT_CONCURRENCY, async (item) => {
+    if (!options.force && fs.existsSync(item.dest)) return
+    const buf = await fetchBuffer(item.url, options)
+    atomicWrite(item.dest, buf)
+    bytes += buf.length
+  })
+
+  atomicWrite(modelJsonPath, JSON.stringify(model3, null, 2))
+  return { destDir, modelJsonPath, mocBuffer, bytes }
 }
 
 /**
@@ -394,15 +969,38 @@ export async function downloadModel(
   progress: (message: string) => void
 ): Promise<FetchedModel> {
   const bundleManifest = await ripperManifest(libraryRoot, entry.bundle, options)
-  const model3File = bundleManifest.files.find((file) => file.path.endsWith('.model3.json'))
-  if (!model3File) {
-    throw new Error(`${entry.id}: no .model3.json in ${entry.bundle}`)
-  }
-  const variant = path.basename(model3File.path, '.model3.json')
-  const destDir = path.join(modelsDir, entry.id, variant)
+  const isCanonical = bundleManifest.format === 'sekai-serve-canonical'
 
-  progress(`模型 ${entry.id} → ${path.relative(modelsDir, destDir)}`)
-  const downloaded = await downloadBundle(libraryRoot, entry.bundle, destDir, options)
+  let destDir: string
+  let modelJsonPath: string
+  let downloadedBytes = 0
+  let mocResolver: Moc3BindingResolver | undefined
+
+  if (isCanonical) {
+    const res = await downloadCanonicalModelBundle(
+      entry,
+      bundleManifest,
+      modelsDir,
+      options,
+      progress
+    )
+    destDir = res.destDir
+    modelJsonPath = res.modelJsonPath
+    downloadedBytes = res.bytes
+    mocResolver = buildMoc3BindingResolver(res.mocBuffer)
+  } else {
+    const model3File = bundleManifest.files.find((file) => file.path.endsWith('.model3.json'))
+    if (!model3File) {
+      throw new Error(`${entry.id}: no .model3.json in ${entry.bundle}`)
+    }
+    const variant = path.basename(model3File.path, '.model3.json')
+    destDir = path.join(modelsDir, entry.id, variant)
+    modelJsonPath = path.join(destDir, ...model3File.path.split('/'))
+
+    progress(`模型 ${entry.id} → ${path.relative(modelsDir, destDir)}`)
+    const downloaded = await downloadBundle(libraryRoot, entry.bundle, destDir, options)
+    downloadedBytes = downloaded.bytes
+  }
 
   const motionBundles = (
     entry.motions?.length ? entry.motions : entry.motion ? [entry.motion] : []
@@ -430,7 +1028,12 @@ export async function downloadModel(
     for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, item.name)
       if (item.isDirectory()) result.push(...walk(full))
-      else if (item.name.endsWith('.sse-motion.json')) result.push(full)
+      else if (
+        item.name.endsWith('.sse-motion.json') ||
+        item.name.endsWith('.live2d-motion.json')
+      ) {
+        result.push(full)
+      }
     }
     return result
   }
@@ -444,9 +1047,10 @@ export async function downloadModel(
         progress(`跳过无法解析的动作 ${path.relative(motionDir, file)}: ${String(error)}`)
         continue
       }
+      const fallbackName = path.basename(file).replace(/\.(?:sse-motion|live2d-motion)\.json$/, '')
       let converted
       try {
-        converted = convertSseMotion(raw)
+        converted = convertAnyMotion(raw, mocResolver, fallbackName)
       } catch (error) {
         progress(`跳过无法转换的动作 ${path.relative(motionDir, file)}: ${String(error)}`)
         continue
@@ -465,12 +1069,7 @@ export async function downloadModel(
     }
   }
 
-  const modelJsonPath = path.join(destDir, ...model3File.path.split('/'))
-  const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
-    FileReferences?: {
-      Motions?: Record<string, Array<{ File: string; FadeInTime: number; FadeOutTime: number }>>
-    }
-  }
+  const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as Model3JsonShape
   if (!model3.FileReferences) model3.FileReferences = {}
   const motions: Record<
     string,
@@ -502,7 +1101,7 @@ export async function downloadModel(
     path: path.relative(modelsDir, modelJsonPath).split(path.sep).join('/'),
     motions: names.length - facials,
     facials,
-    bytes: downloaded.bytes
+    bytes: downloadedBytes
   }
 }
 
