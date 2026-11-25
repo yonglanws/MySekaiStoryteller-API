@@ -59,6 +59,10 @@ export interface OfficialLintMetrics {
   unclosedEffects: string[]
   invalidCatalogAnimations: string[]
   inPlaceAppearShare: number
+  inPlaceClearShare: number
+  slideEntryExitCount: number
+  staggeredListenerActionCount: number
+  staggeredListenerMotionCount: number
   stageViolationCount: number
   duplicateBgmCount: number
 }
@@ -183,6 +187,11 @@ export function lintOfficialStory(
   let slow100SlideCount = 0
   let appearCount = 0
   let inPlaceAppearCount = 0
+  let clearCount = 0
+  let inPlaceClearCount = 0
+  let slideEntryExitCount = 0
+  let staggeredListenerActionCount = 0
+  let staggeredListenerMotionCount = 0
   let appearMotionClashCount = 0
   let missingWindowCloseBeforeTransitionCount = 0
   let stageViolationCount = 0
@@ -255,11 +264,12 @@ export function lintOfficialStory(
       appearCount += 1
       const from = isRecord(data.from) ? data.from : {}
       const to = isRecord(data.to) ? data.to : {}
-      if (
-        str(from.side, 'Center') === str(to.side, 'Center') &&
-        num(from.offset, 0) === num(to.offset, 0)
-      ) {
+      const fromSide = str(from.side, 'Center')
+      const toSide = str(to.side, 'Center')
+      if (fromSide === toSide && num(from.offset, 0) === num(to.offset, 0)) {
         inPlaceAppearCount += 1
+      } else if (fromSide !== toSide) {
+        slideEntryExitCount += 1
       }
       const modelId = num(data.modelId, -1)
       const side = str(to.side, 'Left')
@@ -281,6 +291,16 @@ export function lintOfficialStory(
         })
       }
     } else if (kind === 'LayoutClear') {
+      clearCount += 1
+      const from = isRecord(data.from) ? data.from : {}
+      const to = isRecord(data.to) ? data.to : {}
+      const fromSide = str(from.side, 'Center')
+      const toSide = str(to.side, 'Center')
+      if (fromSide === toSide && num(from.offset, 0) === num(to.offset, 0)) {
+        inPlaceClearCount += 1
+      } else if (fromSide !== toSide) {
+        slideEntryExitCount += 1
+      }
       const modelId = num(data.modelId, -1)
       visible.delete(modelId)
       lastAppearMotion.delete(modelId)
@@ -318,8 +338,16 @@ export function lintOfficialStory(
         for (const action of data.actions) {
           if (!isRecord(action)) continue
           const aid = num(action.modelId, speakerId)
-          if (str(action.motion).trim()) {
-            checkActionTime(aid, str(action.motion).trim(), num(action.at, 0))
+          const atFrac = num(action.at, 0)
+          const hasMotion = Boolean(str(action.motion).trim())
+          if (hasMotion) {
+            checkActionTime(aid, str(action.motion).trim(), atFrac)
+          }
+          if (aid !== speakerId && atFrac > 0.01) {
+            staggeredListenerActionCount += 1
+            if (hasMotion) {
+              staggeredListenerMotionCount += 1
+            }
           }
         }
       }
@@ -432,6 +460,18 @@ export function lintOfficialStory(
     issues.push(`存在未收录的动作/表情：${invalidCatalogAnimations.slice(0, 5).join(', ')}`)
   }
   if (stageViolationCount > 0) issues.push(`舞台槽位/人数违规 ${stageViolationCount} 处`)
+  const inPlaceAppearShare = appearCount > 0 ? inPlaceAppearCount / appearCount : 1
+  const inPlaceClearShare = clearCount > 0 ? inPlaceClearCount / clearCount : 1
+  if (slideEntryExitCount >= 2 && (inPlaceAppearShare < 0.6 || inPlaceClearShare < 0.6)) {
+    warnings.push(
+      `存在 ${slideEntryExitCount} 处画外滑入/滑出（原地淡入占比 ${(inPlaceAppearShare * 100).toFixed(0)}%，原地淡出占比 ${(inPlaceClearShare * 100).toFixed(0)}%），官方 PJSK 默认使用槽位原地淡入淡出（from.side === to.side）`
+    )
+  }
+  if (staggeredListenerMotionCount > 0) {
+    warnings.push(
+      `存在 ${staggeredListenerMotionCount} 处句中错峰听者身体动作（at > 0），官方 PJSK 台词动作全在句首 at=0，听者建议用句首纯 facial 或独立 Motion 节拍`
+    )
+  }
   if (talkCount >= 15 && seCount === 0) {
     warnings.push(
       '长段剧情全程未配置任何 Sound/PlaySe 音效，建议在脚步/开门/提示音等物理节拍处适量点缀'
@@ -450,8 +490,11 @@ export function lintOfficialStory(
       missingWindowCloseBeforeTransitionCount,
       unclosedEffects,
       invalidCatalogAnimations,
-      inPlaceAppearShare:
-        appearCount > 0 ? Number((inPlaceAppearCount / appearCount).toFixed(3)) : 1,
+      inPlaceAppearShare: Number(inPlaceAppearShare.toFixed(3)),
+      inPlaceClearShare: Number(inPlaceClearShare.toFixed(3)),
+      slideEntryExitCount,
+      staggeredListenerActionCount,
+      staggeredListenerMotionCount,
       stageViolationCount,
       duplicateBgmCount
     }
@@ -802,6 +845,8 @@ export interface ActingFidelityReport {
   simultaneousCollisionCount: number
   stageDirectionLeakCount: number
   listenerFrozenCount: number
+  staggeredMidlineMotionCount: number
+  excessiveSlidingCount: number
   duplicateBgmCount: number
   zeroWidthCharCount: number
   officialReport: OfficialLintReport
@@ -913,6 +958,8 @@ export function auditStoryActingAndFidelity(
   let simultaneousCollisionCount = 0
   let stageDirectionLeakCount = 0
   let listenerFrozenCount = 0
+  let staggeredMidlineMotionCount = 0
+  let excessiveSlidingCount = 0
   let duplicateBgmCount = 0
   let zeroWidthCharCount = 0
 
@@ -1226,6 +1273,27 @@ export function auditStoryActingAndFidelity(
     for (const act of actions) {
       if (act.modelId === -1) continue
       const isListener = act.modelId !== speakerId
+      if (isListener && act.at > 0.01 && act.motion) {
+        staggeredMidlineMotionCount += 1
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkCount,
+          modelId: act.modelId,
+          listenerModelId: act.modelId,
+          speaker: `${modelMeta.get(act.modelId)?.name ?? act.modelId}(听者)`,
+          content,
+          emotion,
+          facial: act.facial,
+          motion: act.motion,
+          inferredMood: 'attentive_listen',
+          field: 'staging',
+          code: 'staggered_midline_motion',
+          severity: 'high',
+          message: `第 ${talkCount} 句在句中 at=${act.at} 触发听者身体动作 ${act.motion}，易造成突兀错峰弹窗；官方 PJSK 听者反应请改为句首 at=0 纯切 facial 或独立 Motion 节拍`,
+          recommendedFacials: [],
+          recommendedMotions: []
+        })
+      }
       if (act.motion) {
         bodyMotionCounts.set(act.modelId, (bodyMotionCounts.get(act.modelId) ?? 0) + 1)
       }
@@ -1297,6 +1365,8 @@ export function auditStoryActingAndFidelity(
     }
 
     // 审计在场听者是否长时间僵立不动（listener_frozen）
+    // 官方 PJSK 节奏下说话者连续 2~3 句是常态，且纯内心独白（……）听者听不见，不计入听者僵直
+    const isInnerMonologue = /^[（(][^（）()]+[）)]$/.test(content.trim())
     const updatedModelIds = new Set<number>()
     for (const act of actions) {
       if (act.modelId !== -1 && (act.facial || act.motion)) {
@@ -1312,6 +1382,7 @@ export function auditStoryActingAndFidelity(
         resetListenerState(listenerId)
         continue
       }
+      if (isInnerMonologue) continue
       const st = listenerState.get(listenerId) ?? {
         silentLinesSinceUpdate: 0,
         consecutiveOtherSpeakerLines: 0,
@@ -1328,7 +1399,7 @@ export function auditStoryActingAndFidelity(
       }
       listenerState.set(listenerId, st)
 
-      if (st.consecutiveOtherSpeakerLines >= 2 || st.silentLinesSinceUpdate >= 3) {
+      if (st.consecutiveOtherSpeakerLines >= 4 || st.silentLinesSinceUpdate >= 5) {
         listenerFrozenCount += 1
         const lMeta = modelMeta.get(listenerId)
         const lTracker = getTracker(listenerId)
@@ -1360,8 +1431,8 @@ export function auditStoryActingAndFidelity(
           inferredMood: lRec.mood,
           field: 'staging',
           code: 'listener_frozen',
-          severity: 'high',
-          message: `在场听者 ${lMeta?.name ?? listenerId} 已连续 ${frozenSpan} 句无任何表情/动作反应，请补充听者反应（可仅切 facial，或将听者身体动作错拍放在 at: 0.5..0.85，避免与说话者 at: 0 撞拍）`,
+          severity: frozenSpan >= 6 ? 'high' : 'medium',
+          message: `在场听者 ${lMeta?.name ?? listenerId} 已连续 ${frozenSpan} 句无表情变化，建议在合适台词句首（at: 0）补充纯 facial 表情微调，或在重大情绪转折处插入独立 Motion 节拍（避免句中错峰弹身体动作）`,
           recommendedFacials: lRec.facials,
           recommendedMotions: lRec.motions
         })
@@ -1409,6 +1480,51 @@ export function auditStoryActingAndFidelity(
     }
   }
 
+  if (officialReport.metrics.staggeredListenerActionCount >= 4) {
+    diagnostics.push({
+      snippetIndex: 0,
+      lineNumber: 0,
+      modelId: -1,
+      speaker: '',
+      content: '',
+      emotion: '',
+      facial: '',
+      motion: '',
+      inferredMood: 'neutral',
+      field: 'staging',
+      code: 'excessive_staggered_listener',
+      severity: 'high',
+      message: `全片存在 ${officialReport.metrics.staggeredListenerActionCount} 处句中错峰听者动作（at > 0），错峰过于密集；请对齐官方 PJSK 节奏，听者反应改为句首 at=0 纯切 facial 或少量独立 Motion 节拍`,
+      recommendedFacials: [],
+      recommendedMotions: []
+    })
+  }
+
+  if (
+    officialReport.metrics.slideEntryExitCount >= 2 &&
+    (officialReport.metrics.inPlaceAppearShare < 0.6 ||
+      officialReport.metrics.inPlaceClearShare < 0.6)
+  ) {
+    excessiveSlidingCount = officialReport.metrics.slideEntryExitCount
+    diagnostics.push({
+      snippetIndex: 0,
+      lineNumber: 0,
+      modelId: -1,
+      speaker: '',
+      content: '',
+      emotion: '',
+      facial: '',
+      motion: '',
+      inferredMood: 'neutral',
+      field: 'staging',
+      code: 'excessive_slide_entry_exit',
+      severity: 'medium',
+      message: `存在 ${excessiveSlidingCount} 处画外滑入/滑出，过于依赖移动进出场；官方 PJSK（如 event_145_08）默认采用槽位原地淡入淡出（from.side === to.side, offset: 0）`,
+      recommendedFacials: [],
+      recommendedMotions: []
+    })
+  }
+
   let penalty = officialReport.issues.length * 10
   for (const d of diagnostics) {
     penalty += d.severity === 'high' ? 12 : 5
@@ -1428,6 +1544,8 @@ export function auditStoryActingAndFidelity(
     simultaneousCollisionCount,
     stageDirectionLeakCount,
     listenerFrozenCount,
+    staggeredMidlineMotionCount,
+    excessiveSlidingCount,
     duplicateBgmCount,
     zeroWidthCharCount,
     officialReport

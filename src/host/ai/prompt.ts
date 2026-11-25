@@ -1389,9 +1389,9 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - ChangeLayoutMode.data.mode：固定为 "Normal"（Left / Right 双人或单人 Center）；严禁 3 人及以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
 - **双人主同框与单人思考留白原则**：当整场只有 2 名角色时，日常对话保持两人在场（Left/Right），不要无故每句切人；但遇到角色内心独白、独自思考或特写反应时，允许用 LayoutClear + LayoutAppear(Center)（或 Move 到 Center）切出自然单人画面，思索结束后再切回 Left/Right 同框。当整场 >=3 名角色时，保持每次最多 2 人在场，按场景或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
-- **入场/退场动画规则**：
-  - 入场默认槽位原地淡入：LayoutAppear 的 from 写目标槽位（from == to, offset=0），moveSpeed="Normal"；只有明确“走入”镜头才用 LeftOver/RightOver 作画外起点（offset=0）。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
-  - 仅在明确“走入/走离”镜头时，才用 LeftOver/RightOver 作为物理起点/终点（可配脚步 SE），禁止写 ±100px 偏移滑行。
+- **入场/退场动画规则（官方渐变进出默认）**：
+  - 官方 PJSK（如 event_145_08 全片 41/41 入场、42/42 退场）默认采用**槽位原地淡入淡出**：LayoutAppear / LayoutClear 的 from 与 to 写同一目标槽位（\`from.side === to.side\`, \`offset: 0\`），\`moveSpeed: "Normal"\`；即使奔跑/追逐场景也优先原地淡入淡出配脚步 SE。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
+  - 仅在镜头明确强调角色物理冲入/跑离画框时，才偶尔使用 LeftOver/RightOver 画外起点/终点（可配脚步 SE），严禁把滑入滑出当默认，也禁止 ±100px 偏移滑行或无故 \`LayoutClear -> Move Center -> Move Left -> LayoutAppear\` 反复挪位。
   - LayoutAppear 若已带入场动作（禁止 default 站姿），紧接着 0.4s 内的该角色首句 Talk 不要再重复触发 body motion（可只改 facial）。
   - LayoutClear 默认原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
 - 可用 Move 做小幅跨步/移近（offset ±80~150 或单人移至 Center），用 CharacterShake（X/Y）演受惊，用 AttachCharacterShader（hologram）演虚拟歌手投影/通话。
@@ -1406,9 +1406,9 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 
 ## 对话与表演规范
 
-- **每句台词最多 1 个身体动作**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。常规句动作在 at=0 触发；禁止同句里让说话者和听者在同一瞬间一起做身体动作。
-- **双人动作轮替与听者微妙反应（防听者站桩卡死）**：哪怕只有两三个字的短反应（如「……嗯？」「啊。」）也应保持 facial 表情贴合语境；只把约 20%~25% 的承接句或刚入场首句设为无动作。**当角色 A 连续说 >=2 句或说出情绪转折句时，务必给在场听者 B 安排微妙的反应**（纯切 facial 或把听者身体动作错拍放在 \`at: 0.5..0.85\`，绝不与说话者 \`at: 0\` 同瞬撞拍），避免 B 站桩 30 秒一动不动。
-- **动作与表情双重对位剧情**：仔细核对动作与表情括号语义（区分点头/歪头/前倾/叹气/害羞/思索与真笑/苦笑/闭眼微笑/阴沉冷脸），禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug 动作或真笑表情；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`Move\` / \`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，且禁止连续多句卡死在同一表情或 default 站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
+- **每句台词最多 1 个身体动作（官方句首 at=0 节奏）**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。官方 PJSK 100% 的台词动作均在句首 \`at: 0\` 触发；禁止同句里让说话者和听者同时做身体动作，也**禁止在句中 \`at: 0.5..0.85\` 塞入听者错峰身体动作**。
+- **自然动作频率与听者回应**：约 75%~85% 的台词在句首配 1 个贴合情绪的身体动作，其余 15%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 保持姿态，不要为了防重复而每句硬切无关动作；当角色 A 连续说多句（>=4 句）或情绪大转折时，给在场听者 B 在句首 \`at: 0\` 补纯 \`facial\` 表情微调，或在两句之间插入独立 \`Motion\` 节拍（内心独白句听者听不见，不给听者加反应）。
+- **动作与表情双重对位剧情**：同一角色优先使用 \`w-normal-*\` 保持动作风格统一，避免在 \`w-normal-*\` 与 \`w-cool-*\`/\`w-happy-*\` 间突兀跳切；仔细核对动作与表情括号语义，禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug/greeting/relief/tilthead 动作或真笑表情；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`Move\` / \`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，且禁止连续多句卡死在同一表情或 default 站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
 - **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
 - **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。

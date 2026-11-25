@@ -699,8 +699,32 @@ test('auditStoryActingAndFidelity catches listener_frozen, Move/LayoutAppear moo
           ttsText: '😭息が詰まりそうになるんだよ……！',
           emotion: '伤心',
           modelId: 1,
-          closeWindowOnFinish: true,
           actions: [{ at: 0, modelId: 1, motion: 'w-normal-trouble01', facial: 'face_trouble_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '每次被那样小心翼翼地对待，我就什么都说不出来了。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-sigh01', facial: 'face_sad_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……真的对不起。',
+          emotion: '伤心',
+          modelId: 1,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 1, facial: 'face_closeeye_01' }]
         }
       },
       {
@@ -725,28 +749,40 @@ test('auditStoryActingAndFidelity catches listener_frozen, Move/LayoutAppear moo
   const frozen = report.diagnostics.find((d) => d.code === 'listener_frozen')
   assert.ok(frozen)
   assert.equal(frozen.listenerModelId, 2)
-  assert.equal(frozen.snippetIndex, 6)
-  assert.match(frozen.message, /0\.5\.\.0\.85/)
+  assert.equal(frozen.snippetIndex, 8)
+  assert.match(frozen.message, /at:\s*0/)
+  assert.ok(!frozen.message.includes('0.5..0.85'))
   assert.ok(frozen.recommendedFacials.length > 0)
   assert.ok(frozen.recommendedMotions.length > 0)
 
   assert.equal(report.duplicateBgmCount, 1)
   assert.equal(report.officialReport.metrics.duplicateBgmCount, 1)
   assert.equal(report.zeroWidthCharCount, 1)
-  // LayoutAppear (idx 2) and Move (idx 7) both had face_surprise_01 in sad context
+  // LayoutAppear (idx 2) and Move (idx 9) both had face_surprise_01 in sad context
   assert.ok(report.diagnostics.some((d) => d.snippetIndex === 2 && d.field === 'facial'))
-  assert.ok(report.diagnostics.some((d) => d.snippetIndex === 7 && d.field === 'facial'))
+  assert.ok(report.diagnostics.some((d) => d.snippetIndex === 9 && d.field === 'facial'))
 
-  // Adding a staggered listener reaction clears listener_frozen without collision
-  story.snippets[6].data.actions.push({
+  // Adding a mid-line staggered body motion (at: 0.65) is flagged as staggered_midline_motion
+  story.snippets[8].data.actions.push({
     at: 0.65,
     modelId: 2,
     motion: 'w-normal-sad01',
     facial: 'face_darksad_01'
   })
   const afterStagger = auditStoryActingAndFidelity(story, view)
-  assert.equal(afterStagger.listenerFrozenCount, 0)
-  assert.equal(afterStagger.simultaneousCollisionCount, 0)
+  assert.equal(afterStagger.staggeredMidlineMotionCount, 1)
+  assert.ok(afterStagger.diagnostics.some((d) => d.code === 'staggered_midline_motion'))
+
+  // Replacing with official PJSK at: 0 facial-only listener reaction clears both without collision
+  story.snippets[8].data.actions[story.snippets[8].data.actions.length - 1] = {
+    at: 0,
+    modelId: 2,
+    facial: 'face_darksad_01'
+  }
+  const afterOfficialFacial = auditStoryActingAndFidelity(story, view)
+  assert.equal(afterOfficialFacial.listenerFrozenCount, 0)
+  assert.equal(afterOfficialFacial.staggeredMidlineMotionCount, 0)
+  assert.equal(afterOfficialFacial.simultaneousCollisionCount, 0)
 
   // enforceOfficialStoryInvariants removes duplicate ChangeBgm & strips \u200b while keeping Irodori emojis
   const warnings = []
@@ -781,10 +817,10 @@ test(
     assert.equal(facialByIdx.get(55)?.code, 'surprise_on_sad_or_monologue')
     assert.equal(facialByIdx.get(63)?.code, 'angry_on_sad_or_regret')
 
-    // 2. Listener frozen across consecutive speaker stretches
+    // 2. Listener frozen across long consecutive speaker stretches (>=4 spoken lines)
     assert.ok(
-      report.listenerFrozenCount >= 10,
-      `expected >=10 listener_frozen, got ${report.listenerFrozenCount}`
+      report.listenerFrozenCount >= 1,
+      `expected >=1 listener_frozen, got ${report.listenerFrozenCount}`
     )
 
     // 3. Duplicate consecutive ChangeBgm (snippet 24) & missing SE warning
@@ -804,6 +840,143 @@ test(
       report.diagnostics.some((d) => d.code.includes('emoji')),
       false,
       'must not flag Irodori emojis in ttsText'
+    )
+  }
+)
+
+test('official PJSK parity: listener mood inference, strict motion compatibility, style consistency, and relaxed motion hold', () => {
+  // Listener mood: monologue -> attentive_listen, speaker sad -> sad_regret (NOT gentle_reassure), speaker surprise -> attentive_listen
+  assert.equal(
+    inferDramaticContext({
+      content: '（……刚才那一瞬间，我明明也僵在原地了。）',
+      emotion: '伤心',
+      isListener: true
+    }).mood,
+    'attentive_listen'
+  )
+  assert.equal(
+    inferDramaticContext({
+      content: '我真的不是你想的那样……',
+      emotion: '伤心',
+      isListener: true
+    }).mood,
+    'sad_regret'
+  )
+  assert.equal(
+    inferDramaticContext({
+      content: '为什么不行……？',
+      emotion: '惊讶',
+      prevEmotion: '伤心',
+      isListener: true
+    }).mood,
+    'sad_regret'
+  )
+
+  // Sad/despair lines reject tilthead, greeting, relief, surprise, angry motions
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-tilthead01',
+      emotion: '伤心',
+      content: '……不行啊，绘名。',
+      isListener: true
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-greeting01',
+      emotion: '伤心',
+      content: '对不起，我还是没能说出口。'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-surprise01',
+      emotion: '伤心',
+      content: '我就觉得快要窒息了。'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-angry01',
+      emotion: '伤心',
+      content: '为什么我什么都没能说出口啊……'
+    }).ok,
+    false
+  )
+
+  // Style consistency: w-normal-* preferred over w-cool-*
+  const picked = pickMoodMatchedMotion(
+    ['w-cool-posesad01', 'w-normal-sad01', 'w-normal-sigh01'],
+    'sad_regret'
+  )
+  assert.equal(picked, 'w-normal-sad01')
+
+  // Consecutive same motion is allowed up to 3 lines, flagged at >=4
+  const holdOk = evaluateActingLineMatch({
+    motion: 'w-normal-sad01',
+    facial: 'face_sad_01',
+    facials: ['face_sad_01', 'face_trouble_01'],
+    motions: ['w-normal-sad01', 'w-normal-sigh01'],
+    content: '……因为大家，都太温柔了。',
+    emotion: '伤心',
+    consecutiveSameMotionCount: 2
+  })
+  assert.equal(
+    holdOk.issues.some((i) => i.code === 'consecutive_same_motion'),
+    false
+  )
+  const holdFlag = evaluateActingLineMatch({
+    motion: 'w-normal-sad01',
+    facial: 'face_sad_01',
+    facials: ['face_sad_01', 'face_trouble_01'],
+    motions: ['w-normal-sad01', 'w-normal-sigh01'],
+    content: '……因为大家，都太温柔了。',
+    emotion: '伤心',
+    consecutiveSameMotionCount: 4
+  })
+  assert.equal(
+    holdFlag.issues.some((i) => i.code === 'consecutive_same_motion'),
+    true
+  )
+})
+
+const EVENT_145_08_PATH =
+  'D:/Users/桌面/mzkbot/MySekaiStoryteller/resources/stories/event_145_08.sekai-story.json'
+const XWW9BI_PATH =
+  'D:/Users/桌面/mzkbot/MySekaiStoryteller/apifile/script-1795634483120-xww9bi.json'
+test(
+  'regression: event_145_08 matches official in-place fade & at=0 baseline while xww9bi.json bugs are caught',
+  {
+    skip:
+      (!fs.existsSync(EVENT_145_08_PATH) || !fs.existsSync(XWW9BI_PATH)) &&
+      'event_145_08 or xww9bi fixture not present'
+  },
+  () => {
+    const official = JSON.parse(fs.readFileSync(EVENT_145_08_PATH, 'utf8'))
+    const officialLint = lintOfficialStory(official)
+    assert.equal(officialLint.metrics.inPlaceAppearShare, 1)
+    assert.equal(officialLint.metrics.inPlaceClearShare, 1)
+    assert.equal(officialLint.metrics.slideEntryExitCount, 0)
+    assert.equal(officialLint.metrics.staggeredListenerActionCount, 0)
+    assert.equal(officialLint.metrics.staggeredListenerMotionCount, 0)
+
+    const xww9bi = JSON.parse(fs.readFileSync(XWW9BI_PATH, 'utf8'))
+    const xwwReport = auditStoryActingAndFidelity(xww9bi)
+    assert.equal(xwwReport.passed, false)
+    assert.equal(xwwReport.staggeredMidlineMotionCount, 8)
+    assert.equal(xwwReport.officialReport.metrics.staggeredListenerActionCount, 37)
+    assert.equal(xwwReport.officialReport.metrics.slideEntryExitCount, 2)
+    assert.ok(xwwReport.diagnostics.some((d) => d.code === 'excessive_staggered_listener'))
+    assert.ok(xwwReport.diagnostics.some((d) => d.code === 'staggered_midline_motion'))
+    assert.ok(xwwReport.diagnostics.some((d) => d.code === 'excessive_slide_entry_exit'))
+    assert.ok(
+      xwwReport.diagnostics.some(
+        (d) => d.snippetIndex === 29 && d.code === 'tilthead_motion_on_sad_line'
+      ),
+      'must catch Mizuki tilthead clash on snippet #29'
     )
   }
 )
