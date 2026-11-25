@@ -1449,67 +1449,122 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     return null
   }
 
+  const buildRawAuditStory = (
+    candidate: Record<string, unknown>,
+    fallbackModels: StoryData['models'] = [],
+    fallbackImages: StoryData['images'] = []
+  ): StoryData => {
+    const rawSnippets = Array.isArray(candidate.snippets) ? candidate.snippets : []
+    const clonedSnippets = rawSnippets.map((s) =>
+      s && typeof s === 'object' ? structuredClone(s) : { type: 'Unknown', data: {} }
+    )
+    const rawModels = Array.isArray(candidate.models)
+      ? (structuredClone(candidate.models) as StoryData['models'])
+      : fallbackModels
+    const rawImages = Array.isArray(candidate.images)
+      ? (structuredClone(candidate.images) as StoryData['images'])
+      : fallbackImages
+    return {
+      models: rawModels,
+      images: rawImages,
+      snippets: clonedSnippets as unknown as StoryData['snippets']
+    }
+  }
+
+  const auditDraftCandidate = (
+    candidate: Record<string, unknown>
+  ): {
+    story: StoryData
+    warnings: string[]
+    actingReport: ActingFidelityReport
+    postOfficialReport: ReturnType<typeof officialLinterMod.lintOfficialStory>
+    dialogueLint: ReturnType<typeof lintDialogueFidelity>
+    bodyMotions: Record<string, number>
+    stageLeaks: number[]
+    officialPassed: boolean
+    readyToFinalize: boolean
+  } => {
+    const { story, warnings } = validateAndFixStory(candidate, view, logger, {
+      emotionLabels
+    })
+    // 审计 raw candidate.snippets，保留与 savedDraft 一致的 snippetIndex，避免 ensureOpeningAndEnding
+    // 位移索引或 repairActingMismatches 掩盖尚未修复的表情/动作冲突。
+    const rawAuditStory = buildRawAuditStory(candidate, story.models, story.images)
+    const actingReport = runActingAndFidelityAudit(rawAuditStory, view)
+    const postOfficialReport = officialLinterMod.lintOfficialStory(story, view)
+    const dialogueLines = extractDialogueLinesFromStory(
+      rawAuditStory as unknown as Record<string, unknown>
+    )
+    const dialogueLint = lintDialogueFidelity(
+      {
+        title: savedPlan?.title ?? '',
+        lines: dialogueLines.map((l) => ({ id: l.id, speaker: l.speaker, content: l.content }))
+      },
+      {
+        ...(savedPlan?.pairwiseAddress ? { pairwiseAddress: savedPlan.pairwiseAddress } : {}),
+        cast: view.primaryModels().map((m) => ({
+          modelId: m.id,
+          name: view.shortName(m),
+          fullName: m.name,
+          path: m.path,
+          role: ''
+        }))
+      }
+    )
+    const bodyMotions = countBodyMotionsByModel(rawAuditStory)
+    const stageLeaks = rawAuditStory.snippets
+      .map((s, idx) => ({ idx, s }))
+      .filter(
+        ({ s }) =>
+          s.type === 'Talk' &&
+          'data' in s &&
+          hasSpokenStageDirectionLeak(String((s.data as Record<string, unknown>)?.content ?? ''))
+      )
+      .map(({ idx }) => idx)
+    const officialPassed =
+      postOfficialReport.passed &&
+      (actingReport.talkCount < 6 || actingReport.zeroMotionModelIds.length === 0) &&
+      stageLeaks.length === 0
+    return {
+      story,
+      warnings,
+      actingReport,
+      postOfficialReport,
+      dialogueLint,
+      bodyMotions,
+      stageLeaks,
+      officialPassed,
+      readyToFinalize:
+        officialPassed &&
+        actingReport.passed &&
+        !dialogueLint.issues.some((i) => i.severity === 'high')
+    }
+  }
+
   const runCompactAudit = (candidate: Record<string, unknown>): Record<string, unknown> => {
     try {
-      const { story, warnings } = validateAndFixStory(candidate, view, logger, {
-        emotionLabels
-      })
-      const actingReport = runActingAndFidelityAudit(story, view)
-      const dialogueLines = extractDialogueLinesFromStory(
-        story as unknown as Record<string, unknown>
-      )
-      const dialogueLint = lintDialogueFidelity(
-        {
-          title: savedPlan?.title ?? '',
-          lines: dialogueLines.map((l) => ({ id: l.id, speaker: l.speaker, content: l.content }))
-        },
-        {
-          ...(savedPlan?.pairwiseAddress ? { pairwiseAddress: savedPlan.pairwiseAddress } : {}),
-          cast: view.primaryModels().map((m) => ({
-            modelId: m.id,
-            name: view.shortName(m),
-            fullName: m.name,
-            path: m.path,
-            role: ''
-          }))
-        }
-      )
-      const bodyMotions = countBodyMotionsByModel(story)
-      const stageLeaks = story.snippets
-        .map((s, idx) => ({ idx, s }))
-        .filter(
-          ({ s }) =>
-            s.type === 'Talk' &&
-            'data' in s &&
-            hasSpokenStageDirectionLeak(String((s.data as Record<string, unknown>)?.content ?? ''))
-        )
-        .map(({ idx }) => idx)
-
+      const audited = auditDraftCandidate(candidate)
       return {
         schemaValid: true,
-        officialPassed:
-          actingReport.officialReport.passed &&
-          (actingReport.talkCount < 6 || actingReport.zeroMotionModelIds.length === 0) &&
-          stageLeaks.length === 0,
-        actingPassed: actingReport.passed,
-        actingScore: actingReport.score,
-        readyToFinalize:
-          actingReport.officialReport.passed && actingReport.passed && stageLeaks.length === 0,
-        warnings: warnings.slice(0, 12),
-        officialIssues: actingReport.officialReport.issues,
-        zeroMotionModelIds: actingReport.zeroMotionModelIds,
-        stageDirectionLeakSnippetIndices: stageLeaks,
-        dialogueIssues: dialogueLint.issues.slice(0, 10),
-        actingDiagnostics: actingReport.diagnostics.slice(0, 12),
+        officialPassed: audited.officialPassed,
+        actingPassed: audited.actingReport.passed,
+        actingScore: audited.actingReport.score,
+        readyToFinalize: audited.readyToFinalize,
+        warnings: audited.warnings.slice(0, 12),
+        officialIssues: audited.postOfficialReport.issues,
+        zeroMotionModelIds: audited.actingReport.zeroMotionModelIds,
+        stageDirectionLeakSnippetIndices: audited.stageLeaks,
+        dialogueIssues: audited.dialogueLint.issues.slice(0, 10),
+        actingDiagnostics: audited.actingReport.diagnostics.slice(0, 12),
         metrics: {
-          talkCount: actingReport.officialReport.metrics.talkCount,
-          talkZeroDelayShare: actingReport.officialReport.metrics.talkZeroDelayShare,
-          appearMotionClashCount: actingReport.officialReport.metrics.appearMotionClashCount,
-          inPlaceAppearShare: actingReport.officialReport.metrics.inPlaceAppearShare,
-          bodyMotionsByModel: bodyMotions,
-          facialMismatchCount: actingReport.facialMismatchCount,
-          motionMismatchCount: actingReport.motionMismatchCount,
-          repeatedFacialRunCount: actingReport.repeatedFacialRunCount
+          talkCount: audited.postOfficialReport.metrics.talkCount,
+          talkZeroDelayShare: audited.postOfficialReport.metrics.talkZeroDelayShare,
+          appearMotionClashCount: audited.postOfficialReport.metrics.appearMotionClashCount,
+          inPlaceAppearShare: audited.postOfficialReport.metrics.inPlaceAppearShare,
+          bodyMotionsByModel: audited.bodyMotions,
+          facialMismatchCount: audited.actingReport.facialMismatchCount,
+          motionMismatchCount: audited.actingReport.motionMismatchCount,
+          repeatedFacialRunCount: audited.actingReport.repeatedFacialRunCount
         }
       }
     } catch (error) {
@@ -2024,8 +2079,12 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       let issueByIdx = new Map<number, string[]>()
       if (onlyIssues) {
         try {
-          const { story } = validateAndFixStory(savedDraft, view, logger, { emotionLabels })
-          const report = runActingAndFidelityAudit(story, view)
+          let report: ActingFidelityReport
+          try {
+            report = auditDraftCandidate(savedDraft).actingReport
+          } catch {
+            report = runActingAndFidelityAudit(buildRawAuditStory(savedDraft), view)
+          }
           issueByIdx = new Map<number, string[]>()
           for (const d of report.diagnostics) {
             const arr = issueByIdx.get(d.snippetIndex) ?? []
@@ -2103,22 +2162,46 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       if (Array.isArray(args.models)) draft.models = args.models
       if (Array.isArray(args.images)) draft.images = args.images
       const snippets = [...(draft.snippets as Array<Record<string, unknown>>)]
+      const originalLength = snippets.length
       const ops = Array.isArray(args.operations) ? args.operations : []
       const appliedNotes: string[] = []
+      const deletedOriginalIndices = new Set<number>()
 
-      // 排序处理 index 偏移或按逆序删除/插入？为避免多操作索引漂移，提示或按原序列执行并明确记录
-      for (const rawOp of ops) {
-        if (!rawOp || typeof rawOp !== 'object') continue
-        const opObj = rawOp as Record<string, unknown>
+      // 按原始 index 降序执行（同 index 先 insert_after -> 原位改写 -> delete -> insert_before），
+      // 确保同一批次中多个 delete/insert/update_acting 共用原始索引时不发生漂移。
+      const opPhase = (op: string): number => {
+        if (op === 'insert_after') return 0
+        if (op === 'update_talk' || op === 'update_acting' || op === 'replace') return 1
+        if (op === 'delete') return 2
+        if (op === 'insert_before') return 3
+        return 4
+      }
+      const sortedOps = ops
+        .map((rawOp, order) => ({ rawOp, order }))
+        .filter((entry): entry is { rawOp: Record<string, unknown>; order: number } =>
+          Boolean(entry.rawOp && typeof entry.rawOp === 'object')
+        )
+        .sort((a, b) => {
+          const idxA = typeof a.rawOp.index === 'number' ? Math.floor(a.rawOp.index) : -1
+          const idxB = typeof b.rawOp.index === 'number' ? Math.floor(b.rawOp.index) : -1
+          if (idxA !== idxB) return idxB - idxA
+          const phaseA = opPhase(String(a.rawOp.op ?? ''))
+          const phaseB = opPhase(String(b.rawOp.op ?? ''))
+          if (phaseA !== phaseB) return phaseA - phaseB
+          return phaseA === 0 || phaseA === 3 ? b.order - a.order : a.order - b.order
+        })
+
+      for (const { rawOp: opObj } of sortedOps) {
         const op = String(opObj.op ?? '')
         const idx = typeof opObj.index === 'number' ? Math.floor(opObj.index) : -1
-        if (idx < 0 || idx >= snippets.length) {
+        if (idx < 0 || idx >= originalLength || deletedOriginalIndices.has(idx)) {
           appliedNotes.push(`跳过越界操作 ${op}(index=${idx})`)
           continue
         }
         const target = snippets[idx]
         if (op === 'delete') {
           snippets.splice(idx, 1)
+          deletedOriginalIndices.add(idx)
           appliedNotes.push(`delete@${idx}`)
           continue
         }
@@ -2227,45 +2310,23 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           ? Math.max(1, Math.min(40, Math.round(args.maxDiagnostics)))
           : 15
       try {
-        const { story, warnings } = validateAndFixStory(candidate, view, logger, {
-          emotionLabels
-        })
-        const report = runActingAndFidelityAudit(story, view)
-        const lines = extractDialogueLinesFromStory(story as unknown as Record<string, unknown>)
-        const dialogueLint = lintDialogueFidelity(
-          {
-            title: savedPlan?.title ?? '',
-            lines: lines.map((l) => ({ id: l.id, speaker: l.speaker, content: l.content }))
-          },
-          {
-            ...(savedPlan?.pairwiseAddress ? { pairwiseAddress: savedPlan.pairwiseAddress } : {}),
-            cast: view.primaryModels().map((m) => ({
-              modelId: m.id,
-              name: view.shortName(m),
-              fullName: m.name,
-              path: m.path,
-              role: ''
-            }))
-          }
-        )
+        const audited = auditDraftCandidate(candidate)
         return JSON.stringify({
           schemaValid: true,
-          readyToFinalize:
-            report.passed &&
-            report.officialReport.passed &&
-            !dialogueLint.issues.some((i) => i.severity === 'high'),
-          actingScore: report.score,
-          officialPassed: report.officialReport.passed,
-          officialIssues: report.officialReport.issues,
-          zeroMotionModelIds: report.zeroMotionModelIds,
-          repeatedFacialRunCount: report.repeatedFacialRunCount,
-          facialMismatchCount: report.facialMismatchCount,
-          motionMismatchCount: report.motionMismatchCount,
-          simultaneousCollisionCount: report.simultaneousCollisionCount,
-          stageDirectionLeakCount: report.stageDirectionLeakCount,
-          dialogueIssues: dialogueLint.issues.slice(0, maxDiag),
-          diagnostics: report.diagnostics.slice(0, maxDiag),
-          warnings: warnings.slice(0, 8)
+          readyToFinalize: audited.readyToFinalize,
+          actingPassed: audited.actingReport.passed,
+          actingScore: audited.actingReport.score,
+          officialPassed: audited.officialPassed,
+          officialIssues: audited.postOfficialReport.issues,
+          zeroMotionModelIds: audited.actingReport.zeroMotionModelIds,
+          repeatedFacialRunCount: audited.actingReport.repeatedFacialRunCount,
+          facialMismatchCount: audited.actingReport.facialMismatchCount,
+          motionMismatchCount: audited.actingReport.motionMismatchCount,
+          simultaneousCollisionCount: audited.actingReport.simultaneousCollisionCount,
+          stageDirectionLeakCount: audited.actingReport.stageDirectionLeakCount,
+          dialogueIssues: audited.dialogueLint.issues.slice(0, maxDiag),
+          diagnostics: audited.actingReport.diagnostics.slice(0, maxDiag),
+          warnings: audited.warnings.slice(0, 8)
         })
       } catch (error) {
         return JSON.stringify({

@@ -793,20 +793,49 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
   }
   const saved = JSON.parse(await toolkit.execute('save_story_draft', { story: flawedDraft }))
   assert.equal(saved.draftSaved, true)
+  assert.equal(saved.actingPassed, false)
+  assert.equal(saved.metrics.facialMismatchCount, 1)
+  assert.equal(saved.metrics.motionMismatchCount, 1)
+  assert.ok(saved.actingDiagnostics.some((d) => d.snippetIndex === 3 && d.field === 'facial'))
+
+  const critique = JSON.parse(await toolkit.execute('critique_story_draft', {}))
+  assert.equal(critique.schemaValid, true)
+  assert.equal(critique.readyToFinalize, false)
+  assert.equal(critique.facialMismatchCount, 1)
+  assert.equal(critique.motionMismatchCount, 1)
+  assert.ok(critique.diagnostics.some((d) => d.snippetIndex === 3 && d.field === 'facial'))
+  assert.ok(critique.diagnostics.some((d) => d.snippetIndex === 3 && d.field === 'motion'))
+
+  const issuesOnly = JSON.parse(await toolkit.execute('inspect_story_draft', { onlyIssues: true }))
+  assert.equal(issuesOnly.matchedCount, 1)
+  assert.equal(issuesOnly.slice[0].idx, 3)
+  assert.ok(Array.isArray(issuesOnly.slice[0].issues) && issuesOnly.slice[0].issues.length >= 2)
 
   const inspectOut = JSON.parse(await toolkit.execute('inspect_story_draft', { type: 'Talk' }))
   assert.equal(inspectOut.matchedCount, 2)
 
-  // Patch snippet index 3 to fix the facial & motion, then finalize
+  // Batch insert_before@1 + update_acting@3 in the same patch_story_draft call (ascending order):
+  // descending index execution prevents index 1 insertion from shifting index 3 target.
   const patched = JSON.parse(
     await toolkit.execute('patch_story_draft', {
       operations: [
+        {
+          op: 'insert_before',
+          index: 1,
+          snippet: { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } }
+        },
         { op: 'update_acting', index: 3, motion: 'w-normal-sigh01', facial: 'face_sad_01' }
       ]
     })
   )
   assert.equal(patched.patched, true)
   assert.equal(patched.actingPassed, true)
+  assert.equal(patched.readyToFinalize, true)
+
+  const postPatchTalks = JSON.parse(await toolkit.execute('inspect_story_draft', { type: 'Talk' }))
+  assert.equal(postPatchTalks.slice[0].idx, 4)
+  assert.equal(postPatchTalks.slice[0].actions[0].motion, 'w-normal-sigh01')
+  assert.equal(postPatchTalks.slice[0].actions[0].facial, 'face_sad_01')
 
   const finalized = JSON.parse(await toolkit.execute('finalize_story_draft', {}))
   assert.equal(finalized.finalized, true)

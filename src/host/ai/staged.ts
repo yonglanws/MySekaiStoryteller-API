@@ -635,9 +635,9 @@ function isPrecededByTenseBeat(
 
 const isRestrainedRole = (roleOrName = ''): boolean => {
   if (typeof personasStagedApi.characterActingProfile === 'function') {
-    return personasStagedApi.characterActingProfile(roleOrName).restrained
+    return personasStagedApi.characterActingProfile(roleOrName, roleOrName).restrained
   }
-  return /真冬|mafuyu|克制|冷静|寡言|内敛/.test(roleOrName)
+  return /真冬|mafuyu|克制|冷静|寡言|内敛|沉默/.test(roleOrName)
 }
 
 function pickFacialFromHints(
