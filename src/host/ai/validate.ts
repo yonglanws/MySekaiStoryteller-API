@@ -265,21 +265,33 @@ function isMotionMoodCompatible(params: {
 }): boolean {
   if (!params.motion.trim()) return true
   if (typeof facialValidationApi.isMotionCompatibleWithLine === 'function') {
-    return facialValidationApi.isMotionCompatibleWithLine(params).ok
+    if (!facialValidationApi.isMotionCompatibleWithLine(params).ok) return false
   }
   const lower = params.motion.toLowerCase()
   const mood = inferValidationMood(params.content, params.emotion)
+  const emo = params.emotion.trim()
+  const text = params.content.trim()
+  const monologue = isInnerMonologueText(text)
+  const isSadOrDespair = mood === 'sad' || emo === '伤心' || DESPAIR_SAD_TEXT_RE.test(text)
+  const isGenuineShock = emo === '惊讶' || (GENUINE_SHOCK_TEXT_RE.test(text) && emo !== '伤心')
   const isTense =
-    params.prevTense ||
-    mood === 'sad' ||
-    mood === 'angry' ||
-    mood === 'trouble' ||
-    params.emotion === '害怕'
-  const isJoyfulMotion = /glad|happy|cheer|joy|wink|smug|doya|pose|delicious|sing/.test(lower)
+    params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble' || emo === '害怕'
+  const isJoyfulMotion = /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing/.test(
+    lower
+  )
   const isNegativeMotion = /angry|disgust|sad|cry|sigh/.test(lower)
   if (isTense && isJoyfulMotion) return false
   if (mood === 'smile' && !params.prevTense && isNegativeMotion) return false
   if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
+  // 悲伤/绝望/沉重独白句严禁切换为歪头/打招呼/松口气/惊讶/生气等与情绪脱节的动作
+  if ((isSadOrDespair || monologue) && !isGenuineShock) {
+    if (/tilthead|tilt|greeting|wave|relief|surprise|shock|angry|disgust/.test(lower)) {
+      return false
+    }
+  }
+  if (mood === 'angry' && /tilthead|tilt|greeting|wave/.test(lower)) {
+    return false
+  }
   return true
 }
 
@@ -292,8 +304,13 @@ function pickCompatibleMotionFallback(
 ): string {
   const model = view.modelById(modelId)
   if (!model) return view.defaultMotion(modelId)
-  const candidates = view.promptMotions(model).filter((m) => !isStandingMotion(m))
-  if (candidates.length === 0) return view.defaultMotion(modelId)
+  const rawCandidates = view.promptMotions(model).filter((m) => !isStandingMotion(m))
+  if (rawCandidates.length === 0) return view.defaultMotion(modelId)
+  // 优先同一套 w-normal-* 常规风格动作，避免莫名跳切到 w-cool-* / w-cute-* 风格
+  const candidates = [
+    ...rawCandidates.filter((m) => /^w-normal/i.test(m)),
+    ...rawCandidates.filter((m) => !/^w-normal/i.test(m))
+  ]
   if (typeof facialValidationApi.pickMoodMatchedMotion === 'function') {
     const picked = facialValidationApi.pickMoodMatchedMotion(
       candidates,
@@ -305,16 +322,16 @@ function pickCompatibleMotionFallback(
     if (picked) return picked
   }
   const hintsByMood: Record<facialSemanticsMod.TargetMood, RegExp[]> = {
-    sad: [/sad|cry|sigh|lookdown/i, /trouble|think/i, /nod|tilthead/i],
-    trouble: [/trouble|think|sigh|lookaway/i, /tilthead|nod/i],
+    sad: [/sad|cry|sigh|lookdown/i, /trouble|think/i],
+    trouble: [/trouble|think|sigh|lookaway/i, /nod/i],
     angry: [/angry|disgust|shakehead/i, /forward|serious/i],
     surprise: [/surprise|tilthead|forward/i, /nod/i],
     shy: [/shy|blush|fidget|lookaway/i, /tilthead/i],
     smile: [/glad|happy|cheer|joy|relief/i, /nod|tilthead|greeting|playful/i],
-    gentle: [/relief|nod|tilthead|soft/i, /glad|greeting/i],
-    wry_smile: [/trouble|relief|sigh|tilthead/i, /nod|shy/i],
+    gentle: [/relief|nod|tilthead|soft/i, /glad/i],
+    wry_smile: [/trouble|relief|sigh/i, /nod|shy/i],
     serious: [/forward|think|shakehead|nod/i, /serious|trouble/i],
-    thinking: [/think|tilthead|lookaway|trouble/i, /nod|forward/i],
+    thinking: [/think|lookaway|trouble/i, /nod|sigh/i],
     neutral: [/nod|tilthead|think|forward|relief/i]
   }
   const tiers = hintsByMood[mood] ?? hintsByMood.neutral
@@ -322,10 +339,13 @@ function pickCompatibleMotionFallback(
     const match = candidates.find((m) => m !== avoidMotion && hint.test(m))
     if (match) return match
   }
+  for (const hint of tiers) {
+    const match = candidates.find((m) => hint.test(m))
+    if (match) return match
+  }
   return (
-    candidates.find((m) => m !== avoidMotion && !/glad|angry|sad|cry/i.test(m)) ??
-    candidates[0] ??
-    view.defaultMotion(modelId)
+    candidates.find((m) => m !== avoidMotion && !/glad|angry|sad|cry|greeting|tilthead/i.test(m)) ??
+    ''
   )
 }
 
@@ -483,6 +503,25 @@ function repairActingMismatches(
           )
         }
       }
+      const motion = toStr(data.motion)
+      if (
+        motion &&
+        !isMotionMoodCompatible({
+          motion,
+          modelPath: model.path,
+          emotion: contextTalk.emotion,
+          content: contextTalk.content,
+          prevTense,
+          restrainedRole: restrained
+        })
+      ) {
+        const mood = inferValidationMood(contextTalk.content, contextTalk.emotion)
+        const replacement = pickCompatibleMotionFallback(view, modelId, mood, restrained, motion)
+        data.motion = replacement && replacement !== motion ? replacement : ''
+        warn(
+          `snippets[${i}] ${kind} motion '${motion}' 与周边剧情情绪冲突，已${data.motion ? `改为 ${toStr(data.motion)}` : '清除'}`
+        )
+      }
       continue
     }
 
@@ -551,6 +590,11 @@ function repairActingMismatches(
           warn(
             `snippets[${i}] ${isListener ? '听者' : '说话者'} motion '${motion}' 与当前台词情绪冲突，已改为 ${replacement}`
           )
+        } else {
+          delete targetObj.motion
+          warn(
+            `snippets[${i}] ${isListener ? '听者' : '说话者'} motion '${motion}' 与当前台词情绪冲突，无贴合替代动作已清除`
+          )
         }
       }
     }
@@ -570,26 +614,12 @@ function repairActingMismatches(
   }
 }
 
-const SUBTLE_LISTENER_MOTION_RE =
-  /(?:nod|tilthead|tilt|trouble|sad|sigh|think|lookdown|lookaway|surprise|relief|shy|fidget)/i
-
-function pickStaggeredListenerAt(existingAts: number[], reactionIndex: number): number {
-  const candidates = [0.55, 0.65, 0.75, 0.5, 0.8, 0.45, 0.85]
-  const start = reactionIndex % candidates.length
-  for (let offset = 0; offset < candidates.length; offset++) {
-    const at = candidates[(start + offset) % candidates.length]
-    if (existingAts.every((other) => Math.abs(other - at) >= 0.3 - 1e-6)) {
-      return at
-    }
-  }
-  return 0.65
-}
-
 /**
- * 确定性听者响应补全：追踪在场角色，避免“A 连续说话而 B 全程静止像卡住”。
- * 当在场听者连续 >=2 句未获得表情或动作更新（或遇到高张力台词且已静止 >=1 句）时，
- * 自动在 Talk.data.actions 中注入错峰（at: 0.45..0.85）的剧情贴合听者反应，
- * 并交替使用“纯微表情”与“轻微身体动作”，绝不与说话者同瞬碰撞。
+ * 确定性听者响应补全（对齐官方 event_145_08 演出节奏）：
+ * - 跳过内心独白（旁人无法听见说话者的心里话）；
+ * - 仅当在场听者连续 >=4 句（高张力台词 >=3 句）未获任何更新时，
+ *   在 Talk.data.actions 句首（at: 0）注入轻柔的**纯表情**（facial-only，不含 body motion）变化；
+ * - 绝不向台词中途（at: 0.45..0.85）批量塞入错峰身体动作，避免突兀弹跳与错峰干扰。
  */
 export function ensureListenerReactivity(
   story: JsonRecord,
@@ -601,8 +631,6 @@ export function ensureListenerReactivity(
   const idleTalks = new Map<number, number>()
   const justAppeared = new Set<number>()
   const lastListenerFacial = new Map<number, string>()
-  const lastListenerMotion = new Map<number, string>()
-  const reactionCount = new Map<number, number>()
 
   let prevContent = ''
   let prevEmotion = ''
@@ -638,9 +666,7 @@ export function ensureListenerReactivity(
         idleTalks.set(mid, 0)
         justAppeared.delete(mid)
         const f = toStr(data.facial)
-        const m = toStr(data.motion)
         if (f) lastListenerFacial.set(mid, f)
-        if (m) lastListenerMotion.set(mid, m)
       }
       continue
     }
@@ -649,7 +675,7 @@ export function ensureListenerReactivity(
     const speakerId = toNumber(data.modelId, -1)
     const content = toStr(data.content)
     const emotion = toStr(data.emotion)
-    if (speakerId === -1) {
+    if (speakerId === -1 || isInnerMonologueText(content)) {
       prevContent = content
       prevEmotion = emotion
       continue
@@ -660,18 +686,12 @@ export function ensureListenerReactivity(
       : []
 
     const activeInThisTalk = new Set<number>([speakerId])
-    const existingAts: number[] = []
-    if (toStr(data.motion).trim() || toStr(data.facial).trim()) {
-      existingAts.push(0)
-    }
     for (const act of actions) {
       const aid = toNumber(act.modelId, speakerId)
       activeInThisTalk.add(aid)
-      existingAts.push(toNumber(act.at, 0))
       if (aid !== speakerId) {
         idleTalks.set(aid, 0)
         if (toStr(act.facial)) lastListenerFacial.set(aid, toStr(act.facial))
-        if (toStr(act.motion)) lastListenerMotion.set(aid, toStr(act.motion))
       }
     }
 
@@ -689,7 +709,7 @@ export function ensureListenerReactivity(
       const freshlyAppeared = justAppeared.has(listenerId)
       const shouldReact =
         !addedListenerOnThisTalk &&
-        (nextIdle >= 2 || (isHighIntensity && nextIdle >= 1 && !freshlyAppeared))
+        (nextIdle >= 4 || (isHighIntensity && nextIdle >= 3 && !freshlyAppeared))
 
       if (!shouldReact) {
         idleTalks.set(listenerId, nextIdle)
@@ -703,11 +723,7 @@ export function ensureListenerReactivity(
       }
 
       const restrained = isRestrainedActor(listenerModel.name, listenerModel.path)
-      const count = reactionCount.get(listenerId) ?? 0
-      const wantBodyMotion = !freshlyAppeared && (count % 2 === 1 || nextIdle >= 3)
-
       let pickedFacial = ''
-      let pickedMotion = ''
 
       if (typeof facialValidationApi.recommendActingForLine === 'function') {
         const rec = facialValidationApi.recommendActingForLine({
@@ -722,7 +738,6 @@ export function ensureListenerReactivity(
           isListener: true,
           restrainedRole: restrained,
           prevFacial: lastListenerFacial.get(listenerId),
-          prevMotion: lastListenerMotion.get(listenerId),
           limit: 4
         })
         pickedFacial =
@@ -737,19 +752,6 @@ export function ensureListenerReactivity(
               restrainedRole: restrained
             })
           ) ?? ''
-        if (wantBodyMotion) {
-          pickedMotion =
-            rec.motions.find(
-              (m) =>
-                !isStandingMotion(m) &&
-                m !== lastListenerMotion.get(listenerId) &&
-                SUBTLE_LISTENER_MOTION_RE.test(m)
-            ) ??
-            rec.motions.find(
-              (m) => !isStandingMotion(m) && m !== lastListenerMotion.get(listenerId)
-            ) ??
-            ''
-        }
       }
 
       if (!pickedFacial) {
@@ -770,41 +772,17 @@ export function ensureListenerReactivity(
         )
       }
 
-      if (wantBodyMotion && !pickedMotion) {
-        const mood = inferValidationMood(content, emotion)
-        const listenerTargetMood: facialSemanticsMod.TargetMood =
-          mood === 'angry' || mood === 'sad'
-            ? 'trouble'
-            : mood === 'surprise'
-              ? 'surprise'
-              : mood === 'smile'
-                ? 'gentle'
-                : 'neutral'
-        const cand = pickCompatibleMotionFallback(
-          view,
-          listenerId,
-          listenerTargetMood,
-          restrained,
-          lastListenerMotion.get(listenerId)
-        )
-        if (cand && !isStandingMotion(cand)) pickedMotion = cand
-      }
-
-      if (pickedFacial || pickedMotion) {
-        const at = pickStaggeredListenerAt(existingAts, count)
+      if (pickedFacial) {
         const listenerAct: JsonRecord = {
-          at,
+          at: 0,
           modelId: listenerId,
-          ...(pickedMotion ? { motion: pickedMotion } : {}),
-          ...(pickedFacial ? { facial: pickedFacial } : {})
+          facial: pickedFacial
         }
         actions.push(listenerAct)
         actions.sort((a, b) => toNumber(a.at) - toNumber(b.at))
         data.actions = actions
         idleTalks.set(listenerId, 0)
-        if (pickedFacial) lastListenerFacial.set(listenerId, pickedFacial)
-        if (pickedMotion) lastListenerMotion.set(listenerId, pickedMotion)
-        reactionCount.set(listenerId, count + 1)
+        lastListenerFacial.set(listenerId, pickedFacial)
         addedListenerOnThisTalk = true
         injectedCount += 1
       } else {
@@ -822,7 +800,7 @@ export function ensureListenerReactivity(
   }
 
   if (injectedCount > 0) {
-    warn(`已为在场听者自动补充 ${injectedCount} 处错峰倾听/反应演出，避免角色长时间静止`)
+    warn(`已为在场听者自动补充 ${injectedCount} 处句首(at: 0)纯微表情倾听反应，避免角色长时间静止`)
   }
 }
 
@@ -1101,12 +1079,19 @@ function validateActions(
   }
   kept.sort((a, b) => toNumber(a.at) - toNumber(b.at))
   if (speakerCap === 1 && kept.length > 1) {
-    // 禁止同一瞬间双人同时做动作（说话者优先）；错峰（>=0.25）的反应动作保留。
+    // 禁止同一瞬间双人同时做身体动作（说话者优先）；纯表情听者反应（无 motion）允许在 at: 0 与说话者自然共存。
+    const hasBodyMotion = (act: JsonRecord): boolean =>
+      typeof act.motion === 'string' && act.motion.trim().length > 0
     const deduped: JsonRecord[] = []
     for (const action of kept) {
-      const conflictIdx = deduped.findIndex(
-        (existing) => Math.abs(toNumber(existing.at) - toNumber(action.at)) < 0.25 - 1e-9
-      )
+      const actionHasBody = hasBodyMotion(action)
+      const conflictIdx = actionHasBody
+        ? deduped.findIndex(
+            (existing) =>
+              hasBodyMotion(existing) &&
+              Math.abs(toNumber(existing.at) - toNumber(action.at)) < 0.25 - 1e-9
+          )
+        : -1
       if (conflictIdx < 0) {
         deduped.push(action)
       } else if (action.modelId === speakerId && deduped[conflictIdx].modelId !== speakerId) {

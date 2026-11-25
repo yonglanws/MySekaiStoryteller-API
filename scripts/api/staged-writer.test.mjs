@@ -1015,8 +1015,8 @@ test('composed staging keeps ambient and second background through validation', 
     '说话者动作必须在句首触发'
   )
   assert.ok(
-    listenerActions.every((action) => action.at >= 0.45 && action.at <= 0.85),
-    '听者反应动作必须错峰触发，避免与说话者碰撞'
+    listenerActions.every((action) => action.at === 0 && !action.motion),
+    '听者反应动作应对齐官方节奏，采用句首(at: 0)纯微表情，不向句中塞入错峰身体动作'
   )
 })
 
@@ -1501,5 +1501,9 @@ test('buildDirectionPrompt annotates motions and composeStory repairs/diversifie
   )
   const l4Motion = talks[3].data.actions[0]?.motion
   const l5Motion = talks[4].data.actions[0]?.motion
-  assert.notEqual(l5Motion, l4Motion, 'consecutive duplicate speaker motion should diversify')
+  assert.equal(
+    l5Motion,
+    l4Motion,
+    '2 consecutive same-mood sad lines should hold posture naturally instead of hyperactive swapping'
+  )
 })

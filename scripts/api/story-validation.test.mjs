@@ -685,24 +685,42 @@ test('keeps multi-beat actions on silent Motion snippets', () => {
   )
 })
 
-test('keeps one action per Talk when a listener reaction shares the line', () => {
+test('deduplicates simultaneous dual-actor body motions while allowing facial-only listener at at=0', () => {
   const story = makeStory()
   const talk = story.snippets.find(
     (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
   )
   talk.data.actions = [
     { at: 0, modelId: 1, motion: 'w-normal-nod01', facial: 'face_smile_01' },
-    { at: 0, modelId: 2, facial: 'face_smile_01' }
+    { at: 0, modelId: 2, motion: 'w-normal-tilt01', facial: 'face_smile_01' }
   ]
   const { story: fixed } = validateAndFixStory(story, makeView())
   const fixedTalk = fixed.snippets.find(
     (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
   )
-  assert.equal(fixedTalk.data.actions.length, 1, 'official Talk rows carry at most one motion')
+  assert.equal(fixedTalk.data.actions.length, 1, 'simultaneous dual body motions deduplicate to 1')
   assert.equal(
     fixedTalk.data.actions[0].modelId,
     1,
-    'the speaker action outranks a listener reaction'
+    'the speaker body motion outranks a colliding listener body motion'
+  )
+
+  const storyFacialOnly = makeStory()
+  const talk2 = storyFacialOnly.snippets.find(
+    (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
+  )
+  talk2.data.actions = [
+    { at: 0, modelId: 1, motion: 'w-normal-nod01', facial: 'face_smile_01' },
+    { at: 0, modelId: 2, facial: 'face_smile_01' }
+  ]
+  const { story: fixed2 } = validateAndFixStory(storyFacialOnly, makeView())
+  const fixedTalk2 = fixed2.snippets.find(
+    (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
+  )
+  assert.equal(
+    fixedTalk2.data.actions.length,
+    2,
+    'facial-only listener reaction cleanly coexists at at=0 with speaker body motion'
   )
 })
 
@@ -992,7 +1010,7 @@ test('chof3y regression: repairs despair surprise/notice & regret angry, injects
     ]
   }
 
-  const { story, warnings } = validateAndFixStory(chof3yLike, view)
+  const { story } = validateAndFixStory(chof3yLike, view)
 
   // 1) Consecutive duplicate ChangeBgm removed, distinct BGM preserved
   const bgms = story.snippets.filter((s) => s.type === 'ChangeBgm')
@@ -1019,21 +1037,75 @@ test('chof3y regression: repairs despair surprise/notice & regret angry, injects
   const moveSnippet = story.snippets.find((s) => s.type === 'Move')
   assert.notEqual(moveSnippet.data.facial, 'face_surprise_01')
 
-  // 4) Staggered listener reactions injected for Ena (modelId=2) during Mizuki's 4-line run without colliding at=0
+  // 4) Official PJSK listener reactivity: skips inner monologues (talks 0..1), injects clean at: 0 facial-only
+  //    reactions ONLY when listener is idle across >=3..4 non-monologue lines (0 mid-line staggered body motions!)
   const listenerActs = talks
     .filter((t) => t.data.modelId === 1)
     .flatMap((t) => (t.data.actions ?? []).filter((a) => a.modelId === 2))
-  assert.ok(listenerActs.length >= 2, `expected >=2 listener reactions, got ${listenerActs.length}`)
-  for (const t of talks) {
-    const acts = t.data.actions ?? []
-    for (let i = 0; i < acts.length; i++) {
-      for (let j = i + 1; j < acts.length; j++) {
-        assert.ok(
-          Math.abs(acts[i].at - acts[j].at) >= 0.25,
-          `actions must be staggered, got ${acts[i].at} and ${acts[j].at}`
-        )
+  assert.ok(
+    listenerActs.every((a) => a.at === 0 && !a.motion),
+    `listener auto-reactions must be at: 0 facial-only without mid-line body motion spam, got ${JSON.stringify(listenerActs)}`
+  )
+  assert.equal(
+    (talks[0].data.actions ?? []).filter((a) => a.modelId === 2).length,
+    0,
+    'listener must not react to inner monologue'
+  )
+  assert.equal(
+    (talks[1].data.actions ?? []).filter((a) => a.modelId === 2).length,
+    0,
+    'listener must not react to inner monologue'
+  )
+  // Also verify 4 consecutive non-monologue lines DO inject a clean at: 0 facial-only reaction
+  const longSpeech = structuredClone(chof3yLike)
+  longSpeech.snippets.splice(
+    11,
+    0,
+    {
+      type: 'Talk',
+      wait: true,
+      delay: 0,
+      data: {
+        speaker: '瑞希',
+        content: '大家一定会为了不伤害我，拼命装作什么都没发生过。',
+        emotion: '伤心',
+        modelId: 1,
+        actions: [{ at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_sad_01' }]
+      }
+    },
+    {
+      type: 'Talk',
+      wait: true,
+      delay: 0,
+      data: {
+        speaker: '瑞希',
+        content: '一想到那样，我就根本受不了……！',
+        emotion: '伤心',
+        modelId: 1,
+        actions: [{ at: 0, modelId: 1, motion: 'w-normal-tilthead01', facial: 'face_sad_01' }]
       }
     }
-  }
-  assert.ok(warnings.some((w) => w.includes('听者')))
+  )
+  const { story: longFixed, warnings: longWarnings } = validateAndFixStory(longSpeech, view)
+  const longTalks = longFixed.snippets.filter((s) => s.type === 'Talk')
+  const longListenerActs = longTalks
+    .filter((t) => t.data.modelId === 1)
+    .flatMap((t) => (t.data.actions ?? []).filter((a) => a.modelId === 2))
+  assert.ok(
+    longListenerActs.length >= 1,
+    `expected >=1 at: 0 facial-only listener reaction across 4 non-monologue lines, got ${longListenerActs.length}`
+  )
+  assert.ok(
+    longListenerActs.every((a) => a.at === 0 && !a.motion && Boolean(a.facial)),
+    'all injected listener reactions must be at: 0 facial-only'
+  )
+  // Unrelated tilthead motion on heartbroken sad line must be repaired away from tilthead
+  const heartbrokenTalk = longTalks.find((t) => t.data.content.includes('根本受不了'))
+  assert.ok(heartbrokenTalk)
+  assert.notEqual(
+    heartbrokenTalk.data.actions?.[0]?.motion,
+    'w-normal-tilthead01',
+    'sad/heartbroken line must not keep unrelated tilthead motion'
+  )
+  assert.ok(longWarnings.some((w) => w.includes('听者')))
 })

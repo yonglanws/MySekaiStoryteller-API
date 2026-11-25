@@ -728,10 +728,14 @@ export function inferDramaticContext(params: {
 
   let mood: DramaticContextMood = 'neutral'
   if (params.isListener) {
-    if (emo === '生气' || ANGRY_TEXT_RE.test(text)) mood = 'sad_regret'
-    else if (emo === '伤心' || emo === '害怕' || apologyOrRegret) mood = 'gentle_reassure'
-    else if (emo === '惊讶' || SURPRISE_TEXT_RE.test(text)) mood = 'surprise'
-    else if (emo === '开心' || (hasPosCue && !tense)) mood = 'cheerful_banter'
+    if (monologue) mood = 'attentive_listen'
+    else if (emo === '生气' || ANGRY_TEXT_RE.test(text)) mood = 'sad_regret'
+    else if (emo === '伤心' || emo === '害怕' || apologyOrRegret || isDespair) mood = 'sad_regret'
+    else if (reassure) mood = 'gentle_reassure'
+    else if (emo === '惊讶' || SURPRISE_TEXT_RE.test(text)) {
+      mood =
+        hasNegCue || prevEmo === '伤心' || prevEmo === '生气' ? 'sad_regret' : 'attentive_listen'
+    } else if (emo === '开心' || (hasPosCue && !tense)) mood = 'cheerful_banter'
     else mood = 'attentive_listen'
   } else if (emo === '生气' || (ANGRY_TEXT_RE.test(text) && !hasPosCue)) {
     mood = 'angry_frustration'
@@ -965,6 +969,47 @@ export function isMotionCompatibleWithLine(params: {
     return { ok: false, reason: 'playful_motion_on_restrained_role' }
   }
 
+  const emo = (params.emotion ?? '').trim()
+  const text = (params.content ?? '').trim()
+  const isDespair = DESPAIR_TEXT_RE.test(text)
+  const isGenuineShock = emo === '惊讶' || GENUINE_SURPRISE_TEXT_RE.test(text)
+
+  // 5) 悲伤/绝望/愤怒语境禁止配打招呼/松口气等轻松社交动作
+  if (
+    (ctx.mood === 'sad_regret' || ctx.mood === 'angry_frustration' || isDespair) &&
+    (info.role === 'greeting' || info.role === 'relief')
+  ) {
+    return { ok: false, reason: 'casual_motion_on_tense_or_sad_line' }
+  }
+
+  // 6) 强烈悲伤/自责/听者承压句禁止用无关的歪头动作（避免心碎场面突然卖萌歪头）
+  if (
+    ctx.mood === 'sad_regret' &&
+    info.role === 'tilthead' &&
+    (!ctx.questionOrDoubt || Boolean(params.isListener) || isDespair || ctx.apologyOrRegret)
+  ) {
+    return { ok: false, reason: 'tilthead_motion_on_sad_line' }
+  }
+
+  // 7) 悲伤/独白语境（非真正惊讶）禁止误用吃惊动作
+  if (
+    !isGenuineShock &&
+    info.role === 'surprise' &&
+    (ctx.mood === 'sad_regret' || ctx.mood === 'thinking_monologue' || isDespair)
+  ) {
+    return { ok: false, reason: 'surprise_motion_on_sad_or_monologue' }
+  }
+
+  // 8) 含泪自责/伤心台词（无明确怒气）禁止误用生气动作
+  if (
+    ctx.mood === 'sad_regret' &&
+    info.role === 'angry' &&
+    emo !== '生气' &&
+    !ANGRY_TEXT_RE.test(text)
+  ) {
+    return { ok: false, reason: 'angry_motion_on_sad_or_regret' }
+  }
+
   return { ok: true }
 }
 
@@ -1102,18 +1147,35 @@ export function pickMoodMatchedFacial(
 }
 
 const MOTION_ROLES_BY_DRAMATIC_MOOD: Record<DramaticContextMood, MotionSemanticRole[]> = {
-  surprise: ['surprise', 'tilthead', 'forward', 'shakehead'],
-  awkward: ['trouble', 'shy', 'think', 'tilthead', 'nod'],
-  gentle_reassure: ['nod', 'relief', 'tilthead', 'forward', 'greeting'],
-  inner_resolve: ['forward', 'nod', 'tilthead', 'relief'],
-  shy_hesitation: ['shy', 'trouble', 'think', 'tilthead'],
-  angry_frustration: ['angry', 'shakehead', 'forward', 'trouble', 'tilthead'],
-  sad_regret: ['sad', 'trouble', 'shakehead', 'think', 'nod', 'tilthead'],
+  surprise: ['surprise', 'forward', 'shakehead', 'tilthead'],
+  awkward: ['trouble', 'shy', 'think', 'nod'],
+  gentle_reassure: ['nod', 'relief', 'forward', 'tilthead'],
+  inner_resolve: ['forward', 'nod', 'relief'],
+  shy_hesitation: ['shy', 'trouble', 'think'],
+  angry_frustration: ['angry', 'shakehead', 'forward', 'trouble'],
+  sad_regret: ['sad', 'trouble', 'shakehead', 'think'],
   cheerful_banter: ['glad', 'playful', 'nod', 'tilthead', 'greeting', 'relief'],
-  attentive_listen: ['nod', 'tilthead', 'think', 'relief'],
-  thinking_monologue: ['think', 'trouble', 'sad', 'tilthead', 'nod'],
-  entry_exit: ['greeting', 'tilthead', 'nod', 'relief', 'forward'],
-  neutral: ['tilthead', 'nod', 'relief', 'forward', 'think']
+  attentive_listen: ['nod', 'think', 'tilthead', 'relief'],
+  thinking_monologue: ['think', 'trouble', 'sad', 'nod'],
+  entry_exit: ['nod', 'tilthead', 'greeting', 'relief', 'forward'],
+  neutral: ['nod', 'tilthead', 'relief', 'forward', 'think']
+}
+
+/** 优先保持动作风格一致（w-normal-* 优先，避免对话中途在 normal 与 cool/cute/happy 风格间突兀跳切）。 */
+function sortMotionsByStyleConsistency(motions: string[], preferredStyle?: string): string[] {
+  const pref = (preferredStyle ?? '').toLowerCase()
+  const rankOf = (m: string): number => {
+    const style = parseMotionStem(m).style
+    if (pref && pref.startsWith('normal') && style === pref) return 0
+    if (style.startsWith('normal')) return 1
+    if (pref && style === pref) return 2
+    if (!style) return 3
+    return 4
+  }
+  return motions
+    .map((m, idx) => ({ m, idx, rank: rankOf(m) }))
+    .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+    .map((entry) => entry.m)
 }
 
 /** 根据剧情情绪从角色真实动作集中挑选最贴切的身体动作（过滤掉 default 与 special 清场动作）。 */
@@ -1148,7 +1210,7 @@ export function pickMoodMatchedMotion(
 
   const avoid = Array.isArray(avoidMotions) ? new Set(avoidMotions) : avoidMotions
   const activePool = motions.filter((m) => !isSpecialOrStandingMotion(m))
-  const pool = activePool.length > 0 ? activePool : motions
+  const pool = sortMotionsByStyleConsistency(activePool.length > 0 ? activePool : motions)
   const wantedRoles =
     MOTION_ROLES_BY_DRAMATIC_MOOD[dramaticMood] ?? MOTION_ROLES_BY_DRAMATIC_MOOD.neutral
 
@@ -1300,7 +1362,11 @@ export function recommendActingForLine(params: {
     compatibleMotions.length > 0
       ? compatibleMotions
       : params.motions.filter((m) => !isSpecialOrStandingMotion(m))
-  const effectiveMotions = motionPool.length > 0 ? motionPool : params.motions
+  const prevStyle = params.prevMotion ? parseMotionStem(params.prevMotion).style : ''
+  const effectiveMotions = sortMotionsByStyleConsistency(
+    motionPool.length > 0 ? motionPool : params.motions,
+    prevStyle
+  )
 
   const wantedMotionRoles = MOTION_ROLES_BY_DRAMATIC_MOOD[ctx.mood]
   const rankedMotions: string[] = []
@@ -1314,7 +1380,20 @@ export function recommendActingForLine(params: {
       }
     }
   }
+  // 若情绪匹配的候选仍不足，允许复用同情绪角色池中的动作（宁可保持贴合情绪的姿势，也不跨情绪硬换无关动作）
   if (rankedMotions.length < limit) {
+    for (const role of wantedMotionRoles) {
+      if (params.restrainedRole && role === 'playful') continue
+      for (const m of effectiveMotions) {
+        if (rankedMotions.length >= limit) break
+        if (rankedMotions.includes(m)) continue
+        if (inspectModelMotion(params.modelPath, m, params.modelsRoot).role === role) {
+          rankedMotions.push(m)
+        }
+      }
+    }
+  }
+  if (rankedMotions.length === 0) {
     const fallback = pickMoodMatchedMotion(
       effectiveMotions,
       ctx.mood,
@@ -1466,12 +1545,12 @@ export function evaluateActingLineMatch(params: {
   }
 
   const sameMotionCount = params.consecutiveSameMotionCount ?? 0
-  if (motion && sameMotionCount >= 2) {
+  if (motion && sameMotionCount >= 4) {
     issues.push({
       field: 'repetition',
       code: 'consecutive_same_motion',
       severity: 'medium',
-      message: `身体动作 ${motion} 连续重复 ${sameMotionCount} 句，建议换用相近语义的动作避免僵硬`
+      message: `身体动作 ${motion} 已连续重复 ${sameMotionCount} 句，可在合适情绪节点适度换姿（若情绪延续可留空 motion 保持当前姿态）`
     })
   }
 

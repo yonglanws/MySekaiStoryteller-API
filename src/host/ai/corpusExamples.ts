@@ -175,9 +175,9 @@ export function getOfficialActingGuidelines(
   const parts: string[] = [
     '1. 结构自然：同一时间地点保持 1 幕连贯推进，不硬凑多幕；只有真正换地点、跳时间、回忆（WhiteOut -> FlashbackIn -> WhiteIn）或出入 SEKAI（SekaiOut / SekaiIn）时才做转场。',
     '2. 台词与心里话：spoken 台词不写（微笑）/（叹气）等动作括号；纯内心独白用完整括号行「（……原来如此）」，并可配 Center 单人镜头留白后切回 Left/Right。',
-    '3. 动作密度与听者呼应：约 75%~80% 台词在句首配 1 个贴合语气的身体动作，严禁说话者与听者同瞬碰撞；可通过听者静止句回应或独立 Motion 节拍让双方都有自然表演。',
-    '4. 表情对位剧情：道歉、犹豫、嘴硬、克制人物（如真冬）禁用真笑/wink；表面强颜欢笑用 wry_smile（苦笑）或阴郁表情，情绪高点再切换强表情，避免连卡 face_normal_01。',
-    '5. 声画氛围：入退场默认槽位原地淡入淡出，物理走近/离开才用 LeftOver/RightOver 配脚步/开门 SE；情绪转折前可用 ChangeBgm stop 留白一拍。'
+    '3. 动作密度与官方听者节奏：官方 PJSK（如 event_145_08）100% 的 Talk 动作都在句首 at=0 触发；约 75%~85% 台词在句首配 1 个贴合语气的身体动作，其余 15%~25% 保持姿态仅换表情或留空。听者反应以句首 at=0 纯切 facial 或情绪转折处的独立 Motion 节拍为主，严禁在说话者句中大量塞入 at: 0.5..0.85 的错峰弹动作。',
+    '4. 动作与表情对位剧情：同一角色尽量保持 w-normal-* 动作风格一致，切忌为了避免重复而把悲伤/道歉句强行换成 tilthead/nod/greeting 或跨风格跳切到 w-cool-*；道歉、犹豫、克制人物（如真冬）禁用真笑/wink，表面强颜欢笑用 wry_smile（苦笑）或阴郁表情，悲伤独白禁用 surprise/notice，含泪自责禁用 angry。',
+    '5. 官方渐变进出场与声画氛围：PJSK 原版（如 event_145_08 全片 41/41 入场、42/42 退场）默认使用槽位原地淡入淡出（from.side === to.side, offset: 0），即使奔跑追逐戏也以原地淡入淡出配脚步 SE 为主；严禁滥用 LeftOver/RightOver 滑入滑出或无故 LayoutClear -> Move Center -> Move Left -> LayoutAppear 反复挪位。情绪转折前可用 ChangeBgm stop 留白一拍。'
   ]
   if ((options.castCount ?? 2) >= 3) {
     parts.push(
