@@ -219,7 +219,7 @@ const CHARACTER_ACTING_RULES: Array<{
   profile: CharacterActingProfile
 }> = [
   {
-    pattern: /真冬|mafuyu|朝比奈/,
+    pattern: /真冬|朝比奈|(?:^|[^a-z])mafuyu(?:[^a-z]|$)/i,
     profile: {
       restrained: true,
       temperament: 'restrained',
@@ -228,7 +228,8 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /奏|kanade|宵崎|志步|shiho|冬弥|touya|toya/,
+    pattern:
+      /宵崎奏|日野森志步|青柳冬弥|志步|冬弥|(?:^|[^a-z])(?:kanade|shiho|touya|toya)(?:[^a-z]|$)|(?:^|[\s/·，、])奏(?:$|[\s/·，、])/i,
     profile: {
       restrained: true,
       temperament: 'restrained',
@@ -237,7 +238,8 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /宁宁|nene|草薙|绘名|ena|东云|彰人|akito|一歌|ichika/,
+    pattern:
+      /草薙宁宁|宁宁|东云绘名|绘名|东云彰人|彰人|星乃一歌|一歌|(?:^|[^a-z])(?:nene|ena|akito|ichika)(?:[^a-z]|$)/i,
     profile: {
       restrained: false,
       temperament: 'earnest',
@@ -246,7 +248,7 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /司|tsukasa|天马司/,
+    pattern: /天马司|(?:^|[^a-z])tsukasa(?:[^a-z]|$)|(?:^|[\s/·，、])司(?:$|[\s/·，、])/i,
     profile: {
       restrained: false,
       temperament: 'theatrical',
@@ -255,7 +257,8 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /笑梦|emu|凤笑梦|咲希|saki|实乃理|minori|杏|an|瑞希|mizuki|晓山/,
+    pattern:
+      /凤笑梦|笑梦|天马咲希|咲希|花里实乃理|实乃理|白石杏|晓山瑞希|瑞希|(?:^|[^a-z])(?:emu|saki|minori|an|mizuki)(?:[^a-z]|$)|(?:^|[\s/·，、])杏(?:$|[\s/·，、])/i,
     profile: {
       restrained: false,
       temperament: 'expressive',
@@ -263,7 +266,8 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /类|rui|神代|爱莉|airi|铃|rin|连|len/,
+    pattern:
+      /神代类|桃井爱莉|爱莉|镜音铃|镜音连|(?:^|[^a-z])(?:rui|airi|rin|len)(?:[^a-z]|$)|(?:^|[\s/·，、])(?:类|铃|连)(?:$|[\s/·，、])/i,
     profile: {
       restrained: false,
       temperament: 'playful',
@@ -272,7 +276,8 @@ const CHARACTER_ACTING_RULES: Array<{
     }
   },
   {
-    pattern: /穗波|honami|遥|haruka|雫|shizuku|心羽|kohane|初音|miku|巡音|luka|meiko|kaito/,
+    pattern:
+      /望月穗波|穗波|桐谷遥|日野森雫|小豆泽心羽|心羽|初音未来|初音|巡音流歌|巡音|(?:^|[^a-z])(?:honami|haruka|shizuku|kohane|miku|luka|meiko|kaito)(?:[^a-z]|$)|(?:^|[\s/·，、])(?:遥|雫)(?:$|[\s/·，、])/i,
     profile: {
       restrained: false,
       temperament: 'gentle',
@@ -284,9 +289,8 @@ const CHARACTER_ACTING_RULES: Array<{
 
 /** 根据官方 PJSK 角色性格返回演戏基调（克制程度、气质与选表情/动作提示）。 */
 export function characterActingProfile(nameOrPath: string, roleHint = ''): CharacterActingProfile {
-  const hay = `${nameOrPath} ${roleHint}`
   for (const rule of CHARACTER_ACTING_RULES) {
-    if (rule.pattern.test(hay)) return rule.profile
+    if (rule.pattern.test(nameOrPath)) return rule.profile
   }
   if (/克制|冷静|寡言|内敛|沉默/.test(roleHint)) {
     return {

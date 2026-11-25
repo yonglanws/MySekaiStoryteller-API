@@ -503,6 +503,9 @@ test('prompt, personas, scenarioCues, and corpusExamples helpers return rich off
   assert.equal(mafuyuProfile.restrained, true)
   const emuProfile = characterActingProfile('凤笑梦')
   assert.equal(emuProfile.restrained, false)
+  assert.equal(characterActingProfile('小豆泽心羽 09kohane_normal').temperament, 'gentle')
+  assert.equal(characterActingProfile('白石杏 10an_normal').temperament, 'expressive')
+  assert.equal(characterActingProfile('镜音连 len_normal').temperament, 'playful')
 
   const cues = recommendScenarioCues('深夜下雨，瑞希推门走进画室端着热茶回忆过去', {
     isFlashback: true
