@@ -211,6 +211,10 @@ function pickCompatibleMotionFallback(
     surprise: [/surprise|tilthead|forward/i, /nod/i],
     shy: [/shy|blush|fidget|lookaway/i, /tilthead/i],
     smile: [/glad|happy|cheer|joy|relief/i, /nod|tilthead|greeting|playful/i],
+    gentle: [/relief|nod|tilthead|soft/i, /glad|greeting/i],
+    wry_smile: [/trouble|relief|sigh|tilthead/i, /nod|shy/i],
+    serious: [/forward|think|shakehead|nod/i, /serious|trouble/i],
+    thinking: [/think|tilthead|lookaway|trouble/i, /nod|forward/i],
     neutral: [/nod|tilthead|think|forward|relief/i]
   }
   const tiers = hintsByMood[mood] ?? hintsByMood.neutral
