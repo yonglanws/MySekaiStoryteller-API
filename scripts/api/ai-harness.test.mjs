@@ -489,13 +489,13 @@ test('LlmClient and StoryWriter surface finish_reason=length when output is trun
 
   // 1) Empty content + finish_reason=length
   replyPayload = { content: '', finish_reason: 'length' }
-  await assert.rejects(
-    client.chatJson([{ role: 'user', content: 'hi' }]),
-    /finish_reason=length/
-  )
+  await assert.rejects(client.chatJson([{ role: 'user', content: 'hi' }]), /finish_reason=length/)
 
   // 2) Reasoning prose with no JSON + finish_reason=length
-  replyPayload = { content: 'Let me think step by step about the dialogue...', finish_reason: 'length' }
+  replyPayload = {
+    content: 'Let me think step by step about the dialogue...',
+    finish_reason: 'length'
+  }
   await assert.rejects(
     client.chatJson([{ role: 'user', content: 'hi' }]),
     /no JSON value in model response \(finish_reason=length; output truncated at max_tokens=8192/
@@ -581,7 +581,7 @@ test('official script invariants stay in both prompt builders', () => {
   assert.match(singleText, /每句台词最多 1 个身体动作/, 'single prompt caps one action per line')
   assert.match(
     singleText,
-    /禁止同句里让说话者和听者在同一瞬间一起做身体动作/,
+    /禁止同句里让说话者和听者(?:在同一瞬间一起|同时)做身体动作/,
     'single prompt avoids simultaneous dual-actor motion'
   )
   assert.match(singleText, /槽位原地淡入/, 'single prompt fades in at the slot')
