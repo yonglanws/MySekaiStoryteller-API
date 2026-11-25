@@ -3,6 +3,28 @@ import type { StoryData } from '../../common/types/Story'
 import { isJapaneseSpeechText } from '../../common/tts/speechText'
 import { enforceIrodoriEmojiBudget } from '../../common/tts/irodori'
 
+/** 零宽字符（ZWSP / ZWNJ / Word Joiner / BOM；保留 \u200D ZWJ 以免破坏 😮‍💨 等 Irodori 组合 Emoji） */
+const ZERO_WIDTH_CHARS_RE = /[\u200B\u200C\u2060\uFEFF]/gu
+
+/** 剥离文本中的零宽字符（\u200b、\u200c、\u2060、\ufeff），保留 Irodori Emoji 与 ZWJ。 */
+export function stripZeroWidthChars(text: string): string {
+  return String(text ?? '').replace(ZERO_WIDTH_CHARS_RE, '')
+}
+
+/** 检测文本中是否混入了零宽字符（\u200b、\u200c、\u2060、\ufeff）。 */
+export function hasZeroWidthChars(text: string): boolean {
+  return /[\u200B\u200C\u2060\uFEFF]/u.test(String(text ?? ''))
+}
+
+/**
+ * 清洗发往 IrodoriTTS 的日文台词：
+ * 1. 剥离零宽字符（\u200b、\ufeff 等，保留 \u200D 以兼容组合 Emoji）；
+ * 2. 保留 Irodori 情绪表达 Emoji 并按安全白名单与单句预算（<=2）裁剪。
+ */
+export function cleanTtsText(text: string): string {
+  return enforceIrodoriEmojiBudget(stripZeroWidthChars(text), 2)
+}
+
 /**
  * IrodoriTTS 只接受日文。宿主在导出前必须把每条 Talk 的 ttsText 补成日文，
  * 不能像以前那样在缺失时把中文 content 直接送去合成。
@@ -137,6 +159,18 @@ export async function ensureJapaneseTtsText(
   const retries = Math.max(0, Math.floor(options.retries ?? 1))
   let translated = 0
 
+  // 预先清洗已有 Talk 的 content 与 ttsText 中的零宽字符（保留 Irodori Emoji）
+  for (const snippet of story.snippets) {
+    if (snippet.type !== 'Talk') continue
+    const data = snippet.data as { content?: string; ttsText?: string }
+    if (typeof data.content === 'string' && hasZeroWidthChars(data.content)) {
+      data.content = stripZeroWidthChars(data.content)
+    }
+    if (typeof data.ttsText === 'string' && data.ttsText && hasZeroWidthChars(data.ttsText)) {
+      data.ttsText = stripZeroWidthChars(data.ttsText)
+    }
+  }
+
   // 第一轮按正常批量翻译；仍缺时再补翻，批量缩小以降低“一条坏掉整块丢弃”的影响。
   for (let attempt = 0; attempt <= retries; attempt++) {
     const targets = collectTtsTargets(story)
@@ -171,7 +205,7 @@ export async function ensureJapaneseTtsText(
         }
         for (let index = 0; index < chunk.length; index++) {
           const rawValue = output[index]
-          const value = typeof rawValue === 'string' ? enforceIrodoriEmojiBudget(rawValue, 2) : ''
+          const value = typeof rawValue === 'string' ? cleanTtsText(rawValue) : ''
           if (!value || !isJapaneseText(value)) {
             logger.warn(`[TTS] snippets[${chunk[index].snippetIndex}] 翻译结果不是日文，已忽略`)
             continue

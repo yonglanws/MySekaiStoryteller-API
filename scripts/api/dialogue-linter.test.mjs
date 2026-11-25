@@ -301,7 +301,8 @@ test('buildDialoguePolishPrompt carries the user prompt, persona voice baseline,
 import {
   hasSpokenStageDirectionLeak,
   isStageDirectionParenthetical,
-  repairSpokenStageDirections
+  repairSpokenStageDirections,
+  sanitizeDialogueContent
 } from '../../out-host/host/ai/dialogueLinter.js'
 
 test('isStageDirectionParenthetical and repairSpokenStageDirections strip expanded physical cues while keeping inner monologues', () => {
@@ -328,4 +329,16 @@ test('isStageDirectionParenthetical and repairSpokenStageDirections strip expand
   }
   assert.equal(isStageDirectionParenthetical('嘴角上扬'), true)
   assert.equal(isStageDirectionParenthetical('……原来如此'), false)
+})
+
+test('lintDialogueFidelity and sanitizers detect and strip zero-width characters cleanly', () => {
+  const dirty = '（只要多停顿半秒的措辞……\u200b\n我全都会察觉到的。\ufeff）'
+  const report = lintDialogueFidelity({
+    title: '零宽字符测试',
+    lines: [{ id: 'l1', speaker: '瑞希', content: dirty }]
+  })
+  assert.ok(report.issues.some((i) => i.code === 'zero_width_char' && i.lineId === 'l1'))
+  assert.equal(report.shouldPolish, true)
+  assert.equal(sanitizeDialogueContent(dirty), '（只要多停顿半秒的措辞……\n我全都会察觉到的。）')
+  assert.equal(repairSpokenStageDirections('（微笑）没关系\u200b♪'), '没关系♪')
 })

@@ -16,7 +16,10 @@ const {
   hasTranslationContent,
   collectTtsTargets,
   ensureJapaneseTtsText,
-  TtsTextTranslationError
+  TtsTextTranslationError,
+  stripZeroWidthChars,
+  hasZeroWidthChars,
+  cleanTtsText
 } = require('../../out-host/host/ai/ttsText.js')
 const {
   selectSpeechText,
@@ -76,7 +79,10 @@ test('collectTtsTargets finds empty and Chinese ttsText but keeps Japanese', () 
 })
 
 test('official corpus with kanji-only ttsText passes the preflight unchanged', async () => {
-  const localFile = new URL('../../resources/stories/event_145_08.sekai-story.json', import.meta.url)
+  const localFile = new URL(
+    '../../resources/stories/event_145_08.sekai-story.json',
+    import.meta.url
+  )
   const fallbackRoot = process.env.MSS_RESOURCE_DIR?.trim()
   const filePath = existsSync(localFile)
     ? localFile
@@ -270,4 +276,28 @@ test('Irodori selection never falls back to Chinese content', () => {
   assert.equal(selectSpeechText('irodori', '你好', '你好'), null)
   assert.equal(selectSpeechText('gpt-sovits', '', '你好'), '你好')
   assert.equal(selectSpeechText('gpt-sovits', 'こんにちは', '你好'), 'こんにちは')
+})
+
+test('zero-width chars are stripped while Irodori TTS emojis (including ZWJ 😮‍💨) are preserved', async () => {
+  assert.equal(hasZeroWidthChars('（只要多停顿半秒……\u200b\n我全都会察觉到的。）'), true)
+  assert.equal(hasZeroWidthChars('😮‍💨はぁ……'), false, 'ZWJ inside 😮‍💨 must not be flagged as leak')
+  assert.equal(stripZeroWidthChars('\ufeff😮‍💨はぁ……\u200b'), '😮‍💨はぁ……')
+  assert.equal(cleanTtsText('\u200b🌬️はぁ……\ufeff🥺'), '🌬️はぁ……🥺')
+
+  const story = {
+    models: [],
+    images: [],
+    snippets: [
+      talk('只要多停顿半秒……\u200b\n我全都会察觉到的。', ''),
+      talk('叹气', '\u200b😮‍💨はぁ……そうだよね。')
+    ]
+  }
+  await ensureJapaneseTtsText(
+    story,
+    async () => ['\u200b🥺ほんの少し言葉に詰まる間も……分かっちゃうんだ。\ufeff'],
+    { info() {}, warn() {} }
+  )
+  assert.equal(story.snippets[0].data.content.includes('\u200b'), false)
+  assert.equal(story.snippets[0].data.ttsText, '🥺ほんの少し言葉に詰まる間も……分かっちゃうんだ。')
+  assert.equal(story.snippets[1].data.ttsText, '😮‍💨はぁ……そうだよね。')
 })

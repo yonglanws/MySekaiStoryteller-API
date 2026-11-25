@@ -31,10 +31,13 @@ import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/
 import { hasSpokenStageDirectionLeak } from './dialogueLinter'
 import {
   evaluateActingLineMatch,
+  isFacialCompatibleWithLine,
   isSpecialOrStandingMotion,
+  recommendActingForLine,
   type DramaticContextMood
 } from './facialSemantics'
 import { characterActingProfile } from './personas'
+import { hasZeroWidthChars, stripZeroWidthChars } from './ttsText'
 
 type JsonRecord = Record<string, unknown>
 
@@ -57,6 +60,7 @@ export interface OfficialLintMetrics {
   invalidCatalogAnimations: string[]
   inPlaceAppearShare: number
   stageViolationCount: number
+  duplicateBgmCount: number
 }
 
 export interface OfficialLintReport {
@@ -182,7 +186,16 @@ export function lintOfficialStory(
   let appearMotionClashCount = 0
   let missingWindowCloseBeforeTransitionCount = 0
   let stageViolationCount = 0
+  let duplicateBgmCount = 0
+  let seCount = 0
   const invalidCatalogAnimations: string[] = []
+
+  const rawStoryBgm = (story as JsonRecord).bgm
+  const initialBgmList = Array.isArray(rawStoryBgm) ? rawStoryBgm : []
+  let currentBgmFile =
+    initialBgmList.length > 0 && typeof initialBgmList[0] === 'string'
+      ? initialBgmList[0].trim().toLowerCase()
+      : ''
 
   const visible = new Map<number, { side: string; offset: number }>()
   let flashbackOpen = false
@@ -352,6 +365,23 @@ export function lintOfficialStory(
       cameraDirty = Math.abs(num(data.scale, 1) - 1) > 0.01
     } else if (kind === 'CameraMove') {
       cameraDirty = Math.abs(num(data.x, 0)) > 0.5 || Math.abs(num(data.y, 0)) > 0.5
+    } else if (kind === 'ChangeBgm') {
+      if (data.stop === true) {
+        currentBgmFile = ''
+      } else {
+        const bgmFile = str(data.file).trim()
+        const normalized = bgmFile.toLowerCase()
+        if (normalized) {
+          if (normalized === currentBgmFile) {
+            duplicateBgmCount += 1
+            issues.push(`snippets[${i}] 重复触发相同 BGM（${bgmFile}），无需连续重播同一曲目`)
+          } else {
+            currentBgmFile = normalized
+          }
+        }
+      }
+    } else if (kind === 'Sound' || kind === 'PlaySe') {
+      seCount += 1
     }
 
     // 实时 CatalogView 动作/表情有效性检查
@@ -402,6 +432,11 @@ export function lintOfficialStory(
     issues.push(`存在未收录的动作/表情：${invalidCatalogAnimations.slice(0, 5).join(', ')}`)
   }
   if (stageViolationCount > 0) issues.push(`舞台槽位/人数违规 ${stageViolationCount} 处`)
+  if (talkCount >= 15 && seCount === 0) {
+    warnings.push(
+      '长段剧情全程未配置任何 Sound/PlaySe 音效，建议在脚步/开门/提示音等物理节拍处适量点缀'
+    )
+  }
 
   return {
     passed: issues.length === 0,
@@ -417,7 +452,8 @@ export function lintOfficialStory(
       invalidCatalogAnimations,
       inPlaceAppearShare:
         appearCount > 0 ? Number((inPlaceAppearCount / appearCount).toFixed(3)) : 1,
-      stageViolationCount
+      stageViolationCount,
+      duplicateBgmCount
     }
   }
 }
@@ -469,6 +505,10 @@ export function enforceOfficialStoryInvariants(
   let cameraZoomed = false
   let cameraMoved = false
   const activeShaders = new Set<number>()
+  const initBgm = Array.isArray(story.bgm) ? story.bgm : []
+  let currentBgmFile =
+    initBgm.length > 0 && typeof initBgm[0] === 'string' ? initBgm[0].trim().toLowerCase() : ''
+  let dedupedBgm = 0
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
@@ -583,9 +623,25 @@ export function enforceOfficialStoryInvariants(
       cameraZoomed = Math.abs(num(data.scale, 1) - 1) > 0.01
     } else if (kind === 'CameraMove') {
       cameraMoved = Math.abs(num(data.x, 0)) > 0.5 || Math.abs(num(data.y, 0)) > 0.5
+    } else if (kind === 'ChangeBgm') {
+      if (data.stop === true) {
+        currentBgmFile = ''
+      } else {
+        const normalized = str(data.file).trim().toLowerCase()
+        if (normalized && normalized === currentBgmFile) {
+          snippets.splice(i, 1)
+          dedupedBgm += 1
+          i -= 1
+          continue
+        }
+        if (normalized) currentBgmFile = normalized
+      }
     }
   }
 
+  if (dedupedBgm > 0) {
+    warn(`[Linter] 已移除 ${dedupedBgm} 条重复连续的 ChangeBgm 指令`)
+  }
   if (dedupedClashes > 0) {
     warn(`[Linter] 已去重 ${dedupedClashes} 处 LayoutAppear 后 <0.4s 的重叠起手动作`)
   }
@@ -677,11 +733,14 @@ export function enforceOfficialStoryInvariants(
       if (!isRecord(s) || str(s.type) !== 'Talk' || !isRecord(s.data)) continue
       const data = s.data
       talkDatas.push(data)
+      if (typeof data.content === 'string' && hasZeroWidthChars(data.content)) {
+        data.content = stripZeroWidthChars(data.content)
+      }
       if (typeof data.ttsCaption === 'string' && data.ttsCaption) {
         data.ttsCaption = sanitizeIrodoriCaption(data.ttsCaption)
       }
       if (typeof data.ttsText === 'string' && data.ttsText) {
-        data.ttsText = enforceIrodoriEmojiBudget(data.ttsText, 2)
+        data.ttsText = enforceIrodoriEmojiBudget(stripZeroWidthChars(data.ttsText), 2)
       }
       if (typeof data.ttsSpeed === 'number' && Number.isFinite(data.ttsSpeed)) {
         const special = data.ttsSpecialScene === true
@@ -716,6 +775,7 @@ export interface ActingFidelityDiagnostic {
   snippetIndex: number
   lineNumber: number
   modelId: number
+  listenerModelId?: number
   speaker: string
   content: string
   emotion: string
@@ -741,7 +801,50 @@ export interface ActingFidelityReport {
   motionMismatchCount: number
   simultaneousCollisionCount: number
   stageDirectionLeakCount: number
+  listenerFrozenCount: number
+  duplicateBgmCount: number
+  zeroWidthCharCount: number
   officialReport: OfficialLintReport
+}
+
+function findSurroundingTalkContext(
+  snippets: JsonRecord[],
+  index: number,
+  modelId: number,
+  preferNext: boolean
+): { content: string; emotion: string; modelId: number } | null {
+  let prevAny: { content: string; emotion: string; modelId: number } | null = null
+  let prevSame: { content: string; emotion: string; modelId: number } | null = null
+  for (let j = index - 1; j >= Math.max(0, index - 3); j--) {
+    const s = snippets[j]
+    if (str(s?.type) !== 'Talk' || !isRecord(s.data)) continue
+    const entry = {
+      content: str(s.data.content),
+      emotion: str(s.data.emotion),
+      modelId: num(s.data.modelId, -1)
+    }
+    if (!prevAny) prevAny = entry
+    if (entry.modelId === modelId && !prevSame) prevSame = entry
+  }
+
+  let nextAny: { content: string; emotion: string; modelId: number } | null = null
+  let nextSame: { content: string; emotion: string; modelId: number } | null = null
+  for (let j = index + 1; j <= Math.min(snippets.length - 1, index + 4); j++) {
+    const s = snippets[j]
+    if (str(s?.type) !== 'Talk' || !isRecord(s.data)) continue
+    const entry = {
+      content: str(s.data.content),
+      emotion: str(s.data.emotion),
+      modelId: num(s.data.modelId, -1)
+    }
+    if (!nextAny) nextAny = entry
+    if (entry.modelId === modelId && !nextSame) nextSame = entry
+  }
+
+  if (preferNext) {
+    return nextSame ?? nextAny ?? prevSame ?? prevAny
+  }
+  return prevSame ?? nextSame ?? prevAny ?? nextAny
 }
 
 /**
@@ -809,17 +912,90 @@ export function auditStoryActingAndFidelity(
   let motionMismatchCount = 0
   let simultaneousCollisionCount = 0
   let stageDirectionLeakCount = 0
+  let listenerFrozenCount = 0
+  let duplicateBgmCount = 0
+  let zeroWidthCharCount = 0
+
+  const onStage = new Set<number>()
+  interface ListenerTrackState {
+    silentLinesSinceUpdate: number
+    consecutiveOtherSpeakerLines: number
+    lastOtherSpeakerId: number
+  }
+  const listenerState = new Map<number, ListenerTrackState>()
+  const resetListenerState = (id: number): void => {
+    listenerState.set(id, {
+      silentLinesSinceUpdate: 0,
+      consecutiveOtherSpeakerLines: 0,
+      lastOtherSpeakerId: -1
+    })
+  }
+  const rawStoryBgm = (story as JsonRecord).bgm
+  const initialBgmList = Array.isArray(rawStoryBgm) ? rawStoryBgm : []
+  let currentBgmFile =
+    initialBgmList.length > 0 && typeof initialBgmList[0] === 'string'
+      ? initialBgmList[0].trim().toLowerCase()
+      : ''
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
     const kind = str(snippet.type)
     const data = isRecord(snippet.data) ? snippet.data : {}
 
+    if (kind === 'ChangeBgm') {
+      if (data.stop === true) {
+        currentBgmFile = ''
+      } else {
+        const bgmFile = str(data.file).trim()
+        const normalized = bgmFile.toLowerCase()
+        if (normalized) {
+          if (normalized === currentBgmFile) {
+            duplicateBgmCount += 1
+            diagnostics.push({
+              snippetIndex: i,
+              lineNumber: talkCount,
+              modelId: -1,
+              speaker: '',
+              content: '',
+              emotion: '',
+              facial: '',
+              motion: '',
+              inferredMood: 'neutral',
+              field: 'staging',
+              code: 'duplicate_bgm',
+              severity: 'medium',
+              message: `snippets[${i}] 连续重复播放相同 BGM（${bgmFile}），请移除冗余 ChangeBgm`,
+              recommendedFacials: [],
+              recommendedMotions: []
+            })
+          } else {
+            currentBgmFile = normalized
+          }
+        }
+      }
+      continue
+    }
+
+    if (kind === 'LayoutClear') {
+      const mid = num(data.modelId, -1)
+      if (mid !== -1) {
+        onStage.delete(mid)
+        listenerState.delete(mid)
+      }
+      continue
+    }
+
     if (kind === 'LayoutAppear' || kind === 'Move') {
       const mid = num(data.modelId, -1)
       const motion = str(data.motion).trim()
       const facial = str(data.facial).trim()
       const meta = modelMeta.get(mid)
+      if (kind === 'LayoutAppear' && mid !== -1) {
+        onStage.add(mid)
+        resetListenerState(mid)
+      } else if (kind === 'Move' && mid !== -1 && (motion || facial)) {
+        resetListenerState(mid)
+      }
       if (kind === 'Move' && motion) {
         bodyMotionCounts.set(mid, (bodyMotionCounts.get(mid) ?? 0) + 1)
       }
@@ -852,6 +1028,51 @@ export function auditStoryActingAndFidelity(
           recommendedMotions: evalRes.recommendedMotions
         })
       }
+      if (facial) {
+        const surrounding = findSurroundingTalkContext(snippets, i, mid, kind === 'LayoutAppear')
+        if (surrounding) {
+          const fc = isFacialCompatibleWithLine({
+            facial,
+            modelPath: meta?.path,
+            emotion: surrounding.emotion,
+            content: surrounding.content,
+            prevTense,
+            isMonologue: false,
+            isListener: false,
+            restrainedRole: meta?.restrained
+          })
+          if (!fc.ok) {
+            const rec = recommendActingForLine({
+              facials: meta?.facials ?? [],
+              motions: meta?.motions ?? [],
+              modelPath: meta?.path,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              prevTense,
+              restrainedRole: meta?.restrained,
+              prevFacial: getTracker(mid).prevFacial
+            })
+            facialMismatchCount += 1
+            diagnostics.push({
+              snippetIndex: i,
+              lineNumber: talkCount,
+              modelId: mid,
+              speaker: meta?.name ?? `model${mid}`,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              facial,
+              motion,
+              inferredMood: rec.mood,
+              field: 'facial',
+              code: fc.reason ?? 'stage_facial_mood_mismatch',
+              severity: 'high',
+              message: `${kind} 表情 ${facial} 与前后「${rec.mood}」情绪语境冲突`,
+              recommendedFacials: rec.facials,
+              recommendedMotions: rec.motions
+            })
+          }
+        }
+      }
       if (facial) getTracker(mid).prevFacial = facial
       if (motion) getTracker(mid).prevMotion = motion
       continue
@@ -862,12 +1083,18 @@ export function auditStoryActingAndFidelity(
       const actions = Array.isArray(data.actions) ? (data.actions as JsonRecord[]) : []
       if (str(data.motion).trim()) {
         bodyMotionCounts.set(mid, (bodyMotionCounts.get(mid) ?? 0) + 1)
+        if (mid !== -1) resetListenerState(mid)
+      } else if (str(data.facial).trim() && mid !== -1) {
+        resetListenerState(mid)
       }
       for (const act of actions) {
         if (!isRecord(act)) continue
         const aid = num(act.modelId, mid)
         if (str(act.motion).trim()) {
           bodyMotionCounts.set(aid, (bodyMotionCounts.get(aid) ?? 0) + 1)
+        }
+        if ((str(act.motion).trim() || str(act.facial).trim()) && aid !== -1) {
+          resetListenerState(aid)
         }
       }
       continue
@@ -879,6 +1106,48 @@ export function auditStoryActingAndFidelity(
     const speakerName = str(data.speaker, modelMeta.get(speakerId)?.name ?? '')
     const content = str(data.content)
     const emotion = str(data.emotion)
+    const ttsText = str(data.ttsText)
+
+    if (hasZeroWidthChars(content)) {
+      zeroWidthCharCount += 1
+      diagnostics.push({
+        snippetIndex: i,
+        lineNumber: talkCount,
+        modelId: speakerId,
+        speaker: speakerName,
+        content,
+        emotion,
+        facial: '',
+        motion: '',
+        inferredMood: 'neutral',
+        field: 'dialogue',
+        code: 'content_zero_width_leak',
+        severity: 'medium',
+        message: '台词 content 混入了零宽字符（如 \\u200b/\\ufeff），请清理干净',
+        recommendedFacials: [],
+        recommendedMotions: []
+      })
+    }
+    if (hasZeroWidthChars(ttsText)) {
+      zeroWidthCharCount += 1
+      diagnostics.push({
+        snippetIndex: i,
+        lineNumber: talkCount,
+        modelId: speakerId,
+        speaker: speakerName,
+        content,
+        emotion,
+        facial: '',
+        motion: '',
+        inferredMood: 'neutral',
+        field: 'dialogue',
+        code: 'tts_zero_width_leak',
+        severity: 'medium',
+        message: '台词 ttsText 混入了零宽字符（如 \\u200b/\\ufeff），请清理（保留 Irodori Emoji）',
+        recommendedFacials: [],
+        recommendedMotions: []
+      })
+    }
 
     if (hasSpokenStageDirectionLeak(content)) {
       stageDirectionLeakCount += 1
@@ -1027,6 +1296,80 @@ export function auditStoryActingAndFidelity(
       }
     }
 
+    // 审计在场听者是否长时间僵立不动（listener_frozen）
+    const updatedModelIds = new Set<number>()
+    for (const act of actions) {
+      if (act.modelId !== -1 && (act.facial || act.motion)) {
+        updatedModelIds.add(act.modelId)
+      }
+    }
+    if (speakerId !== -1) {
+      resetListenerState(speakerId)
+    }
+    for (const listenerId of onStage) {
+      if (listenerId === speakerId || listenerId === -1) continue
+      if (updatedModelIds.has(listenerId)) {
+        resetListenerState(listenerId)
+        continue
+      }
+      const st = listenerState.get(listenerId) ?? {
+        silentLinesSinceUpdate: 0,
+        consecutiveOtherSpeakerLines: 0,
+        lastOtherSpeakerId: -1
+      }
+      st.silentLinesSinceUpdate += 1
+      if (speakerId !== -1) {
+        if (st.lastOtherSpeakerId === speakerId) {
+          st.consecutiveOtherSpeakerLines += 1
+        } else {
+          st.lastOtherSpeakerId = speakerId
+          st.consecutiveOtherSpeakerLines = 1
+        }
+      }
+      listenerState.set(listenerId, st)
+
+      if (st.consecutiveOtherSpeakerLines >= 2 || st.silentLinesSinceUpdate >= 3) {
+        listenerFrozenCount += 1
+        const lMeta = modelMeta.get(listenerId)
+        const lTracker = getTracker(listenerId)
+        const lRec = recommendActingForLine({
+          facials: lMeta?.facials ?? [],
+          motions: lMeta?.motions ?? [],
+          modelPath: lMeta?.path,
+          content,
+          emotion,
+          prevContent,
+          prevEmotion,
+          prevTense,
+          isListener: true,
+          restrainedRole: lMeta?.restrained,
+          prevFacial: lTracker.prevFacial,
+          prevMotion: lTracker.prevMotion
+        })
+        const frozenSpan = Math.max(st.consecutiveOtherSpeakerLines, st.silentLinesSinceUpdate)
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkCount,
+          modelId: listenerId,
+          listenerModelId: listenerId,
+          speaker: `${lMeta?.name ?? `model${listenerId}`}(听者)`,
+          content,
+          emotion,
+          facial: '',
+          motion: '',
+          inferredMood: lRec.mood,
+          field: 'staging',
+          code: 'listener_frozen',
+          severity: 'high',
+          message: `在场听者 ${lMeta?.name ?? listenerId} 已连续 ${frozenSpan} 句无任何表情/动作反应，请补充听者反应（可仅切 facial，或将听者身体动作错拍放在 at: 0.5..0.85，避免与说话者 at: 0 撞拍）`,
+          recommendedFacials: lRec.facials,
+          recommendedMotions: lRec.motions
+        })
+        st.silentLinesSinceUpdate = 0
+        st.consecutiveOtherSpeakerLines = 0
+      }
+    }
+
     prevContent = content
     prevEmotion = emotion
     prevTense = emotion === '生气' || emotion === '伤心' || emotion === '害怕'
@@ -1084,6 +1427,9 @@ export function auditStoryActingAndFidelity(
     motionMismatchCount,
     simultaneousCollisionCount,
     stageDirectionLeakCount,
+    listenerFrozenCount,
+    duplicateBgmCount,
+    zeroWidthCharCount,
     officialReport
   }
 }

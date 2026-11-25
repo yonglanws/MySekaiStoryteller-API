@@ -1,4 +1,5 @@
 import type { StagedCastPlan, StagedDialogue } from './staged'
+import { hasZeroWidthChars, stripZeroWidthChars } from './ttsText'
 
 export type DialogueLintCode =
   | 'therapy_cliche'
@@ -11,6 +12,7 @@ export type DialogueLintCode =
   | 'monologue_overload'
   | 'speaker_imbalance'
   | 'repetitive_opener'
+  | 'zero_width_char'
 
 export interface DialogueLintIssue {
   lineId: string
@@ -99,11 +101,18 @@ export function hasSpokenStageDirectionLeak(content: string): boolean {
   return false
 }
 
-/** 清理台词中的括号动作提示（如 (微笑)、（挠头）），同时保留真正的心里话括号独白。 */
+/** 清理台词中的零宽字符（\u200b/\ufeff 等），保留换行与常规标点。 */
+export function sanitizeDialogueContent(content: string): string {
+  if (!content) return content
+  return stripZeroWidthChars(content)
+}
+
+/** 清理台词中的括号动作提示（如 (微笑)、（挠头））与零宽字符，同时保留真正的心里话括号独白。 */
 export function repairSpokenStageDirections(content: string): string {
   if (!content) return content
-  let changed = false
-  const replaced = content.replace(/[（(]([^（）()]+)[）)]/g, (full, inner: string) => {
+  const withoutZwc = stripZeroWidthChars(content)
+  let changed = withoutZwc !== content
+  const replaced = withoutZwc.replace(/[（(]([^（）()]+)[）)]/g, (full, inner: string) => {
     if (!isStageDirectionParenthetical(inner)) return full
     changed = true
     return ''
@@ -383,6 +392,14 @@ export function lintDialogueFidelity(
         code: 'stage_direction_leak',
         severity: 'high',
         message: '台词内夹带了动作/神态描写，请删除括号动作或第三人称叙述，只保留说出口的话'
+      })
+    }
+    if (hasZeroWidthChars(content)) {
+      issues.push({
+        lineId: line.id,
+        code: 'zero_width_char',
+        severity: 'high',
+        message: '台词内混入了零宽字符（如 \\u200b/\\ufeff），请清理为纯文本对白'
       })
     }
   }

@@ -11,10 +11,15 @@ import {
   isFacialCompatibleWithLine,
   isMotionCompatibleWithLine,
   isSpecialOrStandingMotion,
+  pickMoodMatchedFacial,
   pickMoodMatchedMotion,
   recommendActingForLine
 } from '../../out-host/host/ai/facialSemantics.js'
-import { auditStoryActingAndFidelity } from '../../out-host/host/ai/officialLinter.js'
+import {
+  auditStoryActingAndFidelity,
+  enforceOfficialStoryInvariants,
+  lintOfficialStory
+} from '../../out-host/host/ai/officialLinter.js'
 import { characterActingProfile } from '../../out-host/host/ai/personas.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { recommendScenarioCues } from '../../out-host/host/ai/scenarioCues.js'
@@ -525,3 +530,280 @@ test('prompt, personas, scenarioCues, and corpusExamples helpers return rich off
   assert.match(guidelines, /FlashbackOut/)
   assert.match(guidelines, /wry_smile/)
 })
+
+test('despair, monologue, and tearful regret lines reject surprise/notice/angry facials while genuine shock/anger pass', () => {
+  const view = makeActingView()
+  const mizuki = view.modelById(1)
+
+  // 绝望/伤心独白禁用 surprise/notice/shock
+  for (const facial of ['face_surprise_01', 'face_notice_01', 'face_shock_01']) {
+    const res1 = isFacialCompatibleWithLine({
+      facial,
+      emotion: '伤心',
+      content: '（那种因为顾虑才滋生出来的“温柔”……）'
+    })
+    assert.equal(res1.ok, false, `expected ${facial} to fail on despair monologue`)
+    assert.equal(res1.reason, 'surprise_on_sad_or_monologue')
+
+    const res2 = isFacialCompatibleWithLine({
+      facial,
+      emotion: '伤心',
+      content: '我就觉得快要窒息了。我根本受不了那个样子……！'
+    })
+    assert.equal(res2.ok, false, `expected ${facial} to fail on despair exclamation`)
+    assert.equal(res2.reason, 'surprise_on_sad_or_monologue')
+
+    const res3 = isFacialCompatibleWithLine({
+      facial,
+      emotion: '伤心',
+      content: '可我还是……没办法面对这样的现实。'
+    })
+    assert.equal(res3.ok, false, `expected ${facial} to fail on sad resignation`)
+    assert.equal(res3.reason, 'surprise_on_sad_or_monologue')
+  }
+
+  // 普通思索独白也禁止误挂 surprise/notice
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_notice_01',
+      content: '（……如果当时能更坦率一点就好了）',
+      isMonologue: true
+    }).ok,
+    false
+  )
+
+  // 真正吃惊的句子仍允许 surprise/shock
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_surprise_01',
+      emotion: '惊讶',
+      content: '咦……？为什么是你在道歉啊——'
+    }).ok,
+    true
+  )
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_shock_01',
+      content: '（……原来真相是这样？！）',
+      isMonologue: true
+    }).ok,
+    true
+  )
+
+  // 含泪自责/懊悔禁止误挂 face_angry_01
+  const regretRes = isFacialCompatibleWithLine({
+    facial: 'face_angry_01',
+    emotion: '伤心',
+    content: '为什么我什么都没能说出口啊……！！'
+  })
+  assert.equal(regretRes.ok, false)
+  assert.equal(regretRes.reason, 'angry_on_sad_or_regret')
+
+  // 明确生气台词仍允许 face_angry_01
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_angry_01',
+      emotion: '生气',
+      content: '那你干嘛要跑啊！'
+    }).ok,
+    true
+  )
+
+  // pickMoodMatchedFacial 支持 DramaticContextMood 且绝不回退到 surprise/angry
+  const pickedSad = pickMoodMatchedFacial(
+    ['face_surprise_01', 'face_angry_01', 'face_sad_01', 'face_trouble_01'],
+    'sad_regret'
+  )
+  assert.equal(pickedSad, 'face_sad_01')
+
+  const evalDespair = evaluateActingLineMatch({
+    facial: 'face_notice_01',
+    facials: mizuki.facials,
+    motions: mizuki.motions,
+    content: '我就觉得快要窒息了。我根本受不了那个样子……！',
+    emotion: '伤心'
+  })
+  assert.equal(evalDespair.ok, false)
+  assert.ok(evalDespair.issues.some((i) => i.code === 'surprise_on_sad_or_monologue'))
+  assert.ok(!evalDespair.recommendedFacials.includes('face_surprise_01'))
+})
+
+test('auditStoryActingAndFidelity catches listener_frozen, Move/LayoutAppear mood clashes, duplicate ChangeBgm, and zero-width leaks', () => {
+  const view = makeActingView()
+  const story = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: 'w-normal-tilthead01',
+          facial: 'face_sad_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: 'w-normal-nod01',
+          facial: 'face_surprise_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'cloud/bgm00039.mp3', stop: false }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '可我还是……\u200b没办法面对这样的现实。',
+          ttsText: '🥺でもボクはやっぱり……向き合えないんだ。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-sigh01', facial: 'face_sad_01' }]
+        }
+      },
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'cloud/bgm00039.mp3', stop: false }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '我就觉得快要窒息了。我根本受不了那个样子……！',
+          ttsText: '😭息が詰まりそうになるんだよ……！',
+          emotion: '伤心',
+          modelId: 1,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-trouble01', facial: 'face_trouble_01' }]
+        }
+      },
+      {
+        type: 'Move',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 40 },
+          motion: '',
+          facial: 'face_surprise_01',
+          moveSpeed: 'Normal'
+        }
+      }
+    ]
+  }
+
+  const report = auditStoryActingAndFidelity(story, view)
+  assert.equal(report.passed, false)
+  assert.ok(report.listenerFrozenCount >= 1)
+  const frozen = report.diagnostics.find((d) => d.code === 'listener_frozen')
+  assert.ok(frozen)
+  assert.equal(frozen.listenerModelId, 2)
+  assert.equal(frozen.snippetIndex, 6)
+  assert.match(frozen.message, /0\.5\.\.0\.85/)
+  assert.ok(frozen.recommendedFacials.length > 0)
+  assert.ok(frozen.recommendedMotions.length > 0)
+
+  assert.equal(report.duplicateBgmCount, 1)
+  assert.equal(report.officialReport.metrics.duplicateBgmCount, 1)
+  assert.equal(report.zeroWidthCharCount, 1)
+  // LayoutAppear (idx 2) and Move (idx 7) both had face_surprise_01 in sad context
+  assert.ok(report.diagnostics.some((d) => d.snippetIndex === 2 && d.field === 'facial'))
+  assert.ok(report.diagnostics.some((d) => d.snippetIndex === 7 && d.field === 'facial'))
+
+  // Adding a staggered listener reaction clears listener_frozen without collision
+  story.snippets[6].data.actions.push({
+    at: 0.65,
+    modelId: 2,
+    motion: 'w-normal-sad01',
+    facial: 'face_darksad_01'
+  })
+  const afterStagger = auditStoryActingAndFidelity(story, view)
+  assert.equal(afterStagger.listenerFrozenCount, 0)
+  assert.equal(afterStagger.simultaneousCollisionCount, 0)
+
+  // enforceOfficialStoryInvariants removes duplicate ChangeBgm & strips \u200b while keeping Irodori emojis
+  const warnings = []
+  enforceOfficialStoryInvariants(story, view, (m) => warnings.push(m))
+  assert.equal(lintOfficialStory(story, view).metrics.duplicateBgmCount, 0)
+  assert.equal(story.snippets.filter((s) => s.type === 'ChangeBgm').length, 1)
+  const talkWithZwc = story.snippets.find((s) => s.type === 'Talk')
+  assert.equal(talkWithZwc.data.content.includes('\u200b'), false)
+  assert.ok(talkWithZwc.data.ttsText.includes('🥺'), 'Irodori emoji in ttsText must be preserved')
+})
+
+const CHOF3Y_PATH =
+  'D:/Users/桌面/mzkbot/MySekaiStoryteller/apifile/script-1795627702100-chof3y.json'
+test(
+  'regression: auditStoryActingAndFidelity catches all real bugs in apifile/script-1795627702100-chof3y.json',
+  { skip: !fs.existsSync(CHOF3Y_PATH) && 'chof3y regression fixture not present' },
+  () => {
+    const story = JSON.parse(fs.readFileSync(CHOF3Y_PATH, 'utf8'))
+    const report = auditStoryActingAndFidelity(story)
+    assert.equal(report.passed, false)
+
+    // 1. Expression mismatches: despair surprise/notice, Move surprise, LayoutAppear shock, tearful regret angry
+    const facialByIdx = new Map(
+      report.diagnostics.filter((d) => d.field === 'facial').map((d) => [d.snippetIndex, d])
+    )
+    assert.equal(facialByIdx.get(39)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(44)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(45)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(46)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(47)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(48)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(55)?.code, 'surprise_on_sad_or_monologue')
+    assert.equal(facialByIdx.get(63)?.code, 'angry_on_sad_or_regret')
+
+    // 2. Listener frozen across consecutive speaker stretches
+    assert.ok(
+      report.listenerFrozenCount >= 10,
+      `expected >=10 listener_frozen, got ${report.listenerFrozenCount}`
+    )
+
+    // 3. Duplicate consecutive ChangeBgm (snippet 24) & missing SE warning
+    assert.equal(report.duplicateBgmCount, 1)
+    assert.ok(report.diagnostics.some((d) => d.code === 'duplicate_bgm' && d.snippetIndex === 24))
+    assert.ok(report.officialReport.warnings.some((w) => w.includes('Sound/PlaySe')))
+
+    // 4. Zero-width chars in content (snippets 42 & 43), while Irodori emojis in ttsText are NOT flagged
+    assert.equal(report.zeroWidthCharCount, 2)
+    assert.ok(
+      report.diagnostics.some((d) => d.code === 'content_zero_width_leak' && d.snippetIndex === 42)
+    )
+    assert.ok(
+      report.diagnostics.some((d) => d.code === 'content_zero_width_leak' && d.snippetIndex === 43)
+    )
+    assert.equal(
+      report.diagnostics.some((d) => d.code.includes('emoji')),
+      false,
+      'must not flag Irodori emojis in ttsText'
+    )
+  }
+)

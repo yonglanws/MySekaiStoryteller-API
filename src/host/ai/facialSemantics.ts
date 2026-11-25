@@ -270,6 +270,14 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
   const closed = eyeOpen <= 0.08
   const darkPrefix =
     rawLower.startsWith('face_dark') || rawLower.includes('nhi') || shadow > 0.15 || eyeHi < -0.2
+  const isExplicitSurpriseName = /^face_(?:surprise|shock|notice|scared|nsscared|e(?:_|$))/.test(
+    lower
+  )
+
+  if (isExplicitSurpriseName) {
+    const base = classifyByName(facialName)
+    return { ...base, role: 'surprise', fromMotion3: true }
+  }
 
   if (tear > 0.2) {
     if (mouthForm >= 0.25 || eyeSmile >= 0.4) {
@@ -652,11 +660,17 @@ export function isSadOrAngryFacial(
 const POSITIVE_TEXT_CUE_RE =
   /(开心|高兴|太好了|好耶|太棒了|哈哈|呵呵|嘿嘿|嘻嘻|太幸运|真期待|好期待|好温柔|真漂亮|好喜欢|最喜欢|不愧是|Wonderhoy|真可爱|辛苦啦|♪)/
 const NEGATIVE_TEXT_CUE_RE =
-  /(难过|伤心|痛苦|抱歉|对不起|对不住|失落|害怕|恐惧|担心|不安|烦死|气死|讨厌|委屈|眼泪|哭|叹气|沉默|沉重|糟糕|惨了|完蛋|不行|做不到|算了|别管|没空|冷漠|无聊|疲惫|累了|苦恼|烦恼|头疼|纠结|勉强|搞砸|后悔|愧疚)/
+  /(难过|伤心|痛苦|抱歉|对不起|对不住|失落|害怕|恐惧|担心|不安|烦死|气死|讨厌|委屈|眼泪|哭|叹气|沉默|沉重|糟糕|惨了|完蛋|不行|做不到|算了|别管|没空|冷漠|无聊|疲惫|累了|苦恼|烦恼|头疼|纠结|勉强|搞砸|后悔|愧疚|窒息|受不了|没办法面对|不可能一样|不一样了|绝望|崩溃|煎熬|无能为力|没能说出口|什么都没能|不敢|顾虑|推开|逃走|别走)/
 const APOLOGY_REGRET_RE = /(对不起|抱歉|对不住|都是我的错|搞砸|愧疚|后悔|不好意思让你)/
+const SELF_BLAME_REGRET_RE =
+  /(?:对不起|抱歉|对不住|都是我的错|搞砸|愧疚|后悔|不好意思让你|为什么我.{0,8}(?:没能|没有|什么都没|说不出口|做不到)|明明只要|是我不好|我真没用|怪我自己)/
+const DESPAIR_TEXT_RE =
+  /(?:窒息|受不了|没办法面对|不可能一样|不一样了|绝望|崩溃|好痛苦|撑不住|别说了|再见|别走|推开|(?<!不会|不|别)逃走|顾虑|装作什么都没发生)/
 const NEGATED_JOY_RE = /(?:不|没|没有|别|哪有|才不|才没有|算不上).{0,3}(?:开心|高兴|笑得出来|轻松)/
 const SURPRISE_TEXT_RE =
   /(?:^|[，。！？\s])(?:咦|诶|欸|吓我一跳|真的吗|怎么会|居然|骗人|……！|！！|\?!|？！)/
+const GENUINE_SURPRISE_TEXT_RE =
+  /(?:^|[，。！？\s「（(])(?:咦|诶|欸|哎|啊咧|吓我一跳|吓了一跳|真的吗|怎么会|居然|骗人|不会吧|什么意思|等一下|发生了什么|怎么突然|没想到|竟然)|(?:\?!|？！)/
 const SHY_TEXT_RE = /(?:才没有|才不是|别看我|好害羞|脸红|讨厌啦|哪有那样|少、少啰嗦)/
 const RESOLVE_TEXT_RE = /(?:决定|一定|必须|绝对要|不会逃|试一次|认真听|听我说|交给我吧)/
 const REASSURE_TEXT_RE =
@@ -684,8 +698,9 @@ export function inferDramaticContext(params: {
   const caption = (params.ttsCaption ?? '').trim()
 
   const monologue = Boolean(params.isMonologue) || INNER_MONOLOGUE_RE.test(text)
-  const apologyOrRegret = APOLOGY_REGRET_RE.test(text)
-  const reassure = REASSURE_TEXT_RE.test(text) && !apologyOrRegret
+  const apologyOrRegret = APOLOGY_REGRET_RE.test(text) || SELF_BLAME_REGRET_RE.test(text)
+  const isDespair = DESPAIR_TEXT_RE.test(text)
+  const reassure = REASSURE_TEXT_RE.test(text) && !apologyOrRegret && !isDespair
   const hasNegCue = (NEGATIVE_TEXT_CUE_RE.test(text) || NEGATED_JOY_RE.test(text)) && !reassure
   const hasPosCue = POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text)
   const questionOrDoubt = /[？?]/.test(text) || /(?:难道|为什么|怎么|是不是)/.test(text)
@@ -720,7 +735,7 @@ export function inferDramaticContext(params: {
     else mood = 'attentive_listen'
   } else if (emo === '生气' || (ANGRY_TEXT_RE.test(text) && !hasPosCue)) {
     mood = 'angry_frustration'
-  } else if (emo === '伤心' || emo === '害怕' || apologyOrRegret) {
+  } else if (emo === '伤心' || emo === '害怕' || apologyOrRegret || isDespair) {
     mood = 'sad_regret'
   } else if (emo === '惊讶' || SURPRISE_TEXT_RE.test(text)) {
     mood = 'surprise'
@@ -765,15 +780,33 @@ export function isFacialCompatibleWithLine(params: {
   emotion?: string
   content: string
   prevTense?: boolean
+  isMonologue?: boolean
+  isListener?: boolean
   restrainedRole?: boolean
   modelsRoot?: string
 }): FacialCompatibilityResult {
-  const { facial, modelPath, emotion, content, prevTense, restrainedRole, modelsRoot } = params
+  const {
+    facial,
+    modelPath,
+    emotion,
+    content,
+    prevTense,
+    isMonologue,
+    isListener,
+    restrainedRole,
+    modelsRoot
+  } = params
   if (!facial.trim()) return { ok: true }
   const info = inspectModelFacial(modelPath, facial, modelsRoot)
   const emo = (emotion ?? '').trim()
   const text = content.trim()
-  const ctx = inferDramaticContext({ content: text, emotion: emo, restrainedRole })
+  const ctx = inferDramaticContext({
+    content: text,
+    emotion: emo,
+    isMonologue,
+    isListener,
+    restrainedRole
+  })
   const hasNegCue =
     (NEGATIVE_TEXT_CUE_RE.test(text) || NEGATED_JOY_RE.test(text)) && ctx.mood !== 'gentle_reassure'
   const hasPosCue = POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text)
@@ -781,7 +814,7 @@ export function isFacialCompatibleWithLine(params: {
 
   // 1) 明确负面/紧张/道歉/惊愕情绪绝对禁止搭配纯正微笑/俏皮表情（苦笑 wry_smile 与含泪微笑 tearful_smile 除外）
   if (
-    (isTenseEmotion || hasNegCue || ctx.apologyOrRegret) &&
+    (isTenseEmotion || hasNegCue || ctx.apologyOrRegret || ctx.mood === 'sad_regret') &&
     (info.role === 'genuine_smile' || info.role === 'closed_smile' || info.role === 'playful')
   ) {
     return { ok: false, reason: 'negative_context_smile' }
@@ -823,6 +856,36 @@ export function isFacialCompatibleWithLine(params: {
   // 5) 温柔安抚时不用怒脸/冷眼
   if (ctx.mood === 'gentle_reassure' && (info.role === 'angry' || info.role === 'cold_hollow')) {
     return { ok: false, reason: 'angry_on_reassure' }
+  }
+
+  // 6) 悲伤/绝望/独白语境严禁误挂惊讶/察觉/震惊脸（除非台词本身明确是惊讶/恍然大悟）
+  const isGenuineShock = emo === '惊讶' || GENUINE_SURPRISE_TEXT_RE.test(text)
+  const isScaredOnFear = emo === '害怕' && /scared/i.test(facial)
+  if (
+    !isListener &&
+    info.role === 'surprise' &&
+    !isGenuineShock &&
+    !isScaredOnFear &&
+    (ctx.mood === 'sad_regret' ||
+      ctx.mood === 'thinking_monologue' ||
+      DESPAIR_TEXT_RE.test(text) ||
+      emo === '伤心')
+  ) {
+    return { ok: false, reason: 'surprise_on_sad_or_monologue' }
+  }
+
+  // 7) 含泪自责/伤心懊悔台词（无明确怒气）严禁误挂生气脸
+  if (
+    info.role === 'angry' &&
+    emo !== '生气' &&
+    !ANGRY_TEXT_RE.test(text) &&
+    (emo === '伤心' ||
+      emo === '害怕' ||
+      ctx.mood === 'sad_regret' ||
+      ctx.apologyOrRegret ||
+      SELF_BLAME_REGRET_RE.test(text))
+  ) {
+    return { ok: false, reason: 'angry_on_sad_or_regret' }
   }
 
   return { ok: true }
@@ -995,25 +1058,45 @@ function dramaticMoodToTargetMood(mood: DramaticContextMood | TargetMood): Targe
 /** 根据目标情绪从角色实际拥有的表情集合中选择最贴切的表情。 */
 export function pickMoodMatchedFacial(
   facials: string[],
-  mood: TargetMood,
+  mood: TargetMood | DramaticContextMood,
   modelPath?: string,
   restrainedRole?: boolean,
   modelsRoot?: string
 ): string {
+  const targetMood = dramaticMoodToTargetMood(mood)
   const roles =
-    mood === 'neutral' && restrainedRole
+    targetMood === 'neutral' && restrainedRole
       ? (['neutral', 'serious', 'cold_hollow', 'closed_neutral'] as FacialSemanticRole[])
-      : mood === 'smile' && restrainedRole
+      : targetMood === 'smile' && restrainedRole
         ? (['wry_smile', 'neutral', 'genuine_smile'] as FacialSemanticRole[])
-        : mood === 'gentle' && restrainedRole
+        : targetMood === 'gentle' && restrainedRole
           ? (['closed_neutral', 'neutral', 'wry_smile', 'genuine_smile'] as FacialSemanticRole[])
-          : FACIAL_ROLES_BY_MOOD[mood]
+          : FACIAL_ROLES_BY_MOOD[targetMood]
 
   for (const wantedRole of roles) {
     const hit = facials.find(
       (f) => inspectModelFacial(modelPath, f, modelsRoot).role === wantedRole
     )
     if (hit) return hit
+  }
+  if (
+    targetMood === 'sad' ||
+    targetMood === 'thinking' ||
+    targetMood === 'trouble' ||
+    targetMood === 'wry_smile' ||
+    targetMood === 'gentle'
+  ) {
+    const safeFallback = facials.find((f) => {
+      const role = inspectModelFacial(modelPath, f, modelsRoot).role
+      return (
+        role !== 'surprise' &&
+        role !== 'angry' &&
+        role !== 'genuine_smile' &&
+        role !== 'closed_smile' &&
+        role !== 'playful'
+      )
+    })
+    if (safeFallback) return safeFallback
   }
   return pickNeutralFacial(facials, undefined, modelPath, restrainedRole, modelsRoot)
 }
@@ -1159,6 +1242,8 @@ export function recommendActingForLine(params: {
         emotion: params.emotion,
         content: params.content,
         prevTense: params.prevTense || ctx.tense,
+        isMonologue: params.isMonologue,
+        isListener: params.isListener,
         restrainedRole: params.restrainedRole,
         modelsRoot: params.modelsRoot
       }).ok
@@ -1316,6 +1401,8 @@ export function evaluateActingLineMatch(params: {
       emotion: params.emotion,
       content: params.content,
       prevTense: params.prevTense,
+      isMonologue: params.isMonologue,
+      isListener: params.isListener,
       restrainedRole: params.restrainedRole,
       modelsRoot: params.modelsRoot
     })
