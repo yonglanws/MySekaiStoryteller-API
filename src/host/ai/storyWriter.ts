@@ -71,6 +71,8 @@ export interface GenerateStoryOptions {
   pipeline?: LlmPipeline
   /** 启用工具调用 Agentic Harness（不设时仅在 pipeline === 'agent' 启用） */
   agentic?: boolean
+  /** Agentic 模式最大工具调用/迭代轮次（默认沿用 llm.agentMaxSteps） */
+  maxToolTurns?: number
   signal?: AbortSignal
 }
 
@@ -104,6 +106,7 @@ export interface GenerateStoryMeta {
   /** Agentic 模式下调用的工具名称与运行模式（native / react-json / staged-fallback） */
   toolCalls?: string[]
   agentMode?: 'native' | 'react-json' | 'staged-fallback'
+  agentSteps?: number
 }
 
 export interface GenerateStoryResult {
@@ -229,7 +232,9 @@ export class StoryWriter {
       return null
     }
     const embedConfig = resolveEmbeddingConfig(this.settings)
-    const embeddingClient = embedConfig.enabled ? new EmbeddingClient(embedConfig, this.logger) : null
+    const embeddingClient = embedConfig.enabled
+      ? new EmbeddingClient(embedConfig, this.logger)
+      : null
     const rerankConfig = resolveRerankConfig(this.settings)
     const rerankClient = rerankConfig.enabled ? new RerankClient(rerankConfig, this.logger) : null
     this.ragRetriever = new AdaptiveRagRetriever({
@@ -286,11 +291,11 @@ export class StoryWriter {
       )
     })
     if (mentioned.length > 0) {
-      const picked = mentioned.slice(0, maxFastCast).map((m) => view.resolveOutfitVariant(m, prompt) ?? m)
+      const picked = mentioned
+        .slice(0, maxFastCast)
+        .map((m) => view.resolveOutfitVariant(m, prompt) ?? m)
       this.logger.info(
-        `[AI] 场景点名角色：${picked
-          .map((model) => view.shortName(model))
-          .join('、')}`
+        `[AI] 场景点名角色：${picked.map((model) => view.shortName(model)).join('、')}`
       )
       return view.withModels(picked)
     }
@@ -299,9 +304,7 @@ export class StoryWriter {
     for (let index = history.length - 1; index >= 0; index--) {
       const role = history[index]?.role ?? ''
       if (!role || ['user', 'assistant', 'system', '用户', '助手'].includes(role)) continue
-      const model = primary.find(
-        (item) => item.name === role || (item.shortName ?? '') === role
-      )
+      const model = primary.find((item) => item.name === role || (item.shortName ?? '') === role)
       if (model) {
         const chosen = view.resolveOutfitVariant(model, prompt) ?? model
         this.logger.info(`[AI] 沿用上一轮角色：${view.shortName(chosen)}`)
@@ -340,12 +343,19 @@ export class StoryWriter {
             view.models.find((entry) => (entry.cloudId ?? '') === text) ??
             null)
         if (model) {
-          const resolved = /^\d+$/.test(text) ? model : (view.resolveOutfitVariant(model, prompt) ?? model)
+          const resolved = /^\d+$/.test(text)
+            ? model
+            : (view.resolveOutfitVariant(model, prompt) ?? model)
           if (!cast.includes(resolved)) cast.push(resolved)
         }
       }
       if (cast.length > 0) {
-        this.logger.info(`[AI] 快速选角：${cast.slice(0, maxFastCast).map((model) => view.shortName(model)).join('、')}`)
+        this.logger.info(
+          `[AI] 快速选角：${cast
+            .slice(0, maxFastCast)
+            .map((model) => view.shortName(model))
+            .join('、')}`
+        )
         return view.withModels(cast.slice(0, maxFastCast))
       }
     } catch (error) {
@@ -537,6 +547,8 @@ export class StoryWriter {
         scene: prompt,
         targetMinutes,
         emotionLabels: this.emotionLabels,
+        systemPrompt: this.settings.systemPrompt,
+        maxToolTurns: options.maxToolTurns ?? this.settings.agentMaxSteps,
         ragRetriever: retriever,
         logger: this.logger,
         signal: options.signal
@@ -550,6 +562,7 @@ export class StoryWriter {
         meta: {
           mode: 'story',
           pipeline: 'agent',
+          ...(agentRes.title ? { title: agentRes.title } : {}),
           model: agentRes.model,
           rounds: agentRes.rounds,
           warnings: agentRes.warnings,
@@ -557,16 +570,17 @@ export class StoryWriter {
           latencyMs: agentRes.latencyMs,
           durationMs: 0,
           ttsTranslated,
-          cast: agentRes.story.models.map((m) => view.shortName(view.modelById(m.id) ?? m as never) || String(m.id)),
+          cast: agentRes.story.models.map(
+            (m) => view.shortName(view.modelById(m.id) ?? (m as never)) || String(m.id)
+          ),
           toolCalls: agentRes.toolCallsUsed,
-          agentMode: agentRes.modeUsed
+          agentMode: agentRes.modeUsed,
+          agentSteps: agentRes.rounds
         }
       }
     } catch (error) {
       if (options.signal?.aborted) throw error
-      this.logger.warn(
-        `[AI] Agentic 模式回退至 staged 流水线：${errorMessage(error)}`
-      )
+      this.logger.warn(`[AI] Agentic 模式回退至 staged 流水线：${errorMessage(error)}`)
       const fallback = await this.generateStaged({ prompt, view, personas, targetMinutes, options })
       fallback.meta.agentMode = 'staged-fallback'
       return fallback
@@ -1228,7 +1242,9 @@ export class StoryWriter {
       '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
       '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。',
       '5. 只输出说出口或内心独白的台词正文，严禁插入「(笑)」「（ため息）」等括号动作提示。',
-      ...(addressLines.length > 0 ? [`6. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`] : []),
+      ...(addressLines.length > 0
+        ? [`6. 角色日文称呼表（务必遵守）：${addressLines.join('；')}`]
+        : []),
       ...(jpSamples.length > 0
         ? [`7. 官方日文口吻参考（仅学语气与人称，严禁照抄）：\n${jpSamples.join('\n---\n')}`]
         : [])
@@ -1238,20 +1254,21 @@ export class StoryWriter {
       const hasContext = Boolean(
         items?.some((item) => item.speaker || item.emotion || item.ttsCaption)
       )
-      const userContent = hasContext && items
-        ? `把下面 ${items.length} 条台词结合角色与声演指令翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(
-            items.map((item) => {
-              const style = this.speakerStyleHint(item.speaker, personas)
-              return {
-                text: item.text,
-                ...(item.speaker ? { speaker: item.speaker } : {}),
-                ...(style ? { style } : {}),
-                ...(item.emotion ? { emotion: item.emotion } : {}),
-                ...(item.ttsCaption ? { ttsCaption: item.ttsCaption } : {})
-              }
-            })
-          )}`
-        : `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
+      const userContent =
+        hasContext && items
+          ? `把下面 ${items.length} 条台词结合角色与声演指令翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(
+              items.map((item) => {
+                const style = this.speakerStyleHint(item.speaker, personas)
+                return {
+                  text: item.text,
+                  ...(item.speaker ? { speaker: item.speaker } : {}),
+                  ...(style ? { style } : {}),
+                  ...(item.emotion ? { emotion: item.emotion } : {}),
+                  ...(item.ttsCaption ? { ttsCaption: item.ttsCaption } : {})
+                }
+              })
+            )}`
+          : `把下面 ${texts.length} 条台词翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(texts)}`
 
       const { data } = await this.llm.chatJson<string[]>(
         [

@@ -485,6 +485,8 @@ async function bootstrap(): Promise<void> {
           translateForTts?: unknown
           pipeline?: unknown
           agentic?: unknown
+          maxToolTurns?: unknown
+          agentMaxSteps?: unknown
         },
         signal: AbortSignal
       ): Promise<GenerateStoryResult> => {
@@ -527,12 +529,29 @@ async function bootstrap(): Promise<void> {
             : config.llm.targetMinutes
         let pipeline: 'single' | 'staged' | 'agent' | undefined
         if (body.pipeline !== undefined) {
-          if (body.pipeline !== 'single' && body.pipeline !== 'staged' && body.pipeline !== 'agent') {
+          if (
+            body.pipeline !== 'single' &&
+            body.pipeline !== 'staged' &&
+            body.pipeline !== 'agent'
+          ) {
             throw new StoryGenerationError('pipeline 必须是 "single"、"staged" 或 "agent"', [])
           }
           pipeline = body.pipeline
         }
         const agentic = typeof body.agentic === 'boolean' ? body.agentic : undefined
+        const rawSteps = body.maxToolTurns ?? body.agentMaxSteps
+        let maxToolTurns: number | undefined
+        if (rawSteps !== undefined) {
+          if (
+            typeof rawSteps !== 'number' ||
+            !Number.isInteger(rawSteps) ||
+            rawSteps < 2 ||
+            rawSteps > 40
+          ) {
+            throw new StoryGenerationError('agentMaxSteps / maxToolTurns 必须是 2~40 的整数', [])
+          }
+          maxToolTurns = rawSteps
+        }
         return storyWriter.generate({
           prompt: body.prompt,
           mode,
@@ -543,6 +562,7 @@ async function bootstrap(): Promise<void> {
             typeof body.translateForTts === 'boolean' ? body.translateForTts : undefined,
           pipeline,
           agentic,
+          maxToolTurns,
           signal
         })
       }
@@ -820,6 +840,7 @@ async function bootstrap(): Promise<void> {
         model: config.llm.model,
         ...(authed ? { baseUrl: config.llm.baseUrl } : {}),
         pipeline: config.llm.pipeline,
+        agentMaxSteps: config.llm.agentMaxSteps,
         apiKeyConfigured: Boolean(llmClient.apiKey),
         activeGenerations: aiActive,
         maxConcurrent: AI_MAX_CONCURRENT

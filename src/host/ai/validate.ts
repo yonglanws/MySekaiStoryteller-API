@@ -3,7 +3,8 @@ import { DEFAULT_BGM_FADE_MS, MAX_BGM_FADE_MS } from '../../common/audio/bgm'
 import { StorySchema, type StoryData } from '../../common/types/Story'
 import { enforceOfficialStoryInvariants, type OfficialLintReport } from './officialLinter'
 import { repairSpokenStageDirections } from './dialogueLinter'
-import { normalizePjskTerminology } from './personas'
+import * as facialSemanticsMod from './facialSemantics'
+import * as personasMod from './personas'
 import { isStandingMotion, type CatalogView } from './prompt'
 import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
@@ -98,6 +99,317 @@ const cleanPath = (value: unknown, fallback = ''): string => {
     .replace(/\s*\/\s*/g, '/')
     .trim()
   return text || fallback
+}
+
+interface FacialSemanticsValidationExt {
+  isMotionCompatibleWithLine?: (params: {
+    motion: string
+    modelPath?: string
+    emotion?: string
+    content: string
+    prevTense?: boolean
+    isListener?: boolean
+    restrainedRole?: boolean
+  }) => { ok: boolean; reason?: string }
+  pickMoodMatchedMotion?: (
+    motions: string[],
+    mood: facialSemanticsMod.TargetMood,
+    modelPath?: string,
+    restrainedRole?: boolean,
+    avoidMotions?: ReadonlySet<string> | string[]
+  ) => string
+}
+
+interface PersonasValidationExt {
+  characterActingProfile?: (
+    nameOrPath: string,
+    roleHint?: string
+  ) => { restrained: boolean; temperament: string; actingNote: string }
+}
+
+const facialValidationApi = facialSemanticsMod as unknown as FacialSemanticsValidationExt
+const personasValidationApi = personasMod as unknown as PersonasValidationExt
+
+function inferValidationMood(content: string, emotion: string): facialSemanticsMod.TargetMood {
+  const emo = emotion.trim()
+  if (emo === '伤心') return 'sad'
+  if (emo === '生气') return 'angry'
+  if (emo === '害怕') return 'trouble'
+  if (emo === '惊讶') return 'surprise'
+  if (emo === '害羞') return 'shy'
+  if (emo === '开心') return 'smile'
+  if (/对不起|抱歉|对不住|搞砸|后悔|难过|伤心|眼泪|哭|失落/.test(content)) return 'sad'
+  if (/烦死|够了|住口|气死|少啰嗦/.test(content)) return 'angry'
+  if (/那个|苦笑|没办法|为难|尴尬|纠结/.test(content)) return 'trouble'
+  if (/什么！？|怎么会|竟然|！？|\?!/.test(content)) return 'surprise'
+  if (/脸红|害羞|别看我/.test(content)) return 'shy'
+  if (/太好了|好耶|哈哈|嘿嘿|嘻嘻|～♪|♪|Wonderhoy/.test(content)) return 'smile'
+  return 'neutral'
+}
+
+function isRestrainedActor(modelName: string, modelPath: string): boolean {
+  if (typeof personasValidationApi.characterActingProfile === 'function') {
+    return personasValidationApi.characterActingProfile(`${modelName} ${modelPath}`).restrained
+  }
+  return /真冬|mafuyu/i.test(`${modelName} ${modelPath}`)
+}
+
+function isMotionMoodCompatible(params: {
+  motion: string
+  modelPath?: string
+  emotion: string
+  content: string
+  prevTense: boolean
+  isListener?: boolean
+  restrainedRole: boolean
+}): boolean {
+  if (!params.motion.trim()) return true
+  if (typeof facialValidationApi.isMotionCompatibleWithLine === 'function') {
+    return facialValidationApi.isMotionCompatibleWithLine(params).ok
+  }
+  const lower = params.motion.toLowerCase()
+  const mood = inferValidationMood(params.content, params.emotion)
+  const isTense =
+    params.prevTense ||
+    mood === 'sad' ||
+    mood === 'angry' ||
+    mood === 'trouble' ||
+    params.emotion === '害怕'
+  const isJoyfulMotion = /glad|happy|cheer|joy|wink|smug|doya|pose|delicious|sing/.test(lower)
+  const isNegativeMotion = /angry|disgust|sad|cry|sigh/.test(lower)
+  if (isTense && isJoyfulMotion) return false
+  if (mood === 'smile' && !params.prevTense && isNegativeMotion) return false
+  if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
+  return true
+}
+
+function pickCompatibleMotionFallback(
+  view: CatalogView,
+  modelId: number,
+  mood: facialSemanticsMod.TargetMood,
+  restrainedRole: boolean,
+  avoidMotion?: string
+): string {
+  const model = view.modelById(modelId)
+  if (!model) return view.defaultMotion(modelId)
+  const candidates = view.promptMotions(model).filter((m) => !isStandingMotion(m))
+  if (candidates.length === 0) return view.defaultMotion(modelId)
+  if (typeof facialValidationApi.pickMoodMatchedMotion === 'function') {
+    const picked = facialValidationApi.pickMoodMatchedMotion(
+      candidates,
+      mood,
+      model.path,
+      restrainedRole,
+      avoidMotion ? [avoidMotion] : undefined
+    )
+    if (picked) return picked
+  }
+  const hintsByMood: Record<facialSemanticsMod.TargetMood, RegExp[]> = {
+    sad: [/sad|cry|sigh|lookdown/i, /trouble|think/i, /nod|tilthead/i],
+    trouble: [/trouble|think|sigh|lookaway/i, /tilthead|nod/i],
+    angry: [/angry|disgust|shakehead/i, /forward|serious/i],
+    surprise: [/surprise|tilthead|forward/i, /nod/i],
+    shy: [/shy|blush|fidget|lookaway/i, /tilthead/i],
+    smile: [/glad|happy|cheer|joy|relief/i, /nod|tilthead|greeting|playful/i],
+    neutral: [/nod|tilthead|think|forward|relief/i]
+  }
+  const tiers = hintsByMood[mood] ?? hintsByMood.neutral
+  for (const hint of tiers) {
+    const match = candidates.find((m) => m !== avoidMotion && hint.test(m))
+    if (match) return match
+  }
+  return (
+    candidates.find((m) => m !== avoidMotion && !/glad|angry|sad|cry/i.test(m)) ??
+    candidates[0] ??
+    view.defaultMotion(modelId)
+  )
+}
+
+function pickCompatibleFacialFallback(
+  view: CatalogView,
+  modelId: number,
+  content: string,
+  emotion: string,
+  prevTense: boolean,
+  restrainedRole: boolean
+): string {
+  const model = view.modelById(modelId)
+  if (!model) return view.neutralFacial(modelId)
+  const facials = view.promptFacials(model)
+  const mood = inferValidationMood(content, emotion)
+  const targetMood: facialSemanticsMod.TargetMood =
+    prevTense && mood === 'smile' && emotion !== '开心' ? 'neutral' : mood
+  const picked = facialSemanticsMod.pickMoodMatchedFacial(
+    facials,
+    targetMood,
+    model.path,
+    restrainedRole
+  )
+  if (
+    picked &&
+    facialSemanticsMod.isFacialCompatibleWithLine({
+      facial: picked,
+      modelPath: model.path,
+      emotion,
+      content,
+      prevTense,
+      restrainedRole
+    }).ok
+  ) {
+    return picked
+  }
+  return facialSemanticsMod.pickNeutralFacial(
+    facials,
+    model.defaultFacial,
+    model.path,
+    restrainedRole
+  )
+}
+
+function repairActingMismatches(
+  story: JsonRecord,
+  view: CatalogView,
+  warn: (message: string) => void
+): void {
+  const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+  let prevTense = false
+
+  const findNextTalkForActor = (
+    startIndex: number,
+    modelId: number
+  ): { content: string; emotion: string } | null => {
+    for (let j = startIndex + 1; j < Math.min(snippets.length, startIndex + 10); j++) {
+      const s = snippets[j]
+      if (!isRecord(s) || s.type !== 'Talk' || !isRecord(s.data)) continue
+      if (toNumber(s.data.modelId, -1) === modelId) {
+        return { content: toStr(s.data.content), emotion: toStr(s.data.emotion) }
+      }
+    }
+    return null
+  }
+
+  for (let i = 0; i < snippets.length; i++) {
+    const snippet = snippets[i]
+    if (!isRecord(snippet) || !isRecord(snippet.data)) continue
+    const kind = toStr(snippet.type)
+    const data = snippet.data
+
+    if (kind === 'LayoutAppear') {
+      const modelId = toNumber(data.modelId, -1)
+      const model = view.modelById(modelId)
+      if (!model) continue
+      const nextTalk = findNextTalkForActor(i, modelId)
+      if (!nextTalk) continue
+      const restrained = isRestrainedActor(model.name, model.path)
+      const facial = toStr(data.facial)
+      if (
+        facial &&
+        !facialSemanticsMod.isFacialCompatibleWithLine({
+          facial,
+          modelPath: model.path,
+          emotion: nextTalk.emotion,
+          content: nextTalk.content,
+          prevTense,
+          restrainedRole: restrained
+        }).ok
+      ) {
+        const replacement = pickCompatibleFacialFallback(
+          view,
+          modelId,
+          nextTalk.content,
+          nextTalk.emotion,
+          prevTense,
+          restrained
+        )
+        if (replacement && replacement !== facial) {
+          data.facial = replacement
+          warn(
+            `snippets[${i}] LayoutAppear facial '${facial}' 与开场剧情情绪冲突，已改为 ${replacement}`
+          )
+        }
+      }
+      continue
+    }
+
+    if (kind !== 'Talk') continue
+    const speakerId = toNumber(data.modelId, -1)
+    const content = toStr(data.content)
+    const emotion = toStr(data.emotion)
+    if (speakerId === -1) {
+      prevTense =
+        ['生气', '伤心', '害怕'].includes(emotion) || /对不起|抱歉|糟糕|难过/.test(content)
+      continue
+    }
+
+    const fixActorActing = (targetObj: JsonRecord, actorId: number, isListener: boolean): void => {
+      const actorModel = view.modelById(actorId)
+      if (!actorModel) return
+      const restrained = isRestrainedActor(actorModel.name, actorModel.path)
+      const facial = toStr(targetObj.facial)
+      if (facial) {
+        const checkContent = isListener ? content : content
+        const fCompat = facialSemanticsMod.isFacialCompatibleWithLine({
+          facial,
+          modelPath: actorModel.path,
+          emotion,
+          content: checkContent,
+          prevTense,
+          restrainedRole: restrained
+        })
+        if (!fCompat.ok) {
+          const replacement = pickCompatibleFacialFallback(
+            view,
+            actorId,
+            content,
+            emotion,
+            prevTense,
+            restrained
+          )
+          if (replacement && replacement !== facial) {
+            targetObj.facial = replacement
+            warn(
+              `snippets[${i}] ${isListener ? '听者' : '说话者'} facial '${facial}' 与当前台词情绪冲突，已改为 ${replacement}`
+            )
+          }
+        }
+      }
+      const motion = toStr(targetObj.motion)
+      if (
+        motion &&
+        !isMotionMoodCompatible({
+          motion,
+          modelPath: actorModel.path,
+          emotion,
+          content,
+          prevTense,
+          isListener,
+          restrainedRole: restrained
+        })
+      ) {
+        const mood = inferValidationMood(content, emotion)
+        const replacement = pickCompatibleMotionFallback(view, actorId, mood, restrained, motion)
+        if (replacement && replacement !== motion) {
+          targetObj.motion = replacement
+          warn(
+            `snippets[${i}] ${isListener ? '听者' : '说话者'} motion '${motion}' 与当前台词情绪冲突，已改为 ${replacement}`
+          )
+        }
+      }
+    }
+
+    fixActorActing(data, speakerId, false)
+    if (Array.isArray(data.actions)) {
+      for (const act of data.actions) {
+        if (!isRecord(act)) continue
+        const aid = toNumber(act.modelId, speakerId)
+        fixActorActing(act, aid, aid !== speakerId)
+      }
+    }
+
+    prevTense =
+      ['生气', '伤心', '害怕'].includes(emotion) ||
+      /对不起|抱歉|别再|少啰嗦|为什么|骗人|糟糕|难过|哭/.test(content)
+  }
 }
 
 /** 字符显示宽度：CJK/全角记 1，ASCII 记 0.5。 */
@@ -836,7 +1148,7 @@ export function validateAndFixStory(
         data.speaker = speakerRaw || (model ? view.shortName(model) : '')
       }
       const content = repairSpokenStageDirections(
-        normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
+        personasMod.normalizePjskTerminology(toStr(data.content, '...').replace(/\\n/g, '\n'))
       )
       data.content = sanitizeDisplayText(content) || '...'
       data.voice = toStr(data.voice, '')
@@ -858,7 +1170,12 @@ export function validateAndFixStory(
       } else {
         delete data.ttsSpecialScene
       }
-      if ('ttsSpeed' in data && data.ttsSpeed !== undefined && data.ttsSpeed !== null && data.ttsSpeed !== '') {
+      if (
+        'ttsSpeed' in data &&
+        data.ttsSpeed !== undefined &&
+        data.ttsSpeed !== null &&
+        data.ttsSpeed !== ''
+      ) {
         const parsedSpeed = toNumber(data.ttsSpeed, Number.NaN)
         if (Number.isFinite(parsedSpeed) && parsedSpeed > 0) {
           const minSpeed = isSpecialScene ? 0.85 : 0.92
@@ -903,12 +1220,26 @@ export function validateAndFixStory(
         if (fixed) {
           data[field] = fixed
         } else if (field === 'motion') {
-          warn(`snippets[${index}] motion '${current}' 不可用，已回退默认动作`)
-          data[field] = view.defaultMotion(modelId)
+          warn(`snippets[${index}] motion '${current}' 不可用，已按语境回退动作`)
+          const mood = inferValidationMood(toStr(data.content), toStr(data.emotion))
+          const m = view.modelById(modelId)
+          data[field] = pickCompatibleMotionFallback(
+            view,
+            modelId,
+            mood,
+            m ? isRestrainedActor(m.name, m.path) : false
+          )
         } else {
-          warn(`snippets[${index}] facial '${current}' 不可用，已回退默认表情`)
-          const tenseEmo = ['生气', '伤心', '害怕', '惊讶'].includes(String(data.emotion ?? ''))
-          data[field] = tenseEmo ? view.neutralFacial(modelId) : view.defaultFacial(modelId)
+          warn(`snippets[${index}] facial '${current}' 不可用，已按语境回退表情`)
+          const m = view.modelById(modelId)
+          data[field] = pickCompatibleFacialFallback(
+            view,
+            modelId,
+            toStr(data.content),
+            toStr(data.emotion),
+            false,
+            m ? isRestrainedActor(m.name, m.path) : false
+          )
         }
       }
       snippet.data = data
@@ -1221,13 +1552,17 @@ export function validateAndFixStory(
     }
 
     if (kind === 'Telop') {
-      data.content = sanitizeDisplayText(normalizePjskTerminology(toStr(data.content)), false)
+      data.content = sanitizeDisplayText(
+        personasMod.normalizePjskTerminology(toStr(data.content)),
+        false
+      )
       snippet.data = data
       continue
     }
 
     if (kind === 'PlaceInfo') {
-      data.text = sanitizeDisplayText(normalizePjskTerminology(toStr(data.text)), false) || '...'
+      data.text =
+        sanitizeDisplayText(personasMod.normalizePjskTerminology(toStr(data.text)), false) || '...'
       if ('duration' in data)
         data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
@@ -1235,7 +1570,7 @@ export function validateAndFixStory(
     }
 
     if (kind === 'FullScreenText') {
-      data.text = normalizePjskTerminology(toStr(data.text).trim())
+      data.text = personasMod.normalizePjskTerminology(toStr(data.text).trim())
       if ('duration' in data)
         data.duration = Math.min(120000, Math.max(0, toNumber(data.duration, 2500)))
       snippet.data = data
@@ -1332,6 +1667,7 @@ export function validateAndFixStory(
   ensureOpeningAndEnding(story)
   compileStoryBgm(story, view, warn)
   normalizeScene(story)
+  repairActingMismatches(story, view, warn)
   splitOverflowTalks(story)
   // 确定性限制整场 ttsSpecialScene 占比 <= 15%，并重新钳制被降级句子的语速
   {
@@ -1351,7 +1687,9 @@ export function validateAndFixStory(
         }
         dropped += 1
       }
-      warn(`ttsSpecialScene 超过 15% 上限（${specialTalks.length}/${talkDatas.length}），已收敛 ${dropped} 句`)
+      warn(
+        `ttsSpecialScene 超过 15% 上限（${specialTalks.length}/${talkDatas.length}），已收敛 ${dropped} 句`
+      )
     }
   }
   const lint = enforceOfficialStoryInvariants(story, view, warn)

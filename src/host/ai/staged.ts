@@ -1,5 +1,7 @@
 import type { CatalogModel } from '../resources/resourceCatalog'
+import * as corpusExamplesMod from './corpusExamples'
 import { selectUnitFewShotExcerpts } from './corpusExamples'
+import * as personasMod from './personas'
 import {
   GENERIC_PROFILE,
   dialoguePersonaPrompt,
@@ -24,6 +26,7 @@ import { hasTranslationContent } from './ttsText'
 import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
 import type { RagRetrieveResult } from '../rag/types'
 import { type DialogueLintIssue } from './dialogueLinter'
+import * as facialSemanticsMod from './facialSemantics'
 import {
   annotateFacialName,
   isFacialCompatibleWithLine,
@@ -334,23 +337,185 @@ const cleanText = (value: unknown): string => {
   return merged.trim()
 }
 
+interface FacialSemanticsStagedExt {
+  annotateMotionName?: (modelPath: string | undefined, motionName: string) => string
+  isMotionCompatibleWithLine?: (params: {
+    motion: string
+    modelPath?: string
+    emotion?: string
+    content: string
+    prevTense?: boolean
+    isListener?: boolean
+    restrainedRole?: boolean
+  }) => { ok: boolean; reason?: string }
+  pickMoodMatchedMotion?: (
+    motions: string[],
+    mood: facialSemanticsMod.TargetMood,
+    modelPath?: string,
+    restrainedRole?: boolean,
+    avoidMotions?: ReadonlySet<string> | string[]
+  ) => string
+}
+
+interface PersonasStagedExt {
+  characterActingProfile?: (
+    nameOrPath: string,
+    roleHint?: string
+  ) => { restrained: boolean; temperament: string; actingNote: string }
+}
+
+interface CorpusExamplesStagedExt {
+  getOfficialActingGuidelines?: (options?: {
+    castCount?: number
+    isSekai?: boolean
+    isFlashback?: boolean
+  }) => string
+}
+
+const facialStagedApi = facialSemanticsMod as unknown as FacialSemanticsStagedExt
+const personasStagedApi = personasMod as unknown as PersonasStagedExt
+const corpusStagedApi = corpusExamplesMod as unknown as CorpusExamplesStagedExt
+
+const MOTION_LABEL_FALLBACK: Array<[RegExp, string]> = [
+  [/default|stand/i, '默认站姿'],
+  [/nod/i, '点头'],
+  [/tilthead|tilt/i, '歪头'],
+  [/shakehead/i, '摇头'],
+  [/glad|happy|cheer|joy/i, '开心欢呼'],
+  [/wink|smug|doya|pose|delicious/i, '俏皮/得意'],
+  [/shy|blush|fidget/i, '害羞/局促'],
+  [/trouble|worry/i, '为难'],
+  [/sad|sigh|lookdown|cry/i, '低落/叹气'],
+  [/angry|disgust/i, '生气'],
+  [/forward/i, '前倾认真'],
+  [/think|lookaway|lookup/i, '思考'],
+  [/surprise|shock|scared/i, '惊讶'],
+  [/relief/i, '松口气'],
+  [/greeting|wave/i, '打招呼'],
+  [/sleep/i, '困倦']
+]
+
+function annotateMotionForDirection(modelPath: string | undefined, motionName: string): string {
+  if (typeof facialStagedApi.annotateMotionName === 'function') {
+    return facialStagedApi.annotateMotionName(modelPath, motionName)
+  }
+  for (const [re, label] of MOTION_LABEL_FALLBACK) {
+    if (re.test(motionName)) return `${motionName}(${label})`
+  }
+  return motionName
+}
+
+function inferMotionMoodKey(
+  line?: { content: string; emotion?: string },
+  prevTense = false
+): 'sad' | 'angry' | 'trouble' | 'surprise' | 'shy' | 'smile' | 'thinking' | 'neutral' {
+  if (!line) return prevTense ? 'trouble' : 'neutral'
+  const emo = (line.emotion ?? '').trim()
+  const text = line.content ?? ''
+  if (emo === '伤心') return 'sad'
+  if (emo === '生气') return 'angry'
+  if (emo === '害怕') return 'trouble'
+  if (emo === '惊讶') return 'surprise'
+  if (emo === '害羞') return 'shy'
+  if (emo === '开心') return 'smile'
+  if (/对不起|抱歉|对不住|搞砸|后悔|难过|伤心|眼泪|哭|失落/.test(text)) return 'sad'
+  if (/烦死|够了|住口|气死|少啰嗦/.test(text)) return 'angry'
+  if (/苦笑|没办法|为难|尴尬|纠结|勉强/.test(text)) return 'trouble'
+  if (/什么！？|怎么会|竟然|！？|\?!/.test(text)) return 'surprise'
+  if (/脸红|害羞|别看我/.test(text)) return 'shy'
+  if (/^[（(].*[）)]$/.test(text.trim())) return 'thinking'
+  if (!prevTense && /太好了|好耶|哈哈|嘿嘿|嘻嘻|～♪|♪|Wonderhoy/.test(text)) return 'smile'
+  return prevTense ? 'trouble' : 'neutral'
+}
+
+function isMotionCompatibleWithContext(params: {
+  motion: string
+  modelPath?: string
+  line: { content: string; emotion?: string }
+  prevTense: boolean
+  isListener?: boolean
+  restrainedRole?: boolean
+}): boolean {
+  if (!params.motion.trim()) return true
+  if (typeof facialStagedApi.isMotionCompatibleWithLine === 'function') {
+    return facialStagedApi.isMotionCompatibleWithLine({
+      motion: params.motion,
+      modelPath: params.modelPath,
+      emotion: params.line.emotion,
+      content: params.line.content,
+      prevTense: params.prevTense,
+      isListener: params.isListener,
+      restrainedRole: params.restrainedRole
+    }).ok
+  }
+  const lower = params.motion.toLowerCase()
+  const mood = inferMotionMoodKey(params.line, params.prevTense)
+  const isTense = params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble'
+  const isJoyful = /glad|happy|cheer|joy|wink|smug|doya|pose|delicious|sing/.test(lower)
+  const isNegative = /angry|disgust|sad|cry|sigh/.test(lower)
+  if (isTense && isJoyful) return false
+  if (mood === 'smile' && !params.prevTense && isNegative) return false
+  if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
+  return true
+}
+
 function pickFollowupMotion(
   view: CatalogView,
   modelId: number,
   currentMotion?: string,
-  recentlyUsed?: ReadonlySet<string>
+  recentlyUsed?: ReadonlySet<string>,
+  moodContext?: {
+    line?: { content: string; emotion?: string }
+    prevTense?: boolean
+    restrained?: boolean
+  }
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
   const curated = view.promptMotions(model)
   const nonStanding = curated.filter((name) => !isStandingMotion(name))
-  const calmRe = /nod|tilthead|relief|think|lookaway|forward|shy|sigh|greeting/i
+  const moodKey = inferMotionMoodKey(moodContext?.line, Boolean(moodContext?.prevTense))
+  if (typeof facialStagedApi.pickMoodMatchedMotion === 'function' && moodContext?.line) {
+    const avoid = new Set<string>(recentlyUsed ?? [])
+    if (currentMotion) avoid.add(currentMotion)
+    const matched = facialStagedApi.pickMoodMatchedMotion(
+      nonStanding,
+      moodKey === 'thinking' ? 'neutral' : moodKey,
+      model.path,
+      moodContext.restrained,
+      avoid
+    )
+    if (matched) return matched
+  }
+  const moodHints: Record<typeof moodKey, RegExp> = {
+    sad: /sad|sigh|lookdown|trouble|think|nod/i,
+    angry: /angry|shakehead|forward|serious/i,
+    trouble: /trouble|think|tilthead|lookaway|sigh|nod/i,
+    surprise: /surprise|tilthead|forward|nod/i,
+    shy: /shy|blush|fidget|tilthead|lookaway/i,
+    smile: /glad|nod|tilthead|relief|greeting|playful/i,
+    thinking: /think|tilthead|lookaway|nod|sigh/i,
+    neutral: /nod|tilthead|relief|think|lookaway|forward|shy|sigh|greeting/i
+  }
+  const calmRe = moodHints[moodKey] ?? moodHints.neutral
+  const compatiblePool = moodContext?.line
+    ? nonStanding.filter((name) =>
+        isMotionCompatibleWithContext({
+          motion: name,
+          modelPath: model.path,
+          line: moodContext.line!,
+          prevTense: Boolean(moodContext.prevTense),
+          restrainedRole: moodContext.restrained
+        })
+      )
+    : nonStanding
+  const pool = compatiblePool.length > 0 ? compatiblePool : nonStanding
   const isFresh = (name: string): boolean => name !== currentMotion && !recentlyUsed?.has(name)
   return (
-    nonStanding.find((name) => isFresh(name) && calmRe.test(name)) ??
-    nonStanding.find((name) => isFresh(name)) ??
-    nonStanding.find((name) => name !== currentMotion && calmRe.test(name)) ??
-    nonStanding.find((name) => name !== currentMotion) ??
+    pool.find((name) => isFresh(name) && calmRe.test(name)) ??
+    pool.find((name) => isFresh(name)) ??
+    pool.find((name) => name !== currentMotion && calmRe.test(name)) ??
+    pool.find((name) => name !== currentMotion) ??
     ''
   )
 }
@@ -441,11 +606,7 @@ const shouldAvoidIncongruousSmile = (
   ) {
     return true
   }
-  return (
-    SMILE_FACIAL_RE.test(facial) &&
-    line.emotion !== '开心' &&
-    isSilentBeatLine(line.content)
-  )
+  return SMILE_FACIAL_RE.test(facial) && line.emotion !== '开心' && isSilentBeatLine(line.content)
 }
 
 function isPrecededByTenseBeat(
@@ -472,7 +633,12 @@ function isPrecededByTenseBeat(
   return false
 }
 
-const isRestrainedRole = (roleOrName = ''): boolean => /真冬|克制|冷静|寡言|内敛/.test(roleOrName)
+const isRestrainedRole = (roleOrName = ''): boolean => {
+  if (typeof personasStagedApi.characterActingProfile === 'function') {
+    return personasStagedApi.characterActingProfile(roleOrName).restrained
+  }
+  return /真冬|mafuyu|克制|冷静|寡言|内敛/.test(roleOrName)
+}
 
 function pickFacialFromHints(
   facials: string[],
@@ -522,20 +688,24 @@ function pickSpeakerSubtleFacial(
     )
   }
   if (emotion === '伤心') {
-    return pickFacialFromHints(
-      safePool,
-      [/sad|worry|cry|darksad|closeeye/i, /trouble|lookaway|smallmouth/i],
-      currentFacial,
-      /smile|smug|wink|sparkling|angry/i
-    ) || pickMoodMatchedFacial(facials, 'sad', modelPath, restrained)
+    return (
+      pickFacialFromHints(
+        safePool,
+        [/sad|worry|cry|darksad|closeeye/i, /trouble|lookaway|smallmouth/i],
+        currentFacial,
+        /smile|smug|wink|sparkling|angry/i
+      ) || pickMoodMatchedFacial(facials, 'sad', modelPath, restrained)
+    )
   }
   if (emotion === '生气') {
-    return pickFacialFromHints(
-      safePool,
-      [/angry|darkangry|sharp|serious|disgust/i, /trouble|smallmouth/i],
-      currentFacial,
-      /smile|smug|wink|sparkling/i
-    ) || pickMoodMatchedFacial(facials, 'angry', modelPath, restrained)
+    return (
+      pickFacialFromHints(
+        safePool,
+        [/angry|darkangry|sharp|serious|disgust/i, /trouble|smallmouth/i],
+        currentFacial,
+        /smile|smug|wink|sparkling/i
+      ) || pickMoodMatchedFacial(facials, 'angry', modelPath, restrained)
+    )
   }
   if (emotion === '害怕') {
     return pickFacialFromHints(
@@ -577,7 +747,8 @@ function pickSpeakerSubtleFacial(
   // 平静/无标签对话：按台词具体语气细分微表情，不再全锁成 face_normal_01，也不误触发道歉句的笑脸
   const explicitJoyRe = /♪|～♪|哈哈|嘿嘿|太好了|开心/
   const mildJoyRe = /♪|～|哈哈|嘿嘿|太好了|开心|最喜欢|好喜欢|谢谢啦|早安|晚安|不错嘛/
-  const hasNegOrApology = /对不起|抱歉|糟|烦|无奈|叹|算了|没办法|真是的|别这样|讨厌|难过|不开心|不高兴|没笑/.test(text)
+  const hasNegOrApology =
+    /对不起|抱歉|糟|烦|无奈|叹|算了|没办法|真是的|别这样|讨厌|难过|不开心|不高兴|没笑/.test(text)
   if (!hasNegOrApology && (precededByTense ? explicitJoyRe.test(text) : mildJoyRe.test(text))) {
     return pickFacialFromHints(
       facials,
@@ -1096,7 +1267,10 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
         : [],
     retrievalQueries: {
       plot: '与本场核心事件相关的官方剧情或过往经历',
-      voice: `${exampleCast.slice(0, 2).map((c) => c.name).join(' ')} 日常互动对白与称呼`,
+      voice: `${exampleCast
+        .slice(0, 2)
+        .map((c) => c.name)
+        .join(' ')} 日常互动对白与称呼`,
       worldview: '相关地点、社团/团体设定或关系背景'
     }
   }
@@ -1577,7 +1751,13 @@ export interface CanonGroundingBriefOptions {
  * 全程按分段边界装箱，不做字符级硬截断。
  */
 export function formatCanonGroundingBrief(options: CanonGroundingBriefOptions = {}): string {
-  const { scene = '', plan = null, ragContext = null, stage = 'dialogue', maxChars = 2400 } = options
+  const {
+    scene = '',
+    plan = null,
+    ragContext = null,
+    stage = 'dialogue',
+    maxChars = 2400
+  } = options
   const blocks: string[] = []
 
   const prompt = scene.trim()
@@ -1721,7 +1901,10 @@ export function buildDialoguePrompt(
       : '',
     (u?.characterGoals?.length ?? 0) > 0
       ? `  - 表里动机：${(u?.characterGoals ?? [])
-          .map((goal) => `${goal.cast || '角色'}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`)
+          .map(
+            (goal) =>
+              `${goal.cast || '角色'}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`
+          )
           .join('；')}。隐瞒的部分只能从停顿、改口、转移话题里漏出来。`
       : ''
   ]
@@ -2297,8 +2480,7 @@ export function normalizeVoiceDirectionPlan(
             ttsSpecialScene
           )
         : undefined
-    const ttsSpeed =
-      clampedSpeed !== undefined ? Number(clampedSpeed.toFixed(2)) : undefined
+    const ttsSpeed = clampedSpeed !== undefined ? Number(clampedSpeed.toFixed(2)) : undefined
 
     result.set(line.id, {
       emotion,
@@ -2582,11 +2764,7 @@ export function applyEmotionPlan(
   }
   const firstValue = plan.values().next().value
   if (firstValue && typeof firstValue === 'object') {
-    return applyVoiceDirectionPlan(
-      dialogue,
-      plan as Map<string, StagedVoiceDirectionLine>,
-      labels
-    )
+    return applyVoiceDirectionPlan(dialogue, plan as Map<string, StagedVoiceDirectionLine>, labels)
   }
   const allowed = new Set(labels.map((label) => label.trim()).filter(Boolean))
   const strPlan = plan as Map<string, string>
@@ -2731,7 +2909,9 @@ export function applyDialoguePolish(
     const id = str(item.id ?? item.lineId).trim()
     if (!id || !allowedIds.has(id)) continue
     const content = normalizePjskTerminology(
-      str(item.content ?? item.text ?? item.line).replace(/\\n/g, '\n').trim()
+      str(item.content ?? item.text ?? item.line)
+        .replace(/\\n/g, '\n')
+        .trim()
     )
     if (!content) continue
     replacementMap.set(id, content)
@@ -3399,10 +3579,14 @@ export function buildDirectionPrompt(
   staging?: StagedStaging
 ): StagedMessages {
   const castLines = plan.cast
-    .map(
-      (member) =>
-        `- ${member.name}（modelId=${member.modelId}）${member.role ? ` — ${member.role}` : ''}`
-    )
+    .map((member) => {
+      const profile =
+        typeof personasStagedApi.characterActingProfile === 'function'
+          ? personasStagedApi.characterActingProfile(member.name, member.role)
+          : null
+      const note = profile?.actingNote ? `（演技特点：${profile.actingNote}）` : ''
+      return `- ${member.name}（modelId=${member.modelId}）${member.role ? ` — ${member.role}` : ''}${note}`
+    })
     .join('\n')
 
   const sceneForLine = (idx: number): StagedStagingScene | null => {
@@ -3437,13 +3621,18 @@ export function buildDirectionPrompt(
 
   const hasEmotionTags = dialogue.lines.some((line) => line.emotion)
 
-  const motionLines = plan.cast
-    .map((member) => {
-      const model = view.modelById(member.modelId)
-      const names = model ? view.promptMotions(model) : []
-      return `${member.name}(${member.modelId})：${names.length ? names.join('，') : '（无）'}`
-    })
-    .join('\n')
+  const extView = view as CatalogView & { annotatedMotionList?: (modelIds?: number[]) => string }
+  const motionLines =
+    typeof extView.annotatedMotionList === 'function'
+      ? extView.annotatedMotionList(plan.cast.map((c) => c.modelId))
+      : plan.cast
+          .map((member) => {
+            const model = view.modelById(member.modelId)
+            const names = model ? view.promptMotions(model) : []
+            const annotated = names.map((name) => annotateMotionForDirection(model?.path, name))
+            return `${member.name}(${member.modelId})：${annotated.length ? annotated.join('，') : '（无）'}`
+          })
+          .join('\n')
 
   const facialLines = plan.cast
     .map((member) => {
@@ -3502,6 +3691,11 @@ export function buildDirectionPrompt(
     ]
   }
 
+  const officialActingNote =
+    typeof corpusStagedApi.getOfficialActingGuidelines === 'function'
+      ? `\n${corpusStagedApi.getOfficialActingGuidelines({ castCount: plan.cast.length })}\n`
+      : ''
+
   return {
     system: [
       '你是 Project SEKAI 风格视觉小说的精细演技导演（directActing）。',
@@ -3514,7 +3708,7 @@ export function buildDirectionPrompt(
     user: `## 这一场
 小事件：${plan.event || options.scene}
 ${plan.logline ? `一句话：${plan.logline}` : ''}
-${formatDirectingAnchorBlock(plan)}
+${formatDirectingAnchorBlock(plan)}${officialActingNote}
 出场角色：
 ${castLines}${formatWorldviewCueBlock(options.ragContext)}
 
@@ -4039,6 +4233,7 @@ export function composeStory(
     lastBodyMotion: string
     lastFacial: string
     lastSpeakingFacial: string
+    consecutiveSameFacial: number
     lastSpeakingWasShortWithMotion: boolean
     recentBodyMotions: string[]
     speakingCountSinceAppear: number
@@ -4051,7 +4246,11 @@ export function composeStory(
     preferredSide.set(cast[1].modelId, 'Right')
   }
   const onStage = new Map<number, StageActorState>()
-  const trackActorBodyMotion = (st: StageActorState | undefined, motionName: string, modelId?: number): void => {
+  const trackActorBodyMotion = (
+    st: StageActorState | undefined,
+    motionName: string,
+    modelId?: number
+  ): void => {
     if (!st || !motionName) return
     st.lastBodyMotion = motionName
     st.linesSinceLastBodyMotion = 0
@@ -4396,6 +4595,7 @@ export function composeStory(
         lastBodyMotion: entryMotion,
         lastFacial: entryFacial,
         lastSpeakingFacial: '',
+        consecutiveSameFacial: 0,
         lastSpeakingWasShortWithMotion: false,
         recentBodyMotions: entryMotion ? [entryMotion] : [],
         speakingCountSinceAppear: 0,
@@ -4919,9 +5119,7 @@ export function composeStory(
       Boolean(actorState?.lastSpeakingWasShortWithMotion) &&
       talkDelay < 0.8
     const justMovedWithMotion =
-      movedWithMotionActorId === member.modelId &&
-      movedWithMotionLine === index &&
-      talkDelay < 0.8
+      movedWithMotionActorId === member.modelId && movedWithMotionLine === index && talkDelay < 0.8
     const skipImmediateBodyMotion =
       justAppeared || justHadStandaloneMotion || justHadShortClipMotion || justMovedWithMotion
 
@@ -4952,7 +5150,7 @@ export function composeStory(
       }
     }
 
-    // 防止说话人连续多句卡死在 face_normal_01，或紧张/沉默/负向语境误配笑脸
+    // 防止说话人连续多句卡死在 face_normal_01 或同一表情，也防止表情/动作与剧情情绪冲突
     const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
     const speakerModelPath = view.modelById(member.modelId)?.path
     const speakerRestrained = isRestrainedRole(member.role) || isRestrainedRole(member.name)
@@ -4966,13 +5164,18 @@ export function composeStory(
         allowStaleCheck &&
         Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
         /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
+      const staleRepeatedFacial =
+        allowStaleCheck &&
+        Boolean(currentSpeakerFacial) &&
+        currentSpeakerFacial === actorState.lastSpeakingFacial &&
+        actorState.consecutiveSameFacial >= 2
       const incongruousSmile = shouldAvoidIncongruousSmile(
         currentSpeakerFacial,
         line,
         precededByTense,
         { modelPath: speakerModelPath, restrained: speakerRestrained }
       )
-      if (stuckOnNormal || incongruousSmile) {
+      if (stuckOnNormal || staleRepeatedFacial || incongruousSmile) {
         const varied = pickSpeakerSubtleFacial(
           view,
           member.modelId,
@@ -4986,6 +5189,39 @@ export function composeStory(
             speakerZeroAct.facial = varied
           } else {
             actions.unshift({ at: 0, modelId: member.modelId, facial: varied })
+          }
+        }
+      }
+
+      // 校验说话者身体动作是否与剧情情绪冲突，并避免连续重复相同动作
+      const speakerMotionAct = actions.find(
+        (a) =>
+          a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.trim().length > 0
+      )
+      const currentSpeakerMotion =
+        typeof speakerMotionAct?.motion === 'string' ? speakerMotionAct.motion.trim() : ''
+      if (currentSpeakerMotion && speakerMotionAct) {
+        const motionCompat = isMotionCompatibleWithContext({
+          motion: currentSpeakerMotion,
+          modelPath: speakerModelPath,
+          line,
+          prevTense: precededByTense,
+          restrainedRole: speakerRestrained
+        })
+        const repeatedBackToBack =
+          allowStaleCheck &&
+          currentSpeakerMotion === actorState.lastBodyMotion &&
+          actorState.linesSinceLastBodyMotion <= 1
+        if (!motionCompat || repeatedBackToBack) {
+          const replacement = pickFollowupMotion(
+            view,
+            member.modelId,
+            currentSpeakerMotion,
+            new Set(actorState.recentBodyMotions),
+            { line, prevTense: precededByTense, restrained: speakerRestrained }
+          )
+          if (replacement && replacement !== currentSpeakerMotion) {
+            speakerMotionAct.motion = replacement
           }
         }
       }
@@ -5043,7 +5279,9 @@ export function composeStory(
             }
           )
         : listenerFacialRaw
-      const speakerActedThisLine = actions.some((a) => a.modelId === member.modelId && num(a.at) < 0.25)
+      const speakerActedThisLine = actions.some(
+        (a) => a.modelId === member.modelId && num(a.at) < 0.25
+      )
       if (listenerMotion || listenerFacial) {
         if (!speakerActedThisLine || dialogue.lines.length < 6) {
           actions.push({
@@ -5098,9 +5336,7 @@ export function composeStory(
             index > pst.appearedAtLine &&
             (pid !== nextSpeakerId || nextTalkPause >= 0.8 || !nextSpeakerHasImmediateMotion)
         )
-        .sort(
-          ([aid], [bid]) => (totalBodyMotions.get(aid) ?? 0) - (totalBodyMotions.get(bid) ?? 0)
-        )
+        .sort(([aid], [bid]) => (totalBodyMotions.get(aid) ?? 0) - (totalBodyMotions.get(bid) ?? 0))
       const idlePartner = eligibleCandidates.find(
         ([pid, pst]) => pid !== member.modelId && pst.linesSinceLastBodyMotion >= 2
       )
@@ -5108,7 +5344,12 @@ export function composeStory(
         eligibleCandidates.find(([pid]) => pid !== member.modelId && pid !== nextSpeakerId) ??
         eligibleCandidates.find(([pid]) => pid !== nextSpeakerId) ??
         eligibleCandidates[0]
-      if (hasZeroMotionActorOnStage || pauseOrEllipsis || idlePartner || (turnBoundary && index % 4 === 2)) {
+      if (
+        hasZeroMotionActorOnStage ||
+        pauseOrEllipsis ||
+        idlePartner ||
+        (turnBoundary && index % 4 === 2)
+      ) {
         const picked = idlePartner ?? fallbackOffTurn
         if (picked) {
           autoSilentTargetId = picked[0]
@@ -5232,6 +5473,8 @@ export function composeStory(
       }
       if (typeof act.facial === 'string' && act.facial.length > 0) {
         if (aid === member.modelId) {
+          ast.consecutiveSameFacial =
+            ast.lastSpeakingFacial === act.facial ? ast.consecutiveSameFacial + 1 : 1
           ast.lastSpeakingFacial = act.facial
         }
         ast.lastFacial = act.facial
@@ -5295,16 +5538,31 @@ export function composeStory(
         const targetModelPath = view.modelById(targetId)?.path
         const fromPendingListener =
           pendingListenerMotion?.modelId === targetId ? pendingListenerMotion : null
+        const silentPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+        const targetRestrained =
+          isRestrainedRole(targetMember?.role ?? '') || isRestrainedRole(targetMember?.name ?? '')
+        const rawSilentMotion = ev?.silentReaction?.motion || fromPendingListener?.motion || ''
+        const safeSilentMotion =
+          rawSilentMotion &&
+          isMotionCompatibleWithContext({
+            motion: rawSilentMotion,
+            modelPath: targetModelPath,
+            line,
+            prevTense: silentPrecededByTense,
+            isListener: targetId !== member.modelId,
+            restrainedRole: targetRestrained
+          })
+            ? rawSilentMotion
+            : ''
         const motion =
-          ev?.silentReaction?.motion ||
-          fromPendingListener?.motion ||
+          safeSilentMotion ||
           pickFollowupMotion(
             view,
             targetId,
             targetState.lastBodyMotion,
-            new Set(targetState.recentBodyMotions)
+            new Set(targetState.recentBodyMotions),
+            { line, prevTense: silentPrecededByTense, restrained: targetRestrained }
           )
-        const silentPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
         const rawSilentFacial = ev?.silentReaction?.facial || fromPendingListener?.facial || ''
         const safeSilentFacial = shouldAvoidIncongruousSmile(
           rawSilentFacial,
@@ -5316,7 +5574,10 @@ export function composeStory(
           : rawSilentFacial
         const facial =
           safeSilentFacial ||
-          (directed?.silentMotion || autoSilentTargetId !== null || rawSilentFacial || fromPendingListener
+          (directed?.silentMotion ||
+          autoSilentTargetId !== null ||
+          rawSilentFacial ||
+          fromPendingListener
             ? targetId === member.modelId
               ? pickSpeakerSubtleFacial(
                   view,

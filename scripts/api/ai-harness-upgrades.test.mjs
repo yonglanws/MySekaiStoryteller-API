@@ -4,7 +4,10 @@ import { once } from 'node:events'
 import { test } from 'node:test'
 import { Logger } from 'tslog'
 import { resolveIrodoriVoice } from '../../out-host/common/tts/irodori.js'
-import { createStoryAgentToolkit, runAgenticStoryGeneration } from '../../out-host/host/ai/agentTools.js'
+import {
+  createStoryAgentToolkit,
+  runAgenticStoryGeneration
+} from '../../out-host/host/ai/agentTools.js'
 import {
   hasSpokenStageDirectionLeak,
   lintDialogueFidelity,
@@ -37,7 +40,13 @@ function makeView() {
         name: '晓山瑞希',
         shortName: '瑞希',
         path: '20mizuki_normal/20mizuki_normal_3.0_t04/20mizuki_normal.model3.json',
-        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-tilthead01', 'w-normal-glad01', 'w-normal-sigh01'],
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-tilthead01',
+          'w-normal-glad01',
+          'w-normal-sigh01'
+        ],
         facials: [
           'face_normal_01',
           'face_smile_01',
@@ -56,7 +65,13 @@ function makeView() {
         name: '东云绘名',
         shortName: '绘名',
         path: '19ena_normal/19ena_normal_3.0_t04/19ena_normal.model3.json',
-        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-tilthead01', 'w-normal-angry01', 'w-normal-sigh01'],
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-tilthead01',
+          'w-normal-angry01',
+          'w-normal-sigh01'
+        ],
         facials: [
           'face_normal_01',
           'face_smile_01',
@@ -76,7 +91,9 @@ function makeView() {
     ],
     voices: [],
     bgm: ['bgm00003.mp3'],
-    bgmDetails: [{ file: 'bgm00003.mp3', name: '日常曲', mood: '日常', description: '轻松的日常配乐' }]
+    bgmDetails: [
+      { file: 'bgm00003.mp3', name: '日常曲', mood: '日常', description: '轻松的日常配乐' }
+    ]
   })
 }
 
@@ -122,10 +139,7 @@ test('requirement #1: facial semantics block smile on sad/apologetic lines and s
     }).ok,
     false
   )
-  assert.equal(
-    pickNeutralFacial(view.models[0].facials, 'face_smile_01'),
-    'face_normal_01'
-  )
+  assert.equal(pickNeutralFacial(view.models[0].facials, 'face_smile_01'), 'face_normal_01')
   assert.match(annotateFacialName(undefined, 'face_sad_01'), /低落|失落/)
 
   const plan = makePlan(view)
@@ -171,8 +185,12 @@ test('requirement #2: 2-char scene gives both characters body motions without si
     {
       lines: dialogue.lines.map((l, idx) => ({
         id: l.id,
-        ...(idx % 2 === 0 ? { motion: 'w-normal-nod01', facial: 'face_smile_01' } : { facial: 'face_serious_01' }),
-        ...(idx === 2 ? { listener: { modelId: 2, motion: 'w-normal-tilthead01', facial: 'face_trouble_01' } } : {})
+        ...(idx % 2 === 0
+          ? { motion: 'w-normal-nod01', facial: 'face_smile_01' }
+          : { facial: 'face_serious_01' }),
+        ...(idx === 2
+          ? { listener: { modelId: 2, motion: 'w-normal-tilthead01', facial: 'face_trouble_01' } }
+          : {})
       }))
     },
     view,
@@ -197,14 +215,21 @@ test('requirement #2: 2-char scene gives both characters body motions without si
   }
 
   // 绘名（modelId=2）绝不能全程 0 动作（包含独立 Motion 片段）
-  const bodyMotionsByActor = new Map([[1, 0], [2, 0]])
+  const bodyMotionsByActor = new Map([
+    [1, 0],
+    [2, 0]
+  ])
   for (const snippet of story.snippets) {
     if (snippet.type === 'Talk') {
       for (const act of snippet.data.actions ?? []) {
-        if (act.motion) bodyMotionsByActor.set(act.modelId, (bodyMotionsByActor.get(act.modelId) ?? 0) + 1)
+        if (act.motion)
+          bodyMotionsByActor.set(act.modelId, (bodyMotionsByActor.get(act.modelId) ?? 0) + 1)
       }
     } else if (snippet.type === 'Motion' && snippet.data.motion) {
-      bodyMotionsByActor.set(snippet.data.modelId, (bodyMotionsByActor.get(snippet.data.modelId) ?? 0) + 1)
+      bodyMotionsByActor.set(
+        snippet.data.modelId,
+        (bodyMotionsByActor.get(snippet.data.modelId) ?? 0) + 1
+      )
     }
   }
   assert.ok(bodyMotionsByActor.get(1) >= 1, 'actor 1 has body motions')
@@ -225,7 +250,14 @@ test('requirement #6 & #7: no forced multi-act prompts and 2-char solo Center cu
   const stagingPrompt = buildStagingPrompt(
     view,
     plan,
-    { title: 't', lines: Array.from({ length: 14 }, (_, i) => ({ id: `l${i + 1}`, speaker: '瑞希', content: '嗯' })) },
+    {
+      title: 't',
+      lines: Array.from({ length: 14 }, (_, i) => ({
+        id: `l${i + 1}`,
+        speaker: '瑞希',
+        content: '嗯'
+      }))
+    },
     { scene: 't', personas: [], targetMinutes: 2 }
   )
   assert.match(stagingPrompt.user, /短暂切到单人 Center/)
@@ -254,7 +286,13 @@ test('requirement #6 & #7: no forced multi-act prompts and 2-char solo Center cu
     plan,
     dialogue
   )
-  const story = composeStory(view, plan, dialogue, normalizeDirection({}, view, plan, dialogue), staging)
+  const story = composeStory(
+    view,
+    plan,
+    dialogue,
+    normalizeDirection({}, view, plan, dialogue),
+    staging
+  )
   const { story: fixed } = validateAndFixStory(story, view)
   const soloAppears = fixed.snippets.filter(
     (s) => s.type === 'Move' && s.data?.to?.side === 'Center'
@@ -308,7 +346,11 @@ test('requirement #9: TTS voice refAudioPaths reset + calm specialScene/speed sm
     { lineOverride: { ttsSpecialScene: true } }
   )
   assert.equal(resolved.refAudioPath, 'refs/sad.wav')
-  assert.equal(resolved.refAudioPaths, undefined, 'single-ref emotion overrides multi-ref base wavs')
+  assert.equal(
+    resolved.refAudioPaths,
+    undefined,
+    'single-ref emotion overrides multi-ref base wavs'
+  )
 
   const dialogue = {
     title: '语速平滑',
@@ -320,15 +362,31 @@ test('requirement #9: TTS voice refAudioPaths reset + calm specialScene/speed sm
   const plan = normalizeVoiceDirectionPlan(
     {
       lines: [
-        { id: 'l1', emotion: '平静', ttsCaption: '落ち着いて話す。', ttsSpeed: 0.85, ttsSpecialScene: true },
-        { id: 'l2', emotion: '平静', ttsCaption: '穏やかに話す。', ttsSpeed: 1.18, ttsSpecialScene: false }
+        {
+          id: 'l1',
+          emotion: '平静',
+          ttsCaption: '落ち着いて話す。',
+          ttsSpeed: 0.85,
+          ttsSpecialScene: true
+        },
+        {
+          id: 'l2',
+          emotion: '平静',
+          ttsCaption: '穏やかに話す。',
+          ttsSpeed: 1.18,
+          ttsSpecialScene: false
+        }
       ]
     },
     dialogue,
     ['平静', '开心', '伤心']
   )
   const applied = applyVoiceDirectionPlan(dialogue, plan, ['平静', '开心', '伤心'])
-  assert.equal(applied.lines[0].ttsSpecialScene, undefined, 'calm line without scream/cry drops specialScene')
+  assert.equal(
+    applied.lines[0].ttsSpecialScene,
+    undefined,
+    'calm line without scream/cry drops specialScene'
+  )
   assert.ok(
     Math.abs((applied.lines[1].ttsSpeed ?? 1) - (applied.lines[0].ttsSpeed ?? 1)) <= 0.08 + 1e-6,
     'same-speaker calm speed jump is smoothly damped'
@@ -390,49 +448,86 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
   // 1) 原生 tool_calls 测试：先查表情工具再交付成稿
   let callIndex = 0
   const nativeServer = http.createServer(async (req, res) => {
-    for await (const _ of req) { /* drain */ }
+    for await (const _ of req) {
+      /* drain */
+    }
     callIndex += 1
     res.setHeader('content-type', 'application/json')
     if (callIndex === 1) {
-      res.end(JSON.stringify({
-        model: 'mock-agent',
-        choices: [{
-          finish_reason: 'tool_calls',
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              id: 'tc_1',
-              type: 'function',
-              function: {
-                name: 'inspect_character_expressions',
-                arguments: JSON.stringify({ modelId: 1, mood: '微笑' })
+      res.end(
+        JSON.stringify({
+          model: 'mock-agent',
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'tc_1',
+                    type: 'function',
+                    function: {
+                      name: 'inspect_character_expressions',
+                      arguments: JSON.stringify({ modelId: 1, mood: '微笑' })
+                    }
+                  }
+                ]
               }
-            }]
-          }
-        }]
-      }))
+            }
+          ]
+        })
+      )
       return
     }
-    res.end(JSON.stringify({
-      model: 'mock-agent',
-      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(validPayload) } }]
-    }))
+    res.end(
+      JSON.stringify({
+        model: 'mock-agent',
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: { role: 'assistant', content: JSON.stringify(validPayload) }
+          }
+        ]
+      })
+    )
   })
   nativeServer.listen(0, '127.0.0.1')
   await once(nativeServer, 'listening')
   const nativeUrl = `http://127.0.0.1:${nativeServer.address().port}/v1`
   try {
-    const client = new LlmClient({
-      enabled: true, baseUrl: nativeUrl, apiKeyEnv: 'UNSET', model: 'mock-agent',
-      temperature: 0.4, maxTokens: 4000, timeoutMs: 5000, retries: 0, jsonMode: 'auto',
-      extraBody: {}, systemPrompt: '', targetMinutes: 1, repairRounds: 1, pipeline: 'single',
-      condenseDialogue: true, polishDialogue: false, translateForTts: false, personas: [],
-      personaDirs: [],
-      rag: { enabled: false }
-    }, logger)
+    const client = new LlmClient(
+      {
+        enabled: true,
+        baseUrl: nativeUrl,
+        apiKeyEnv: 'UNSET',
+        model: 'mock-agent',
+        temperature: 0.4,
+        maxTokens: 4000,
+        timeoutMs: 5000,
+        retries: 0,
+        jsonMode: 'auto',
+        extraBody: {},
+        systemPrompt: '',
+        targetMinutes: 1,
+        repairRounds: 1,
+        pipeline: 'single',
+        condenseDialogue: true,
+        polishDialogue: false,
+        translateForTts: false,
+        personas: [],
+        personaDirs: [],
+        rag: { enabled: false }
+      },
+      logger
+    )
     const res = await runAgenticStoryGeneration({
-      llm: client, view, personas: [], scene: '晚上写分镜', targetMinutes: 1, logger
+      llm: client,
+      view,
+      personas: [],
+      scene: '晚上写分镜',
+      targetMinutes: 1,
+      logger
     })
     assert.equal(res.modeUsed, 'native')
     assert.deepEqual(res.toolCallsUsed, ['inspect_character_expressions'])
@@ -456,36 +551,61 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
     }
     reactStep += 1
     if (reactStep === 1) {
-      res.end(JSON.stringify({
-        model: 'mock-react',
-        choices: [{
-          finish_reason: 'stop',
-          message: {
-            content: JSON.stringify({
-              tool_call: { name: 'search_assets', arguments: { kind: 'background', query: '夜晚' } }
-            })
-          }
-        }]
-      }))
+      res.end(
+        JSON.stringify({
+          model: 'mock-react',
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                content: JSON.stringify({
+                  tool_call: {
+                    name: 'search_assets',
+                    arguments: { kind: 'background', query: '夜晚' }
+                  }
+                })
+              }
+            }
+          ]
+        })
+      )
       return
     }
-    res.end(JSON.stringify({
-      model: 'mock-react',
-      choices: [{
-        finish_reason: 'stop',
-        message: { content: JSON.stringify({ final: validPayload }) }
-      }]
-    }))
+    res.end(
+      JSON.stringify({
+        model: 'mock-react',
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: { content: JSON.stringify({ final: validPayload }) }
+          }
+        ]
+      })
+    )
   })
   fallbackServer.listen(0, '127.0.0.1')
   await once(fallbackServer, 'listening')
   const fallbackUrl = `http://127.0.0.1:${fallbackServer.address().port}/v1`
   try {
     const reactSettings = {
-      enabled: true, baseUrl: fallbackUrl, apiKeyEnv: 'UNSET', model: 'mock-react',
-      temperature: 0.4, maxTokens: 4000, timeoutMs: 5000, retries: 0, jsonMode: 'auto',
-      extraBody: {}, systemPrompt: '', targetMinutes: 1, repairRounds: 1, pipeline: 'single',
-      condenseDialogue: true, polishDialogue: false, translateForTts: false, personas: [],
+      enabled: true,
+      baseUrl: fallbackUrl,
+      apiKeyEnv: 'UNSET',
+      model: 'mock-react',
+      temperature: 0.4,
+      maxTokens: 4000,
+      timeoutMs: 5000,
+      retries: 0,
+      jsonMode: 'auto',
+      extraBody: {},
+      systemPrompt: '',
+      targetMinutes: 1,
+      repairRounds: 1,
+      pipeline: 'single',
+      condenseDialogue: true,
+      polishDialogue: false,
+      translateForTts: false,
+      personas: [],
       personaDirs: [],
       rag: { enabled: false }
     }
@@ -501,7 +621,11 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
       })
     }
     const writer = new StoryWriter(reactClient, reactSettings, reactCatalog, logger)
-    const out = await writer.generate({ prompt: '晚上继续工作', pipeline: 'agent', translateForTts: false })
+    const out = await writer.generate({
+      prompt: '晚上继续工作',
+      pipeline: 'agent',
+      translateForTts: false
+    })
     assert.equal(out.meta.agentMode, 'react-json')
     assert.deepEqual(out.meta.toolCalls, ['search_assets'])
     assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 1)
@@ -522,4 +646,282 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
   assert.equal(checkOut.ok, false)
   assert.equal(checkOut.stageDirectionFixes.length, 1)
   assert.equal(checkOut.stageDirectionFixes[0].repaired, '这就交给我吧。')
+})
+
+test('agentic harness: stateful outline -> acting advisor -> draft -> critique -> patch -> finalize across >8 steps', async (t) => {
+  const view = makeView()
+  const logger = new Logger({ type: 'hidden' })
+  const toolkit = createStoryAgentToolkit({
+    view,
+    personas: [],
+    emotionLabels: ['平静', '开心', '伤心'],
+    logger
+  })
+
+  // 1) lookup_character & inspect_character_expressions (both motion and facial with Chinese mood)
+  const charRes = JSON.parse(await toolkit.execute('lookup_character', { character: '瑞希' }))
+  assert.equal(charRes.characters[0].modelId, 1)
+
+  const exprRes = JSON.parse(
+    await toolkit.execute('inspect_character_expressions', {
+      modelId: 1,
+      mood: '伤心 道歉',
+      dialogueLine: '对不起，我还是搞砸了……',
+      emotion: '伤心'
+    })
+  )
+  assert.ok(Array.isArray(exprRes.motions) && exprRes.motions.length > 0)
+  assert.ok(exprRes.motions.some((m) => m.includes('sigh') || m.includes('叹气')))
+  assert.ok(exprRes.recommended && !exprRes.recommended.facials[0].startsWith('face_smile_01'))
+
+  // 2) recommend_acting_for_lines batch advisor
+  const batchRes = JSON.parse(
+    await toolkit.execute('recommend_acting_for_lines', {
+      lines: [
+        { id: 'l1', speaker: '瑞希', content: '对不起，昨天是我态度太冲了……', emotion: '伤心' },
+        { id: 'l2', speaker: '绘名', content: '……别这么说，其实我也有不对。', emotion: '平静' }
+      ]
+    })
+  )
+  assert.equal(batchRes.recommendations.length, 2)
+  assert.ok(batchRes.recommendations[0].recommendedFacials.length >= 1)
+  assert.ok(batchRes.recommendations[0].recommendedMotions.length >= 1)
+
+  // 3) plan_story_outline warns on unnecessary split with same background/ambient
+  const outlineRes = JSON.parse(
+    await toolkit.execute('plan_story_outline', {
+      title: '天台和解',
+      cast: [{ name: '瑞希' }, { name: '绘名' }],
+      scenes: [
+        { id: 's1', summary: '开头', background: 'bg_rooftop.jpg', ambient: 'normal' },
+        { id: 's2', summary: '继续', background: 'bg_rooftop.jpg', ambient: 'normal' }
+      ]
+    })
+  )
+  assert.equal(outlineRes.ok, true)
+  assert.ok(outlineRes.warnings.some((w) => w.includes('合并为 1 幕')))
+
+  // 4) save_story_draft -> critique_story_draft -> patch_story_draft -> finalize_story_draft
+  const flawedDraft = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_normal_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: 'w-normal-tilthead01',
+          facial: 'face_normal_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '对不起，昨天是我太冲动了……',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-glad01', facial: 'face_smile_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '……没关系，我也有不对的地方。',
+          emotion: '平静',
+          modelId: 2,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 2, motion: 'w-normal-nod01', facial: 'face_serious_01' }]
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: '',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: '',
+          moveSpeed: 'Normal'
+        }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+  const saved = JSON.parse(await toolkit.execute('save_story_draft', { story: flawedDraft }))
+  assert.equal(saved.draftSaved, true)
+
+  const inspectOut = JSON.parse(await toolkit.execute('inspect_story_draft', { type: 'Talk' }))
+  assert.equal(inspectOut.matchedCount, 2)
+
+  // Patch snippet index 3 to fix the facial & motion, then finalize
+  const patched = JSON.parse(
+    await toolkit.execute('patch_story_draft', {
+      operations: [
+        { op: 'update_acting', index: 3, motion: 'w-normal-sigh01', facial: 'face_sad_01' }
+      ]
+    })
+  )
+  assert.equal(patched.patched, true)
+  assert.equal(patched.actingPassed, true)
+
+  const finalized = JSON.parse(await toolkit.execute('finalize_story_draft', {}))
+  assert.equal(finalized.finalized, true)
+
+  // 5) Multi-step autonomous loop (>8 turns: 10 tool calls + finalize) succeeds with default maxToolTurns=16
+  let turn = 0
+  const multiStepServer = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      /* drain */
+    }
+    turn += 1
+    res.setHeader('content-type', 'application/json')
+    const toolPlan = [
+      { name: 'lookup_character', args: { character: '瑞希' } },
+      { name: 'lookup_character', args: { character: '绘名' } },
+      { name: 'search_assets', args: { kind: 'background', query: '天台' } },
+      { name: 'search_assets', args: { kind: 'se', query: '脚步' } },
+      { name: 'search_official_corpus', args: { query: '天台 瑞希 绘名', stage: 'dialogue' } },
+      {
+        name: 'plan_story_outline',
+        args: { title: '天台', cast: [{ name: '瑞希' }, { name: '绘名' }] }
+      },
+      { name: 'inspect_character_expressions', args: { modelId: 1, mood: '伤心' } },
+      {
+        name: 'recommend_acting_for_lines',
+        args: { lines: [{ speaker: '瑞希', content: '对不起……', emotion: '伤心' }] }
+      },
+      { name: 'save_story_draft', args: { story: flawedDraft } },
+      {
+        name: 'patch_story_draft',
+        args: {
+          operations: [
+            { op: 'update_acting', index: 3, motion: 'w-normal-sigh01', facial: 'face_sad_01' }
+          ]
+        }
+      }
+    ]
+    if (turn <= toolPlan.length) {
+      const step = toolPlan[turn - 1]
+      res.end(
+        JSON.stringify({
+          model: 'mock-multi',
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: `tc_${turn}`,
+                    type: 'function',
+                    function: { name: step.name, arguments: JSON.stringify(step.args) }
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      )
+      return
+    }
+    res.end(
+      JSON.stringify({
+        model: 'mock-multi',
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: { role: 'assistant', content: JSON.stringify({ use_saved_draft: true }) }
+          }
+        ]
+      })
+    )
+  })
+  multiStepServer.listen(0, '127.0.0.1')
+  await once(multiStepServer, 'listening')
+  t.after(() => multiStepServer.close())
+
+  const multiUrl = `http://127.0.0.1:${multiStepServer.address().port}/v1`
+  const client = new LlmClient(
+    {
+      enabled: true,
+      baseUrl: multiUrl,
+      apiKeyEnv: 'UNSET',
+      model: 'mock-multi',
+      temperature: 0.4,
+      maxTokens: 4000,
+      timeoutMs: 5000,
+      retries: 0,
+      jsonMode: 'off',
+      extraBody: {},
+      systemPrompt: '',
+      targetMinutes: 1,
+      repairRounds: 1,
+      pipeline: 'agent',
+      agentMaxSteps: 16,
+      polishDialogue: false,
+      translateForTts: false,
+      personas: [],
+      personaDirs: [],
+      rag: { enabled: false }
+    },
+    logger
+  )
+  const multiRes = await runAgenticStoryGeneration({
+    llm: client,
+    view,
+    personas: [],
+    scene: '瑞希和绘名在天台道歉和解',
+    targetMinutes: 1,
+    logger
+  })
+  assert.equal(multiRes.rounds, 11)
+  assert.equal(multiRes.toolCallsUsed.length, 10)
+  const talks = multiRes.story.snippets.filter((s) => s.type === 'Talk')
+  assert.equal(talks[0].data.actions[0].facial, 'face_sad_01')
+  assert.equal(talks[0].data.actions[0].motion, 'w-normal-sigh01')
 })

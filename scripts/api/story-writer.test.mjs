@@ -3,6 +3,7 @@ import { once } from 'node:events'
 import http from 'node:http'
 import { test } from 'node:test'
 import { Logger } from 'tslog'
+import { loadHostConfig } from '../../out-host/host/config.js'
 import { LlmClient } from '../../out-host/host/ai/llm.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 
@@ -208,4 +209,83 @@ test('translates missing ttsText in a batch after validation', async (t) => {
   assert.equal(talk.data.ttsText, 'こんばんは。')
   assert.equal(result.meta.ttsTranslated, 1)
   assert.ok(original.length >= 3)
+})
+
+test('config loads agentMaxSteps with MSS_LLM_AGENT_MAX_STEPS override and passes maxToolTurns to agent pipeline', async (t) => {
+  const prev = process.env.MSS_LLM_AGENT_MAX_STEPS
+  t.after(() => {
+    if (prev === undefined) delete process.env.MSS_LLM_AGENT_MAX_STEPS
+    else process.env.MSS_LLM_AGENT_MAX_STEPS = prev
+  })
+  delete process.env.MSS_LLM_AGENT_MAX_STEPS
+  const defaultCfg = loadHostConfig()
+  assert.equal(defaultCfg.llm.agentMaxSteps, 16)
+
+  process.env.MSS_LLM_AGENT_MAX_STEPS = '20'
+  const envCfg = loadHostConfig()
+  assert.equal(envCfg.llm.agentMaxSteps, 20)
+
+  let callCount = 0
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {
+      /* drain */
+    }
+    callCount += 1
+    res.setHeader('content-type', 'application/json')
+    if (callCount < 4) {
+      res.end(
+        JSON.stringify({
+          model: 'mock-agent',
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: `tc_${callCount}`,
+                    type: 'function',
+                    function: { name: 'lookup_character', arguments: '{}' }
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      )
+      return
+    }
+    res.end(
+      JSON.stringify({
+        model: 'mock-agent',
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: { role: 'assistant', content: JSON.stringify(validStory('多步代理完成。')) }
+          }
+        ]
+      })
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  process.env.MSS_TEST_LLM_KEY = 'test-key'
+  const settings = makeSettings(`http://127.0.0.1:${server.address().port}/v1`, {
+    pipeline: 'agent',
+    agentMaxSteps: 12
+  })
+  const writer = new StoryWriter(
+    new LlmClient(settings, new Logger({ type: 'hidden' })),
+    settings,
+    catalog,
+    new Logger({ type: 'hidden' })
+  )
+  const out = await writer.generate({ prompt: '晚上在房间里聊天', translateForTts: false })
+  assert.equal(out.meta.pipeline, 'agent')
+  assert.equal(out.meta.agentMode, 'native')
+  assert.equal(out.meta.agentSteps, 4)
+  assert.equal(out.meta.toolCalls.length, 3)
 })

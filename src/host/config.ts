@@ -285,6 +285,8 @@ const LlmSchema = z.object({
    * chat 模式始终走 single。
    */
   pipeline: z.enum(['single', 'staged', 'agent']).default('staged'),
+  /** Agentic 模式下允许的最大工具调用/迭代步数 */
+  agentMaxSteps: z.number().int().min(2).max(40).default(16),
   /** response_format=json_object：auto = 先带后回退，on = 必须，off = 不发送 */
   jsonMode: z.enum(['auto', 'on', 'off']).default('auto'),
   /** 生成后把中文台词翻译成日文 ttsText（TTS 参考音频通常为日语） */
@@ -567,6 +569,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_LLM_PIPELINE) {
     const v = env.MSS_LLM_PIPELINE.toLowerCase()
     if (v === 'single' || v === 'staged' || v === 'agent') config.llm.pipeline = v
+  }
+  if (env.MSS_LLM_AGENT_MAX_STEPS) {
+    const v = parseInt(env.MSS_LLM_AGENT_MAX_STEPS, 10)
+    if (Number.isFinite(v) && v >= 2 && v <= 40) config.llm.agentMaxSteps = v
   }
   if (env.MSS_LLM_JSON_MODE) {
     const v = env.MSS_LLM_JSON_MODE.toLowerCase()
