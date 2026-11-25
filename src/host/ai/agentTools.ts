@@ -128,6 +128,8 @@ export interface ActingFidelityReport {
   listenerFrozenCount?: number
   duplicateBgmCount?: number
   zeroWidthCharCount?: number
+  staggeredMidlineMotionCount?: number
+  excessiveSlidingCount?: number
   officialReport: officialLinterMod.OfficialLintReport
 }
 
@@ -500,6 +502,16 @@ function checkMotionCompatibility(params: {
   if (params.restrainedRole && info.role === 'glad') {
     return { ok: false, reason: 'restrained_role_exuberant_motion' }
   }
+  if (
+    (ctx.mood === 'sad_regret' || ctx.monologue) &&
+    emo !== '惊讶' &&
+    ['tilthead', 'greeting', 'relief', 'surprise', 'angry'].includes(info.role)
+  ) {
+    return { ok: false, reason: 'sad_or_monologue_unrelated_motion' }
+  }
+  if (ctx.mood === 'angry_frustration' && ['tilthead', 'greeting'].includes(info.role)) {
+    return { ok: false, reason: 'angry_context_unrelated_motion' }
+  }
   return { ok: true }
 }
 
@@ -592,14 +604,14 @@ function recommendForLine(
   const desiredRolesByMood: Record<DramaticContextMood, MotionSemanticRole[]> = {
     surprise: ['surprise', 'tilthead', 'forward', 'nod'],
     awkward: ['trouble', 'think', 'shy', 'tilthead'],
-    gentle_reassure: ['nod', 'relief', 'greeting', 'forward'],
+    gentle_reassure: ['nod', 'relief', 'forward'],
     inner_resolve: ['forward', 'nod', 'think'],
     shy_hesitation: ['shy', 'think', 'trouble', 'tilthead'],
     angry_frustration: ['angry', 'shakehead', 'forward'],
-    sad_regret: ['sad', 'trouble', 'think', 'nod'],
+    sad_regret: ['sad', 'trouble', 'think'],
     cheerful_banter: ['glad', 'nod', 'playful', 'relief', 'greeting'],
-    attentive_listen: ['nod', 'tilthead', 'think', 'forward'],
-    thinking_monologue: ['think', 'tilthead', 'sad', 'trouble'],
+    attentive_listen: ['nod', 'think', 'forward', 'trouble'],
+    thinking_monologue: ['think', 'sad', 'trouble'],
     entry_exit: ['greeting', 'nod', 'tilthead'],
     neutral: ['nod', 'tilthead', 'think', 'forward', 'relief']
   }
@@ -622,8 +634,9 @@ function recommendForLine(
       const role = inspectMotion(model.path, m).role
       const roleIdx = wantedRoles.indexOf(role)
       let score = roleIdx >= 0 ? 20 - roleIdx * 4 : 0
-      if (m === params.prevMotion) score -= 12
-      if (recentSet.has(m)) score -= 5
+      if (/^w-normal/i.test(m)) score += 3
+      if (m === params.prevMotion) score -= 3
+      if (recentSet.has(m)) score -= 2
       return { m, score }
     })
     .sort((a, b) => b.score - a.score)
@@ -913,7 +926,7 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
       const prevM = lastMotionByModel.get(modelId)
       const nextRun = prevM && prevM.motion === primaryMotion ? prevM.run + 1 : 1
       lastMotionByModel.set(modelId, { motion: primaryMotion, run: nextRun })
-      if (nextRun >= 3) {
+      if (nextRun >= 4) {
         diagnostics.push({
           snippetIndex: i,
           lineNumber: talkIdx,
@@ -927,59 +940,62 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
           field: 'repetition',
           code: 'repeated_motion_run',
           severity: 'medium',
-          message: `连续 ${nextRun} 句重复动作 ${primaryMotion}，建议更换更贴合本句节奏的动作`,
+          message: `连续 ${nextRun} 句重复动作 ${primaryMotion}，建议在情绪转折处自然换拍`,
           recommendedFacials: [],
           recommendedMotions: rec.motions
         })
       }
     }
 
-    // 听者静止检测：同台非说话角色连续 >=2 句无表情/动作更新时报告 listener_frozen
+    // 听者静止检测（对齐官方 event_145_08）：跳过内心独白，连续 >=4 句无更新才提示，推荐 at: 0 纯表情或句间独立 Motion
+    const isMonologueLine = /^[（(]/.test(content.trim()) && /[）)]$/.test(content.trim())
     const activeIds = new Set<number>([modelId])
     for (const act of actions) {
       if (typeof act.modelId === 'number') activeIds.add(act.modelId)
     }
-    for (const onStageId of onStage) {
-      if (activeIds.has(onStageId)) {
-        listenerIdleTalks.set(onStageId, 0)
-        continue
-      }
-      const nextIdle = (listenerIdleTalks.get(onStageId) ?? 0) + 1
-      listenerIdleTalks.set(onStageId, nextIdle)
-      if (nextIdle === 2 || (nextIdle > 2 && nextIdle % 3 === 0)) {
-        listenerFrozenCount += 1
-        const listenerModel = view.modelById(onStageId)
-        const listenerProfile = getActingProfile(listenerModel?.name ?? '', '')
-        const listenerRec = listenerModel
-          ? recommendForLine(view, listenerModel, {
-              content,
-              emotion,
-              prevContent,
-              prevEmotion,
-              prevTense,
-              isListener: true,
-              restrainedRole: listenerProfile.restrained,
-              limit: 3
-            })
-          : { mood: 'attentive_listen' as DramaticContextMood, facials: [], motions: [] }
-        diagnostics.push({
-          snippetIndex: i,
-          lineNumber: talkIdx,
-          modelId,
-          listenerModelId: onStageId,
-          speaker,
-          content: content.slice(0, 60),
-          emotion,
-          facial: '',
-          motion: '',
-          inferredMood: listenerRec.mood,
-          field: 'staging',
-          code: 'listener_frozen',
-          severity: 'medium',
-          message: `在场听者(modelId=${onStageId})已连续 ${nextIdle} 句静止无反应，建议在 actions 中错峰(at: 0.5..0.85)添加听者微表情或轻动作`,
-          recommendedFacials: listenerRec.facials,
-          recommendedMotions: listenerRec.motions
-        })
+    if (!isMonologueLine) {
+      for (const onStageId of onStage) {
+        if (activeIds.has(onStageId)) {
+          listenerIdleTalks.set(onStageId, 0)
+          continue
+        }
+        const nextIdle = (listenerIdleTalks.get(onStageId) ?? 0) + 1
+        listenerIdleTalks.set(onStageId, nextIdle)
+        if (nextIdle === 4 || (nextIdle > 4 && nextIdle % 4 === 0)) {
+          listenerFrozenCount += 1
+          const listenerModel = view.modelById(onStageId)
+          const listenerProfile = getActingProfile(listenerModel?.name ?? '', '')
+          const listenerRec = listenerModel
+            ? recommendForLine(view, listenerModel, {
+                content,
+                emotion,
+                prevContent,
+                prevEmotion,
+                prevTense,
+                isListener: true,
+                restrainedRole: listenerProfile.restrained,
+                limit: 3
+              })
+            : { mood: 'attentive_listen' as DramaticContextMood, facials: [], motions: [] }
+          diagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkIdx,
+            modelId,
+            listenerModelId: onStageId,
+            speaker,
+            content: content.slice(0, 60),
+            emotion,
+            facial: '',
+            motion: '',
+            inferredMood: listenerRec.mood,
+            field: 'staging',
+            code: 'listener_frozen',
+            severity: 'medium',
+            message: `在场听者(modelId=${onStageId})已连续 ${nextIdle} 句静止无反应，建议在 actions 中于 at: 0 添加纯表情(facial-only)切换，或在情绪转折点句间插入独立 Motion 片段`,
+            recommendedFacials: listenerRec.facials,
+            recommendedMotions: listenerRec.motions
+          })
+        }
       }
     }
 
@@ -1234,7 +1250,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'recommend_acting_for_lines',
         description:
-          '批量为多句台词匹配最贴合剧情情绪、上下文转折与角色性格的 facial 和 motion 候选；若提供 listenerModelId 或 listenerSpeaker，同时返回错峰（at: 0.5..0.85）听者反应建议。',
+          '批量为多句台词匹配最贴合剧情情绪、上下文转折与角色性格的 facial 和 motion 候选；若提供 listenerModelId 或 listenerSpeaker，同时返回官方节奏的听者句首(at: 0)纯表情反应建议。',
         parameters: {
           type: 'object',
           properties: {
@@ -1254,7 +1270,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   isMonologue: { type: 'boolean' },
                   listenerModelId: {
                     type: 'number',
-                    description: '可选：同台听者 modelId，提供时同步返回错峰听者反应推荐'
+                    description: '可选：同台听者 modelId，提供时同步返回句首(at: 0)听者微表情建议'
                   },
                   listenerSpeaker: {
                     type: 'string',
@@ -1519,12 +1535,16 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   listenerAction: {
                     type: 'object',
                     description:
-                      '为 Talk 片段新增/更新听者反应（自动错峰 at: 0.45..0.85，不与说话者碰撞）',
+                      '为 Talk 片段新增/更新听者反应（默认 at: 0 纯表情，不与说话者身体动作冲突；如需听者身体动作请插独立 Motion 片段）',
                     properties: {
                       modelId: { type: 'number', description: '听者 modelId' },
-                      at: { type: 'number', description: '触发时刻（默认 0.6，自动避开说话者）' },
-                      facial: { type: 'string', description: '听者微表情' },
-                      motion: { type: 'string', description: '可选：听者轻微身体动作' },
+                      at: { type: 'number', description: '触发时刻（默认 0，纯表情无需错峰）' },
+                      facial: { type: 'string', description: '听者微表情（推荐仅传 facial）' },
+                      motion: {
+                        type: 'string',
+                        description:
+                          '可选：仅当说话者本句无身体动作时生效；否则自动保留纯表情以避免双人动作碰撞'
+                      },
                       remove: { type: 'boolean', description: '为 true 时移除该听者的动作' }
                     },
                     required: ['modelId']
@@ -1953,7 +1973,9 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           listenerReaction = {
             modelId: listenerModel.id,
             speaker: view.shortName(listenerModel),
-            suggestedAt: 0.6,
+            suggestedAt: 0,
+            preferFacialOnly: true,
+            note: '官方 PJSK 节奏：优先在 at: 0 仅切听者微表情(facial-only)；仅在情绪转折点于句间插独立 Motion 片段，勿在句中 at: 0.5..0.85 塞入听者身体动作',
             inferredMood: lAdvised.mood,
             recommendedFacials: lAdvised.facials.map((f) => ({
               name: f,
@@ -2565,29 +2587,38 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   : []
                 const existingIdx = acts.findIndex((a) => a && a.modelId === lModelId)
                 const removeListener = Boolean(rawListener.remove)
-                const lMotion =
+                let lMotion =
                   typeof rawListener.motion === 'string' ? rawListener.motion.trim() : undefined
                 const lFacial =
                   typeof rawListener.facial === 'string' ? rawListener.facial.trim() : undefined
                 if (removeListener || (lMotion === '' && lFacial === '')) {
                   if (existingIdx >= 0) acts.splice(existingIdx, 1)
                 } else {
-                  const speakerAts = acts
-                    .filter((a) => a && a.modelId !== lModelId)
-                    .map((a) => (typeof a.at === 'number' && Number.isFinite(a.at) ? a.at : 0))
-                  let desiredAt =
+                  const desiredAt =
                     typeof rawListener.at === 'number' &&
                     Number.isFinite(rawListener.at) &&
-                    rawListener.at >= 0.45 &&
-                    rawListener.at <= 0.85
+                    rawListener.at >= 0 &&
+                    rawListener.at <= 1
                       ? rawListener.at
-                      : 0.6
-                  if (speakerAts.some((sat) => Math.abs(sat - desiredAt) < 0.3 - 1e-6)) {
-                    const fallbackAts = [0.6, 0.7, 0.5, 0.8, 0.45, 0.85]
-                    desiredAt =
-                      fallbackAts.find((cand) =>
-                        speakerAts.every((sat) => Math.abs(sat - cand) >= 0.3 - 1e-6)
-                      ) ?? 0.65
+                      : 0
+                  const speakerBodyAts = acts
+                    .filter(
+                      (a) =>
+                        a &&
+                        a.modelId !== lModelId &&
+                        typeof a.motion === 'string' &&
+                        a.motion.trim().length > 0
+                    )
+                    .map((a) => (typeof a.at === 'number' && Number.isFinite(a.at) ? a.at : 0))
+                  if (
+                    lMotion &&
+                    speakerBodyAts.some((sat) => Math.abs(sat - desiredAt) < 0.25 - 1e-6)
+                  ) {
+                    // 说话者已在同拍播放身体动作：保留听者纯表情，不把听者身体动作硬推到句中错峰
+                    lMotion = ''
+                    appliedNotes.push(
+                      `listener@${idx}:保留at:${desiredAt}纯表情(如需听者身体动作请插独立Motion片段)`
+                    )
                   }
                   const nextAct: Record<string, unknown> =
                     existingIdx >= 0
@@ -2664,6 +2695,8 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           listenerFrozenCount: audited.actingReport.listenerFrozenCount ?? 0,
           duplicateBgmCount: audited.actingReport.duplicateBgmCount ?? 0,
           zeroWidthCharCount: audited.actingReport.zeroWidthCharCount ?? 0,
+          staggeredMidlineMotionCount: audited.actingReport.staggeredMidlineMotionCount ?? 0,
+          excessiveSlidingCount: audited.actingReport.excessiveSlidingCount ?? 0,
           dialogueIssues: audited.dialogueLint.issues.slice(0, maxDiag),
           diagnostics: audited.actingReport.diagnostics.slice(0, maxDiag),
           warnings: audited.warnings.slice(0, 8)
@@ -2839,10 +2872,10 @@ export async function runAgenticStoryGeneration(
     '- 用 search_assets({ kinds: ["background","bgm","se"], queries: [...] }) 一次查完背景/BGM/音效，不要拆成多次单查！',
     '- 用 inspect_character_expressions({ modelId, moods: ["伤心","生气","惊讶","平静","困扰"] })（或留空 mood 取按情绪分组总览）每个角色只查 1 次！',
     '创作硬规范（务必遵守）：',
-    '1. 表情与动作贴合实际剧情：悲伤/绝望/沉重独白句严禁挂 face_surprise_01 / face_notice_01 / face_shock_01（除非台词本身是真正的突发惊愕），纯自责/含泪悔恨的 [伤心] 句严禁挂 face_angry_01；Move 与 LayoutAppear 的 facial 也要贴合周边剧情气氛；朝比奈真冬保持克制内敛。',
-    '2. 听者实时反应（防卡顿）与动作防撞：A 连续说话时，同台听者 B 绝不能全程静止！每当 A 连续说 >=2 句（或情绪强烈句）时，务必在 Talk.data.actions 里给听者 B 加错峰反应（at: 0.5..0.85，与说话者 at: 0 严格错开 >=0.3），交替使用“纯微表情”和“轻身体动作(nod/tilthead/trouble/sad/sigh/surprise)”，也可以用 patch_story_draft 的 listenerAction 字段快速补齐。',
+    '1. 表情与动作贴合实际剧情（稳态克制，严禁乱切动作）：悲伤/绝望/沉重独白句严禁挂 face_surprise_01 / face_notice_01 / face_shock_01（除非台词本身是真正的突发惊愕），纯自责/含泪悔恨的 [伤心] 句严禁挂 face_angry_01，也严禁为了防重复而把伤心/沉重句切去 tilthead/greeting/relief/forward 等脱节动作；同情绪连续 2~3 句保持稳定站姿或只微调表情是 PJSK 原版常态，优先使用同一套 w-normal-* 动作风格；Move 与 LayoutAppear 的 motion/facial 也要贴合周边剧情气氛；朝比奈真冬保持克制内敛。',
+    '2. 听者反应对齐官方 PJSK（禁止句中错峰刷屏）：严禁在台词中途（at: 0.45..0.85）频繁塞入听者错峰动作！A 连续说话（非内心独白）>=3~4 句且气氛变化时，优先在 Talk.data.actions 中给听者 B 放 at: 0 的**纯表情切换**（仅 facial，不带 motion，与说话者动作自然共存不冲突）；仅在真正情绪转折点才于句间插入 1 条独立 Motion 片段表现听者身体反应。',
     '3. 不强制分幕且不重复切 BGM：同一时间地点连续对话保持 1 幕即可；严禁连续两次 ChangeBgm 播放同一首曲子；有奔跑/脚步/推门等动作时配合 PlaySe 音效。',
-    '4. 放宽双人同框：日常对话 Left/Right 同框，角色内心独白或沉思时鼓励用 LayoutClear + LayoutAppear(Center)（或 Move 到 Center）切单人特写留白，之后再切回 Left/Right；>=3 人时始终 Normal 模式（<=2 人同台）交叠轮换。',
+    '4. 原地渐变进出场（对齐 PJSK 原版 event_145_08）：所有 LayoutAppear / LayoutClear 默认使用**原地渐变淡入淡出**（from.side === to.side, offset: 0，如 Left->Left、Right->Right、Center->Center）；仅在剧情明确描写“奔跑冲入/推门走入/转身跑离”时才使用 LeftOver/RightOver 滑入滑出（配合脚步 SE）！日常对话 Left/Right 同框，内心独白或沉思切单人 Center 特写时优先直接原地渐变 LayoutClear + LayoutAppear(Center->Center)，避免无意义的 LayoutClear -> Move Center -> Move Left -> LayoutAppear 反复横移；>=3 人时始终 Normal 模式（<=2 人同台）交叠渐变轮换。',
     '5. 禁止括号动作提示与 AI 套话：台词中只写说出口的话或心理独白（如「（……怎么办才好）」），严禁夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号，禁止心理咨询式说教结尾。',
     '6. 排版与交卷：每条 Talk 最多 3 行（每行<=30字宽），不写 ttsText；约 90% Talk delay=0，仅重大停顿用 1.0/1.5；转场与静默 Motion 前最后一句 Talk 设 closeWindowOnFinish=true；务必先 save_story_draft + critique_story_draft + patch_story_draft 打磨，再 finalize_story_draft 交卷。',
     emotionNote,

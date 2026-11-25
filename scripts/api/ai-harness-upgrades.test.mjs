@@ -200,15 +200,17 @@ test('requirement #2: 2-char scene gives both characters body motions without si
   const raw = composeStory(view, plan, dialogue, direction)
   const { story } = validateAndFixStory(raw, view)
 
-  // 同句 Talk.actions 绝不出现双人同时刻（<0.25）碰撞
+  // 同句 Talk.actions 绝不出现双人同时刻（<0.25）身体动作碰撞（纯表情听者反应允许在 at=0 共存）
   const talks = story.snippets.filter((s) => s.type === 'Talk')
   for (const talk of talks) {
-    const acts = Array.isArray(talk.data.actions) ? talk.data.actions : []
-    for (let i = 0; i < acts.length; i++) {
-      for (let j = i + 1; j < acts.length; j++) {
+    const bodyActs = (Array.isArray(talk.data.actions) ? talk.data.actions : []).filter(
+      (a) => typeof a.motion === 'string' && a.motion.trim().length > 0
+    )
+    for (let i = 0; i < bodyActs.length; i++) {
+      for (let j = i + 1; j < bodyActs.length; j++) {
         assert.ok(
-          Math.abs((acts[i].at ?? 0) - (acts[j].at ?? 0)) >= 0.25,
-          'no simultaneous dual-actor actions inside Talk'
+          Math.abs((bodyActs[i].at ?? 0) - (bodyActs[j].at ?? 0)) >= 0.25,
+          'no simultaneous dual-actor body motions inside Talk'
         )
       }
     }
@@ -997,7 +999,7 @@ test('agentic harness: batched inspect_character_expressions, search_assets, lis
   assert.ok(Array.isArray(batchedAssets.bgm) && batchedAssets.bgm.length >= 1)
   assert.ok(Array.isArray(batchedAssets.se) && batchedAssets.se.length >= 1)
 
-  // 3) recommend_acting_for_lines with listenerModelId returns staggered listenerReaction
+  // 3) recommend_acting_for_lines with listenerModelId returns official at: 0 facial-only listenerReaction
   const recWithListener = JSON.parse(
     await toolkit.execute('recommend_acting_for_lines', {
       lines: [
@@ -1016,10 +1018,11 @@ test('agentic harness: batched inspect_character_expressions, search_assets, lis
   const lr = recWithListener.recommendations[0].listenerReaction
   assert.ok(lr, 'should include listenerReaction when listenerModelId is provided')
   assert.equal(lr.modelId, 2)
-  assert.ok(lr.suggestedAt >= 0.45 && lr.suggestedAt <= 0.85)
+  assert.equal(lr.suggestedAt, 0, 'official PJSK listener reaction defaults to at: 0 facial-only')
+  assert.equal(lr.preferFacialOnly, true)
   assert.ok(Array.isArray(lr.recommendedFacials) && lr.recommendedFacials.length >= 1)
 
-  // 4) patch_story_draft listenerAction auto-staggers away from speaker at=0 and supports removal
+  // 4) patch_story_draft listenerAction keeps clean at: 0 facial-only when speaker already has a body motion at=0
   const draft = {
     models: [
       { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
@@ -1092,7 +1095,7 @@ test('agentic harness: batched inspect_character_expressions, search_assets, lis
           index: 5,
           listenerAction: {
             modelId: 2,
-            at: 0, // intentionally colliding -> must be auto-staggered >= 0.45
+            at: 0, // speaker already has body motion at=0 -> keeps facial-only at=0 without jarring mid-line stagger
             facial: 'face_sad_01',
             motion: 'w-normal-tilthead01'
           }
@@ -1106,10 +1109,11 @@ test('agentic harness: batched inspect_character_expressions, search_assets, lis
   assert.equal(talk2Acts.length, 2)
   const listenerAct = talk2Acts.find((a) => a.modelId === 2)
   assert.ok(listenerAct, 'listener action should be present')
-  assert.ok(
-    listenerAct.at >= 0.45 && listenerAct.at <= 0.85,
-    `expected staggered at, got ${listenerAct.at}`
-  )
+  assert.equal(listenerAct.at, 0, `expected official at: 0 facial-only, got ${listenerAct.at}`)
   assert.equal(listenerAct.facial, 'face_sad_01')
-  assert.equal(listenerAct.motion, 'w-normal-tilthead01')
+  assert.equal(
+    listenerAct.motion,
+    undefined,
+    'clashing listener body motion is stripped so facial-only cleanly coexists at=0'
+  )
 })
