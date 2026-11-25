@@ -1025,7 +1025,7 @@ const MOTION_ROLES_BY_DRAMATIC_MOOD: Record<DramaticContextMood, MotionSemanticR
   inner_resolve: ['forward', 'nod', 'tilthead', 'relief'],
   shy_hesitation: ['shy', 'trouble', 'think', 'tilthead'],
   angry_frustration: ['angry', 'shakehead', 'forward', 'trouble', 'tilthead'],
-  sad_regret: ['sad', 'trouble', 'shakehead', 'think', 'nod'],
+  sad_regret: ['sad', 'trouble', 'shakehead', 'think', 'nod', 'tilthead'],
   cheerful_banter: ['glad', 'playful', 'nod', 'tilthead', 'greeting', 'relief'],
   attentive_listen: ['nod', 'tilthead', 'think', 'relief'],
   thinking_monologue: ['think', 'trouble', 'sad', 'tilthead', 'nod'],
@@ -1081,8 +1081,30 @@ export function pickMoodMatchedMotion(
     return ''
   }
 
+  const isOppositeRole = (role: MotionSemanticRole): boolean => {
+    if (
+      dramaticMood === 'sad_regret' ||
+      dramaticMood === 'angry_frustration' ||
+      dramaticMood === 'awkward' ||
+      dramaticMood === 'shy_hesitation'
+    ) {
+      return role === 'glad' || role === 'playful'
+    }
+    if (dramaticMood === 'cheerful_banter') {
+      return role === 'sad' || role === 'angry'
+    }
+    return false
+  }
+
   return (
-    pickFromRoles(false) || pickFromRoles(true) || pool.find((m) => !avoid?.has(m)) || pool[0] || ''
+    pickFromRoles(false) ||
+    pool.find(
+      (m) => !avoid?.has(m) && !isOppositeRole(inspectModelMotion(modelPath, m, modelsRoot).role)
+    ) ||
+    pickFromRoles(true) ||
+    pool.find((m) => !avoid?.has(m)) ||
+    pool[0] ||
+    ''
   )
 }
 

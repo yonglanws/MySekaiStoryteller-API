@@ -480,12 +480,12 @@ function pickFollowupMotion(
     if (currentMotion) avoid.add(currentMotion)
     const matched = facialStagedApi.pickMoodMatchedMotion(
       nonStanding,
-      moodKey === 'thinking' ? 'neutral' : moodKey,
+      moodKey,
       model.path,
       moodContext.restrained,
       avoid
     )
-    if (matched) return matched
+    if (matched && matched !== currentMotion) return matched
   }
   const moodHints: Record<typeof moodKey, RegExp> = {
     sad: /sad|sigh|lookdown|trouble|think|nod/i,
