@@ -18,6 +18,7 @@ import type { AssetsSettings } from '../config'
 import { atomicWrite, type RequestOptions } from './http'
 import { listMedia, listScenarioSeFiles } from './media'
 import {
+  isLegacyDeadMoesekaiUrl,
   libraryRootFor,
   loadMoesekaiIndex,
   ripperManifest,
@@ -364,7 +365,8 @@ function bgmLabelOf(
   if (sem) {
     const name = label?.name && label.name !== id ? label.name : sem.name || id
     const baseDesc = sem.description || ''
-    const hasCat = label?.description && !baseDesc.includes(label.description.replace(/\s*BGM$/, ''))
+    const hasCat =
+      label?.description && !baseDesc.includes(label.description.replace(/\s*BGM$/, ''))
     const description =
       hasCat && label?.description ? `${baseDesc}（${label.description}）` : baseDesc
     return {
@@ -381,20 +383,59 @@ function bgmLabelOf(
   return { name: label.name || id, description: label.description }
 }
 
-function inferDefaultOutfitMeta(id: string, isDefault: boolean): {
+function inferDefaultOutfitMeta(
+  id: string,
+  isDefault: boolean
+): {
   outfitCategory: string
   outfitLabel: string
 } {
   const clean = id.replace(/^v2_/, '')
+  const isV2 = id.startsWith('v2_')
+  const verTag = isV2 ? '(新立绘)' : ''
+  if (/black\d*$/i.test(clean)) return { outfitCategory: '特殊', outfitLabel: '暗色剪影' }
+  if (clean.includes('child')) return { outfitCategory: '特殊', outfitLabel: '幼年时期' }
+  if (/^clb\d+_/.test(clean)) return { outfitCategory: '联动', outfitLabel: '联动服装' }
+  if (clean.includes('april')) return { outfitCategory: '活动', outfitLabel: '愚人节限定服' }
+
   const suffix = clean.replace(/^\d{2}[a-z]+_/, '')
-  if (suffix === 'normal') return { outfitCategory: '常服', outfitLabel: id.startsWith('v2_') ? '日常常服(新版)' : '日常常服' }
-  if (suffix.startsWith('casual')) return { outfitCategory: '私服', outfitLabel: '私服' }
-  if (suffix.startsWith('school')) return { outfitCategory: '校服', outfitLabel: '校服' }
-  if (suffix.startsWith('unit')) return { outfitCategory: '队服', outfitLabel: '团体队服' }
-  if (suffix.startsWith('sports')) return { outfitCategory: '运动服', outfitLabel: '运动服' }
+  if (suffix === 'normal')
+    return { outfitCategory: '常服', outfitLabel: isV2 ? '日常常服(新版)' : '日常常服' }
+  if (suffix.startsWith('casual')) return { outfitCategory: '私服', outfitLabel: `私服${verTag}` }
+  if (suffix.startsWith('school')) return { outfitCategory: '校服', outfitLabel: `校服${verTag}` }
+  if (suffix.startsWith('jc')) return { outfitCategory: '校服', outfitLabel: '初中校服' }
+  if (suffix.startsWith('unit') || suffix.startsWith('longunit')) {
+    return { outfitCategory: '队服', outfitLabel: `团体队服${verTag}` }
+  }
+  if (suffix.includes('darkunit'))
+    return { outfitCategory: '队服', outfitLabel: `暗色队服${verTag}` }
+  if (suffix.startsWith('sports')) return { outfitCategory: '运动服', outfitLabel: '运动服/体操服' }
   if (suffix.startsWith('swim')) return { outfitCategory: '泳装', outfitLabel: '泳装' }
-  if (suffix.startsWith('cloth')) return { outfitCategory: '演出服', outfitLabel: `演出服(${suffix})` }
-  return { outfitCategory: isDefault ? '常服' : '活动', outfitLabel: isDefault ? '默认服装' : suffix }
+  if (suffix.startsWith('pajamas')) return { outfitCategory: '私服', outfitLabel: '睡衣' }
+  if (suffix.startsWith('parttime')) return { outfitCategory: '打工服', outfitLabel: '打工服' }
+  if (suffix.startsWith('lesson')) return { outfitCategory: '运动服', outfitLabel: '练习服' }
+  if (suffix.startsWith('culture')) return { outfitCategory: '活动', outfitLabel: '文化祭服装' }
+  if (suffix.startsWith('yukata') || suffix.startsWith('kimono') || suffix.startsWith('haregi')) {
+    return { outfitCategory: '和服', outfitLabel: '和服/浴衣' }
+  }
+  if (suffix.startsWith('christmas')) return { outfitCategory: '活动', outfitLabel: '圣诞服装' }
+  if (suffix.startsWith('wedding') || suffix.startsWith('tuxedo'))
+    return { outfitCategory: '礼服', outfitLabel: '礼服' }
+  if (suffix.startsWith('archery')) return { outfitCategory: '活动', outfitLabel: '弓道服' }
+  if (suffix.startsWith('priestess')) return { outfitCategory: '活动', outfitLabel: '巫女服' }
+  if (suffix.startsWith('police')) return { outfitCategory: '活动', outfitLabel: '警服' }
+  if (suffix.startsWith('tenniswear')) return { outfitCategory: '运动服', outfitLabel: '网球服' }
+  if (suffix.includes('fancostume'))
+    return { outfitCategory: '演出服', outfitLabel: `粉丝应援演出服(${suffix})` }
+  if (suffix.startsWith('cloth'))
+    return { outfitCategory: '演出服', outfitLabel: `活动演出服(${suffix})` }
+  if (/^(?:band|idol|street|wonder|night)/.test(suffix)) {
+    return { outfitCategory: '队服', outfitLabel: `「世界」队服(${suffix})` }
+  }
+  return {
+    outfitCategory: isDefault ? '常服' : '活动',
+    outfitLabel: isDefault ? '默认服装' : suffix
+  }
 }
 
 /**
@@ -429,7 +470,8 @@ export async function buildCloudCatalog(
 
   // 本地 mock 测试或极小索引直接拉 _ripper.json；真实远端全量索引优先复用离线 model-metadata.json 的 model3Path
   const isMockOrSmallIndex =
-    index.models.length <= 50 || /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(settings.indexBase)
+    index.models.length <= 50 ||
+    /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(settings.indexBase)
   const ripperCache: RipperCache = new Map()
 
   const models = (
@@ -560,7 +602,10 @@ export async function buildCloudCatalog(
   bgm.sort((a, b) => a.id.localeCompare(b.id))
 
   const se: CloudSeEntry[] = scenarioSe.map((entry) => {
-    const sem = seSemantics[entry.id] ?? seSemantics[entry.id.replace(/_b$/, '')]
+    const sem =
+      seSemantics[entry.id] ??
+      seSemantics[entry.id.replace(/_b$/, '')] ??
+      seSemantics[entry.id.replace(/(?:_b)?_\d+$/, '')]
     return {
       id: entry.id,
       file: `cloud/${entry.file}`,
@@ -660,7 +705,9 @@ export class CloudCatalogService {
   }
 
   isStale(): boolean {
-    return !this.snapshot || ageOf(this.snapshot) > this.ttlMs
+    if (!this.snapshot) return true
+    if (isLegacyDeadMoesekaiUrl(this.snapshot.sources?.indexUrl ?? '')) return true
+    return ageOf(this.snapshot) > this.ttlMs
   }
 
   /** 拉取并替换快照；失败时保留旧快照。 */

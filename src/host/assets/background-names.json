@@ -20664,6 +20664,19 @@
         "实乃理、遥",
         "My Searing Lig"
       ]
+    },
+    "bg_white": {
+      "name": "纯白过渡幕布",
+      "aliases": [],
+      "category": "特效与纯色",
+      "timeOfDay": "通用",
+      "indoor": "室内",
+      "tags": [
+        "白屏",
+        "转场",
+        "纯色",
+        "回忆"
+      ]
     }
   }
 }

@@ -52,10 +52,14 @@ test('checked-in background name index is populated with rich Simplified Chinese
     backgrounds.length >= 1300,
     `expected >=1300 named/classified backgrounds, got ${backgrounds.length}`
   )
+  assert.equal(data.backgrounds.bg_white.name, '纯白过渡幕布')
+  assert.equal(data.backgrounds.bg_white.category, '特效与纯色')
   assert.equal(data.backgrounds.bg_a000301.name, '神山高校 三年一班')
   assert.equal(data.backgrounds.bg_a000301.category, '校园')
   assert.equal(data.backgrounds.bg_a000301.indoor, '室内')
-  assert.ok(['白天', '黄昏', '夜晚', '深夜', '通用'].includes(data.backgrounds.bg_a000301.timeOfDay))
+  assert.ok(
+    ['白天', '黄昏', '夜晚', '深夜', '通用'].includes(data.backgrounds.bg_a000301.timeOfDay)
+  )
   for (const entry of backgrounds) {
     assert.ok(entry.name && entry.name !== '？？？' && entry.name !== '文化祭当日')
     assert.ok(entry.category)

@@ -13,6 +13,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { buildCloudCatalog } from '../../out-host/host/assets/cloudCatalog.js'
+import { parseAudioCuesLoop } from '../../out-host/host/assets/media.js'
+import { live2dMotionSetCandidateNames } from '../../out-host/host/assets/moesekai.js'
+import { ResourceCatalog } from '../../out-host/host/resources/resourceCatalog.js'
 
 function startServer() {
   const requests = []
@@ -191,7 +194,11 @@ test('cloud catalog lists models, named backgrounds and bgm from remote indexes'
   try {
     const catalog = await buildCloudCatalog(settings, { timeoutMs: 5_000, retries: 0 })
     assert.equal(catalog.format, 'msst.cloud-catalog/1')
-    assert.equal(catalog.models.length, 4, 'exposes main characters, alternate outfits, and notable sub characters')
+    assert.equal(
+      catalog.models.length,
+      4,
+      'exposes main characters, alternate outfits, and notable sub characters'
+    )
     const ichika = catalog.models.find((model) => model.id === '01ichika_normal')
     assert.ok(ichika)
     assert.equal(ichika.name, '星乃一歌')
@@ -228,5 +235,118 @@ test('cloud catalog lists models, named backgrounds and bgm from remote indexes'
   } finally {
     server.close()
     await once(server, 'close')
+  }
+})
+
+test('parseAudioCuesLoop, motion set candidate matching, and ResourceCatalog search helpers work cleanly', () => {
+  const loop = parseAudioCuesLoop(
+    {
+      format: 'audio-cues',
+      version: 1,
+      cues: [
+        {
+          name: 'bgm00003',
+          waveforms: [
+            {
+              role: 'cue/bgm00003',
+              frames: 2090950,
+              sample_rate: 44100,
+              channels: 2,
+              loop: [0, 2090950]
+            }
+          ]
+        }
+      ]
+    },
+    'bgm00003'
+  )
+  assert.ok(loop)
+  assert.equal(loop.source, 'audio-cues')
+  assert.equal(loop.loopStartSample, 0)
+  assert.equal(loop.loopEndSample, 2090950)
+  assert.equal(loop.sampleRate, 44100)
+
+  assert.deepEqual(live2dMotionSetCandidateNames('v2_05minori_fancostume_live01'), [
+    'v2_05minori_motion_base',
+    '05minori_motion_base'
+  ])
+  assert.deepEqual(live2dMotionSetCandidateNames('sub_anfather_live'), [
+    'sub_anfather_live_motion_base',
+    'sub_anfather_motion_base'
+  ])
+
+  const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-rc-search-'))
+  try {
+    const noop = { info: () => undefined, warn: () => undefined, error: () => undefined }
+    const rc = new ResourceCatalog(noop, { paths: { resources: resourcesDir } }, () => ({
+      format: 'msst.cloud-catalog/1',
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      region: 'jp',
+      sources: { indexUrl: '', libraryRoot: '', assetBase: '', soundtrack: '' },
+      models: [
+        {
+          id: '05minori_swim',
+          characterId: 5,
+          name: '花里实乃理',
+          shortName: '实乃理',
+          unit: 'MORE MORE JUMP!',
+          outfitCategory: '泳装',
+          outfitLabel: '泳装',
+          isDefault: false,
+          bundle: 'live2d/model/05minori_swim',
+          motionBundles: ['live2d/motion/05minori_motion_base'],
+          path: 'cloud/05minori_swim/05minori_swimsuit/05minori_swimsuit.model3.json',
+          motions: ['w-normal-nod01'],
+          facials: ['face_smile_01'],
+          defaultMotion: 'w-normal-nod01',
+          defaultFacial: 'face_smile_01'
+        }
+      ],
+      backgrounds: [
+        {
+          id: 'bg_white',
+          file: 'cloud/bg_white',
+          name: '纯白过渡幕布',
+          aliases: [],
+          description: '特效与纯色·通用·室内',
+          category: '特效与纯色',
+          timeOfDay: '通用',
+          indoor: '室内',
+          tags: ['白屏', '纯色']
+        }
+      ],
+      bgm: [
+        {
+          id: 'bgm00003',
+          file: 'cloud/bgm00003.mp3',
+          name: 'Slapstick!!',
+          description: '元气欢快·快板',
+          mood: '元气欢快',
+          category: '日常喜剧',
+          tags: ['元气欢快']
+        }
+      ],
+      se: [
+        {
+          id: 'se00204_b_1',
+          file: 'cloud/se00204_b_1.mp3',
+          name: 'se00204_b_1',
+          bundle: 'sound/scenario/se/se',
+          category: '日常环境',
+          description: '剧情环境与动作音效（se00204_b_1）',
+          tags: ['剧情', '日常']
+        }
+      ]
+    }))
+
+    assert.equal(rc.findModel('05minori_swim')?.outfitCategory, '泳装')
+    assert.equal(rc.findBackground('纯白过渡幕布')?.id, 'bg_white')
+    assert.equal(rc.findBgm('Slapstick!!')?.id, 'bgm00003')
+    assert.equal(rc.findSe('se00204_b_1')?.id, 'se00204_b_1')
+    const search = rc.searchAssets({ kind: 'all', query: '泳装', limit: 5 })
+    assert.equal(search.models?.length, 1)
+  } finally {
+    fs.rmSync(resourcesDir, { recursive: true, force: true })
   }
 })

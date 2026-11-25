@@ -16,8 +16,9 @@ const DEFAULT_OUT = 'src/host/assets/bgm-semantics.json'
 const DEFAULT_CACHE_DIR = 'cache/semantic-build'
 const DEFAULT_CATALOG_CACHE = 'cache/moesekai/catalog.json'
 const DEFAULT_CN_CORPUS = 'd:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/cn'
-const STORAGE_ORIGIN = 'https://storage.exmeaning.com'
-const JP_MASTER_BASE = 'https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master'
+const STORAGE_ORIGIN = 'https://storage.pjsk.moe'
+const STORAGE_BACKUP_ORIGIN = 'https://storage.exmeaning.com'
+const JP_MASTER_BASE = 'https://metadata.pjsk.moe/jp/master'
 
 const CATEGORY_UNIT = {
   1: '通用',
@@ -232,37 +233,254 @@ const AREA_BGM_CURATED = {
 
 /** 高频核心剧情 BGM 的精确中文标注（覆盖无官方曲名/重点曲目 + 校准情绪） */
 const CURATED_SCENARIO_BGM = {
-  bgm00001: { name: '街头律动序曲', mood: '律动街头', tempo: '中快', category: '街头日常', unit: 'Vivid BAD SQUAD', description: '律动街头·中快 | 明快有节奏感的都市开场曲，适合街头练习与伙伴碰面' },
-  bgm00002: { name: '青春校园微风', mood: '轻松日常', tempo: '中拍', category: '校园日常', unit: 'Leo/need', description: '轻松日常·中拍 | 清新温和的校园日常曲，适合课间聊天与放学时光' },
-  bgm00003: { name: 'Slapstick!!', mood: '元气欢快', tempo: '快板', category: '日常喜剧', unit: '通用', description: '元气欢快·快板 | 活泼俏皮的闹剧喜剧 BGM，适合吐槽、热闹拌嘴与开心互动' },
-  bgm00004: { name: '奇幻剧场进行曲', mood: '奇幻活泼', tempo: '快板', category: '演出排练', unit: 'Wonderlands×Showtime', description: '奇幻活泼·快板 | 剧团彩排与奇思妙想专用欢快曲，充满舞台张力' },
-  bgm00005: { name: '夜色微光（25时）', mood: '宁静深夜', tempo: '慢板', category: '深夜叙事', unit: '25时，Nightcord de.', description: '宁静深夜·慢板 | 安静而略带忧思的夜晚钢琴与电子氛围曲，适合深夜通话与倾诉' },
-  bgm00006: { name: '微笑的暖阳', mood: '温暖治愈', tempo: '中慢', category: '温情日常', unit: '通用', description: '温暖治愈·中慢 | 柔和阳光般的日常舒缓 BGM，适合温柔谈心、解开心结与日常相处' },
-  bgm00007: { name: '心弦悸动', mood: '温暖治愈', tempo: '中慢', category: '抒情回忆', unit: '通用', description: '温暖治愈·中慢 | 细腻感人的钢琴抒情曲，适合回忆往事、真诚表露心意' },
-  bgm00008: { name: '偶像闪耀步伐', mood: '元气欢快', tempo: '中快', category: '偶像日常', unit: 'MORE MORE JUMP!', description: '元气欢快·中快 | 偶像练习与元气日常曲，明亮积极' },
-  bgm00009: { name: '潜藏的不安', mood: '紧张悬疑', tempo: '中慢', category: '情绪波澜', unit: '通用', description: '紧张悬疑·中慢 | 气氛突然沉下来的不安压迫感 BGM，适合矛盾爆发前或坏消息来临' },
-  bgm00010: { name: '追逐梦想的脚步', mood: '热血激昂', tempo: '中快', category: '激励成长', unit: '通用', description: '热血激昂·中快 | 坚定决意与迈向前方的鼓舞曲，适合下定决心与振作时刻' },
-  bgm00016: { name: '泪水顺心而下', mood: '感伤忧郁', tempo: '慢板', category: '催泪抒情', unit: '通用', description: '感伤忧郁·慢板 | 弦乐与钢琴交织的深情悲伤曲，适合伤心落泪、痛苦挣扎与坦白脆弱' },
-  bgm00017: { name: '心意一定能传达…', mood: '温暖治愈', tempo: '慢板', category: '感动收束', unit: '通用', description: '温暖治愈·慢板 | 柔和而满怀希望的抒情曲，适合情绪释放后的温柔和解' },
-  bgm00018: { name: '此刻眼前的日常', mood: '轻松日常', tempo: '中拍', category: '日常聊天', unit: '通用', description: '轻松日常·中拍 | 最百搭的平和平稳日常对话 BGM，不抢台词风头' },
-  bgm00020: { name: '雀跃的季节', mood: '元气欢快', tempo: '中快', category: '明快日常', unit: '通用', description: '元气欢快·中快 | 轻盈愉快的日常节拍，适合出游计划、期待与分享喜悦' },
-  bgm00021: { name: '静谧日常絮语', mood: '轻松日常', tempo: '中慢', category: '日常谈心', unit: '通用', description: '轻松日常·中慢 | 高频剧情平缓过渡曲，安静自然，适合室内交谈与思索' },
-  bgm00024: { name: '温柔星霜', mood: '温暖治愈', tempo: '慢板', category: '温情回忆', unit: 'Leo/need', description: '温暖治愈·慢板 | 极具代表性的温柔吉他/钢琴抒情曲，适合青春回忆、夜晚谈心与深厚羁绊' },
-  bgm00032: { name: '黄昏的游行', mood: '奇幻活泼', tempo: '中快', category: '黄昏剧场', unit: 'Wonderlands×Showtime', description: '奇幻活泼·中快 | 带一点落日余晖与梦想气息的 WxS 舞台曲，适合排练收尾与梦想对谈' },
-  bgm00034: { name: '街角沉思时刻', mood: '感伤忧郁', tempo: '中慢', category: '低落思索', unit: '通用', description: '感伤忧郁·中慢 | 适合独自思考、自我怀疑或沉默对视时的低落氛围曲' },
-  bgm00038: { name: '紧绷的琴弦', mood: '紧张悬疑', tempo: '中快', category: '冲突危机', unit: '通用', description: '紧张悬疑·中快 | 急促紧张的冲突推进曲，适合争执、突发状况或焦急赶路' },
-  bgm00039: { name: '暗涌的焦虑', mood: '紧张悬疑', tempo: '中慢', category: '凝重对峙', unit: '通用', description: '紧张悬疑·中慢 | 压抑沉重的低音氛围曲，适合犹豫挣扎、误解或秘密揭开前' },
-  bgm00048: { name: '迈向光芒照耀的未来', mood: '热血激昂', tempo: '中快', category: '希望高潮', unit: '通用', description: '热血激昂·中快 | 明亮振奋的突破感配乐，适合跨越困难、共同约定未来' },
-  bgm00055: { name: '深邃的凝望', mood: '宁静深夜', tempo: '慢板', category: '内心独白', unit: '通用', description: '宁静深夜·慢板 | 沉静克制的低语氛围曲，适合严肃对话、内心独白与认真探讨' },
-  bgm00170: { name: '平凡时光 (Ordinary Time)', mood: '轻松日常', tempo: '中拍', category: '日常闲聊', unit: '通用', description: '轻松日常·中拍 | 现代清爽的日常对话配乐，适合咖啡厅、客厅与放学聊日常' },
-  bgm00171: { name: '共享这份温暖', mood: '温暖治愈', tempo: '慢板', category: '温情治愈', unit: '通用', description: '温暖治愈·慢板 | 柔和安抚人心的日常抒情曲，适合彼此鼓励与体贴关怀' },
-  bgm00173: { name: '沉入深处 (into deep)', mood: '宁静深夜', tempo: '慢板', category: '深沉内省', unit: '通用', description: '宁静深夜·慢板 | 深邃寂静的氛围音乐，适合深夜独处、创伤回忆或陷入沉思' },
-  bgm00175: { name: '昔日之影', mood: '感伤忧郁', tempo: '慢板', category: '回忆往昔', unit: '通用', description: '感伤忧郁·慢板 | 带着淡淡遗憾的怀旧曲，适合回忆过去、物是人非之感' },
-  bgm00180: { name: '宁静的归途', mood: '温暖治愈', tempo: '中慢', category: '放学黄昏', unit: '通用', description: '温暖治愈·中慢 | 夕阳西下并肩回家的平和配乐，适合黄昏街道或天台谈心' },
-  bgm00190: { name: '快乐玩具进行曲', mood: '奇幻活泼', tempo: '快板', category: '喜剧玩闹', unit: 'Wonderlands×Showtime', description: '奇幻活泼·快板 | 俏皮跳跃的玩具箱节奏，适合笑梦整活、奇思妙想与轻喜剧' },
-  bgm00215: { name: '殷切的心意', mood: '感伤忧郁', tempo: '慢板', category: '真情流露', unit: '通用', description: '感伤忧郁·慢板 | 诚挚而略带苦涩的情感配乐，适合倾诉烦恼与彼此理解' },
-  '01_an_02': { name: '白石杏角色主题变奏曲', mood: '律动街头', tempo: '中快', category: '角色主题', unit: 'Vivid BAD SQUAD', description: '律动街头·中快 | 白石杏相关个人剧情曲，充满热情与街头活力' },
-  '02_haruka_02': { name: '桐谷遥角色主题变奏曲', mood: '温暖治愈', tempo: '中拍', category: '角色主题', unit: 'MORE MORE JUMP!', description: '温暖治愈·中拍 | 桐谷遥相关个人剧情曲，沉稳温柔又带有偶像的坚定' }
+  bgm00001: {
+    name: '街头律动序曲',
+    mood: '律动街头',
+    tempo: '中快',
+    category: '街头日常',
+    unit: 'Vivid BAD SQUAD',
+    description: '律动街头·中快 | 明快有节奏感的都市开场曲，适合街头练习与伙伴碰面'
+  },
+  bgm00002: {
+    name: '青春校园微风',
+    mood: '轻松日常',
+    tempo: '中拍',
+    category: '校园日常',
+    unit: 'Leo/need',
+    description: '轻松日常·中拍 | 清新温和的校园日常曲，适合课间聊天与放学时光'
+  },
+  bgm00003: {
+    name: 'Slapstick!!',
+    mood: '元气欢快',
+    tempo: '快板',
+    category: '日常喜剧',
+    unit: '通用',
+    description: '元气欢快·快板 | 活泼俏皮的闹剧喜剧 BGM，适合吐槽、热闹拌嘴与开心互动'
+  },
+  bgm00004: {
+    name: '奇幻剧场进行曲',
+    mood: '奇幻活泼',
+    tempo: '快板',
+    category: '演出排练',
+    unit: 'Wonderlands×Showtime',
+    description: '奇幻活泼·快板 | 剧团彩排与奇思妙想专用欢快曲，充满舞台张力'
+  },
+  bgm00005: {
+    name: '夜色微光（25时）',
+    mood: '宁静深夜',
+    tempo: '慢板',
+    category: '深夜叙事',
+    unit: '25时，Nightcord de.',
+    description: '宁静深夜·慢板 | 安静而略带忧思的夜晚钢琴与电子氛围曲，适合深夜通话与倾诉'
+  },
+  bgm00006: {
+    name: '微笑的暖阳',
+    mood: '温暖治愈',
+    tempo: '中慢',
+    category: '温情日常',
+    unit: '通用',
+    description: '温暖治愈·中慢 | 柔和阳光般的日常舒缓 BGM，适合温柔谈心、解开心结与日常相处'
+  },
+  bgm00007: {
+    name: '心弦悸动',
+    mood: '温暖治愈',
+    tempo: '中慢',
+    category: '抒情回忆',
+    unit: '通用',
+    description: '温暖治愈·中慢 | 细腻感人的钢琴抒情曲，适合回忆往事、真诚表露心意'
+  },
+  bgm00008: {
+    name: '偶像闪耀步伐',
+    mood: '元气欢快',
+    tempo: '中快',
+    category: '偶像日常',
+    unit: 'MORE MORE JUMP!',
+    description: '元气欢快·中快 | 偶像练习与元气日常曲，明亮积极'
+  },
+  bgm00009: {
+    name: '潜藏的不安',
+    mood: '紧张悬疑',
+    tempo: '中慢',
+    category: '情绪波澜',
+    unit: '通用',
+    description: '紧张悬疑·中慢 | 气氛突然沉下来的不安压迫感 BGM，适合矛盾爆发前或坏消息来临'
+  },
+  bgm00010: {
+    name: '追逐梦想的脚步',
+    mood: '热血激昂',
+    tempo: '中快',
+    category: '激励成长',
+    unit: '通用',
+    description: '热血激昂·中快 | 坚定决意与迈向前方的鼓舞曲，适合下定决心与振作时刻'
+  },
+  bgm00016: {
+    name: '泪水顺心而下',
+    mood: '感伤忧郁',
+    tempo: '慢板',
+    category: '催泪抒情',
+    unit: '通用',
+    description: '感伤忧郁·慢板 | 弦乐与钢琴交织的深情悲伤曲，适合伤心落泪、痛苦挣扎与坦白脆弱'
+  },
+  bgm00017: {
+    name: '心意一定能传达…',
+    mood: '温暖治愈',
+    tempo: '慢板',
+    category: '感动收束',
+    unit: '通用',
+    description: '温暖治愈·慢板 | 柔和而满怀希望的抒情曲，适合情绪释放后的温柔和解'
+  },
+  bgm00018: {
+    name: '此刻眼前的日常',
+    mood: '轻松日常',
+    tempo: '中拍',
+    category: '日常聊天',
+    unit: '通用',
+    description: '轻松日常·中拍 | 最百搭的平和平稳日常对话 BGM，不抢台词风头'
+  },
+  bgm00020: {
+    name: '雀跃的季节',
+    mood: '元气欢快',
+    tempo: '中快',
+    category: '明快日常',
+    unit: '通用',
+    description: '元气欢快·中快 | 轻盈愉快的日常节拍，适合出游计划、期待与分享喜悦'
+  },
+  bgm00021: {
+    name: '静谧日常絮语',
+    mood: '轻松日常',
+    tempo: '中慢',
+    category: '日常谈心',
+    unit: '通用',
+    description: '轻松日常·中慢 | 高频剧情平缓过渡曲，安静自然，适合室内交谈与思索'
+  },
+  bgm00024: {
+    name: '温柔星霜',
+    mood: '温暖治愈',
+    tempo: '慢板',
+    category: '温情回忆',
+    unit: 'Leo/need',
+    description: '温暖治愈·慢板 | 极具代表性的温柔吉他/钢琴抒情曲，适合青春回忆、夜晚谈心与深厚羁绊'
+  },
+  bgm00032: {
+    name: '黄昏的游行',
+    mood: '奇幻活泼',
+    tempo: '中快',
+    category: '黄昏剧场',
+    unit: 'Wonderlands×Showtime',
+    description: '奇幻活泼·中快 | 带一点落日余晖与梦想气息的 WxS 舞台曲，适合排练收尾与梦想对谈'
+  },
+  bgm00034: {
+    name: '街角沉思时刻',
+    mood: '感伤忧郁',
+    tempo: '中慢',
+    category: '低落思索',
+    unit: '通用',
+    description: '感伤忧郁·中慢 | 适合独自思考、自我怀疑或沉默对视时的低落氛围曲'
+  },
+  bgm00038: {
+    name: '紧绷的琴弦',
+    mood: '紧张悬疑',
+    tempo: '中快',
+    category: '冲突危机',
+    unit: '通用',
+    description: '紧张悬疑·中快 | 急促紧张的冲突推进曲，适合争执、突发状况或焦急赶路'
+  },
+  bgm00039: {
+    name: '暗涌的焦虑',
+    mood: '紧张悬疑',
+    tempo: '中慢',
+    category: '凝重对峙',
+    unit: '通用',
+    description: '紧张悬疑·中慢 | 压抑沉重的低音氛围曲，适合犹豫挣扎、误解或秘密揭开前'
+  },
+  bgm00048: {
+    name: '迈向光芒照耀的未来',
+    mood: '热血激昂',
+    tempo: '中快',
+    category: '希望高潮',
+    unit: '通用',
+    description: '热血激昂·中快 | 明亮振奋的突破感配乐，适合跨越困难、共同约定未来'
+  },
+  bgm00055: {
+    name: '深邃的凝望',
+    mood: '宁静深夜',
+    tempo: '慢板',
+    category: '内心独白',
+    unit: '通用',
+    description: '宁静深夜·慢板 | 沉静克制的低语氛围曲，适合严肃对话、内心独白与认真探讨'
+  },
+  bgm00170: {
+    name: '平凡时光 (Ordinary Time)',
+    mood: '轻松日常',
+    tempo: '中拍',
+    category: '日常闲聊',
+    unit: '通用',
+    description: '轻松日常·中拍 | 现代清爽的日常对话配乐，适合咖啡厅、客厅与放学聊日常'
+  },
+  bgm00171: {
+    name: '共享这份温暖',
+    mood: '温暖治愈',
+    tempo: '慢板',
+    category: '温情治愈',
+    unit: '通用',
+    description: '温暖治愈·慢板 | 柔和安抚人心的日常抒情曲，适合彼此鼓励与体贴关怀'
+  },
+  bgm00173: {
+    name: '沉入深处 (into deep)',
+    mood: '宁静深夜',
+    tempo: '慢板',
+    category: '深沉内省',
+    unit: '通用',
+    description: '宁静深夜·慢板 | 深邃寂静的氛围音乐，适合深夜独处、创伤回忆或陷入沉思'
+  },
+  bgm00175: {
+    name: '昔日之影',
+    mood: '感伤忧郁',
+    tempo: '慢板',
+    category: '回忆往昔',
+    unit: '通用',
+    description: '感伤忧郁·慢板 | 带着淡淡遗憾的怀旧曲，适合回忆过去、物是人非之感'
+  },
+  bgm00180: {
+    name: '宁静的归途',
+    mood: '温暖治愈',
+    tempo: '中慢',
+    category: '放学黄昏',
+    unit: '通用',
+    description: '温暖治愈·中慢 | 夕阳西下并肩回家的平和配乐，适合黄昏街道或天台谈心'
+  },
+  bgm00190: {
+    name: '快乐玩具进行曲',
+    mood: '奇幻活泼',
+    tempo: '快板',
+    category: '喜剧玩闹',
+    unit: 'Wonderlands×Showtime',
+    description: '奇幻活泼·快板 | 俏皮跳跃的玩具箱节奏，适合笑梦整活、奇思妙想与轻喜剧'
+  },
+  bgm00215: {
+    name: '殷切的心意',
+    mood: '感伤忧郁',
+    tempo: '慢板',
+    category: '真情流露',
+    unit: '通用',
+    description: '感伤忧郁·慢板 | 诚挚而略带苦涩的情感配乐，适合倾诉烦恼与彼此理解'
+  },
+  '01_an_02': {
+    name: '白石杏角色主题变奏曲',
+    mood: '律动街头',
+    tempo: '中快',
+    category: '角色主题',
+    unit: 'Vivid BAD SQUAD',
+    description: '律动街头·中快 | 白石杏相关个人剧情曲，充满热情与街头活力'
+  },
+  '02_haruka_02': {
+    name: '桐谷遥角色主题变奏曲',
+    mood: '温暖治愈',
+    tempo: '中拍',
+    category: '角色主题',
+    unit: 'MORE MORE JUMP!',
+    description: '温暖治愈·中拍 | 桐谷遥相关个人剧情曲，沉稳温柔又带有偶像的坚定'
+  }
 }
 
 function unitFromCostume(costume) {
@@ -294,10 +512,23 @@ function readJsonDir(dir) {
 
 function inferMoodFromProfile({ title, catUnit, stats, id }) {
   const hay = `${title} ${id}`.toLowerCase()
-  const { sad = 0, tense = 0, happy = 0, calm = 0, night = 0, flashback = 0, shake = 0, count = 0 } = stats || {}
+  const {
+    sad = 0,
+    tense = 0,
+    happy = 0,
+    calm = 0,
+    night = 0,
+    flashback = 0,
+    shake = 0,
+    count = 0
+  } = stats || {}
 
   // 1. 曲名关键词优先
-  if (/slapstick|happy|smile|march|fun|pop|ウキウキ|笑顔|パレード|ワクワク|おひさま|陽気|にぎやか|ドタバタ/i.test(title)) {
+  if (
+    /slapstick|happy|smile|march|fun|pop|ウキウキ|笑顔|パレード|ワクワク|おひさま|陽気|にぎやか|ドタバタ/i.test(
+      title
+    )
+  ) {
     return { mood: '元气欢快', tempo: '快板', category: '欢快日常' }
   }
   if (/deep|dark|night|shadow|abyss|void|心景|深き|静寂|迷い|孤独|深夜/i.test(title)) {
@@ -312,7 +543,11 @@ function inferMoodFromProfile({ title, catUnit, stats, id }) {
   if (/future|hope|shine|dream|bright|光射す|未来|希望|決意|勇気|翔/i.test(title)) {
     return { mood: '热血激昂', tempo: '中快', category: '激励成长' }
   }
-  if (/warm|gentle|ordinary|home|帰り道|ぬくもり|微笑|陽だまり|優し|穏やか|日常|星霜|想い/i.test(title)) {
+  if (
+    /warm|gentle|ordinary|home|帰り道|ぬくもり|微笑|陽だまり|優し|穏やか|日常|星霜|想い/i.test(
+      title
+    )
+  ) {
     return { mood: '温暖治愈', tempo: '中慢', category: '温情日常' }
   }
   if (/sekai|wish|tree|miracle|世界|セカイ|星/i.test(hay)) {
@@ -330,7 +565,11 @@ function inferMoodFromProfile({ title, catUnit, stats, id }) {
     if (night >= Math.max(3, count * 0.45) || catUnit === '25时，Nightcord de.') {
       return { mood: '宁静深夜', tempo: '慢板', category: '夜晚谈心' }
     }
-    if (happy >= Math.max(3, count * 0.45) || catUnit === 'Wonderlands×Showtime' || catUnit === 'MORE MORE JUMP!') {
+    if (
+      happy >= Math.max(3, count * 0.45) ||
+      catUnit === 'Wonderlands×Showtime' ||
+      catUnit === 'MORE MORE JUMP!'
+    ) {
       return { mood: '元气欢快', tempo: '中快', category: '欢快互动' }
     }
     if (calm >= sad && calm >= tense) {
@@ -345,10 +584,14 @@ function inferMoodFromProfile({ title, catUnit, stats, id }) {
   if (id.startsWith('bgm90')) {
     return { mood: '热血激昂', tempo: '中快', category: '演出高潮' }
   }
-  if (catUnit === 'Wonderlands×Showtime') return { mood: '奇幻活泼', tempo: '快板', category: '剧团日常' }
-  if (catUnit === '25时，Nightcord de.') return { mood: '宁静深夜', tempo: '慢板', category: '深夜叙事' }
-  if (catUnit === 'Vivid BAD SQUAD') return { mood: '律动街头', tempo: '中快', category: '街头音乐' }
-  if (catUnit === 'MORE MORE JUMP!') return { mood: '元气欢快', tempo: '中快', category: '偶像日常' }
+  if (catUnit === 'Wonderlands×Showtime')
+    return { mood: '奇幻活泼', tempo: '快板', category: '剧团日常' }
+  if (catUnit === '25时，Nightcord de.')
+    return { mood: '宁静深夜', tempo: '慢板', category: '深夜叙事' }
+  if (catUnit === 'Vivid BAD SQUAD')
+    return { mood: '律动街头', tempo: '中快', category: '街头音乐' }
+  if (catUnit === 'MORE MORE JUMP!')
+    return { mood: '元气欢快', tempo: '中快', category: '偶像日常' }
   if (catUnit === 'Leo/need') return { mood: '温暖治愈', tempo: '中慢', category: '校园青春' }
   return { mood: '轻松日常', tempo: '中拍', category: '剧情通用' }
 }
@@ -385,20 +628,16 @@ export async function buildBgmSemantics(options = {}) {
   if (scenarioBgmIds.length === 0) {
     // 联网列举 scenario/bgm/ 与 area_bgm/
     const listPrefix = async (prefix) => {
-      const out = []
-      let cursor = null
-      do {
-        const q = new URLSearchParams({ server: 'jp', prefix, limit: '200' })
-        if (cursor) q.set('cursor', cursor)
-        const page = await fetch(`${STORAGE_ORIGIN}/api/assets/bundles?${q}`).then((r) => r.json())
-        for (const item of page.items || []) {
-          if (item.type === 'bundle' && item.name && item.name !== 'bgm' && item.name !== 'bgm00000') {
-            out.push(item.name)
-          }
+      for (const origin of [STORAGE_ORIGIN, STORAGE_BACKUP_ORIGIN]) {
+        try {
+          const listing = await fetch(`${origin}/sekai-jp-assets/${prefix}`).then((r) => r.json())
+          const dirs = Array.isArray(listing.directories) ? listing.directories : []
+          return dirs.filter((name) => name && name !== 'bgm' && name !== 'bgm00000')
+        } catch {
+          // try backup origin
         }
-        cursor = page.nextCursor?.trim() || null
-      } while (cursor)
-      return out
+      }
+      return []
     }
     scenarioBgmIds = await listPrefix('sound/scenario/bgm/')
     const remoteArea = await listPrefix('sound/area_bgm/').catch(() => [])
@@ -412,7 +651,9 @@ export async function buildBgmSemantics(options = {}) {
   }
   const jpTracks =
     readCached('musicSoundTracks_jp.json') ??
-    (await fetch(`${JP_MASTER_BASE}/musicSoundTracks.json`).then((r) => r.json()).catch(() => []))
+    (await fetch(`${JP_MASTER_BASE}/musicSoundTracks.json`)
+      .then((r) => r.json())
+      .catch(() => []))
 
   const trackByFile = new Map()
   for (const t of jpTracks) {
@@ -421,7 +662,10 @@ export async function buildBgmSemantics(options = {}) {
     if (!trackByFile.has(key)) trackByFile.set(key, { titles: [], categoryIds: [] })
     const rec = trackByFile.get(key)
     if (t.title && !rec.titles.includes(t.title)) rec.titles.push(t.title)
-    if (t.musicSoundTrackCategoryId && !rec.categoryIds.includes(Number(t.musicSoundTrackCategoryId))) {
+    if (
+      t.musicSoundTrackCategoryId &&
+      !rec.categoryIds.includes(Number(t.musicSoundTrackCategoryId))
+    ) {
       rec.categoryIds.push(Number(t.musicSoundTrackCategoryId))
     }
   }
@@ -437,7 +681,17 @@ export async function buildBgmSemantics(options = {}) {
   const stats = new Map()
   const getStat = (id) => {
     if (!stats.has(id)) {
-      stats.set(id, { count: 0, sad: 0, tense: 0, happy: 0, calm: 0, night: 0, flashback: 0, shake: 0, units: new Map() })
+      stats.set(id, {
+        count: 0,
+        sad: 0,
+        tense: 0,
+        happy: 0,
+        calm: 0,
+        night: 0,
+        flashback: 0,
+        shake: 0,
+        units: new Map()
+      })
     }
     return stats.get(id)
   }
@@ -445,7 +699,9 @@ export async function buildBgmSemantics(options = {}) {
   for (const entry of scenarios) {
     const s = entry.data
     if (!s || typeof s !== 'object') continue
-    const units = (s.AppearCharacters || []).map((c) => unitFromCostume(c.CostumeType)).filter(Boolean)
+    const units = (s.AppearCharacters || [])
+      .map((c) => unitFromCostume(c.CostumeType))
+      .filter(Boolean)
     let curBgm = s.FirstBgm && s.FirstBgm !== 'bgm00000' ? s.FirstBgm : ''
     if (curBgm) {
       const st = getStat(curBgm)
@@ -492,7 +748,12 @@ export async function buildBgmSemantics(options = {}) {
       tracks[id] = {
         ...AREA_BGM_CURATED[id],
         bundlePrefix: isArea ? 'sound/area_bgm/' : 'sound/scenario/bgm/',
-        tags: [AREA_BGM_CURATED[id].mood, AREA_BGM_CURATED[id].tempo, AREA_BGM_CURATED[id].category, AREA_BGM_CURATED[id].unit].filter(Boolean)
+        tags: [
+          AREA_BGM_CURATED[id].mood,
+          AREA_BGM_CURATED[id].tempo,
+          AREA_BGM_CURATED[id].category,
+          AREA_BGM_CURATED[id].unit
+        ].filter(Boolean)
       }
       continue
     }
@@ -501,11 +762,14 @@ export async function buildBgmSemantics(options = {}) {
     const curated = CURATED_SCENARIO_BGM[id] || CURATED_SCENARIO_BGM[baseId]
     const trackInfo = trackByFile.get(id) || trackByFile.get(baseId)
     const st = stats.get(id) || stats.get(baseId)
-    const topUnit = st && st.units.size > 0
-      ? [...st.units.entries()].sort((a, b) => b[1] - a[1])[0][0]
-      : '通用'
-    const trackCategoryName = trackInfo?.categoryIds?.[0] ? CATEGORY_UNIT[trackInfo.categoryIds[0]] || '剧情' : ''
-    const unit = curated?.unit || (trackCategoryName && trackCategoryName !== '剧情' ? trackCategoryName : topUnit)
+    const topUnit =
+      st && st.units.size > 0 ? [...st.units.entries()].sort((a, b) => b[1] - a[1])[0][0] : '通用'
+    const trackCategoryName = trackInfo?.categoryIds?.[0]
+      ? CATEGORY_UNIT[trackInfo.categoryIds[0]] || '剧情'
+      : ''
+    const unit =
+      curated?.unit ||
+      (trackCategoryName && trackCategoryName !== '剧情' ? trackCategoryName : topUnit)
     const rawTitle = trackInfo?.titles?.slice(0, 2).join(' / ') || ''
 
     if (curated) {

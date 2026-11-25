@@ -20,9 +20,10 @@ const DEFAULT_OUT = 'src/host/assets/background-names.json'
 const DEFAULT_CN_CORPUS = 'd:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/cn'
 const DEFAULT_CACHE_DIR = 'cache/semantic-build'
 const DEFAULT_CATALOG_CACHE = 'cache/moesekai/catalog.json'
-const STORAGE_ORIGIN = 'https://storage.exmeaning.com'
-const CN_MASTER_BASE = 'https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-cn-diff@master'
-const JP_MASTER_BASE = 'https://cdn.jsdelivr.net/gh/Sekai-World/sekai-master-db-diff@master'
+const STORAGE_ORIGIN = 'https://storage.pjsk.moe'
+const STORAGE_BACKUP_ORIGIN = 'https://storage.exmeaning.com'
+const CN_MASTER_BASE = 'https://metadata.pjsk.moe/cn/master'
+const JP_MASTER_BASE = 'https://metadata.pjsk.moe/jp/master'
 
 /** 纯时间 / 日期 / 节庆当日等 ScenarioTelop 文本，绝不作为地点名。 */
 export const NON_LOCATION_TELOP = new RegExp(
@@ -113,44 +114,226 @@ const JP_TO_CN_PLACE = [
 
 /** 已知高价值基础场景词典（兜底/修正语料缺失或仅有特殊屏显的条目） */
 const CURATED_BG_NAMES = {
-  bg_a000000: { name: '纯黑过渡幕布', category: '特效与纯色', timeOfDay: '通用', indoor: '室内', tags: ['黑屏', '转场', '纯色'] },
-  bg_a000007: { name: '柔和浅色氛围幕布', category: '特效与纯色', timeOfDay: '通用', indoor: '室外', tags: ['纯色', '回忆', '氛围'] },
-  bg_a000025: { name: '暗夜静谧渐变幕布', category: '特效与纯色', timeOfDay: '深夜', indoor: '室内', tags: ['暗色', '回忆', '氛围'] },
-  bg_a000101: { name: '神山高校 中庭', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['神山高校', '中庭', '校园', '白天', '室外'] },
-  bg_a000105: { name: '神山高校 中庭（文化祭）', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['神山高校', '中庭', '文化祭', '校园'] },
-  bg_a000301: { name: '神山高校 三年一班', category: '校园', timeOfDay: '白天', indoor: '室内', tags: ['神山高校', '教室', '三年一班', '校园', '白天', '室内'] },
-  bg_a000302: { name: '神山高校 空教室', category: '校园', timeOfDay: '黄昏', indoor: '室内', tags: ['神山高校', '教室', '空教室', '校园', '黄昏', '室内'] },
-  bg_a000306: { name: '神山高校 三年教室（暗灯）', category: '校园', timeOfDay: '夜晚', indoor: '室内', tags: ['神山高校', '教室', '夜晚', '关灯', '文化祭准备'] },
-  bg_a000401: { name: '宫益坂女子学园 教室', category: '校园', timeOfDay: '白天', indoor: '室内', tags: ['宫益坂女子学园', '教室', '校园', '白天', '室内'] },
-  bg_a000402: { name: '宫益坂女子学园 空教室', category: '校园', timeOfDay: '黄昏', indoor: '室内', tags: ['宫益坂女子学园', '教室', '空教室', '校园', '黄昏', '室内'] },
-  bg_a000403: { name: '宫益坂女子学园 教室（夜晚）', category: '校园', timeOfDay: '夜晚', indoor: '室内', tags: ['宫益坂女子学园', '教室', '校园', '夜晚', '室内'] },
-  bg_a000901: { name: '宫益坂女子学园 操场', category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['宫益坂女子学园', '操场', '校园', '白天', '室外'] },
-  bg_a002801: { name: '天台', aliases: ['病院 屋上'], category: '校园', timeOfDay: '白天', indoor: '室外', tags: ['校园', '室外', '白天', '天台', '病院', '屋上'] },
-  bg_a003101: { name: '郊野登山步道', category: '自然与旅行', timeOfDay: '白天', indoor: '室外', tags: ['郊外', '山路', '自然', '室外'] },
-  bg_c003101: { name: '街头练习空间', category: '演出与排练', timeOfDay: '通用', indoor: '室内', tags: ['VBS', '排练室', '街头'] },
-  bg_c003601: { name: '街头演出广场', category: '涩谷街景', timeOfDay: '夜晚', indoor: '室外', tags: ['VBS', '街头', 'Live', '室外'] },
-  bg_d001401: { name: '菲尼克斯奇幻乐园 剧场舞台', category: '游乐园与休闲', timeOfDay: '白天', indoor: '室内', tags: ['WxS', '舞台', '剧场', '公演'] },
-  bg_d008001: { name: '大型戏剧节会场舞台', category: '演出与排练', timeOfDay: '通用', indoor: '室内', tags: ['WxS', '舞台', '剧场', '演出'] },
-  bg_e002901: { name: '原宿潮流快闪店街', category: '商业与餐饮', timeOfDay: '白天', indoor: '室外', tags: ['25时', '购物', '街道', '时尚'] },
-  bg_g000101: { name: '心愿「世界」·纯白空间', category: 'SEKAI世界', timeOfDay: '通用', indoor: '室外', tags: ['SEKAI', '虚拟歌手', '心愿世界'] },
-  bg_g000102: { name: '心愿「世界」·星光空间', category: 'SEKAI世界', timeOfDay: '夜晚', indoor: '室外', tags: ['SEKAI', '虚拟歌手', '心愿世界'] },
-  bg_g000202: { name: '舞台「世界」（MMJ）', category: 'SEKAI世界', timeOfDay: '通用', indoor: '室外', tags: ['SEKAI', 'MMJ', '舞台'] },
-  bg_g000601: { name: '心愿之树「世界」', category: 'SEKAI世界', timeOfDay: '通用', indoor: '室外', tags: ['SEKAI', 'WorldLink', '心愿之树'] },
-  bg_link2_leoneed_ed5: { name: 'Leo/need 联动纪念舞台', category: '演出与排练', timeOfDay: '夜晚', indoor: '室外', tags: ['Leo/need', '舞台', '联动'] },
-  bg_mv_01band_20_ep7: { name: 'Leo/need MV 星空演出场景', category: '演出与排练', timeOfDay: '夜晚', indoor: '室外', tags: ['Leo/need', 'MV', '演出'] },
-  bg_mv_04wonder_26_ep8: { name: 'WxS MV 奇幻演出场景', category: '演出与排练', timeOfDay: '通用', indoor: '室外', tags: ['WxS', 'MV', '演出'] },
-  bg00026: { name: '早期通用街道背景', category: '涩谷街景', timeOfDay: '白天', indoor: '室外', tags: ['街道', '通用'] }
+  bg_white: {
+    name: '纯白过渡幕布',
+    category: '特效与纯色',
+    timeOfDay: '通用',
+    indoor: '室内',
+    tags: ['白屏', '转场', '纯色', '回忆']
+  },
+  bg_a000000: {
+    name: '纯黑过渡幕布',
+    category: '特效与纯色',
+    timeOfDay: '通用',
+    indoor: '室内',
+    tags: ['黑屏', '转场', '纯色']
+  },
+  bg_a000007: {
+    name: '柔和浅色氛围幕布',
+    category: '特效与纯色',
+    timeOfDay: '通用',
+    indoor: '室外',
+    tags: ['纯色', '回忆', '氛围']
+  },
+  bg_a000025: {
+    name: '暗夜静谧渐变幕布',
+    category: '特效与纯色',
+    timeOfDay: '深夜',
+    indoor: '室内',
+    tags: ['暗色', '回忆', '氛围']
+  },
+  bg_a000101: {
+    name: '神山高校 中庭',
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['神山高校', '中庭', '校园', '白天', '室外']
+  },
+  bg_a000105: {
+    name: '神山高校 中庭（文化祭）',
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['神山高校', '中庭', '文化祭', '校园']
+  },
+  bg_a000301: {
+    name: '神山高校 三年一班',
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室内',
+    tags: ['神山高校', '教室', '三年一班', '校园', '白天', '室内']
+  },
+  bg_a000302: {
+    name: '神山高校 空教室',
+    category: '校园',
+    timeOfDay: '黄昏',
+    indoor: '室内',
+    tags: ['神山高校', '教室', '空教室', '校园', '黄昏', '室内']
+  },
+  bg_a000306: {
+    name: '神山高校 三年教室（暗灯）',
+    category: '校园',
+    timeOfDay: '夜晚',
+    indoor: '室内',
+    tags: ['神山高校', '教室', '夜晚', '关灯', '文化祭准备']
+  },
+  bg_a000401: {
+    name: '宫益坂女子学园 教室',
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室内',
+    tags: ['宫益坂女子学园', '教室', '校园', '白天', '室内']
+  },
+  bg_a000402: {
+    name: '宫益坂女子学园 空教室',
+    category: '校园',
+    timeOfDay: '黄昏',
+    indoor: '室内',
+    tags: ['宫益坂女子学园', '教室', '空教室', '校园', '黄昏', '室内']
+  },
+  bg_a000403: {
+    name: '宫益坂女子学园 教室（夜晚）',
+    category: '校园',
+    timeOfDay: '夜晚',
+    indoor: '室内',
+    tags: ['宫益坂女子学园', '教室', '校园', '夜晚', '室内']
+  },
+  bg_a000901: {
+    name: '宫益坂女子学园 操场',
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['宫益坂女子学园', '操场', '校园', '白天', '室外']
+  },
+  bg_a002801: {
+    name: '天台',
+    aliases: ['病院 屋上'],
+    category: '校园',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['校园', '室外', '白天', '天台', '病院', '屋上']
+  },
+  bg_a003101: {
+    name: '郊野登山步道',
+    category: '自然与旅行',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['郊外', '山路', '自然', '室外']
+  },
+  bg_c003101: {
+    name: '街头练习空间',
+    category: '演出与排练',
+    timeOfDay: '通用',
+    indoor: '室内',
+    tags: ['VBS', '排练室', '街头']
+  },
+  bg_c003601: {
+    name: '街头演出广场',
+    category: '涩谷街景',
+    timeOfDay: '夜晚',
+    indoor: '室外',
+    tags: ['VBS', '街头', 'Live', '室外']
+  },
+  bg_d001401: {
+    name: '菲尼克斯奇幻乐园 剧场舞台',
+    category: '游乐园与休闲',
+    timeOfDay: '白天',
+    indoor: '室内',
+    tags: ['WxS', '舞台', '剧场', '公演']
+  },
+  bg_d008001: {
+    name: '大型戏剧节会场舞台',
+    category: '演出与排练',
+    timeOfDay: '通用',
+    indoor: '室内',
+    tags: ['WxS', '舞台', '剧场', '演出']
+  },
+  bg_e002901: {
+    name: '原宿潮流快闪店街',
+    category: '商业与餐饮',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['25时', '购物', '街道', '时尚']
+  },
+  bg_g000101: {
+    name: '心愿「世界」·纯白空间',
+    category: 'SEKAI世界',
+    timeOfDay: '通用',
+    indoor: '室外',
+    tags: ['SEKAI', '虚拟歌手', '心愿世界']
+  },
+  bg_g000102: {
+    name: '心愿「世界」·星光空间',
+    category: 'SEKAI世界',
+    timeOfDay: '夜晚',
+    indoor: '室外',
+    tags: ['SEKAI', '虚拟歌手', '心愿世界']
+  },
+  bg_g000202: {
+    name: '舞台「世界」（MMJ）',
+    category: 'SEKAI世界',
+    timeOfDay: '通用',
+    indoor: '室外',
+    tags: ['SEKAI', 'MMJ', '舞台']
+  },
+  bg_g000601: {
+    name: '心愿之树「世界」',
+    category: 'SEKAI世界',
+    timeOfDay: '通用',
+    indoor: '室外',
+    tags: ['SEKAI', 'WorldLink', '心愿之树']
+  },
+  bg_link2_leoneed_ed5: {
+    name: 'Leo/need 联动纪念舞台',
+    category: '演出与排练',
+    timeOfDay: '夜晚',
+    indoor: '室外',
+    tags: ['Leo/need', '舞台', '联动']
+  },
+  bg_mv_01band_20_ep7: {
+    name: 'Leo/need MV 星空演出场景',
+    category: '演出与排练',
+    timeOfDay: '夜晚',
+    indoor: '室外',
+    tags: ['Leo/need', 'MV', '演出']
+  },
+  bg_mv_04wonder_26_ep8: {
+    name: 'WxS MV 奇幻演出场景',
+    category: '演出与排练',
+    timeOfDay: '通用',
+    indoor: '室外',
+    tags: ['WxS', 'MV', '演出']
+  },
+  bg00026: {
+    name: '早期通用街道背景',
+    category: '涩谷街景',
+    timeOfDay: '白天',
+    indoor: '室外',
+    tags: ['街道', '通用']
+  }
 }
 
 const UNIT_PREFIX_META = {
   bg_a: { unit: '通用', defaultCat: '涩谷街景', defaultPlace: '涩谷·日常公共场景' },
   bg_b: { unit: 'MORE MORE JUMP!', defaultCat: '演出与排练', defaultPlace: 'MMJ 偶像活动空间' },
   bg_c: { unit: 'Vivid BAD SQUAD', defaultCat: '涩谷街景', defaultPlace: 'VBS 街头音乐据点' },
-  bg_d: { unit: 'Wonderlands×Showtime', defaultCat: '游乐园与休闲', defaultPlace: '奇幻乐园演剧空间' },
-  bg_e: { unit: '25时，Nightcord de.', defaultCat: '住宅与房间', defaultPlace: '25时 深夜日常空间' },
+  bg_d: {
+    unit: 'Wonderlands×Showtime',
+    defaultCat: '游乐园与休闲',
+    defaultPlace: '奇幻乐园演剧空间'
+  },
+  bg_e: {
+    unit: '25时，Nightcord de.',
+    defaultCat: '住宅与房间',
+    defaultPlace: '25时 深夜日常空间'
+  },
   bg_f: { unit: 'Leo/need', defaultCat: '校园', defaultPlace: 'Leo/need 校园乐队空间' },
   bg_g: { unit: '虚拟歌手', defaultCat: 'SEKAI世界', defaultPlace: '「世界」交汇空间' },
-  bg_h: { unit: '25时，Nightcord de.', defaultCat: '线上通话', defaultPlace: 'Nightcord 线上语音房间' },
+  bg_h: {
+    unit: '25时，Nightcord de.',
+    defaultCat: '线上通话',
+    defaultPlace: 'Nightcord 线上语音房间'
+  },
   bg_i: { unit: '剧场版/特别篇', defaultCat: 'SEKAI世界', defaultPlace: '剧场版特别场景' },
   bg_s: { unit: '剧情插画', defaultCat: '剧情插画', defaultPlace: '剧情特写插画' }
 }
@@ -311,20 +494,34 @@ function classifyCategory(id, name, events) {
   if (id.startsWith('bg_s')) return '剧情插画'
   if (id.startsWith('bg_h')) return /教室|走廊|学校/.test(name) ? '校园' : '线上通话'
   if (/「世界」|セカイ|sekai/i.test(name) || id.startsWith('bg_g')) return 'SEKAI世界'
-  if (/高校|学园|学園|学校|教室|走廊|天台|屋上|校门|中庭|图书室|图书馆|保健室|社团|部室|教学楼|体育馆|操场|网球场|泳池/.test(name)) {
+  if (
+    /高校|学园|学園|学校|教室|走廊|天台|屋上|校门|中庭|图书室|图书馆|保健室|社团|部室|教学楼|体育馆|操场|网球场|泳池/.test(
+      name
+    )
+  ) {
     return '校园'
   }
   if (/房间|的房间|客厅|厨房|卧室|玄关|家|阳台|走廊（家）|公寓|宿舍/.test(name)) return '住宅与房间'
-  if (/奇幻乐园|游乐园|过山车|摩天轮|旋转木马|水族馆|动物园|海边|海滩|沙滩|公园|温泉|露营|山|神社|祭典|广场/.test(name)) {
+  if (
+    /奇幻乐园|游乐园|过山车|摩天轮|旋转木马|水族馆|动物园|海边|海滩|沙滩|公园|温泉|露营|山|神社|祭典|广场/.test(
+      name
+    )
+  ) {
     return '游乐园与休闲'
   }
-  if (/舞台|排练|练习室|休息室|后台|剧场|剧团|Live|演唱会|会场|音乐厅|录音|乐器|画室|摄影棚|直播/.test(name)) {
+  if (
+    /舞台|排练|练习室|休息室|后台|剧场|剧团|Live|演唱会|会场|音乐厅|录音|乐器|画室|摄影棚|直播/.test(
+      name
+    )
+  ) {
     return '演出与排练'
   }
   if (/医院|病房|诊所|车站|机场|电车|巴士|船|飞机|文化馆|市民馆|福利|教堂|墓地/.test(name)) {
     return '医院与公共'
   }
-  if (/餐厅|咖啡|商店|购物|百货|便利店|甜品|点心|面包|拉面|商场|快闪|服装|专柜|书店|花店/.test(name)) {
+  if (
+    /餐厅|咖啡|商店|购物|百货|便利店|甜品|点心|面包|拉面|商场|快闪|服装|专柜|书店|花店/.test(name)
+  ) {
     return '商业与餐饮'
   }
   if (/交叉口|十字路口|宫益坂|涩谷|街道|住宅区|商店街|天桥|巷|大桥|河边|海岸|森林|湖/.test(hay)) {
@@ -335,10 +532,18 @@ function classifyCategory(id, name, events) {
 
 function classifyIndoor(id, name, category) {
   if (category === '线上通话' || category === '住宅与房间') return '室内'
-  if (/室内|教室|走廊|保健室|图书|房间|客厅|厨房|病房|医院|餐厅|咖啡|商店|百货|购物|排练室|练习室|休息室|后台|画室|录音|电车|车厢|直播|大厅|馆内|事务所|屋内|玄关|礼堂|体育馆|剧场内|帐篷|地下/.test(name)) {
+  if (
+    /室内|教室|走廊|保健室|图书|房间|客厅|厨房|病房|医院|餐厅|咖啡|商店|百货|购物|排练室|练习室|休息室|后台|画室|录音|电车|车厢|直播|大厅|馆内|事务所|屋内|玄关|礼堂|体育馆|剧场内|帐篷|地下/.test(
+      name
+    )
+  ) {
     return '室内'
   }
-  if (/天台|屋上|中庭|校门|教学楼后|操场|网球场|十字路口|宫益坂|街道|住宅区|广场|公园|乐园|舞台|海边|沙滩|海岸|山|湖|森林|神社|车站前|桥|路上|室外|屋外|庭院|街头|外景/.test(name)) {
+  if (
+    /天台|屋上|中庭|校门|教学楼后|操场|网球场|十字路口|宫益坂|街道|住宅区|广场|公园|乐园|舞台|海边|沙滩|海岸|山|湖|森林|神社|车站前|桥|路上|室外|屋外|庭院|街头|外景/.test(
+      name
+    )
+  ) {
     return '室外'
   }
   if (id.startsWith('bg_h')) return '室内'
@@ -418,20 +623,16 @@ function readJsonDir(dir, sourceTag) {
 }
 
 async function listRemoteBackgroundIds() {
-  const ids = []
-  let cursor = null
-  do {
-    const q = new URLSearchParams({ server: 'jp', prefix: 'scenario/background/', limit: '200' })
-    if (cursor) q.set('cursor', cursor)
-    const page = await fetchJson(`${STORAGE_ORIGIN}/api/assets/bundles?${q}`)
-    for (const item of page.items || []) {
-      if (item.type === 'bundle' && item.name && /^bg/i.test(item.name) && item.name !== 'background') {
-        ids.push(item.name)
-      }
+  for (const origin of [STORAGE_ORIGIN, STORAGE_BACKUP_ORIGIN]) {
+    try {
+      const listing = await fetchJson(`${origin}/sekai-jp-assets/scenario/background/`)
+      const dirs = Array.isArray(listing.directories) ? listing.directories : []
+      return [...new Set(dirs.filter((name) => /^bg/i.test(name) && name !== 'background'))].sort()
+    } catch {
+      // try backup origin
     }
-    cursor = page.nextCursor?.trim() || null
-  } while (cursor)
-  return [...new Set(ids)].sort()
+  }
+  return []
 }
 
 function buildScenarioCorpus({ corpora, cacheDir }) {
@@ -456,13 +657,32 @@ function buildScenarioCorpus({ corpora, cacheDir }) {
 }
 
 const CHAR_SHORT_BY_PREFIX = {
-  '01': '一歌', '02': '咲希', '03': '穗波', '04': '志步',
-  '05': '实乃理', '06': '遥', '07': '爱莉', '08': '雫',
-  '09': '心羽', '10': '杏', '11': '彰人', '12': '冬弥',
-  '13': '司', '14': '笑梦', '15': '宁宁', '16': '类',
-  '17': '奏', '18': '真冬', '19': '绘名', '20': '瑞希',
-  '21': '初音未来', '22': '镜音铃', '23': '镜音连', '24': '巡音流歌',
-  '25': 'MEIKO', '26': 'KAITO'
+  '01': '一歌',
+  '02': '咲希',
+  '03': '穗波',
+  '04': '志步',
+  '05': '实乃理',
+  '06': '遥',
+  '07': '爱莉',
+  '08': '雫',
+  '09': '心羽',
+  10: '杏',
+  11: '彰人',
+  12: '冬弥',
+  13: '司',
+  14: '笑梦',
+  15: '宁宁',
+  16: '类',
+  17: '奏',
+  18: '真冬',
+  19: '绘名',
+  20: '瑞希',
+  21: '初音未来',
+  22: '镜音铃',
+  23: '镜音连',
+  24: '巡音流歌',
+  25: 'MEIKO',
+  26: 'KAITO'
 }
 
 function charNameFromCostume(costume) {
@@ -502,10 +722,15 @@ export async function buildRichBackgroundIndex(options = {}) {
   }
   try {
     eventsCn = readCached('events_cn.json') ?? (await fetchJson(`${CN_MASTER_BASE}/events.json`))
-    eventStoriesCn = readCached('eventStories_cn.json') ?? (await fetchJson(`${CN_MASTER_BASE}/eventStories.json`))
+    eventStoriesCn =
+      readCached('eventStories_cn.json') ?? (await fetchJson(`${CN_MASTER_BASE}/eventStories.json`))
     areasCn = readCached('areas_cn.json') ?? (await fetchJson(`${CN_MASTER_BASE}/areas.json`))
-    eventsJp = readCached('events_jp.json') ?? (await fetchJson(`${JP_MASTER_BASE}/events.json`).catch(() => []))
-    eventStoriesJp = readCached('eventStories_jp.json') ?? (await fetchJson(`${JP_MASTER_BASE}/eventStories.json`).catch(() => []))
+    eventsJp =
+      readCached('events_jp.json') ??
+      (await fetchJson(`${JP_MASTER_BASE}/events.json`).catch(() => []))
+    eventStoriesJp =
+      readCached('eventStories_jp.json') ??
+      (await fetchJson(`${JP_MASTER_BASE}/eventStories.json`).catch(() => []))
   } catch {
     // 离线容错
   }
@@ -647,7 +872,10 @@ export async function buildRichBackgroundIndex(options = {}) {
     const prefixMeta = UNIT_PREFIX_META[id.slice(0, 4)] || UNIT_PREFIX_META.bg_a
     const events = st ? [...st.events] : []
     const topChars = st
-      ? [...st.chars.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([c]) => c)
+      ? [...st.chars.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .map(([c]) => c)
       : []
 
     const curated = CURATED_BG_NAMES[id]
@@ -697,14 +925,21 @@ export async function buildRichBackgroundIndex(options = {}) {
           name = `${prefixMeta.defaultPlace}（${topChars.slice(0, 2).join('、')}相关）`
         } else {
           // 参考 areas.json 匹配单元场景兜底
-          const unitArea =
-            id.startsWith('bg_f') ? areaNamesCn.find((n) => n.includes('教室')) :
-            id.startsWith('bg_b') ? areaNamesCn.find((n) => n.includes('舞台')) :
-            id.startsWith('bg_c') ? areaNamesCn.find((n) => n.includes('街头')) :
-            id.startsWith('bg_d') ? areaNamesCn.find((n) => n.includes('奇幻')) :
-            id.startsWith('bg_e') ? areaNamesCn.find((n) => n.includes('无人')) : ''
+          const unitArea = id.startsWith('bg_f')
+            ? areaNamesCn.find((n) => n.includes('教室'))
+            : id.startsWith('bg_b')
+              ? areaNamesCn.find((n) => n.includes('舞台'))
+              : id.startsWith('bg_c')
+                ? areaNamesCn.find((n) => n.includes('街头'))
+                : id.startsWith('bg_d')
+                  ? areaNamesCn.find((n) => n.includes('奇幻'))
+                  : id.startsWith('bg_e')
+                    ? areaNamesCn.find((n) => n.includes('无人'))
+                    : ''
           const serial = id.replace(/^bg_[a-z]+0*/i, '') || id
-          name = unitArea ? `${unitArea}·衍生场景 #${serial}` : `${prefixMeta.defaultPlace} #${serial}`
+          name = unitArea
+            ? `${unitArea}·衍生场景 #${serial}`
+            : `${prefixMeta.defaultPlace} #${serial}`
         }
       }
     }
@@ -712,16 +947,18 @@ export async function buildRichBackgroundIndex(options = {}) {
     const category = curated?.category || classifyCategory(id, name, events)
     const indoor = curated?.indoor || classifyIndoor(id, name, category)
     const timeOfDay = curated?.timeOfDay || inferTimeOfDay(id, name, st, siblings)
-    const tags = curated?.tags || makeTags({
-      id,
-      name,
-      aliases,
-      category,
-      timeOfDay,
-      indoor,
-      unit: prefixMeta.unit,
-      events
-    })
+    const tags =
+      curated?.tags ||
+      makeTags({
+        id,
+        name,
+        aliases,
+        category,
+        timeOfDay,
+        indoor,
+        unit: prefixMeta.unit,
+        events
+      })
 
     backgrounds[id] = {
       name,

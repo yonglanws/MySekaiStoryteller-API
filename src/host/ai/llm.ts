@@ -35,7 +35,7 @@ export interface ChatOptions {
   signal?: AbortSignal
   /** OpenAI 兼容 function/tool calling 工具定义 */
   tools?: LlmToolDefinition[]
-  toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } }
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } }
 }
 
 export interface ChatUsage {

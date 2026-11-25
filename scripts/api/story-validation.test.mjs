@@ -699,5 +699,90 @@ test('keeps one action per Talk when a listener reaction shares the line', () =>
     (snippet) => snippet.type === 'Talk' && snippet.data.modelId === 1
   )
   assert.equal(fixedTalk.data.actions.length, 1, 'official Talk rows carry at most one motion')
-  assert.equal(fixedTalk.data.actions[0].modelId, 1, 'the speaker action outranks a listener reaction')
+  assert.equal(
+    fixedTalk.data.actions[0].modelId,
+    1,
+    'the speaker action outranks a listener reaction'
+  )
+})
+
+test('repairs mismatched smile/joyful motion on sad apologetic lines and opening LayoutAppear', () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-glad01', 'w-normal-sigh01', 'w-normal-nod01'],
+        facials: ['face_smile_01', 'face_normal_01', 'face_sad_01', 'face_trouble_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      }
+    ],
+    images: ['bg_classroom.jpg'],
+    imageDetails: [{ file: 'bg_classroom.jpg', name: '教室', description: '放学后的教室' }],
+    voices: [],
+    bgm: [],
+    bgmDetails: []
+  })
+  const rawStory = {
+    models: [{ id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json' }],
+    images: [{ id: 1, image: 'bg_classroom.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          motion: '',
+          facial: 'face_smile_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '对不起……刚才是我说得太过分了。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-glad01', facial: 'face_smile_01' }],
+          closeWindowOnFinish: true
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          moveSpeed: 'Normal'
+        }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+  const { story, warnings } = validateAndFixStory(rawStory, view)
+  const appear = story.snippets.find((s) => s.type === 'LayoutAppear')
+  assert.notEqual(
+    appear.data.facial,
+    'face_smile_01',
+    'opening appear facial should not smile before sad apology'
+  )
+  const talk = story.snippets.find((s) => s.type === 'Talk')
+  assert.notEqual(talk.data.actions[0].facial, 'face_smile_01')
+  assert.notEqual(talk.data.actions[0].motion, 'w-normal-glad01')
+  assert.equal(talk.data.actions[0].facial, 'face_sad_01')
+  assert.equal(talk.data.actions[0].motion, 'w-normal-sigh01')
+  assert.ok(warnings.some((w) => w.includes('情绪冲突')))
 })

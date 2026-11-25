@@ -25,9 +25,10 @@ import {
   downloadMediaFile,
   downloadSeFile,
   extractAudioLoopMetadata,
+  transcodeAudioFile,
   writeAudioLoopSidecar
 } from './media'
-import { downloadModel, type MoesekaiIndexEntry } from './moesekai'
+import { CANONICAL_ASSET_SITES, downloadModel, type MoesekaiIndexEntry } from './moesekai'
 
 const IMAGE_EXTENSIONS = ['.webp', '.png', '.jpg', '.jpeg']
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.flac']
@@ -116,10 +117,13 @@ export function findCloudBackground(
   const raw = normalizeRef(value)
   if (!raw) return null
   const lower = raw.toLowerCase()
+  const lowerStem = stem(lower).toLowerCase()
 
   // 1. 精确 id / 文件名 / stem 命中
-  const byId = catalog.backgrounds.find((entry) =>
-    keysOf([entry.id, entry.file, stem(entry.file)]).includes(lower)
+  const byId = catalog.backgrounds.find(
+    (entry) =>
+      keysOf([entry.id, entry.file, stem(entry.file)]).includes(lower) ||
+      keysOf([entry.id, stem(entry.file)]).includes(lowerStem)
   )
   if (byId) return byId
 
@@ -134,11 +138,16 @@ export function findCloudBackground(
       entry.timeOfDay ? `${entry.name} ${entry.timeOfDay}` : undefined,
       ...entry.aliases
     ])
-    return names.includes(lower) || (Boolean(baseQuery) && keysOf([entry.name, ...entry.aliases]).includes(baseQuery))
+    return (
+      names.includes(lower) ||
+      (Boolean(baseQuery) && keysOf([entry.name, ...entry.aliases]).includes(baseQuery))
+    )
   })
   if (exactNameMatches.length > 0) {
     return exactNameMatches.sort(
-      (a, b) => timeRank(a.timeOfDay, timeHint) - timeRank(b.timeOfDay, timeHint) || a.id.localeCompare(b.id)
+      (a, b) =>
+        timeRank(a.timeOfDay, timeHint) - timeRank(b.timeOfDay, timeHint) ||
+        a.id.localeCompare(b.id)
     )[0]
   }
 
@@ -169,9 +178,10 @@ export function findCloudBgm(
   if (!raw) return null
   const lower = raw.toLowerCase()
   const lowerStem = stem(lower).toLowerCase()
-  const exact = catalog.bgm.find((entry) =>
-    keysOf([entry.id, entry.file, stem(entry.file), entry.name]).includes(lower) ||
-    keysOf([entry.id, stem(entry.file)]).includes(lowerStem)
+  const exact = catalog.bgm.find(
+    (entry) =>
+      keysOf([entry.id, entry.file, stem(entry.file), entry.name]).includes(lower) ||
+      keysOf([entry.id, stem(entry.file)]).includes(lowerStem)
   )
   if (exact) return exact
 
@@ -180,6 +190,8 @@ export function findCloudBgm(
   )
   return byName.length === 1 ? byName[0] : null
 }
+
+const isBackViewCloudId = (id: string): boolean => /(?:^|[_-])back(?:\d*)$/i.test(id)
 
 /** 模型：支持云端 id、服装标签（如「星乃一歌 校服」）、角色名/简称、cloud/ 路径。 */
 export function findCloudModel(
@@ -196,25 +208,35 @@ export function findCloudModel(
   )
   if (exactId) return exactId
 
-  const byCharAndOutfit = catalog.models.filter((entry) => {
-    const variants = keysOf([
-      entry.outfitLabel ? `${entry.name} ${entry.outfitLabel}` : undefined,
-      entry.outfitLabel ? `${entry.shortName} ${entry.outfitLabel}` : undefined,
-      entry.outfitLabel ? `${entry.name}·${entry.outfitLabel}` : undefined,
-      entry.outfitCategory ? `${entry.name} ${entry.outfitCategory}` : undefined,
-      entry.outfitCategory ? `${entry.shortName} ${entry.outfitCategory}` : undefined
-    ])
-    return variants.includes(lower)
-  })
+  const byCharAndOutfit = catalog.models
+    .filter((entry) => {
+      const variants = keysOf([
+        entry.outfitLabel ? `${entry.name} ${entry.outfitLabel}` : undefined,
+        entry.outfitLabel ? `${entry.shortName} ${entry.outfitLabel}` : undefined,
+        entry.outfitLabel ? `${entry.name}·${entry.outfitLabel}` : undefined,
+        entry.outfitCategory ? `${entry.name} ${entry.outfitCategory}` : undefined,
+        entry.outfitCategory ? `${entry.shortName} ${entry.outfitCategory}` : undefined
+      ])
+      return variants.includes(lower)
+    })
+    .sort(
+      (a, b) =>
+        Number(isBackViewCloudId(a.id)) - Number(isBackViewCloudId(b.id)) ||
+        Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+        a.id.localeCompare(b.id)
+    )
   if (byCharAndOutfit.length > 0) {
     return byCharAndOutfit[0]
   }
 
   const byChar = catalog.models
-    .filter((entry) =>
-      keysOf([entry.name, entry.shortName]).includes(lower)
+    .filter((entry) => keysOf([entry.name, entry.shortName]).includes(lower))
+    .sort(
+      (a, b) =>
+        Number(isBackViewCloudId(a.id)) - Number(isBackViewCloudId(b.id)) ||
+        Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+        a.id.localeCompare(b.id)
     )
-    .sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.id.localeCompare(b.id))
   if (byChar.length > 0) return byChar[0]
 
   const bySubstring = catalog.models.filter((entry) => entry.id.toLowerCase().includes(lower))
@@ -248,7 +270,52 @@ async function ensureBackground(
 }
 
 export const DEFAULT_INAPP_VERSION = 'jp-7.0.0'
-export const DEFAULT_INAPP_CDN_BASE = 'https://assets.pjsk.moe/sekai-extra-assets/inapp'
+export const DEFAULT_INAPP_CDN_BASE = 'https://storage.pjsk.moe/client/jp'
+
+function canonicalInappUrls(site: string, region: string, relPath: string): string[] {
+  const clientBase = `${site}/client/${region}`
+  const clean = relPath.replace(/^\/+/, '')
+  const spriteMatch = /^player\/loose\/Sprite\/([^/]+)\.png$/i.exec(clean)
+  if (spriteMatch) {
+    return [`${clientBase}/player/loose/Sprite/${encodeURIComponent(spriteMatch[1])}/image.png`]
+  }
+  if (clean === 'player/loose/Texture2D/tex_transition_left.png') {
+    return [`${clientBase}/player/scenario/textures/tex_transition_left.png`]
+  }
+  if (clean === 'player/loose/Texture2D/tex_transition_top.png') {
+    return [`${clientBase}/player/scenario/textures/tex_transition_top.png`]
+  }
+  if (clean === 'player/loose/Texture2D/tex_common_tri_01.png') {
+    return [
+      `${clientBase}/player/effects/common/tex_select_common_tri_01.png`,
+      `${clientBase}/player/effects/common/texture/tex_tri_b.png`
+    ]
+  }
+  if (clean === 'player/loose/Texture2D/holo.png') {
+    return [`${clientBase}/player/live2d/materials/holo.png`]
+  }
+  const menuMatch = /^audio\/MenuCommon\/([^/]+)\.(?:wav|mp3)$/i.exec(clean)
+  if (menuMatch) {
+    return [
+      `${clientBase}/streamingassets/MenuCommon.acb/cue/${encodeURIComponent(menuMatch[1])}.mp3`
+    ]
+  }
+  const builtinMatch = /^audio\/MenuCommon_Built_in\/([^/]+)\.(?:wav|mp3)$/i.exec(clean)
+  if (builtinMatch) {
+    const cue = builtinMatch[1]
+    const candidates = [
+      `${clientBase}/streamingassets/MenuCommon_Built_in.acb/cue/${encodeURIComponent(cue)}.mp3`
+    ]
+    if (cue === 'SE_DECIDE1') {
+      candidates.push(
+        `${clientBase}/streamingassets/MenuCommon_Built_in.acb/cue/SE_CHOICE_DECIDE.mp3`,
+        `${clientBase}/streamingassets/MenuCommon_Built_in.acb/cue/SE_DECIDE1_old.mp3`
+      )
+    }
+    return candidates
+  }
+  return [`${clientBase}/${clean}`]
+}
 
 export const INAPP_UI_ASSET_PATHS = [
   'player/loose/Sprite/bg_story_adv.png',
@@ -308,7 +375,8 @@ export async function ensureInappUiAssets(
   options: EnsureInappAssetsOptions = {}
 ): Promise<EnsureInappAssetsResult> {
   const version = options.version ?? DEFAULT_INAPP_VERSION
-  const baseUrl = (options.inappBase ?? `${DEFAULT_INAPP_CDN_BASE}/${version}`).replace(/\/+$/, '')
+  const explicitBase = options.inappBase?.trim().replace(/\/+$/, '')
+  const region = ctx.settings?.region ?? 'jp'
   const paths = options.paths ?? INAPP_UI_ASSET_PATHS
   const key = `${ctx.resourcesDir}::${version}::${paths.length}`
   const existingLock = !options.force ? inappInflights.get(key) : undefined
@@ -328,16 +396,39 @@ export async function ensureInappUiAssets(
         cached++
         continue
       }
-      const url = `${baseUrl}/${relPath.replace(/^\/+/, '')}`
-      try {
-        const resp = await request(url, { timeoutMs, retries })
-        const buffer = Buffer.from(await resp.arrayBuffer())
-        if (buffer.byteLength === 0) throw new Error('empty body')
-        atomicWrite(localPath, buffer)
-        downloaded++
-      } catch {
-        failed.push(relPath)
+      const cleanRel = relPath.replace(/^\/+/, '')
+      const candidateUrls = explicitBase
+        ? [`${explicitBase}/${cleanRel}`]
+        : CANONICAL_ASSET_SITES.flatMap((site) => canonicalInappUrls(site, region, cleanRel))
+
+      let saved = false
+      for (const url of candidateUrls) {
+        try {
+          const resp = await request(url, { timeoutMs, retries })
+          const buffer = Buffer.from(await resp.arrayBuffer())
+          if (buffer.byteLength === 0) throw new Error('empty body')
+          if (localPath.toLowerCase().endsWith('.wav') && url.toLowerCase().endsWith('.mp3')) {
+            const mp3Temp = `${localPath}.tmp.mp3`
+            atomicWrite(mp3Temp, buffer)
+            try {
+              fs.mkdirSync(path.dirname(localPath), { recursive: true })
+              await transcodeAudioFile(mp3Temp, localPath)
+            } catch {
+              atomicWrite(localPath, buffer)
+            } finally {
+              fs.rmSync(mp3Temp, { force: true })
+            }
+          } else {
+            atomicWrite(localPath, buffer)
+          }
+          saved = true
+          break
+        } catch {
+          // try next candidate URL / backup mirror
+        }
       }
+      if (saved) downloaded++
+      else failed.push(relPath)
     }
 
     if (downloaded > 0 || failed.length > 0) {
@@ -363,20 +454,24 @@ export async function ensureInappUiAssets(
   }
 }
 
-export function findCloudSe(
-  catalog: CloudCatalogData,
-  query: string
-): CloudSeEntry | null {
+export function findCloudSe(catalog: CloudCatalogData | null, query: string): CloudSeEntry | null {
+  if (!catalog) return null
   const entries = catalog.se ?? []
   if (entries.length === 0) return null
   const q = query.trim().toLowerCase()
   if (!q) return null
   const stemQ = q.replace(/^cloud\//, '').replace(/\.(mp3|wav|ogg|flac|hca)$/i, '')
+  const baseStemQ = stemQ.replace(/(?:_b)?_\d+$/, '')
   return (
     entries.find((e) => e.id.toLowerCase() === stemQ) ??
     entries.find((e) => e.file.toLowerCase() === q) ??
     entries.find((e) => e.id.toLowerCase() === stemQ.replace(/_b$/, '')) ??
-    entries.find((e) => e.description.toLowerCase().includes(q) || e.tags.some((t) => t.toLowerCase() === stemQ)) ??
+    entries.find((e) => e.id.toLowerCase() === baseStemQ) ??
+    entries.find(
+      (e) =>
+        e.description.toLowerCase().includes(q) ||
+        e.tags.some((t) => t.toLowerCase() === stemQ || t.toLowerCase().includes(q))
+    ) ??
     null
   )
 }
@@ -433,10 +528,15 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
   if (local) return `cloud/${path.basename(local)}`
 
   const inappCandidate = INAPP_UI_ASSET_PATHS.find(
-    (p) => p.startsWith('audio/') && stem(path.posix.basename(p)).toLowerCase() === stem(name).toLowerCase()
+    (p) =>
+      p.startsWith('audio/') &&
+      stem(path.posix.basename(p)).toLowerCase() === stem(name).toLowerCase()
   )
   if (inappCandidate) {
-    await ensureInappUiAssets(ctx, { paths: [inappCandidate], timeoutMs: Math.min(ctx.settings.timeoutMs, 10_000) })
+    await ensureInappUiAssets(ctx, {
+      paths: [inappCandidate],
+      timeoutMs: Math.min(ctx.settings.timeoutMs, 10_000)
+    })
     const inappLocal = resolveInappAssetPath(ctx.resourcesDir, inappCandidate)
     if (fs.existsSync(inappLocal)) {
       fs.mkdirSync(seDir, { recursive: true })
@@ -467,11 +567,7 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
 
 function isLegacyDefaultBgmRef(ref: string): boolean {
   const lower = ref.trim().replace(/^\/+/, '').toLowerCase()
-  return (
-    lower === DEFAULT_LOCAL_BGM_PATH.toLowerCase() ||
-    lower === 'bg1.mp3' ||
-    lower === 'bg1'
-  )
+  return lower === DEFAULT_LOCAL_BGM_PATH.toLowerCase() || lower === 'bg1.mp3' || lower === 'bg1'
 }
 
 /**
@@ -582,7 +678,10 @@ export async function resolveStoryCloudAssets(
     const ref = model.model
     if (localModelExists(ctx.resourcesDir, ref)) continue
     const entry = ref.startsWith('cloud/')
-      ? (ctx.catalog.models.find((item) => ref.startsWith(`cloud/${item.id}/`)) ?? null)
+      ? (ctx.catalog.models.find(
+          (item) =>
+            ref === item.path || ref === `cloud/${item.id}` || ref.startsWith(`cloud/${item.id}/`)
+        ) ?? findCloudModel(ctx.catalog, ref))
       : findCloudModel(ctx.catalog, ref)
     if (!entry) {
       result.missing.push(`model:${ref}`)
@@ -664,7 +763,10 @@ export async function resolveStoryCloudAssets(
           try {
             const resolved = await ensureModel(entry, ctx)
             if (targetModel) {
-              targetModel.costumes = { ...(targetModel.costumes ?? {}), [snippet.data.costume]: resolved }
+              targetModel.costumes = {
+                ...(targetModel.costumes ?? {}),
+                [snippet.data.costume]: resolved
+              }
             }
             result.models++
           } catch (error) {
@@ -681,7 +783,10 @@ export async function resolveStoryCloudAssets(
     } else if (snippet.type === 'SideFade') {
       neededInapp.add('player/loose/Texture2D/tex_transition_left.png')
       neededInapp.add('player/loose/Texture2D/tex_transition_top.png')
-    } else if (snippet.type === 'AttachCharacterShader' && (snippet.data.shader === 'hologram' || snippet.data.shader === 'monitor')) {
+    } else if (
+      snippet.type === 'AttachCharacterShader' &&
+      (snippet.data.shader === 'hologram' || snippet.data.shader === 'monitor')
+    ) {
       neededInapp.add('player/loose/Texture2D/holo.png')
     } else if (snippet.type === 'SimpleSelectable') {
       neededInapp.add('player/loose/Sprite/btn_round_h80_wh.png')
@@ -700,7 +805,9 @@ export async function resolveStoryCloudAssets(
     }
   }
 
-  const isLocalTestMock = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(ctx.settings.assetBase || '')
+  const isLocalTestMock = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(
+    ctx.settings.assetBase || ''
+  )
   if (neededInapp.size > 0 && !isLocalTestMock) {
     await ensureInappUiAssets(ctx, {
       paths: [...neededInapp],

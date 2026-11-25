@@ -102,7 +102,8 @@ export interface ListMediaResult {
   bundles: MediaBundle[]
 }
 
-const DEFAULT_ASSET_BASE = 'https://storage.exmeaning.com'
+const DEFAULT_ASSET_BASE = 'https://storage.pjsk.moe'
+const BACKUP_ASSET_BASE = 'https://storage.exmeaning.com'
 const DEFAULT_CONCURRENCY = 4
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_RETRIES = 3
@@ -126,6 +127,34 @@ interface AssetApiPage {
   nextCursor?: string
 }
 
+interface DirectoryListingFile {
+  name?: string
+  extension?: string
+  size?: number
+}
+
+interface DirectoryListingPage {
+  format?: string
+  version?: number
+  directories?: string[]
+  files?: Array<string | DirectoryListingFile>
+}
+
+interface AudioCuesDocument {
+  format?: string
+  version?: number
+  cues?: Array<{
+    name?: string
+    waveforms?: Array<{
+      role?: string
+      frames?: number
+      sample_rate?: number
+      channels?: number
+      loop?: [number, number]
+    }>
+  }>
+}
+
 function normalizeAssetBase(raw: string | undefined): string {
   const value = (raw || DEFAULT_ASSET_BASE).trim().replace(/\/+$/, '')
   const url = assertHttpUrl(value, 'assetBase')
@@ -134,6 +163,19 @@ function normalizeAssetBase(raw: string | undefined): string {
 
 function apiOrigin(assetBase: string): string {
   return new URL(assetBase).origin
+}
+
+function isCanonicalAssetOrigin(origin: string): boolean {
+  return origin === DEFAULT_ASSET_BASE || origin === BACKUP_ASSET_BASE
+}
+
+function assetBaseCandidates(raw: string | undefined): string[] {
+  const primary = normalizeAssetBase(raw)
+  const origin = apiOrigin(primary)
+  if (!raw || !raw.trim()) return [DEFAULT_ASSET_BASE, BACKUP_ASSET_BASE]
+  if (origin === DEFAULT_ASSET_BASE) return [primary, BACKUP_ASSET_BASE]
+  if (origin === BACKUP_ASSET_BASE) return [primary, DEFAULT_ASSET_BASE]
+  return [primary]
 }
 
 function requestOptions(options: { timeoutMs?: number; retries?: number }): RequestOptions {
@@ -171,10 +213,36 @@ async function listBundles(
   prefix: string,
   options: RequestOptions
 ): Promise<MediaBundle[]> {
+  const kind: MediaKind = prefix.startsWith('scenario/background') ? 'background' : 'bgm'
+  const isSe = prefix.startsWith('sound/scenario/se')
+
+  if (isCanonicalAssetOrigin(origin)) {
+    const cleanPrefix = prefix.replace(/^\/+/, '').replace(/\/?$/, '/')
+    const url = `${origin}/sekai-${region}-assets/${cleanPrefix}`
+    const page = await fetchJson<DirectoryListingPage>(url, options)
+    if (page.format !== 'directory-listing' || page.version !== 1) {
+      throw new Error(`${url}: unsupported directory-listing`)
+    }
+    const bundles: MediaBundle[] = []
+    for (const dirName of page.directories ?? []) {
+      if (!dirName) continue
+      if (kind === 'background' && !isBackgroundName(dirName)) continue
+      if (kind === 'bgm' && !isSe && !isBgmName(dirName)) continue
+      bundles.push({
+        kind,
+        name: dirName,
+        path: `${cleanPrefix}${dirName}`,
+        bytes: 0,
+        files: 0,
+        prefix: cleanPrefix
+      })
+    }
+    return bundles
+  }
+
   const bundles: MediaBundle[] = []
   const seenCursors = new Set<string>()
   let cursor: string | null = null
-  const kind: MediaKind = prefix.startsWith('scenario/background') ? 'background' : 'bgm'
 
   do {
     const query = new URLSearchParams({
@@ -191,7 +259,7 @@ async function listBundles(
       if (item.type !== 'bundle' || !item.name || !item.path) continue
       if (!item.path.startsWith(prefix)) continue
       if (kind === 'background' && !isBackgroundName(item.name)) continue
-      if (kind === 'bgm' && !isBgmName(item.name)) continue
+      if (kind === 'bgm' && !isSe && !isBgmName(item.name)) continue
       bundles.push({
         kind,
         name: item.name,
@@ -215,6 +283,28 @@ async function bundleFiles(
   bundle: MediaBundle,
   options: RequestOptions
 ): Promise<MediaFile[]> {
+  if (isCanonicalAssetOrigin(origin)) {
+    const cleanBundle = bundle.path.replace(/^\/+|\/+$/g, '')
+    const listingUrl = `${origin}/sekai-${region}-assets/${cleanBundle}/`
+    const page = await fetchJson<DirectoryListingPage>(listingUrl, options)
+    if (page.format !== 'directory-listing' || page.version !== 1) {
+      throw new Error(`${listingUrl}: unsupported directory-listing`)
+    }
+    const files: MediaFile[] = []
+    for (const entry of page.files ?? []) {
+      const name = typeof entry === 'string' ? entry : entry?.name
+      if (!name) continue
+      const relPath = `${cleanBundle}/${name}`
+      files.push({
+        name,
+        path: relPath,
+        url: `${origin}/sekai-${region}-assets/${relPath.split('/').map(encodeURIComponent).join('/')}`,
+        size: typeof entry === 'string' ? 0 : (entry.size ?? 0)
+      })
+    }
+    return files
+  }
+
   const files: MediaFile[] = []
   const seenCursors = new Set<string>()
   let cursor: string | null = null
@@ -394,6 +484,29 @@ export interface DownloadedMediaFile {
   loop?: AudioLoopMetadata
 }
 
+async function fetchCanonicalBgmCuesLoop(
+  origin: string,
+  region: AssetRegion,
+  bundlePath: string,
+  cueHint: string,
+  options: RequestOptions
+): Promise<AudioLoopMetadata | null> {
+  if (!isCanonicalAssetOrigin(origin)) return null
+  const cleanPath = bundlePath.replace(/^\/+|\/+$/g, '')
+  const dirListingUrl = `${origin}/${region}/${cleanPath}/`
+  try {
+    const dir = await fetchJson<DirectoryListingPage>(dirListingUrl, options)
+    const acbDir =
+      (dir.directories ?? []).find((d) => d.endsWith('.acb')) ??
+      `${path.posix.basename(cleanPath)}.acb`
+    const cuesUrl = `${origin}/${region}/${cleanPath}/${acbDir}/cues.json`
+    const doc = await fetchJson<AudioCuesDocument>(cuesUrl, options)
+    return parseAudioCuesLoop(doc, cueHint)
+  } catch {
+    return null
+  }
+}
+
 /**
  * 下载单个背景/BGM bundle 里的首选文件（背景优先 webp，BGM 优先 mp3）。
  * 只写文件，不碰 images.yaml / bgm.yaml —— 云端目录不需要本地登记。
@@ -401,8 +514,7 @@ export interface DownloadedMediaFile {
 export async function downloadMediaFile(
   options: DownloadMediaFileOptions
 ): Promise<DownloadedMediaFile | null> {
-  const assetBase = normalizeAssetBase(options.assetBase)
-  const origin = apiOrigin(assetBase)
+  const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
   const defaultPrefix = prefixFor(options.kind, false)
   const candidatePaths = options.bundlePath
@@ -413,24 +525,35 @@ export async function downloadMediaFile(
 
   const dir = path.join(targetDir(options.outDir, options.kind), options.subdir ?? '')
   const extensions = options.kind === 'background' ? BACKGROUND_EXTS : BGM_EXTS
+  let origin = apiOrigin(candidates[0])
+  let matchedBundlePath = candidatePaths[0]
   let files: MediaFile[] = []
   let picked: MediaFile | null = null
-  for (const candidatePath of candidatePaths) {
-    const bundle: MediaBundle = {
-      kind: options.kind,
-      name: options.name,
-      path: candidatePath,
-      bytes: 0,
-      files: 0,
-      prefix: `${path.posix.dirname(candidatePath)}/`
+
+  for (const base of candidates) {
+    const baseOrigin = apiOrigin(base)
+    for (const candidatePath of candidatePaths) {
+      const bundle: MediaBundle = {
+        kind: options.kind,
+        name: options.name,
+        path: candidatePath,
+        bytes: 0,
+        files: 0,
+        prefix: `${path.posix.dirname(candidatePath)}/`
+      }
+      try {
+        files = await bundleFiles(baseOrigin, options.region, bundle, requestOpts)
+        picked = pickFile(files, extensions)
+        if (picked) {
+          origin = baseOrigin
+          matchedBundlePath = candidatePath
+          break
+        }
+      } catch {
+        // try next prefix or backup origin
+      }
     }
-    try {
-      files = await bundleFiles(origin, options.region, bundle, requestOpts)
-      picked = pickFile(files, extensions)
-      if (picked) break
-    } catch {
-      // try next prefix (e.g. sound/area_bgm/)
-    }
+    if (picked) break
   }
   if (!picked) return null
 
@@ -464,6 +587,15 @@ export async function downloadMediaFile(
       }
     }
   }
+  if (!loop && options.kind === 'bgm') {
+    loop = await fetchCanonicalBgmCuesLoop(
+      origin,
+      options.region,
+      matchedBundlePath,
+      options.name,
+      requestOpts
+    )
+  }
   if (loop) writeAudioLoopSidecar(target, loop)
   return {
     file: relativeTo(options.outDir, target),
@@ -480,7 +612,34 @@ export interface AudioLoopMetadata {
   loopEndSample: number
   sampleRate: number
   durationMs?: number
-  source: 'hca' | 'wav-smpl' | 'sidecar'
+  source: 'hca' | 'wav-smpl' | 'sidecar' | 'audio-cues'
+}
+
+export function parseAudioCuesLoop(raw: unknown, cueHint?: string): AudioLoopMetadata | null {
+  if (!raw || typeof raw !== 'object') return null
+  const doc = raw as AudioCuesDocument
+  const cues = Array.isArray(doc.cues) ? doc.cues : []
+  if (cues.length === 0) return null
+  const chosenCue =
+    (cueHint ? cues.find((c) => c?.name?.toLowerCase() === cueHint.toLowerCase()) : null) ?? cues[0]
+  const wf = chosenCue?.waveforms?.[0]
+  if (!wf || !Array.isArray(wf.loop) || wf.loop.length < 2) return null
+  const sampleRate = Number(wf.sample_rate) || 0
+  const loopStartSample = Number(wf.loop[0])
+  const loopEndSample = Number(wf.loop[1])
+  const frames = Number(wf.frames) || 0
+  if (sampleRate <= 0 || !Number.isFinite(loopStartSample) || loopEndSample <= loopStartSample) {
+    return null
+  }
+  return {
+    loopStartMs: Math.round((loopStartSample * 1000000) / sampleRate) / 1000,
+    loopEndMs: Math.round((loopEndSample * 1000000) / sampleRate) / 1000,
+    loopStartSample,
+    loopEndSample,
+    sampleRate,
+    ...(frames > 0 ? { durationMs: Math.round((frames * 1000000) / sampleRate) / 1000 } : {}),
+    source: 'audio-cues'
+  }
 }
 
 export interface ScenarioSeEntry {
@@ -545,7 +704,8 @@ export function parseWavSmplLoop(buffer: Buffer): AudioLoopMetadata | null {
 
   if (sampleRate <= 0 || loopStartSample < 0 || loopEndSample <= loopStartSample) return null
   const frameBytes = Math.max(1, channels * (bitsPerSample / 8))
-  const totalSamples = dataBytes > 0 && channels > 0 && bitsPerSample > 0 ? Math.floor(dataBytes / frameBytes) : 0
+  const totalSamples =
+    dataBytes > 0 && channels > 0 && bitsPerSample > 0 ? Math.floor(dataBytes / frameBytes) : 0
   const clampedEnd = totalSamples > 0 ? Math.min(loopEndSample, totalSamples) : loopEndSample
   if (clampedEnd <= loopStartSample) return null
 
@@ -555,7 +715,9 @@ export function parseWavSmplLoop(buffer: Buffer): AudioLoopMetadata | null {
     loopStartSample,
     loopEndSample: clampedEnd,
     sampleRate,
-    ...(totalSamples > 0 ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 } : {}),
+    ...(totalSamples > 0
+      ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 }
+      : {}),
     source: 'wav-smpl'
   }
 }
@@ -587,7 +749,10 @@ export function parseHcaLoop(buffer: Buffer): AudioLoopMetadata | null {
       buffer[pos + 3] & 0x7f
     )
     if (tag === 'fmt\0' && pos + 16 <= headerSize) {
-      sampleRate = ((buffer[pos + 5] & 0xff) << 16) | ((buffer[pos + 6] & 0xff) << 8) | (buffer[pos + 7] & 0xff)
+      sampleRate =
+        ((buffer[pos + 5] & 0xff) << 16) |
+        ((buffer[pos + 6] & 0xff) << 8) |
+        (buffer[pos + 7] & 0xff)
       blockCount = buffer.readUInt32BE(pos + 8)
       encoderDelay = buffer.readUInt16BE(pos + 12)
       encoderPadding = buffer.readUInt16BE(pos + 14)
@@ -633,7 +798,9 @@ export function parseHcaLoop(buffer: Buffer): AudioLoopMetadata | null {
     loopStartSample,
     loopEndSample,
     sampleRate,
-    ...(totalSamples > 0 ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 } : {}),
+    ...(totalSamples > 0
+      ? { durationMs: Math.round((totalSamples * 1000000) / sampleRate) / 1000 }
+      : {}),
     source: 'hca'
   }
 }
@@ -669,7 +836,9 @@ export function writeAudioLoopSidecar(audioFilePath: string, metadata: AudioLoop
 }
 
 /** 从 Buffer 或磁盘音频文件（含同 stem .hca / .wav / .loop.json 伴生文件）提取循环点。 */
-export function extractAudioLoopMetadata(filePathOrBuffer: string | Buffer): AudioLoopMetadata | null {
+export function extractAudioLoopMetadata(
+  filePathOrBuffer: string | Buffer
+): AudioLoopMetadata | null {
   if (Buffer.isBuffer(filePathOrBuffer)) {
     return parseHcaLoop(filePathOrBuffer) ?? parseWavSmplLoop(filePathOrBuffer)
   }
@@ -711,7 +880,12 @@ export function inferSeSemanticInfo(
   const lower = cueId.toLowerCase()
   const bundleName = path.posix.basename(bundlePath)
   if (lower.startsWith('se_walk_')) {
-    const who = lower.includes('men_') && !lower.includes('women_') ? '男性' : lower.includes('women_') ? '女性' : ''
+    const who =
+      lower.includes('men_') && !lower.includes('women_')
+        ? '男性'
+        : lower.includes('women_')
+          ? '女性'
+          : ''
     return {
       category: 'footsteps',
       description: `${who}行走脚步声（${cueId}）`,
@@ -719,7 +893,12 @@ export function inferSeSemanticInfo(
     }
   }
   if (lower.startsWith('se_run_')) {
-    const who = lower.includes('men_') && !lower.includes('women_') ? '男性' : lower.includes('women_') ? '女性' : ''
+    const who =
+      lower.includes('men_') && !lower.includes('women_')
+        ? '男性'
+        : lower.includes('women_')
+          ? '女性'
+          : ''
     return {
       category: 'running',
       description: `${who}奔跑脚步声（${cueId}）`,
@@ -741,7 +920,11 @@ export function inferSeSemanticInfo(
     return { category: 'phone', description: `手机/来电音效（${cueId}）`, tags: ['phone'] }
   }
   if (lower.includes('transition') || lower.includes('sekai')) {
-    return { category: 'transition', description: `世界观转场音效（${cueId}）`, tags: ['transition', 'sekai'] }
+    return {
+      category: 'transition',
+      description: `世界观转场音效（${cueId}）`,
+      tags: ['transition', 'sekai']
+    }
   }
   return {
     category: 'scenario',
@@ -758,51 +941,61 @@ export async function listScenarioSeFiles(options: {
   timeoutMs?: number
   retries?: number
 }): Promise<ScenarioSeEntry[]> {
-  const assetBase = normalizeAssetBase(options.assetBase)
-  const origin = apiOrigin(assetBase)
+  const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
 
-  let bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts).catch(() => [])
-  if (bundles.length === 0) {
-    const fallbackNames = options.bundleNames ?? [...SCENARIO_SE_BUNDLES]
-    bundles = fallbackNames.map((bundlePath) => ({
-      kind: 'bgm' as MediaKind,
-      name: path.posix.basename(bundlePath),
-      path: bundlePath,
-      bytes: 0,
-      files: 0,
-      prefix: 'sound/scenario/se/'
-    }))
-  }
+  for (const base of candidates) {
+    const origin = apiOrigin(base)
+    let bundles = await listBundles(
+      origin,
+      options.region,
+      'sound/scenario/se/',
+      requestOpts
+    ).catch(() => [])
+    if (bundles.length === 0) {
+      const fallbackNames = options.bundleNames ?? [...SCENARIO_SE_BUNDLES]
+      bundles = fallbackNames.map((bundlePath) => ({
+        kind: 'bgm' as MediaKind,
+        name: path.posix.basename(bundlePath),
+        path: bundlePath,
+        bytes: 0,
+        files: 0,
+        prefix: 'sound/scenario/se/'
+      }))
+    }
 
-  const perBundle = await mapPool(bundles, 3, async (bundle) => {
-    const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
-    return files
-      .filter((file) => SE_EXTS.includes(path.posix.extname(file.name).toLowerCase()))
-      .map((file): ScenarioSeEntry => {
-        const id = path.posix.basename(file.name, path.posix.extname(file.name))
-        const semantic = inferSeSemanticInfo(id, bundle.path)
-        return {
-          id,
-          file: path.posix.basename(file.name),
-          bundle: bundle.path,
-          path: file.path,
-          url: file.url,
-          size: file.size,
-          ...semantic
+    const perBundle = await mapPool(bundles, 3, async (bundle) => {
+      const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+      return files
+        .filter((file) => SE_EXTS.includes(path.posix.extname(file.name).toLowerCase()))
+        .map((file): ScenarioSeEntry => {
+          const id = path.posix.basename(file.name, path.posix.extname(file.name))
+          const semantic = inferSeSemanticInfo(id, bundle.path)
+          return {
+            id,
+            file: path.posix.basename(file.name),
+            bundle: bundle.path,
+            path: file.path,
+            url: file.url,
+            size: file.size,
+            ...semantic
+          }
+        })
+    })
+
+    const deduped = new Map<string, ScenarioSeEntry>()
+    for (const list of perBundle) {
+      for (const entry of list) {
+        if (!deduped.has(entry.file)) {
+          deduped.set(entry.file, entry)
         }
-      })
-  })
-
-  const deduped = new Map<string, ScenarioSeEntry>()
-  for (const list of perBundle) {
-    for (const entry of list) {
-      if (!deduped.has(entry.file)) {
-        deduped.set(entry.file, entry)
       }
     }
+    if (deduped.size > 0) {
+      return [...deduped.values()].sort((a, b) => a.id.localeCompare(b.id))
+    }
   }
-  return [...deduped.values()].sort((a, b) => a.id.localeCompare(b.id))
+  return []
 }
 
 /**
@@ -825,7 +1018,10 @@ export async function downloadSeFile(options: {
   const desiredStem = extMatch ? desired.slice(0, -extMatch.length) : desired
   const fileName = extMatch ? desired : `${desired}.mp3`
   const seDir = path.join(options.outDir, 'audio', 'se', 'cloud')
-  const target = path.join(seDir, options.transcodeTo ? `${desiredStem}.${options.transcodeTo}` : fileName)
+  const target = path.join(
+    seDir,
+    options.transcodeTo ? `${desiredStem}.${options.transcodeTo}` : fileName
+  )
   if (fs.existsSync(target) && !options.force) {
     return {
       file: relativeTo(options.outDir, target),
@@ -834,77 +1030,106 @@ export async function downloadSeFile(options: {
     }
   }
 
-  const assetBase = normalizeAssetBase(options.assetBase)
-  const origin = apiOrigin(assetBase)
+  const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
-  let bundles = await listBundles(origin, options.region, 'sound/scenario/se/', requestOpts).catch(() => [])
-  if (bundles.length === 0) {
-    bundles = SCENARIO_SE_BUNDLES.map((bundlePath) => ({
-      kind: 'bgm' as MediaKind,
-      name: path.posix.basename(bundlePath),
-      path: bundlePath,
-      bytes: 0,
-      files: 0,
-      prefix: 'sound/scenario/se/'
-    }))
-  }
 
-  for (const bundle of bundles) {
-    const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
-    const hit =
-      files.find((file) => file.name.toLowerCase() === fileName.toLowerCase()) ??
-      files.find((file) => {
-        const ext = path.posix.extname(file.name).toLowerCase()
-        if (!SE_EXTS.includes(ext)) return false
-        return path.posix.basename(file.name, ext).toLowerCase() === desiredStem.toLowerCase()
-      })
-    if (!hit) continue
-
-    const response = await request(new URL(hit.url, origin).href, requestOpts)
-    const buffer = Buffer.from(await response.arrayBuffer())
-    const hitTarget = path.join(seDir, path.posix.basename(hit.name))
-    atomicWrite(hitTarget, buffer)
-
-    const loopMeta = extractAudioLoopMetadata(buffer)
-    if (loopMeta) writeAudioLoopSidecar(hitTarget, loopMeta)
-
-    if (options.transcodeTo && path.extname(hitTarget).toLowerCase() !== `.${options.transcodeTo}`) {
-      await transcodeAudioFile(hitTarget, target)
-      if (loopMeta) writeAudioLoopSidecar(target, loopMeta)
-      return { file: relativeTo(options.outDir, target), bytes: fs.statSync(target).size, skipped: false }
+  for (const base of candidates) {
+    const origin = apiOrigin(base)
+    let bundles = await listBundles(
+      origin,
+      options.region,
+      'sound/scenario/se/',
+      requestOpts
+    ).catch(() => [])
+    if (bundles.length === 0) {
+      bundles = SCENARIO_SE_BUNDLES.map((bundlePath) => ({
+        kind: 'bgm' as MediaKind,
+        name: path.posix.basename(bundlePath),
+        path: bundlePath,
+        bytes: 0,
+        files: 0,
+        prefix: 'sound/scenario/se/'
+      }))
     }
-    return { file: relativeTo(options.outDir, hitTarget), bytes: buffer.byteLength, skipped: false }
+
+    for (const bundle of bundles) {
+      const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+      const hit =
+        files.find((file) => file.name.toLowerCase() === fileName.toLowerCase()) ??
+        files.find((file) => {
+          const ext = path.posix.extname(file.name).toLowerCase()
+          if (!SE_EXTS.includes(ext)) return false
+          return path.posix.basename(file.name, ext).toLowerCase() === desiredStem.toLowerCase()
+        })
+      if (!hit) continue
+
+      const response = await request(new URL(hit.url, origin).href, requestOpts)
+      const buffer = Buffer.from(await response.arrayBuffer())
+      const hitTarget = path.join(seDir, path.posix.basename(hit.name))
+      atomicWrite(hitTarget, buffer)
+
+      const loopMeta = extractAudioLoopMetadata(buffer)
+      if (loopMeta) writeAudioLoopSidecar(hitTarget, loopMeta)
+
+      if (
+        options.transcodeTo &&
+        path.extname(hitTarget).toLowerCase() !== `.${options.transcodeTo}`
+      ) {
+        await transcodeAudioFile(hitTarget, target)
+        if (loopMeta) writeAudioLoopSidecar(target, loopMeta)
+        return {
+          file: relativeTo(options.outDir, target),
+          bytes: fs.statSync(target).size,
+          skipped: false
+        }
+      }
+      return {
+        file: relativeTo(options.outDir, hitTarget),
+        bytes: buffer.byteLength,
+        skipped: false
+      }
+    }
   }
   return null
 }
 
 /** 只列出资源站的背景/BGM bundle，不下载。 */
 export async function listMedia(options: ListMediaOptions): Promise<ListMediaResult> {
-  const assetBase = normalizeAssetBase(options.assetBase)
-  const origin = apiOrigin(assetBase)
+  const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
   const kinds = options.kinds ?? ['background', 'bgm']
-  const bundles: MediaBundle[] = []
 
-  for (const kind of kinds) {
-    const prefixes =
-      kind === 'bgm' && options.includeAreaBgm
-        ? [prefixFor(kind, false), prefixFor(kind, true)]
-        : [prefixFor(kind, false)]
-    for (const prefix of prefixes) {
-      const found = await listBundles(origin, options.region, prefix, requestOpts)
-      bundles.push(...found)
+  let lastError: unknown = null
+  for (const assetBase of candidates) {
+    const origin = apiOrigin(assetBase)
+    try {
+      const bundles: MediaBundle[] = []
+      for (const kind of kinds) {
+        const prefixes =
+          kind === 'bgm' && options.includeAreaBgm
+            ? [prefixFor(kind, false), prefixFor(kind, true)]
+            : [prefixFor(kind, false)]
+        for (const prefix of prefixes) {
+          const found = await listBundles(origin, options.region, prefix, requestOpts)
+          bundles.push(...found)
+        }
+      }
+
+      const filtered = bundles.filter((bundle) => matchesNames(bundle.name, options.names))
+      const limited: MediaBundle[] = []
+      for (const kind of kinds) {
+        const items = filtered.filter((bundle) => bundle.kind === kind)
+        items.sort((a, b) => a.name.localeCompare(b.name))
+        limited.push(
+          ...(options.limit && options.limit > 0 ? items.slice(0, options.limit) : items)
+        )
+      }
+      return { region: options.region, assetBase, bundles: limited }
+    } catch (error) {
+      lastError = error
     }
   }
-
-  const filtered = bundles.filter((bundle) => matchesNames(bundle.name, options.names))
-  const limited: MediaBundle[] = []
-  for (const kind of kinds) {
-    const items = filtered.filter((bundle) => bundle.kind === kind)
-    items.sort((a, b) => a.name.localeCompare(b.name))
-    limited.push(...(options.limit && options.limit > 0 ? items.slice(0, options.limit) : items))
-  }
-  return { region: options.region, assetBase, bundles: limited }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'listMedia failed'))
 }
 
 /** 下载背景/BGM 并追加到 images.yaml / bgm.yaml。 */

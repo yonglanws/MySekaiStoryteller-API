@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { convertSseMotion } from '../../out-host/host/assets/motion3.js'
+import {
+  buildMoc3BindingResolver,
+  convertAnyMotion,
+  convertLive2DMotion,
+  convertSseMotion,
+  crc32Utf8
+} from '../../out-host/host/assets/motion3.js'
 
 const sse = (curves, overrides = {}) => ({
   format: 'sse-motion',
@@ -182,4 +188,90 @@ test('OnLive2DInvokeUserData events become motion3 UserData entries', () => {
   const plain = convertSseMotion(sse([parameter('ParamAngleX', { kind: 'constant', value: 0 })]))
   assert.equal(plain.motion3.Meta.UserDataCount, 0)
   assert.deepEqual(plain.motion3.UserData, [])
+})
+
+test('live2d-motion clip v2 resolves moc3 CRC-32 bindings for streamed, dense, and constant curves', () => {
+  assert.equal(crc32Utf8('Value'), 0xdcb67730)
+  assert.equal(crc32Utf8('Opacity'), 0x8c4054fa)
+
+  const fakeMoc3 = Buffer.from('MOC3\0ParamAngleX\0ParamSmile\0PartArmL\0', 'latin1')
+  const resolver = buildMoc3BindingResolver(fakeMoc3)
+
+  const doc = {
+    format: 'live2d-motion',
+    version: 1,
+    fade_in: 0.4,
+    fade_out: 0.35,
+    clip: {
+      format: 'clip',
+      version: 2,
+      name: 'w-test-canonical',
+      sample_rate: 60,
+      start_time: 0,
+      stop_time: 1,
+      loop: false,
+      curves: [
+        {
+          path: crc32Utf8('Parameters/ParamAngleX'),
+          attribute: 0xdcb67730,
+          kind: 'streamed',
+          segments: [
+            [-3.4028235e38, 0, 0, 0, -10],
+            [0, -16, 0, 34, -10],
+            [0.5, 0, 0, 0, 5]
+          ]
+        },
+        {
+          path: crc32Utf8('Parameters/ParamSmile'),
+          attribute: 0xdcb67730,
+          kind: 'dense',
+          begin_time: 0,
+          sample_rate: 2,
+          samples: [0, 0.5, 1]
+        },
+        {
+          path: crc32Utf8('Parts/PartArmL'),
+          attribute: 0x8c4054fa,
+          kind: 'constant',
+          value: 0.8
+        },
+        {
+          path: crc32Utf8('Parameters/ParamMissing'),
+          attribute: 0xdcb67730,
+          kind: 'constant',
+          value: 1
+        }
+      ],
+      events: [
+        {
+          time: 0.25,
+          function: 'OnLive2DInvokeUserData',
+          data: 'eyeblink,0.2,0.2,0.2',
+          float: 0,
+          int: 0
+        }
+      ]
+    }
+  }
+
+  const converted = convertLive2DMotion(doc, resolver)
+  assert.equal(converted.name, 'w-test-canonical')
+  assert.equal(converted.fadeIn, 0.4)
+  assert.equal(converted.fadeOut, 0.35)
+  assert.equal(converted.motion3.Curves.length, 3)
+
+  const angle = converted.motion3.Curves.find((c) => c.Id === 'ParamAngleX')
+  assert.equal(angle.Target, 'Parameter')
+  assert.equal(evaluate(angle.Segments, 0), -10)
+  assert.equal(evaluate(angle.Segments, 0.5), 5)
+
+  const smile = converted.motion3.Curves.find((c) => c.Id === 'ParamSmile')
+  assert.deepEqual(smile.Segments, [0, 0, 0, 0.5, 0.5, 0, 1, 1])
+
+  const part = converted.motion3.Curves.find((c) => c.Id === 'PartArmL')
+  assert.equal(part.Target, 'PartOpacity')
+  assert.deepEqual(part.Segments, [0, 0.8, 2, 1, 0.8])
+
+  assert.deepEqual(converted.motion3.UserData, [{ Time: 0.25, Value: 'eyeblink,0.2,0.2,0.2' }])
+  assert.equal(convertAnyMotion(doc, resolver).name, 'w-test-canonical')
 })

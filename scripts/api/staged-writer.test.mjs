@@ -1127,7 +1127,10 @@ test('keeps the silent scene cast on stage when no listener actions remain', () 
   const appeared = validated.story.snippets
     .filter((snippet) => snippet.type === 'LayoutAppear')
     .map((snippet) => snippet.data.modelId)
-  assert.ok(appeared.includes(first.id) && appeared.includes(second.id), 'both planned actors appear')
+  assert.ok(
+    appeared.includes(first.id) && appeared.includes(second.id),
+    'both planned actors appear'
+  )
 })
 
 test('staged pipeline expands a too-short dialogue once', async (t) => {
@@ -1239,7 +1242,13 @@ test('formatCanonGroundingBrief keeps user prompt, drama anchors, canon facts an
     }
   }
   const scene = '雨天放学后，瑞希把伞塞给绘名。'
-  const brief = formatCanonGroundingBrief({ scene, plan, ragContext, stage: 'dialogue', maxChars: 40 })
+  const brief = formatCanonGroundingBrief({
+    scene,
+    plan,
+    ragContext,
+    stage: 'dialogue',
+    maxChars: 40
+  })
   assert.ok(brief.includes('## 用户原始需求'))
   assert.ok(brief.includes(scene))
   assert.ok(brief.includes('中段转折点'))
@@ -1247,13 +1256,22 @@ test('formatCanonGroundingBrief keeps user prompt, drama anchors, canon facts an
   assert.ok(brief.includes('### 相关官方剧情与事件参考'))
   assert.ok(brief.includes(firstLine))
   assert.ok(!brief.includes(secondLine), 'over-budget excerpt is dropped whole, never split')
-  assert.ok(!brief.includes('legacy-prompt-block'), 'sections take precedence over the legacy promptBlock')
+  assert.ok(
+    !brief.includes('legacy-prompt-block'),
+    'sections take precedence over the legacy promptBlock'
+  )
   for (const line of brief.split('\n')) {
     if (!line.startsWith('这是第')) continue
     assert.ok([firstLine, secondLine].includes(line), `partial line leaked: ${line}`)
   }
 
-  const full = formatCanonGroundingBrief({ scene, plan, ragContext, stage: 'dialogue', maxChars: 4000 })
+  const full = formatCanonGroundingBrief({
+    scene,
+    plan,
+    ragContext,
+    stage: 'dialogue',
+    maxChars: 4000
+  })
   assert.ok(full.includes('### 官方对白口吻样本'))
   assert.ok(full.includes('诶——？'))
   assert.ok(full.includes('严禁照抄原句'))
@@ -1283,7 +1301,10 @@ test('staged prompts carry the original user request, motif anchors, and the tig
   for (const prompt of downstream) {
     assert.ok(prompt.user.includes('导演锚点'), 'anchor block reaches every down-stream stage')
     assert.ok(prompt.user.includes('中段转折点'))
-    assert.ok(prompt.user.includes('瑞希把伞借给绘名'), 'explicit request reaches every down-stream stage')
+    assert.ok(
+      prompt.user.includes('瑞希把伞借给绘名'),
+      'explicit request reaches every down-stream stage'
+    )
   }
 })
 
@@ -1363,4 +1384,114 @@ test('composeStory backfills a facial when a speaker motion has none', () => {
   const listener = talks[2].data.actions.find((action) => action.modelId === first.id)
   assert.equal(listener.motion, 'w-normal-smile01')
   assert.equal(listener.facial, undefined)
+})
+
+test('buildDirectionPrompt annotates motions and composeStory repairs/diversifies repeated or clashed acting', () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-tilthead01',
+          'w-normal-glad01',
+          'w-normal-sigh01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_serious_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '21ena_normal/21ena_normal.model3.json',
+        motions: ['e-normal-default01', 'e-normal-nod01', 'e-normal-sigh01'],
+        facials: ['face_normal_01', 'face_serious_01', 'face_sad_01'],
+        defaultMotion: 'e-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_room.jpg'],
+    imageDetails: [{ file: 'bg_room.jpg', name: '房间', description: '安静的房间' }],
+    voices: [],
+    bgm: [],
+    bgmDetails: []
+  })
+  const plan = {
+    title: '测试',
+    event: '深夜谈心',
+    logline: '',
+    outline: [],
+    cast: [
+      { modelId: 1, name: '瑞希', fullName: '晓山瑞希', path: view.models[0].path, role: '倾诉' },
+      { modelId: 2, name: '绘名', fullName: '东云绘名', path: view.models[1].path, role: '倾听' }
+    ],
+    background: 'bg_room.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '对不起，我还是搞砸了……', emotion: '伤心' },
+      { id: 'l2', speaker: '瑞希', content: '真的很抱歉，害大家担心了。', emotion: '伤心' },
+      { id: 'l3', speaker: '绘名', content: '……别把错都往自己身上揽。', emotion: '平静' },
+      { id: 'l4', speaker: '瑞希', content: '可是我真的不知道该怎么办。', emotion: '伤心' },
+      { id: 'l5', speaker: '瑞希', content: '连自己想说什么都搞不清楚。', emotion: '伤心' },
+      { id: 'l6', speaker: '绘名', content: '那就先坐下来喘口气吧。', emotion: '平静' }
+    ]
+  }
+  const dirPrompt = buildDirectionPrompt(view, plan, dialogue, {
+    scene: '深夜谈心',
+    personas: [],
+    targetMinutes: 1
+  })
+  assert.match(
+    dirPrompt.user,
+    /w-normal-nod01\([^)]+\)/,
+    'direction prompt includes semantic motion annotations'
+  )
+
+  // 模型在 l2 误给了 glad01 + smile_01，且在 l4/l5 连续重复同一个 motion/facial
+  const direction = normalizeDirection(
+    {
+      background: 'bg_room.jpg',
+      lines: [
+        { id: 'l1', facial: 'face_sad_01' },
+        { id: 'l2', motion: 'w-normal-glad01', facial: 'face_smile_01' },
+        { id: 'l3', motion: 'e-normal-nod01', facial: 'face_serious_01' },
+        { id: 'l4', motion: 'w-normal-sigh01', facial: 'face_sad_01' },
+        { id: 'l5', motion: 'w-normal-sigh01', facial: 'face_sad_01' },
+        { id: 'l6', motion: 'e-normal-nod01', facial: 'face_serious_01' }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const story = composeStory(view, plan, dialogue, direction)
+  const talks = story.snippets.filter((s) => s.type === 'Talk')
+  const l2Act = talks[1].data.actions[0]
+  assert.notEqual(
+    l2Act.motion,
+    'w-normal-glad01',
+    'joyful motion on sad apology line must be repaired'
+  )
+  assert.notEqual(
+    l2Act.facial,
+    'face_smile_01',
+    'smile facial on sad apology line must be repaired'
+  )
+  const l4Motion = talks[3].data.actions[0]?.motion
+  const l5Motion = talks[4].data.actions[0]?.motion
+  assert.notEqual(l5Motion, l4Motion, 'consecutive duplicate speaker motion should diversify')
 })
