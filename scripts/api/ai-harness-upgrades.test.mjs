@@ -954,3 +954,162 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
   assert.equal(talks[0].data.actions[0].facial, 'face_sad_01')
   assert.equal(talks[0].data.actions[0].motion, 'w-normal-sigh01')
 })
+
+test('agentic harness: batched inspect_character_expressions, search_assets, listener recommendation & patch_story_draft listenerAction', async () => {
+  const view = makeView()
+  const logger = new Logger({ type: 'hidden' })
+  const toolkit = createStoryAgentToolkit({
+    view,
+    personas: [],
+    emotionLabels: ['平静', '开心', '伤心', '生气', '惊讶'],
+    logger
+  })
+
+  // 1) inspect_character_expressions with moods array (1 call for multiple moods)
+  const multiMood = JSON.parse(
+    await toolkit.execute('inspect_character_expressions', {
+      modelId: 1,
+      moods: ['伤心', '生气', '开心']
+    })
+  )
+  assert.ok(multiMood.byMood && multiMood.byMood['伤心'] && multiMood.byMood['生气'])
+  assert.ok(
+    Array.isArray(multiMood.byMood['伤心'].facials) && multiMood.byMood['伤心'].facials.length > 0
+  )
+  assert.ok(
+    Array.isArray(multiMood.byMood['伤心'].motions) && multiMood.byMood['伤心'].motions.length > 0
+  )
+
+  // Default overview mode (no mood/moods/dialogueLine) returns grouped byMood in 1 call
+  const overview = JSON.parse(
+    await toolkit.execute('inspect_character_expressions', { modelId: 1 })
+  )
+  assert.ok(overview.byMood && overview.byMood['平静'] && overview.byMood['伤心'])
+
+  // 2) search_assets batched kinds + queries in 1 call
+  const batchedAssets = JSON.parse(
+    await toolkit.execute('search_assets', {
+      kinds: ['background', 'bgm', 'se'],
+      queries: ['天台', '日常', '脚步']
+    })
+  )
+  assert.ok(Array.isArray(batchedAssets.backgrounds) && batchedAssets.backgrounds.length >= 1)
+  assert.ok(Array.isArray(batchedAssets.bgm) && batchedAssets.bgm.length >= 1)
+  assert.ok(Array.isArray(batchedAssets.se) && batchedAssets.se.length >= 1)
+
+  // 3) recommend_acting_for_lines with listenerModelId returns staggered listenerReaction
+  const recWithListener = JSON.parse(
+    await toolkit.execute('recommend_acting_for_lines', {
+      lines: [
+        {
+          id: 'l1',
+          modelId: 1,
+          speaker: '瑞希',
+          content: '我就觉得快要窒息了。我根本受不了那个样子……！',
+          emotion: '伤心',
+          listenerModelId: 2
+        }
+      ]
+    })
+  )
+  assert.equal(recWithListener.recommendations.length, 1)
+  const lr = recWithListener.recommendations[0].listenerReaction
+  assert.ok(lr, 'should include listenerReaction when listenerModelId is provided')
+  assert.equal(lr.modelId, 2)
+  assert.ok(lr.suggestedAt >= 0.45 && lr.suggestedAt <= 0.85)
+  assert.ok(Array.isArray(lr.recommendedFacials) && lr.recommendedFacials.length >= 1)
+
+  // 4) patch_story_draft listenerAction auto-staggers away from speaker at=0 and supports removal
+  const draft = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_sad_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_trouble_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '大家一定会为了不伤害我，拼命装作什么都没发生过。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-sigh01', facial: 'face_sad_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '一想到那样，我就快要窒息了……',
+          emotion: '伤心',
+          modelId: 1,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-nod01', facial: 'face_trouble_01' }]
+        }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+  await toolkit.execute('save_story_draft', { story: draft })
+  const patched = JSON.parse(
+    await toolkit.execute('patch_story_draft', {
+      operations: [
+        {
+          op: 'upsert_listener_action',
+          index: 5,
+          listenerAction: {
+            modelId: 2,
+            at: 0, // intentionally colliding -> must be auto-staggered >= 0.45
+            facial: 'face_sad_01',
+            motion: 'w-normal-tilthead01'
+          }
+        }
+      ]
+    })
+  )
+  assert.equal(patched.patched, true)
+  const inspected = JSON.parse(await toolkit.execute('inspect_story_draft', { type: 'Talk' }))
+  const talk2Acts = inspected.slice[1].actions
+  assert.equal(talk2Acts.length, 2)
+  const listenerAct = talk2Acts.find((a) => a.modelId === 2)
+  assert.ok(listenerAct, 'listener action should be present')
+  assert.ok(
+    listenerAct.at >= 0.45 && listenerAct.at <= 0.85,
+    `expected staggered at, got ${listenerAct.at}`
+  )
+  assert.equal(listenerAct.facial, 'face_sad_01')
+  assert.equal(listenerAct.motion, 'w-normal-tilthead01')
+})

@@ -99,13 +99,14 @@ export interface ActingFidelityDiagnostic {
   snippetIndex: number
   lineNumber: number
   modelId: number
+  listenerModelId?: number
   speaker: string
   content: string
   emotion: string
   facial: string
   motion: string
   inferredMood: DramaticContextMood
-  field: 'facial' | 'motion' | 'repetition' | 'staging' | 'dialogue'
+  field: 'facial' | 'motion' | 'repetition' | 'staging' | 'dialogue' | 'bgm' | 'tts'
   code: string
   severity: 'high' | 'medium'
   message: string
@@ -124,6 +125,9 @@ export interface ActingFidelityReport {
   motionMismatchCount: number
   simultaneousCollisionCount: number
   stageDirectionLeakCount: number
+  listenerFrozenCount?: number
+  duplicateBgmCount?: number
+  zeroWidthCharCount?: number
   officialReport: officialLinterMod.OfficialLintReport
 }
 
@@ -656,6 +660,9 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
 
   const lastFacialByModel = new Map<number, { facial: string; run: number }>()
   const lastMotionByModel = new Map<number, { motion: string; run: number }>()
+  const onStage = new Set<number>()
+  const listenerIdleTalks = new Map<number, number>()
+  let lastBgmKey: string | null = null
   let prevTense = false
   let prevContent = ''
   let prevEmotion = ''
@@ -665,12 +672,65 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
   let motionMismatchCount = 0
   let simultaneousCollisionCount = 0
   let stageDirectionLeakCount = 0
+  let listenerFrozenCount = 0
+  let duplicateBgmCount = 0
 
   for (let i = 0; i < story.snippets.length; i++) {
     const snippet = story.snippets[i]
+    const rawData = (
+      'data' in snippet && snippet.data && typeof snippet.data === 'object' ? snippet.data : {}
+    ) as Record<string, unknown>
+
+    if (snippet.type === 'LayoutAppear') {
+      const mid = typeof rawData.modelId === 'number' ? rawData.modelId : -1
+      if (mid !== -1) {
+        onStage.add(mid)
+        listenerIdleTalks.set(mid, 0)
+      }
+      continue
+    }
+    if (snippet.type === 'LayoutClear') {
+      const mid = typeof rawData.modelId === 'number' ? rawData.modelId : -1
+      onStage.delete(mid)
+      listenerIdleTalks.delete(mid)
+      continue
+    }
+    if (snippet.type === 'Move' || snippet.type === 'Motion') {
+      const mid = typeof rawData.modelId === 'number' ? rawData.modelId : -1
+      if (mid !== -1 && onStage.has(mid)) listenerIdleTalks.set(mid, 0)
+      continue
+    }
+    if (snippet.type === 'ChangeBgm') {
+      const stop = Boolean(rawData.stop)
+      const file = stop ? '' : String(rawData.file ?? '').trim()
+      const key = `${stop ? 'stop' : 'play'}:${file}`
+      if (lastBgmKey !== null && lastBgmKey === key) {
+        duplicateBgmCount += 1
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkIdx,
+          modelId: -1,
+          speaker: '',
+          content: file || 'stop',
+          emotion: '',
+          facial: '',
+          motion: '',
+          inferredMood: 'neutral',
+          field: 'bgm',
+          code: 'duplicate_bgm',
+          severity: 'medium',
+          message: `重复连续播放相同 BGM（${file || 'stop'}），建议删除冗余 ChangeBgm`,
+          recommendedFacials: [],
+          recommendedMotions: []
+        })
+      }
+      lastBgmKey = key
+      continue
+    }
+
     if (snippet.type !== 'Talk' || !('data' in snippet) || !snippet.data) continue
     talkIdx += 1
-    const data = snippet.data as Record<string, unknown>
+    const data = rawData
     const speaker = String(data.speaker ?? '')
     const content = String(data.content ?? '')
     const emotion = String(data.emotion ?? '')
@@ -874,6 +934,55 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
       }
     }
 
+    // 听者静止检测：同台非说话角色连续 >=2 句无表情/动作更新时报告 listener_frozen
+    const activeIds = new Set<number>([modelId])
+    for (const act of actions) {
+      if (typeof act.modelId === 'number') activeIds.add(act.modelId)
+    }
+    for (const onStageId of onStage) {
+      if (activeIds.has(onStageId)) {
+        listenerIdleTalks.set(onStageId, 0)
+        continue
+      }
+      const nextIdle = (listenerIdleTalks.get(onStageId) ?? 0) + 1
+      listenerIdleTalks.set(onStageId, nextIdle)
+      if (nextIdle === 2 || (nextIdle > 2 && nextIdle % 3 === 0)) {
+        listenerFrozenCount += 1
+        const listenerModel = view.modelById(onStageId)
+        const listenerProfile = getActingProfile(listenerModel?.name ?? '', '')
+        const listenerRec = listenerModel
+          ? recommendForLine(view, listenerModel, {
+              content,
+              emotion,
+              prevContent,
+              prevEmotion,
+              prevTense,
+              isListener: true,
+              restrainedRole: listenerProfile.restrained,
+              limit: 3
+            })
+          : { mood: 'attentive_listen' as DramaticContextMood, facials: [], motions: [] }
+        diagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkIdx,
+          modelId,
+          listenerModelId: onStageId,
+          speaker,
+          content: content.slice(0, 60),
+          emotion,
+          facial: '',
+          motion: '',
+          inferredMood: listenerRec.mood,
+          field: 'staging',
+          code: 'listener_frozen',
+          severity: 'medium',
+          message: `在场听者(modelId=${onStageId})已连续 ${nextIdle} 句静止无反应，建议在 actions 中错峰(at: 0.5..0.85)添加听者微表情或轻动作`,
+          recommendedFacials: listenerRec.facials,
+          recommendedMotions: listenerRec.motions
+        })
+      }
+    }
+
     const lineCtx = inferDramaticMoodFallback({ content, emotion, prevContent, prevEmotion })
     prevTense = lineCtx.tense
     prevContent = content
@@ -902,6 +1011,8 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
     motionMismatchCount,
     simultaneousCollisionCount,
     stageDirectionLeakCount,
+    listenerFrozenCount,
+    duplicateBgmCount,
     officialReport
   }
 }
@@ -1083,7 +1194,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'inspect_character_expressions',
         description:
-          '按情绪/剧情台词语义查询指定角色的可用身体动作（motion）和带 motion3 语义注释的表情（facial），支持中英文情绪筛选（如 伤心、道歉、生气、思考、微笑、害羞）。',
+          '按情绪/剧情台词语义查询指定角色的可用身体动作（motion）和带 motion3 语义注释的表情（facial）。支持传 moods 数组一次查询多情绪，或留空 mood 直接返回按情绪分组的紧凑总览（每个角色只需 1 次调用！）。',
         parameters: {
           type: 'object',
           properties: {
@@ -1091,7 +1202,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             character: { type: 'string', description: '角色名或简称（未传 modelId 时使用）' },
             mood: {
               type: 'string',
-              description: '按情绪或动作关键词筛选，例如：伤心、苦笑、道歉、微笑、生气、点头、思考'
+              description:
+                '按单个情绪或动作关键词筛选，例如：伤心、苦笑、道歉、微笑、生气、点头、思考'
+            },
+            moods: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                '推荐：一次批量查询多个情绪（如 ["伤心","生气","惊讶","平静","困扰"]），节省工具步数'
             },
             dialogueLine: {
               type: 'string',
@@ -1116,14 +1234,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'recommend_acting_for_lines',
         description:
-          '批量为多句台词匹配最贴合剧情情绪、上下文转折与角色性格的 facial 和 motion 候选（含听者反应参考），避免盲选或重复。',
+          '批量为多句台词匹配最贴合剧情情绪、上下文转折与角色性格的 facial 和 motion 候选；若提供 listenerModelId 或 listenerSpeaker，同时返回错峰（at: 0.5..0.85）听者反应建议。',
         parameters: {
           type: 'object',
           properties: {
             lines: {
               type: 'array',
               description:
-                '台词列表 [{ id?, modelId?, speaker?, content, emotion?, isListener?, isMonologue? }]',
+                '台词列表 [{ id?, modelId?, speaker?, content, emotion?, isListener?, isMonologue?, listenerModelId?, listenerSpeaker? }]',
               items: {
                 type: 'object',
                 properties: {
@@ -1133,7 +1251,15 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   content: { type: 'string' },
                   emotion: { type: 'string' },
                   isListener: { type: 'boolean' },
-                  isMonologue: { type: 'boolean' }
+                  isMonologue: { type: 'boolean' },
+                  listenerModelId: {
+                    type: 'number',
+                    description: '可选：同台听者 modelId，提供时同步返回错峰听者反应推荐'
+                  },
+                  listenerSpeaker: {
+                    type: 'string',
+                    description: '可选：同台听者角色名（未传 listenerModelId 时使用）'
+                  }
                 },
                 required: ['content']
               }
@@ -1148,24 +1274,36 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'search_assets',
         description:
-          '检索目录中真实存在的背景（background）、BGM、官方音效（se）、场景粒子特效（effect）与角色换装（outfit），同时可返回场景氛围推荐。',
+          '检索目录中真实存在的背景（background）、BGM、官方音效（se）、场景粒子特效（effect）与角色换装（outfit）。支持传 kinds 数组和 queries 数组在单次调用内批量检索多类素材！',
         parameters: {
           type: 'object',
           properties: {
             kind: {
               type: 'string',
               enum: ['background', 'bgm', 'se', 'effect', 'outfit', 'all'],
-              description: '资源类别'
+              description: '单个资源类别（批量查询时优先用 kinds）'
+            },
+            kinds: {
+              type: 'array',
+              items: {
+                type: 'string',
+                enum: ['background', 'bgm', 'se', 'effect', 'outfit', 'all']
+              },
+              description: '推荐：一次批量查询多个类别，如 ["background","bgm","se"]'
             },
             query: {
               type: 'string',
-              description: '场景/时段/氛围/服装关键词，如 夜晚、天台、校服、钢琴、脚步'
+              description: '单个场景/时段/氛围/服装关键词，如 夜晚、天台、校服、钢琴、脚步'
             },
-            character: { type: 'string', description: 'kind=outfit 时可指定角色名' },
-            modelId: { type: 'number', description: 'kind=outfit 时可指定基础 modelId' },
-            limit: { type: 'number', description: '最多返回条数（默认 12）' }
-          },
-          required: ['kind']
+            queries: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '推荐：一次批量传入多个关键词（如 ["连廊","悲伤","脚步"]），合并去重返回'
+            },
+            character: { type: 'string', description: '查询 outfit 时可指定角色名' },
+            modelId: { type: 'number', description: '查询 outfit 时可指定基础 modelId' },
+            limit: { type: 'number', description: '每类最多返回条数（默认 12）' }
+          }
         }
       }
     },
@@ -1356,6 +1494,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                       'replace',
                       'update_talk',
                       'update_acting',
+                      'upsert_listener_action',
                       'insert_before',
                       'insert_after',
                       'delete'
@@ -1377,6 +1516,19 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                     description: '说话者或片段主体的 motion（设为空串可清除）'
                   },
                   facial: { type: 'string', description: '说话者或片段主体的 facial' },
+                  listenerAction: {
+                    type: 'object',
+                    description:
+                      '为 Talk 片段新增/更新听者反应（自动错峰 at: 0.45..0.85，不与说话者碰撞）',
+                    properties: {
+                      modelId: { type: 'number', description: '听者 modelId' },
+                      at: { type: 'number', description: '触发时刻（默认 0.6，自动避开说话者）' },
+                      facial: { type: 'string', description: '听者微表情' },
+                      motion: { type: 'string', description: '可选：听者轻微身体动作' },
+                      remove: { type: 'boolean', description: '为 true 时移除该听者的动作' }
+                    },
+                    required: ['modelId']
+                  },
                   actions: {
                     type: 'array',
                     items: { type: 'object' },
@@ -1564,7 +1716,10 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           bodyMotionsByModel: audited.bodyMotions,
           facialMismatchCount: audited.actingReport.facialMismatchCount,
           motionMismatchCount: audited.actingReport.motionMismatchCount,
-          repeatedFacialRunCount: audited.actingReport.repeatedFacialRunCount
+          repeatedFacialRunCount: audited.actingReport.repeatedFacialRunCount,
+          listenerFrozenCount: audited.actingReport.listenerFrozenCount ?? 0,
+          duplicateBgmCount: audited.actingReport.duplicateBgmCount ?? 0,
+          zeroWidthCharCount: audited.actingReport.zeroWidthCharCount ?? 0
         }
       }
     } catch (error) {
@@ -1622,6 +1777,9 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
       }
       const mood = typeof args.mood === 'string' ? args.mood.trim() : ''
+      const moodsArg = Array.isArray(args.moods)
+        ? args.moods.map((m) => String(m ?? '').trim()).filter(Boolean)
+        : []
       const dialogueLine = typeof args.dialogueLine === 'string' ? args.dialogueLine.trim() : ''
       const emotion = typeof args.emotion === 'string' ? args.emotion.trim() : ''
       const kind = typeof args.kind === 'string' ? args.kind : 'all'
@@ -1629,8 +1787,11 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
 
       const allMotions = view.promptMotions(model)
       const allFacials = view.promptFacials(model)
-      const tokens = mood ? expandMoodTokens(mood) : []
-      const filterBySemantics = (items: string[], labelFn: (item: string) => string): string[] => {
+      const filterBySemanticsForTokens = (
+        items: string[],
+        tokens: string[],
+        labelFn: (item: string) => string
+      ): string[] => {
         if (tokens.length === 0) return items
         const scored = items
           .map((item) => {
@@ -1644,22 +1805,54 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         return scored.length > 0 ? scored : items
       }
 
+      const facialLabelFn = (f: string): string =>
+        `${facialSemanticsMod.inspectModelFacial(model.path, f).role} ${facialSemanticsMod.inspectModelFacial(model.path, f).label}`
+      const motionLabelFn = (m: string): string => inspectMotion(model.path, m).label
+
+      // 批量多情绪模式或无过滤默认总览：1 次调用即返回该角色各核心情绪的表情+动作分组
+      const targetMoods =
+        moodsArg.length > 0
+          ? moodsArg.slice(0, 8)
+          : !mood && !dialogueLine && !emotion
+            ? ['平静', '开心', '伤心', '困扰', '生气', '惊讶', '害羞']
+            : []
+
+      const byMood: Record<string, { facials?: string[]; motions?: string[] }> = {}
+      if (targetMoods.length > 0) {
+        for (const mKey of targetMoods) {
+          const mTokens = expandMoodTokens(mKey)
+          const entry: { facials?: string[]; motions?: string[] } = {}
+          if (kind !== 'motion') {
+            entry.facials = filterBySemanticsForTokens(allFacials, mTokens, facialLabelFn)
+              .slice(0, 4)
+              .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
+          }
+          if (kind !== 'facial') {
+            entry.motions = filterBySemanticsForTokens(
+              allMotions.filter((m) => !isStandingMotion(m)),
+              mTokens,
+              motionLabelFn
+            )
+              .slice(0, 4)
+              .map((m) => annotateMotion(model.path, m))
+          }
+          byMood[mKey] = entry
+        }
+      }
+
+      const tokens = mood ? expandMoodTokens(mood) : []
       const motions =
         kind === 'facial'
           ? []
-          : filterBySemantics(allMotions, (m) => inspectMotion(model.path, m).label)
-              .slice(0, 22)
+          : filterBySemanticsForTokens(allMotions, tokens, motionLabelFn)
+              .slice(0, targetMoods.length > 0 ? 12 : 22)
               .map((m) => annotateMotion(model.path, m))
 
       const facials =
         kind === 'motion'
           ? []
-          : filterBySemantics(
-              allFacials,
-              (f) =>
-                `${facialSemanticsMod.inspectModelFacial(model.path, f).role} ${facialSemanticsMod.inspectModelFacial(model.path, f).label}`
-            )
-              .slice(0, 24)
+          : filterBySemanticsForTokens(allFacials, tokens, facialLabelFn)
+              .slice(0, targetMoods.length > 0 ? 14 : 24)
               .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
 
       const recommended =
@@ -1677,6 +1870,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         name: view.shortName(model),
         restrained: profile.restrained,
         actingNote: profile.actingNote,
+        ...(Object.keys(byMood).length > 0 ? { byMood } : {}),
         ...(recommended
           ? {
               recommended: {
@@ -1734,6 +1928,44 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
         if (advised.facials[0]) lastFacial.set(model.id, advised.facials[0])
         if (advised.motions[0]) lastMotion.set(model.id, advised.motions[0])
+
+        let listenerReaction: Record<string, unknown> | undefined
+        const listenerModel =
+          rec.listenerModelId !== undefined || rec.listenerSpeaker !== undefined
+            ? findModel(view, rec.listenerModelId, rec.listenerSpeaker)
+            : null
+        if (listenerModel && listenerModel.id !== model.id) {
+          const lProfile = getActingProfile(`${listenerModel.name} ${listenerModel.path}`)
+          const lAdvised = recommendForLine(view, listenerModel, {
+            content,
+            emotion,
+            prevContent,
+            prevEmotion,
+            prevTense,
+            isListener: true,
+            restrainedRole: lProfile.restrained,
+            prevFacial: lastFacial.get(listenerModel.id),
+            prevMotion: lastMotion.get(listenerModel.id),
+            limit: 3
+          })
+          if (lAdvised.facials[0]) lastFacial.set(listenerModel.id, lAdvised.facials[0])
+          if (lAdvised.motions[0]) lastMotion.set(listenerModel.id, lAdvised.motions[0])
+          listenerReaction = {
+            modelId: listenerModel.id,
+            speaker: view.shortName(listenerModel),
+            suggestedAt: 0.6,
+            inferredMood: lAdvised.mood,
+            recommendedFacials: lAdvised.facials.map((f) => ({
+              name: f,
+              label: facialSemanticsMod.inspectModelFacial(listenerModel.path, f).label
+            })),
+            recommendedMotions: lAdvised.motions.map((m) => ({
+              name: m,
+              label: inspectMotion(listenerModel.path, m).label
+            }))
+          }
+        }
+
         const ctx = inferDramaticMoodFallback({
           content,
           emotion,
@@ -1759,39 +1991,68 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           recommendedMotions: advised.motions.map((m) => ({
             name: m,
             label: inspectMotion(model.path, m).label
-          }))
+          })),
+          ...(listenerReaction ? { listenerReaction } : {})
         })
       }
       return JSON.stringify({ recommendations })
     }
 
     if (name === 'search_assets') {
-      const kind = typeof args.kind === 'string' ? args.kind : 'all'
-      const query = typeof args.query === 'string' ? args.query.trim() : ''
+      const rawKinds = Array.isArray(args.kinds)
+        ? args.kinds.map((k) => String(k ?? '').trim()).filter(Boolean)
+        : []
+      const kindSet = new Set<string>(
+        rawKinds.length > 0 ? rawKinds : [typeof args.kind === 'string' ? args.kind : 'all']
+      )
+      const wantsAll = kindSet.has('all')
+      const rawQueries = Array.isArray(args.queries)
+        ? args.queries.map((q) => String(q ?? '').trim()).filter(Boolean)
+        : []
+      const singleQuery = typeof args.query === 'string' ? args.query.trim() : ''
+      const queryList =
+        rawQueries.length > 0 ? rawQueries.slice(0, 6) : singleQuery ? [singleQuery] : ['']
       const limit =
         typeof args.limit === 'number' && Number.isFinite(args.limit)
           ? Math.max(1, Math.min(25, Math.round(args.limit)))
           : 12
       const result: Record<string, unknown> = {}
-      if (kind === 'background' || kind === 'all') {
-        result.backgrounds = view.imagePromptChoices(limit, query).map((b) => ({
-          file: b.file,
-          name: b.name,
-          timeOfDay: b.timeOfDay,
-          indoor: b.indoor,
-          description: b.description
-        }))
+
+      if (wantsAll || kindSet.has('background')) {
+        const bgMap = new Map<string, Record<string, unknown>>()
+        for (const q of queryList) {
+          for (const b of view.imagePromptChoices(limit, q)) {
+            if (!bgMap.has(b.file)) {
+              bgMap.set(b.file, {
+                file: b.file,
+                name: b.name,
+                timeOfDay: b.timeOfDay,
+                indoor: b.indoor,
+                description: b.description
+              })
+            }
+          }
+        }
+        result.backgrounds = [...bgMap.values()].slice(0, limit)
       }
-      if (kind === 'bgm' || kind === 'all') {
-        result.bgm = view.bgmPromptChoices(limit, query).map((b) => ({
-          file: b.file,
-          name: b.name,
-          mood: b.mood,
-          tempo: b.tempo,
-          description: b.description
-        }))
+      if (wantsAll || kindSet.has('bgm')) {
+        const bgmMap = new Map<string, Record<string, unknown>>()
+        for (const q of queryList) {
+          for (const b of view.bgmPromptChoices(limit, q)) {
+            if (!bgmMap.has(b.file)) {
+              bgmMap.set(b.file, {
+                file: b.file,
+                name: b.name,
+                mood: b.mood,
+                tempo: b.tempo,
+                description: b.description
+              })
+            }
+          }
+        }
+        result.bgm = [...bgmMap.values()].slice(0, limit)
       }
-      if (kind === 'se' || kind === 'all') {
+      if (wantsAll || kindSet.has('se')) {
         const seItems =
           view.seDetailsList().length > 0
             ? view.seDetailsList().map((s) => ({
@@ -1806,21 +2067,28 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 category: s.category,
                 description: s.description
               }))
-        const q = query.toLowerCase()
-        const filtered = q
-          ? seItems.filter((s) =>
-              `${s.file} ${s.name} ${s.category ?? ''} ${s.description}`.toLowerCase().includes(q)
-            )
-          : seItems
-        result.se = (filtered.length > 0 ? filtered : seItems).slice(0, limit)
+        const seMap = new Map<string, (typeof seItems)[number]>()
+        for (const qRaw of queryList) {
+          const q = qRaw.toLowerCase()
+          const matched = q
+            ? seItems.filter((s) =>
+                `${s.file} ${s.name} ${s.category ?? ''} ${s.description}`.toLowerCase().includes(q)
+              )
+            : seItems
+          for (const item of matched) {
+            if (!seMap.has(item.file)) seMap.set(item.file, item)
+          }
+        }
+        result.se = (seMap.size > 0 ? [...seMap.values()] : seItems).slice(0, limit)
       }
-      if (kind === 'effect' || kind === 'all') {
+      if (wantsAll || kindSet.has('effect')) {
         result.effects = [...scenarioCuesMod.CURATED_SCENARIO_EFFECTS]
       }
-      if (kind === 'outfit') {
+      if (kindSet.has('outfit')) {
         const model = findModel(view, args.modelId, args.character)
         if (model) {
-          const matched = query ? view.resolveOutfitVariant(model, query) : null
+          const combinedQuery = queryList.filter(Boolean).join(' ')
+          const matched = combinedQuery ? view.resolveOutfitVariant(model, combinedQuery) : null
           result.outfits = view
             .outfitsFor(model)
             .slice(0, limit)
@@ -1837,8 +2105,9 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           result.note = '查询服装请传入 character 或 modelId'
         }
       }
-      if (query && typeof scenarioCuesApi.recommendScenarioCues === 'function') {
-        result.cueRecommendations = scenarioCuesApi.recommendScenarioCues(query)
+      const combinedCueQuery = queryList.filter(Boolean).join(' ')
+      if (combinedCueQuery && typeof scenarioCuesApi.recommendScenarioCues === 'function') {
+        result.cueRecommendations = scenarioCuesApi.recommendScenarioCues(combinedCueQuery)
       }
       return JSON.stringify(result)
     }
@@ -2171,7 +2440,13 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       // 确保同一批次中多个 delete/insert/update_acting 共用原始索引时不发生漂移。
       const opPhase = (op: string): number => {
         if (op === 'insert_after') return 0
-        if (op === 'update_talk' || op === 'update_acting' || op === 'replace') return 1
+        if (
+          op === 'update_talk' ||
+          op === 'update_acting' ||
+          op === 'upsert_listener_action' ||
+          op === 'replace'
+        )
+          return 1
         if (op === 'delete') return 2
         if (op === 'insert_before') return 3
         return 4
@@ -2225,7 +2500,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           }
           continue
         }
-        if (op === 'update_talk' || op === 'update_acting') {
+        if (op === 'update_talk' || op === 'update_acting' || op === 'upsert_listener_action') {
           const d = (target.data && typeof target.data === 'object' ? target.data : {}) as Record<
             string,
             unknown
@@ -2248,7 +2523,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             const hasFacialArg = typeof opObj.facial === 'string'
             if (target.type === 'Talk') {
               const speakerId = typeof d.modelId === 'number' ? d.modelId : -1
-              if (hasMotionArg || hasFacialArg) {
+              if (op !== 'upsert_listener_action' && (hasMotionArg || hasFacialArg)) {
                 const acts = Array.isArray(d.actions)
                   ? [...(d.actions as Array<Record<string, unknown>>)]
                   : []
@@ -2274,6 +2549,68 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 d.actions = acts
                 if (hasMotionArg) delete d.motion
                 if (hasFacialArg) delete d.facial
+              }
+
+              // 显式新增/更新/移除听者错峰反应（自动确保与说话者间隔 >=0.3，落在 0.45..0.85）
+              const rawListener =
+                opObj.listenerAction && typeof opObj.listenerAction === 'object'
+                  ? (opObj.listenerAction as Record<string, unknown>)
+                  : op === 'upsert_listener_action' && typeof opObj.modelId === 'number'
+                    ? opObj
+                    : null
+              if (rawListener && typeof rawListener.modelId === 'number') {
+                const lModelId = rawListener.modelId
+                const acts = Array.isArray(d.actions)
+                  ? [...(d.actions as Array<Record<string, unknown>>)]
+                  : []
+                const existingIdx = acts.findIndex((a) => a && a.modelId === lModelId)
+                const removeListener = Boolean(rawListener.remove)
+                const lMotion =
+                  typeof rawListener.motion === 'string' ? rawListener.motion.trim() : undefined
+                const lFacial =
+                  typeof rawListener.facial === 'string' ? rawListener.facial.trim() : undefined
+                if (removeListener || (lMotion === '' && lFacial === '')) {
+                  if (existingIdx >= 0) acts.splice(existingIdx, 1)
+                } else {
+                  const speakerAts = acts
+                    .filter((a) => a && a.modelId !== lModelId)
+                    .map((a) => (typeof a.at === 'number' && Number.isFinite(a.at) ? a.at : 0))
+                  let desiredAt =
+                    typeof rawListener.at === 'number' &&
+                    Number.isFinite(rawListener.at) &&
+                    rawListener.at >= 0.45 &&
+                    rawListener.at <= 0.85
+                      ? rawListener.at
+                      : 0.6
+                  if (speakerAts.some((sat) => Math.abs(sat - desiredAt) < 0.3 - 1e-6)) {
+                    const fallbackAts = [0.6, 0.7, 0.5, 0.8, 0.45, 0.85]
+                    desiredAt =
+                      fallbackAts.find((cand) =>
+                        speakerAts.every((sat) => Math.abs(sat - cand) >= 0.3 - 1e-6)
+                      ) ?? 0.65
+                  }
+                  const nextAct: Record<string, unknown> =
+                    existingIdx >= 0
+                      ? { ...acts[existingIdx], at: desiredAt, modelId: lModelId }
+                      : { at: desiredAt, modelId: lModelId }
+                  if (lMotion !== undefined) {
+                    if (lMotion) nextAct.motion = lMotion
+                    else delete nextAct.motion
+                  }
+                  if (lFacial !== undefined) {
+                    if (lFacial) nextAct.facial = lFacial
+                    else delete nextAct.facial
+                  }
+                  if (nextAct.motion || nextAct.facial) {
+                    if (existingIdx >= 0) acts[existingIdx] = nextAct
+                    else acts.push(nextAct)
+                  }
+                }
+                acts.sort(
+                  (a, b) =>
+                    (typeof a.at === 'number' ? a.at : 0) - (typeof b.at === 'number' ? b.at : 0)
+                )
+                d.actions = acts
               }
             } else {
               if (hasMotionArg) d.motion = opObj.motion
@@ -2324,6 +2661,9 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           motionMismatchCount: audited.actingReport.motionMismatchCount,
           simultaneousCollisionCount: audited.actingReport.simultaneousCollisionCount,
           stageDirectionLeakCount: audited.actingReport.stageDirectionLeakCount,
+          listenerFrozenCount: audited.actingReport.listenerFrozenCount ?? 0,
+          duplicateBgmCount: audited.actingReport.duplicateBgmCount ?? 0,
+          zeroWidthCharCount: audited.actingReport.zeroWidthCharCount ?? 0,
           dialogueIssues: audited.dialogueLint.issues.slice(0, maxDiag),
           diagnostics: audited.actingReport.diagnostics.slice(0, maxDiag),
           warnings: audited.warnings.slice(0, 8)
@@ -2495,14 +2835,16 @@ export async function runAgenticStoryGeneration(
       : ''
 
   const sharedRules = [
-    '你是 Project SEKAI 风格视觉小说导演 Agent。你有充分的工具调用步数，请像真实编剧与演出导演一样分步推进：查人设与服装 → 查官方语料与背景/BGM/SE → 用 plan_story_outline 规划事件与分幕 → 用 inspect_character_expressions / recommend_acting_for_lines 为每句剧情挑选贴合语境的动作与表情 → 用 save_story_draft 保存初稿 → 用 critique_story_draft 逐句审查表情/动作冲突与官方节奏 → 用 patch_story_draft 局部修正 → 调用 finalize_story_draft 或输出完整 JSON 交卷。',
+    '你是 Project SEKAI 风格视觉小说导演 Agent。请高效利用批量工具，把素材探索控制在 2~4 步内，留出充足步数走完：批量查素材/表情 → plan_story_outline → save_story_draft → critique_story_draft → patch_story_draft → finalize_story_draft：',
+    '- 用 search_assets({ kinds: ["background","bgm","se"], queries: [...] }) 一次查完背景/BGM/音效，不要拆成多次单查！',
+    '- 用 inspect_character_expressions({ modelId, moods: ["伤心","生气","惊讶","平静","困扰"] })（或留空 mood 取按情绪分组总览）每个角色只查 1 次！',
     '创作硬规范（务必遵守）：',
-    '1. 表情与动作贴合实际剧情：先用 inspect_character_expressions / recommend_acting_for_lines 看清表情和动作的中文语义（分清苦笑、闭眼微笑、阴沉冷脸、轻点头、歪头疑惑、低头叹气），严禁悲伤/生气/道歉/紧张时误选真笑脸或欢快动作，也禁止开心句配哭丧/发怒表情；朝比奈真冬保持克制内敛。',
-    '2. 动作平衡与防撞：官方剧本约 75%~80% 句首单拍动作（含短促反应句），约 20% 过渡句留空；同一句 Talk 绝不同时触发说话者和听者身体动作，但务必让在场双方各自都有自然的动作切换（可在说话者静止句安排听者动作，或插入独立 Motion 片段），绝不让任何在场角色全程 0 动作；避免连续多句卡在 face_normal_01 或同一动作。',
-    '3. 不强制分幕：同一时间地点连续对话保持 1 幕即可；仅在换地点、跳时间、回忆（FlashbackIn/Out）或出入 SEKAI（SekaiIn/Out）时才换背景/分幕。',
+    '1. 表情与动作贴合实际剧情：悲伤/绝望/沉重独白句严禁挂 face_surprise_01 / face_notice_01 / face_shock_01（除非台词本身是真正的突发惊愕），纯自责/含泪悔恨的 [伤心] 句严禁挂 face_angry_01；Move 与 LayoutAppear 的 facial 也要贴合周边剧情气氛；朝比奈真冬保持克制内敛。',
+    '2. 听者实时反应（防卡顿）与动作防撞：A 连续说话时，同台听者 B 绝不能全程静止！每当 A 连续说 >=2 句（或情绪强烈句）时，务必在 Talk.data.actions 里给听者 B 加错峰反应（at: 0.5..0.85，与说话者 at: 0 严格错开 >=0.3），交替使用“纯微表情”和“轻身体动作(nod/tilthead/trouble/sad/sigh/surprise)”，也可以用 patch_story_draft 的 listenerAction 字段快速补齐。',
+    '3. 不强制分幕且不重复切 BGM：同一时间地点连续对话保持 1 幕即可；严禁连续两次 ChangeBgm 播放同一首曲子；有奔跑/脚步/推门等动作时配合 PlaySe 音效。',
     '4. 放宽双人同框：日常对话 Left/Right 同框，角色内心独白或沉思时鼓励用 LayoutClear + LayoutAppear(Center)（或 Move 到 Center）切单人特写留白，之后再切回 Left/Right；>=3 人时始终 Normal 模式（<=2 人同台）交叠轮换。',
     '5. 禁止括号动作提示与 AI 套话：台词中只写说出口的话或心理独白（如「（……怎么办才好）」），严禁夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号，禁止心理咨询式说教结尾。',
-    '6. 排版与交卷：每条 Talk 最多 3 行（每行<=30字宽），不写 ttsText；约 90% Talk delay=0，仅重大停顿用 1.0/1.5；转场与静默 Motion 前最后一句 Talk 设 closeWindowOnFinish=true；推荐先 save_story_draft + critique_story_draft + patch_story_draft 打磨，再 finalize_story_draft。',
+    '6. 排版与交卷：每条 Talk 最多 3 行（每行<=30字宽），不写 ttsText；约 90% Talk delay=0，仅重大停顿用 1.0/1.5；转场与静默 Motion 前最后一句 Talk 设 closeWindowOnFinish=true；务必先 save_story_draft + critique_story_draft + patch_story_draft 打磨，再 finalize_story_draft 交卷。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''
   ]

@@ -276,22 +276,22 @@ test('drops actions that exceed the per-line quota', () => {
   assert.equal(talk.data.actions[0].at, 0.05)
 })
 
-test('sanitizeDisplayText folds blank lines and wraps at 30 CJK cells', () => {
-  assert.equal(sanitizeDisplayText('  你好  \n\n\n世界  '), '你好\n世界')
+test('sanitizeDisplayText folds blank lines, strips zero-width chars, and wraps at 30 CJK cells', () => {
+  assert.equal(sanitizeDisplayText('  你好\u200B  \n\n\n\uFEFF世界  '), '你好\n世界')
   const exact = '一'.repeat(30)
   assert.equal(sanitizeDisplayText(exact), exact)
   const long = '一'.repeat(35)
   const wrapped = sanitizeDisplayText(long)
-  // 排版折行用零宽空格标记在换行前（官方正文换行没有标记）。
-  assert.equal(wrapped, `${'一'.repeat(30)}\u200B\n${'一'.repeat(5)}`)
+  assert.equal(wrapped, `${'一'.repeat(30)}\n${'一'.repeat(5)}`)
+  assert.ok(!wrapped.includes('\u200B'), 'must not leak zero-width space into content')
 
   // 有标点时优先在标点后折行，不把词拦腰截断
   const sentence =
     '今天也一起练习吧，然后我们再对一下明天要用的曲子，顺便把时间也定下来吧，好不好？'
   const natural = sanitizeDisplayText(sentence)
-  assert.ok(natural.split('\n').every((line) => line.replace('\u200B', '').length <= 30))
-  assert.ok(natural.split('\n')[0].replace('\u200B', '').endsWith('，'))
-  assert.equal(natural.replace(/\u200B?\n/g, ''), sentence)
+  assert.ok(natural.split('\n').every((line) => line.length <= 30))
+  assert.ok(natural.split('\n')[0].endsWith('，'))
+  assert.equal(natural.replace(/\n/g, ''), sentence)
 })
 
 test('BGM prompt choices skip undescribed entries but keep them valid', () => {
@@ -785,4 +785,255 @@ test('repairs mismatched smile/joyful motion on sad apologetic lines and opening
   assert.equal(talk.data.actions[0].facial, 'face_sad_01')
   assert.equal(talk.data.actions[0].motion, 'w-normal-sigh01')
   assert.ok(warnings.some((w) => w.includes('情绪冲突')))
+})
+
+test('chof3y regression: repairs despair surprise/notice & regret angry, injects staggered listener reactions, strips ZWC while preserving Irodori emojis, and dedupes consecutive ChangeBgm', () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal_3.0_t04/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-sad01',
+          'w-normal-sigh01',
+          'w-normal-trouble01',
+          'w-normal-nod01',
+          'w-normal-tilthead01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_worry_01',
+          'face_closeeye_01',
+          'face_surprise_01',
+          'face_notice_01',
+          'face_angry_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal_3.0_f_t06/19ena_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-sad01',
+          'w-normal-sigh01',
+          'w-normal-trouble01',
+          'w-normal-nod01',
+          'w-normal-tilthead01',
+          'w-normal-forward01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_closeeye_01',
+          'face_surprise_01',
+          'face_shock_01',
+          'face_angry_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_a000507.webp'],
+    imageDetails: [{ file: 'bg_a000507.webp', name: '神山高校·连廊', description: '学校连廊' }],
+    voices: [],
+    bgm: ['cloud/bgm00039.mp3', 'cloud/bgm00016.mp3'],
+    bgmDetails: [
+      { file: 'cloud/bgm00039.mp3', name: '沉重', description: '低沉配乐' },
+      { file: 'cloud/bgm00016.mp3', name: '悲伤', description: '悲伤配乐' }
+    ]
+  })
+
+  const chof3yLike = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_a000507.webp' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'cloud/bgm00039.mp3', stop: false, fadeMs: 600 }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_worry_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_trouble_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      // Duplicate consecutive ChangeBgm (same file)
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'cloud/bgm00039.mp3', stop: false, fadeMs: 600 }
+      },
+      // Mizuki speaks 4 consecutive lines -> Ena (listener modelId=2) must receive staggered reactions!
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '（只要多停顿半秒的措辞，只要一闪而过的犹豫眼神……\u200B\n我全都会察觉到的。）',
+          ttsText: '😮‍💨ほんの少し言葉に詰まる間も\u200B、ボクには全部、分かっちゃうんだ。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_sad_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '（那种因为顾虑才滋生出来的“温柔”……）',
+          ttsText: 'そんな、気を遣って生まれてしまう「優しさ」が……🥺',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, facial: 'face_notice_01' }]
+        }
+      },
+      {
+        type: 'Move',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_surprise_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'cloud/bgm00016.mp3', stop: false, fadeMs: 600 }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '我就觉得快要窒息了。我根本受不了那个样子……！',
+          ttsText: '息が詰まりそうになるんだよ。😭 そんなの、ボクには耐えられないよ……！',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_surprise_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '可我还是……没办法面对这样的现实。',
+          ttsText: 'でもボクはやっぱり……この現実と、向き合うことができないんだ。😭',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-normal-trouble01', facial: 'face_surprise_01' }]
+        }
+      },
+      // Ena tearful regret line wrongly using face_angry_01
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '为什么我什么都没能说出口啊……！！',
+          ttsText: 'なんで私、😭何も言えなかったの……！！',
+          emotion: '伤心',
+          modelId: 2,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 2, motion: 'w-normal-sad01', facial: 'face_angry_01' }]
+        }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const { story, warnings } = validateAndFixStory(chof3yLike, view)
+
+  // 1) Consecutive duplicate ChangeBgm removed, distinct BGM preserved
+  const bgms = story.snippets.filter((s) => s.type === 'ChangeBgm')
+  assert.deepEqual(
+    bgms.map((b) => b.data.file),
+    ['cloud/bgm00039.mp3', 'cloud/bgm00016.mp3']
+  )
+
+  // 2) Zero-width chars stripped from content & ttsText, while Irodori emojis are PRESERVED!
+  const talks = story.snippets.filter((s) => s.type === 'Talk')
+  for (const t of talks) {
+    assert.ok(!/[\u200B\uFEFF]/.test(t.data.content), 'no ZWC in content')
+    assert.ok(!/[\u200B\uFEFF]/.test(t.data.ttsText), 'no ZWC in ttsText')
+  }
+  assert.ok(talks[0].data.ttsText.includes('😮‍💨'), 'Irodori ZWJ emoji must be preserved in ttsText')
+  assert.ok(talks[1].data.ttsText.includes('🥺'), 'Irodori emoji must be preserved in ttsText')
+  assert.ok(talks[2].data.ttsText.includes('😭'), 'Irodori emoji must be preserved in ttsText')
+
+  // 3) Despair surprise/notice, Move surprise, and regret angry facials all repaired
+  assert.notEqual(talks[1].data.actions[0].facial, 'face_notice_01')
+  assert.notEqual(talks[2].data.actions[0].facial, 'face_surprise_01')
+  assert.notEqual(talks[3].data.actions[0].facial, 'face_surprise_01')
+  assert.notEqual(talks[4].data.actions[0].facial, 'face_angry_01')
+  const moveSnippet = story.snippets.find((s) => s.type === 'Move')
+  assert.notEqual(moveSnippet.data.facial, 'face_surprise_01')
+
+  // 4) Staggered listener reactions injected for Ena (modelId=2) during Mizuki's 4-line run without colliding at=0
+  const listenerActs = talks
+    .filter((t) => t.data.modelId === 1)
+    .flatMap((t) => (t.data.actions ?? []).filter((a) => a.modelId === 2))
+  assert.ok(listenerActs.length >= 2, `expected >=2 listener reactions, got ${listenerActs.length}`)
+  for (const t of talks) {
+    const acts = t.data.actions ?? []
+    for (let i = 0; i < acts.length; i++) {
+      for (let j = i + 1; j < acts.length; j++) {
+        assert.ok(
+          Math.abs(acts[i].at - acts[j].at) >= 0.25,
+          `actions must be staggered, got ${acts[i].at} and ${acts[j].at}`
+        )
+      }
+    }
+  }
+  assert.ok(warnings.some((w) => w.includes('听者')))
 })

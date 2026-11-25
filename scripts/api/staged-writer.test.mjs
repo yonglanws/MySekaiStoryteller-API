@@ -1003,12 +1003,20 @@ test('composed staging keeps ambient and second background through validation', 
     ),
     '退场应原地淡出'
   )
-  const talkActions = validated.story.snippets
-    .filter((snippet) => snippet.type === 'Talk')
-    .flatMap((snippet) => snippet.data.actions ?? [])
+  const talkSnippets = validated.story.snippets.filter((snippet) => snippet.type === 'Talk')
+  const speakerActions = talkSnippets.flatMap((snippet) =>
+    (snippet.data.actions ?? []).filter((action) => action.modelId === snippet.data.modelId)
+  )
+  const listenerActions = talkSnippets.flatMap((snippet) =>
+    (snippet.data.actions ?? []).filter((action) => action.modelId !== snippet.data.modelId)
+  )
   assert.ok(
-    talkActions.every((action) => action.at === 0),
-    '动作必须在句首触发'
+    speakerActions.every((action) => action.at === 0),
+    '说话者动作必须在句首触发'
+  )
+  assert.ok(
+    listenerActions.every((action) => action.at >= 0.45 && action.at <= 0.85),
+    '听者反应动作必须错峰触发，避免与说话者碰撞'
   )
 })
 
