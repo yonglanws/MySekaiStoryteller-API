@@ -336,7 +336,11 @@ export default class AdvancedModel extends Live2DModel {
     const manager = this.internalModel.parallelMotionManager[channel] as unknown as {
       queueManager?: {
         startMotion: (motion: unknown, autoDelete: boolean, now: number) => number
-        _motions?: Array<{ setFadeOut?: (seconds: number) => void }>
+        stopAllMotions?: () => void
+        _motions?: Array<{
+          _motion?: { setFadeOutTime?: (seconds: number) => void }
+          setFadeOut?: (seconds: number) => void
+        }>
       }
       _startMotion?: (
         motion: unknown,
@@ -372,13 +376,19 @@ export default class AdvancedModel extends Live2DModel {
           }
         }
         const queue = manager.queueManager!
+        // fade === 0（force / 首段动作）直接清掉旧队列，避免旧 entry 因 endTime === now 多留一帧幽灵姿态。
+        if (fade <= 0) {
+          queue.stopAllMotions?.()
+        }
         const handle = queue.startMotion(motion, false, performance.now())
-        // startMotion 会先把旧 entry 的 fadeOut 设成旧 clip 自己的值；这里统一成新 blend，
-        // 让旧动作与新动作在同一个时间窗内交叉完成。
+        // startMotion 会先把旧 entry 的 fadeOut 设成旧 clip 自己的值；这里把 entry 与旧 motion 的
+        // _fadeOutSeconds 同步成新 blend，避免 ACubismMotion 用旧 _fadeOutSeconds 除导致首帧权重突跳。
         const entries = queue._motions
-        if (Array.isArray(entries)) {
+        if (fade > 0 && Array.isArray(entries)) {
           for (let i = 0; i < entries.length - 1; i++) {
-            entries[i]?.setFadeOut?.(fade)
+            const oldEntry = entries[i]
+            oldEntry?._motion?.setFadeOutTime?.(fade)
+            oldEntry?.setFadeOut?.(fade)
           }
         }
         return handle
@@ -756,11 +766,13 @@ export default class AdvancedModel extends Live2DModel {
     const queue = manager?.queueManager
     if (!manager || !queue || typeof queue.doUpdateMotion !== 'function') return
 
-    const heldEntries = (this.channelHeldEntries[channel] = new WeakSet<object>())
-    const finishFired = (this.channelFinishFiredEntries[channel] = new WeakSet<object>())
+    this.channelHeldEntries[channel] = new WeakSet<object>()
+    this.channelFinishFiredEntries[channel] = new WeakSet<object>()
 
     const origDoUpdate = queue.doUpdateMotion.bind(queue)
     queue.doUpdateMotion = (model: unknown, userTimeSeconds: number) => {
+      const heldEntries = this.channelHeldEntries[channel]
+      const finishFired = this.channelFinishFiredEntries[channel]
       const entries = queue._motions
       if (Array.isArray(entries)) {
         this.channelEntryCounts[channel] = entries.length
@@ -871,9 +883,27 @@ export default class AdvancedModel extends Live2DModel {
     }
   }
 
+  /**
+   * 离台模型不累积 deltaTime：串行 TTS 预热或 LayoutClear 退场期间 Ticker.shared 仍在推进，
+   * 离台期间 _render 不执行，若让 deltaTime 持续累加到数十秒，重新入场首帧会把几十秒的 dt
+   * 一次性灌进 Cubism 物理与姿势，造成剧烈抖动与首帧卡顿。
+   */
+  public override update(dt: number): void {
+    if (this.destroyed) return
+    const safeDt = Number.isFinite(dt) && dt > 0 ? dt : 0
+    if (!this.parent) {
+      this.deltaTime = 0
+      this.elapsedTime += Math.min(safeDt, 250)
+      return
+    }
+    const maxStep = AnimationManager.isExporting() ? 250 : 100
+    super.update(Math.min(safeDt, maxStep))
+  }
+
   public resetClockBaselines(now = performance.now()): void {
     this.lastNaturalUpdateMs = now
     this.currentBodyStartedAt = now
+    this.deltaTime = 0
     // 同一 worker 连续导出时，眨眼/呼吸相位必须回到固定起点，否则两次导出
     // 的逐帧结果不同（确定性要求）。固定 1/60 步进下从这里开始演进。
     this.blinkState = createBlinkState(1)
@@ -881,7 +911,15 @@ export default class AdvancedModel extends Live2DModel {
     if (this.lastChangeBlinkTime !== null) {
       this.lastChangeBlinkTime = now
     }
-    const nowSeconds = now / 1000
+    // Cubism4InternalModel.update(dt, now) 传给 queueManager 的时间轴是 this.elapsedTime / 1000，
+    // 不能用 performance.now() / 1000 覆盖，否则虚拟时钟归零时会把正在播放的动作基准拉偏。
+    const clockMs =
+      typeof this.elapsedTime === 'number' &&
+      Number.isFinite(this.elapsedTime) &&
+      this.elapsedTime > 0
+        ? this.elapsedTime
+        : now
+    const nowSeconds = clockMs / 1000
     for (const channel of [0, 1] as const) {
       const entries = (
         this.internalModel?.parallelMotionManager?.[channel] as unknown as {

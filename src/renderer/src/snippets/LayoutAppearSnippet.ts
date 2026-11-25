@@ -27,6 +27,12 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     // 新 Appear 让所有更早的退场协程失效（停止写 alpha / 清理动作 / removeModel）。
     const visibilityToken = model.beginVisibilityChange?.()
 
+    // 新入场（非打断退场中）先清零不透明度并确保 visible=true（换装后会置 false），
+    // 防止挂入渲染层时闪出一帧不透明或隐身。
+    model.visible = true
+    if (!wasShown && !model.parent) {
+      model.setOpacity?.(0)
+    }
     this.app.layerModel.addModelToLayer(model)
 
     const from: PositionRel = StageUtils.side_to_position(
@@ -119,6 +125,8 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     // （参考 `layout_running` 只看片段，`motions_settled` 只看 body motion）。
     recordLayoutRunningEnd(this.app, appearStartMs + branchDelayMs + fadeTotalMs)
 
+    // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后淡入 100ms。
+    const fadeTimelineBaseMs = nowMs()
     if (branchDelayMs > 0) await AnimationManager.delay(branchDelayMs)
     const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null
     if (moveTask) {
@@ -126,9 +134,13 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))
     }
 
-    // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后淡入 100ms。
     if (holdFrames > 0) await AnimationManager.delay(holdFrames * FRAME_MS)
-    await model.show(fadeMs, this.data.data.hologram, visibilityToken)
+    await model.show(
+      fadeMs,
+      this.data.data.hologram,
+      visibilityToken,
+      fadeTimelineBaseMs + branchDelayMs + holdFrames * FRAME_MS
+    )
 
     // 入场动作继续播放；body 通道交给 idle 续演逻辑，台词间隙不站桩。
     model.startBodyIdleLoop()
