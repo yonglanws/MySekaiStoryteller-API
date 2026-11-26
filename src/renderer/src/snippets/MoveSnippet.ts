@@ -16,10 +16,14 @@ export default class MoveSnippet extends BaseSnippet {
 
     const model = this.app.getModelById(this.data.data.modelId)
     const moveStartMs = nowMs()
-    ;(this.app.layerModel as unknown as ExtendedModelLayer).setLayoutDepth?.(
-      this.data.data.modelId,
-      'Front'
-    )
+    // 官方 `LayoutOp::Move`（`sse-bake/src/lib.rs:2091`）只调用 `SetCharacterDepth(id, Front)`
+    // 而不调用 `LockCharacterDepth`；若误调 `setLayoutDepth('Front')` 会永久锁死首个移动角色在最前。
+    const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
+    if (typeof modelLayer.bringToFront === 'function') {
+      modelLayer.bringToFront(this.data.data.modelId)
+    } else {
+      modelLayer.setLayoutDepth?.(this.data.data.modelId, 'Front')
+    }
 
     const from: PositionRel = StageUtils.side_to_position(
       this.data.data.from.side,
@@ -35,12 +39,14 @@ export default class MoveSnippet extends BaseSnippet {
     )
 
     if (this.data.data.motion || this.data.data.facial) {
+      // 官方 `LayoutOp::Move`（`sse-bake/src/lib.rs:2290-2296`）表情走正常 0.25s 交叉淡化，
+      // 避免静默反应拍（原地 Move）的表情 1 帧硬切。
       await model.startMotions(
         this.data.data.motion,
         this.data.data.facial,
         this.data.data.facialFirst ?? true,
         {
-          facialForce: true,
+          facialForce: false,
           traceSnippetIndex: this.snippetIndex
         }
       )

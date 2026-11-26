@@ -242,15 +242,18 @@ function lateUpdateBlink(state: BlinkState, delta: number): void {
 }
 
 /**
- * 一帧：tick 命令序列，再让当前模式写 EyeOpening，返回本帧开合（1 = 完全睁开）。
+ * 一帧：tick 命令序列（全局 DOTween，非 active 也推进），再在 active 时让当前模式
+ * 写 EyeOpening，返回本帧开合（1 = 完全睁开）。
  *
  * 自动眨眼是 |sin| 控制器而不是四段线性相位：一眨 19 步小于 1、第 20 步强制
  * 回到 1.0，30fps 抽取时按步号奇偶得到 0.0707 或 0.0957 两个谷值。
  */
-export function stepBlink(state: BlinkState, deltaSeconds: number): number {
+export function stepBlink(state: BlinkState, deltaSeconds: number, active = true): number {
   const delta = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0
   tickBlinkCommand(state, delta)
-  lateUpdateBlink(state, delta)
+  if (active) {
+    lateUpdateBlink(state, delta)
+  }
   return state.opening
 }
 
