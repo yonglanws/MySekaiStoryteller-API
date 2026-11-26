@@ -385,6 +385,7 @@ test('UIText, UISpeakerText, UITextBackground, and UITextUnderline match SekaiSt
   const { GAME_FONT_BODY_STACK, GAME_FONT_NAME_STACK, sseLineAdvance, sseOutlineThickness } =
     load('utils/FontLoader.ts')
 
+  const halfStroke44 = sseOutlineThickness(44) / 2
   const uiText = new UIText(1920, 1080)
   assert.equal(uiText.style.fill, '#FFFFFF')
   assert.equal(uiText.style.fontFamily, GAME_FONT_BODY_STACK)
@@ -395,8 +396,8 @@ test('UIText, UISpeakerText, UITextBackground, and UITextUnderline match SekaiSt
   assert.equal(uiText.style.fontSize, 44)
   assert.ok(Math.abs(uiText.style.lineHeight - sseLineAdvance(44, -80)) < 1e-6)
   assert.equal(uiText.style.wordWrapWidth, 1368.3)
-  assert.equal(uiText.x, 250)
-  assert.equal(uiText.y, 858)
+  assert.ok(Math.abs(uiText.x - (250 - halfStroke44)) < 1e-6)
+  assert.ok(Math.abs(uiText.y - (858 - halfStroke44)) < 1e-6)
 
   const speakerText = new UISpeakerText(1920, 1080)
   assert.equal(speakerText.style.fill, '#EBEBF2')
@@ -408,8 +409,8 @@ test('UIText, UISpeakerText, UITextBackground, and UITextUnderline match SekaiSt
   assert.equal(speakerText.style.fontSize, 44)
   assert.equal(speakerText.anchor.x, 0)
   assert.equal(speakerText.anchor.y, 0)
-  assert.equal(speakerText.x, 230)
-  assert.equal(speakerText.y, 790)
+  assert.ok(Math.abs(speakerText.x - (230 - halfStroke44)) < 1e-6)
+  assert.ok(Math.abs(speakerText.y - (790 - halfStroke44)) < 1e-6)
 
   const bgTex = new pixi.Texture(1920, 1080)
   const textBg = new UITextBackground(bgTex, 1920, 1080)
