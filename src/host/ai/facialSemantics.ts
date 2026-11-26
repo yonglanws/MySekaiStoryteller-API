@@ -25,6 +25,7 @@ export interface FacialInspection {
   role: FacialSemanticRole
   label: string
   fromMotion3: boolean
+  mouthForm?: number
 }
 
 export type MotionSemanticRole =
@@ -150,9 +151,12 @@ function resolveMotion3File(
   const clean = modelPath.replace(/\\/g, '/').replace(/^\/+/, '')
   const modelDir = path.dirname(clean)
   if (!modelDir || modelDir === '.') return null
-  for (const sub of ['motions', 'motion']) {
-    const full = path.join(modelsRoot, modelDir, sub, `${clipName}.motion3.json`)
-    if (fs.existsSync(full)) return full
+  const dirCandidates = clean.startsWith('cloud/') ? [modelDir] : [modelDir, path.posix.join('cloud', modelDir)]
+  for (const dir of dirCandidates) {
+    for (const sub of ['motions', 'motion']) {
+      const full = path.join(modelsRoot, dir, sub, `${clipName}.motion3.json`)
+      if (fs.existsSync(full)) return full
+    }
   }
   return null
 }
@@ -259,7 +263,13 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
   const browAngle = (num('ParamBrowLAngle') + num('ParamBrowRAngle')) / 2
   const mouthForm = num('ParamMouthForm')
   const mouthOpen = num('ParamMouthOpenY')
-  const tear = Math.max(num('ParamTear'), num('ParamEyeTeary'))
+  const tear = Math.max(
+    num('ParamTear'),
+    num('ParamEyeTeary'),
+    num('ParamCry'),
+    num('ParamTear3'),
+    num('ParamTear4')
+  )
   const cheek = Math.max(num('ParamCheek'), num('ParamCheek2'))
   const shadow = Math.abs(num('ParamFaceShadow'))
   const sweat = Math.max(num('ParamSweatOn'), num('ParamSweatOn2'))
@@ -270,20 +280,27 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
   const closed = eyeOpen <= 0.08
   const darkPrefix =
     rawLower.startsWith('face_dark') || rawLower.includes('nhi') || shadow > 0.15 || eyeHi < -0.2
+  const isStrainedSmile =
+    browY <= -0.25 ||
+    browAngle >= 0.25 ||
+    eyeSmile < -0.15 ||
+    sweat > 0.2 ||
+    shadow > 0.15 ||
+    darkPrefix
   const isExplicitSurpriseName = /^face_(?:surprise|shock|notice|scared|nsscared|e(?:_|$))/.test(
     lower
   )
 
   if (isExplicitSurpriseName) {
     const base = classifyByName(facialName)
-    return { ...base, role: 'surprise', fromMotion3: true }
+    return { ...base, role: 'surprise', fromMotion3: true, mouthForm }
   }
 
   if (tear > 0.2) {
-    if (mouthForm >= 0.25 || eyeSmile >= 0.4) {
-      return { role: 'tearful_smile', label: '含泪微笑', fromMotion3: true }
+    if (mouthForm >= 0.2) {
+      return { role: 'tearful_smile', label: '含泪微笑', fromMotion3: true, mouthForm }
     }
-    return { role: 'cry', label: '含泪/哭泣', fromMotion3: true }
+    return { role: 'cry', label: '含泪/哭泣', fromMotion3: true, mouthForm }
   }
 
   if (lower.startsWith('face_smile') || lower.startsWith('face_closeeye')) {
@@ -292,48 +309,67 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
     const hasStrainedBrow = browY <= -0.55 && eyeSmile < 0.25 && cheek < 0.3
     const hasClosedTension = closed && (browY <= -0.35 || eyeSmile < -0.15 || sweat > 0.2)
     if (hasTenseEyes || sweat > 0.2 || shadow > 0.15 || hasStrainedBrow || hasClosedTension) {
-      if (lower.startsWith('face_smile') && mouthForm >= 0.2) {
-        return { role: 'wry_smile', label: '苦笑/勉强笑', fromMotion3: true }
+      if ((lower.startsWith('face_smile') || closed) && mouthForm >= 0.2) {
+        return {
+          role: 'wry_smile',
+          label: closed ? '闭眼苦笑/勉强笑' : '苦笑/勉强笑',
+          fromMotion3: true,
+          mouthForm
+        }
       }
       if (closed) {
-        return { role: 'closed_troubled', label: '闭眼为难/紧绷', fromMotion3: true }
+        return { role: 'closed_troubled', label: '闭眼为难/紧绷', fromMotion3: true, mouthForm }
       }
     }
-    if (closed && (eyeSmile >= 0.4 || mouthForm >= 0.3)) {
+    if (closed && mouthForm >= 0.2) {
+      if (browY <= -0.25 || browAngle >= 0.25) {
+        return { role: 'wry_smile', label: '闭眼苦笑/嘴角微扬', fromMotion3: true, mouthForm }
+      }
       return {
         role: 'closed_smile',
         label: mouthOpen >= 0.4 ? '闭眼大笑' : '闭眼微笑',
-        fromMotion3: true
+        fromMotion3: true,
+        mouthForm
+      }
+    }
+    if (closed && eyeSmile >= 0.4) {
+      return {
+        role: 'closed_smile',
+        label: mouthOpen >= 0.4 ? '闭眼大笑' : '闭眼微笑',
+        fromMotion3: true,
+        mouthForm
       }
     }
     if (lower.startsWith('face_smile')) {
       if (cheek >= 0.5 && mouthForm >= 0.3) {
-        return { role: 'genuine_smile', label: '红晕开心笑', fromMotion3: true }
+        return { role: 'genuine_smile', label: '红晕开心笑', fromMotion3: true, mouthForm }
       }
       if (eyeSmile >= 0.4 && mouthForm >= 0.3) {
         return {
           role: 'genuine_smile',
           label: mouthOpen >= 0.4 ? '开朗大笑' : '温和微笑',
-          fromMotion3: true
+          fromMotion3: true,
+          mouthForm
         }
       }
       if (mouthForm >= 0.15) {
-        return { role: 'genuine_smile', label: '浅笑', fromMotion3: true }
+        return { role: 'genuine_smile', label: '浅笑', fromMotion3: true, mouthForm }
       }
-      return { role: 'wry_smile', label: '克制微苦笑', fromMotion3: true }
+      return { role: 'wry_smile', label: '克制微苦笑', fromMotion3: true, mouthForm }
     }
     if (closed) {
       return {
         role: browY < -0.25 ? 'closed_troubled' : 'closed_neutral',
         label: browY < -0.25 ? '闭眼隐忍/思考' : '安静闭眼',
-        fromMotion3: true
+        fromMotion3: true,
+        mouthForm
       }
     }
   }
 
   if (darkPrefix) {
     if (rawLower.includes('smile') || mouthForm >= 0.2) {
-      return { role: 'wry_smile', label: '阴郁假笑/勉强笑', fromMotion3: true }
+      return { role: 'wry_smile', label: '阴郁假笑/勉强笑', fromMotion3: true, mouthForm }
     }
     if (mouthForm <= 0.05) {
       return {
@@ -347,7 +383,8 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
           : rawLower.includes('angry')
             ? '阴沉压迫'
             : '阴暗/失神冷脸',
-        fromMotion3: true
+        fromMotion3: true,
+        mouthForm
       }
     }
   }
@@ -357,19 +394,41 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
     lower.includes('blush') ||
     (cheek >= 0.5 && browAngle >= -0.1 && mouthForm >= -0.1 && !lower.includes('angry'))
   ) {
-    return { role: 'shy', label: '脸红/害羞', fromMotion3: true }
+    return { role: 'shy', label: '脸红/害羞', fromMotion3: true, mouthForm }
+  }
+
+  // 无论文件名前缀如何（如 face_trouble_02 / face_normal_* / face_sad_* / face_cry_01 无泪等），
+  // 只要 ParamMouthForm >= 0.2 即存在明显嘴角上扬笑意，必须标为苦笑或微笑，绝不能混入普通 trouble/sad！
+  if (mouthForm >= 0.2) {
+    if (isStrainedSmile) {
+      return { role: 'wry_smile', label: '苦笑/嘴角上扬', fromMotion3: true, mouthForm }
+    }
+    if (closed) {
+      return {
+        role: 'closed_smile',
+        label: mouthOpen >= 0.4 ? '闭眼大笑' : '闭眼微笑',
+        fromMotion3: true,
+        mouthForm
+      }
+    }
+    return {
+      role: 'genuine_smile',
+      label: mouthOpen >= 0.4 ? '开朗微笑' : '微笑/嘴角上扬',
+      fromMotion3: true,
+      mouthForm
+    }
   }
 
   if (browAngle <= -0.3 && mouthForm <= 0.05) {
-    return { role: 'angry', label: '蹙眉不满/生气', fromMotion3: true }
+    return { role: 'angry', label: '蹙眉不满/生气', fromMotion3: true, mouthForm }
   }
 
   if (browY <= -0.25 && browAngle >= 0.25 && !lower.includes('smile')) {
-    return { role: 'trouble', label: '苦恼/不安', fromMotion3: true }
+    return { role: 'trouble', label: '苦恼/不安', fromMotion3: true, mouthForm }
   }
 
   const base = classifyByName(facialName)
-  return { ...base, fromMotion3: true }
+  return { ...base, fromMotion3: true, mouthForm }
 }
 
 /**
@@ -628,8 +687,15 @@ export function isSmileLikeFacial(
   modelPath?: string,
   modelsRoot?: string
 ): boolean {
-  const { role } = inspectModelFacial(modelPath, facialName, modelsRoot)
-  return role === 'genuine_smile' || role === 'closed_smile' || role === 'playful'
+  const info = inspectModelFacial(modelPath, facialName, modelsRoot)
+  return (
+    info.role === 'genuine_smile' ||
+    info.role === 'closed_smile' ||
+    info.role === 'playful' ||
+    info.role === 'wry_smile' ||
+    info.role === 'tearful_smile' ||
+    (info.mouthForm !== undefined && info.mouthForm >= 0.2)
+  )
 }
 
 export function isPositiveOnlyFacial(
@@ -775,6 +841,11 @@ export interface FacialCompatibilityResult {
   reason?: string
 }
 
+const EXPLICIT_WRY_SMILE_TEXT_RE =
+  /(?:苦笑|勉强笑|强颜欢笑|含泪笑|自嘲|微笑|笑着|没事的|没关系|别担心|不用担心|安心)/
+const CRY_DESPAIR_CONFRONT_RE =
+  /(?:哭|泣|泪|呜咽|嗚咽|别走|再见|窒息|崩溃|绝望|受不了|不行啊|做不到|对不起|抱歉|后悔|没能|不要|别再|少啰嗦|闭嘴|滚|干嘛|为什么)/
+
 /**
  * 校验某句台词的 facial 是否与情绪标签、文本语境及前一拍气氛明显冲突。
  */
@@ -815,11 +886,39 @@ export function isFacialCompatibleWithLine(params: {
     (NEGATIVE_TEXT_CUE_RE.test(text) || NEGATED_JOY_RE.test(text)) && ctx.mood !== 'gentle_reassure'
   const hasPosCue = POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text)
   const isTenseEmotion = emo === '生气' || emo === '伤心' || emo === '害怕' || emo === '惊讶'
+  const isNegativeOrConfrontation =
+    isTenseEmotion ||
+    hasNegCue ||
+    ctx.apologyOrRegret ||
+    ctx.mood === 'sad_regret' ||
+    ctx.mood === 'angry_frustration' ||
+    ctx.mood === 'surprise' ||
+    DESPAIR_TEXT_RE.test(text) ||
+    CRY_DESPAIR_CONFRONT_RE.test(text)
+  const hasPositiveMouth = info.mouthForm !== undefined && info.mouthForm >= 0.2
+  const allowsWrySmile =
+    EXPLICIT_WRY_SMILE_TEXT_RE.test(text) &&
+    emo !== '生气' &&
+    emo !== '惊讶' &&
+    !/(?:哭|泣|呜|不行|崩溃|绝望|窒息|别走|再见|闭嘴|烦死|气死|什么！？)/.test(text)
 
-  // 1) 明确负面/紧张/道歉/惊愕情绪绝对禁止搭配纯正微笑/俏皮表情（苦笑 wry_smile 与含泪微笑 tearful_smile 除外）
+  // 1) 明确负面/紧张/道歉/惊愕/哭泣对峙语境：严禁纯正微笑/俏皮表情，且任何嘴角上扬(mouthForm >= 0.2 / wry_smile / tearful_smile)
+  //    均严格拦截，除非台词本身明确表达苦笑/含泪安抚笑意
   if (
-    (isTenseEmotion || hasNegCue || ctx.apologyOrRegret || ctx.mood === 'sad_regret') &&
-    (info.role === 'genuine_smile' || info.role === 'closed_smile' || info.role === 'playful')
+    isNegativeOrConfrontation &&
+    (info.role === 'genuine_smile' ||
+      info.role === 'closed_smile' ||
+      info.role === 'playful' ||
+      (info.role === 'shy' && emo !== '害羞'))
+  ) {
+    return { ok: false, reason: 'negative_context_smile' }
+  }
+  if (
+    isNegativeOrConfrontation &&
+    (info.role === 'wry_smile' ||
+      info.role === 'tearful_smile' ||
+      (hasPositiveMouth && info.role !== 'surprise' && !(info.role === 'shy' && emo === '害羞'))) &&
+    !allowsWrySmile
   ) {
     return { ok: false, reason: 'negative_context_smile' }
   }
@@ -829,7 +928,14 @@ export function isFacialCompatibleWithLine(params: {
     (restrainedRole || prevTense) &&
     !hasPosCue &&
     emo !== '开心' &&
-    (info.role === 'genuine_smile' || info.role === 'closed_smile' || info.role === 'playful')
+    (info.role === 'genuine_smile' ||
+      info.role === 'closed_smile' ||
+      info.role === 'playful' ||
+      (hasPositiveMouth &&
+        info.role !== 'surprise' &&
+        info.role !== 'wry_smile' &&
+        info.role !== 'tearful_smile' &&
+        !(info.role === 'shy' && emo === '害羞')))
   ) {
     return { ok: false, reason: 'restrained_or_tense_smile' }
   }
@@ -932,13 +1038,13 @@ export function isMotionCompatibleWithLine(params: {
   })
   const tense = ctx.tense || Boolean(params.prevTense)
 
-  // 1) 负面/悲伤/道歉/紧张/愤怒语境禁止用欢快/得意动作（glad / playful / wandahoi）
+  // 1) 负面/悲伤/道歉/紧张/愤怒语境禁止用欢快/得意/打招呼动作（glad / playful / greeting）
   if (
     (ctx.mood === 'sad_regret' ||
       ctx.mood === 'angry_frustration' ||
       ctx.apologyOrRegret ||
       (tense && !ctx.cheerful)) &&
-    (info.role === 'glad' || info.role === 'playful')
+    (info.role === 'glad' || info.role === 'playful' || info.role === 'greeting')
   ) {
     return { ok: false, reason: 'cheerful_motion_on_tense_or_sad_line' }
   }
@@ -1059,8 +1165,8 @@ export type TargetMood =
   | 'thinking'
 
 const FACIAL_ROLES_BY_MOOD: Record<TargetMood, FacialSemanticRole[]> = {
-  sad: ['sad', 'closed_troubled', 'trouble', 'cry', 'cold_hollow', 'wry_smile', 'neutral'],
-  trouble: ['trouble', 'closed_troubled', 'wry_smile', 'sad', 'serious', 'neutral'],
+  sad: ['cry', 'sad', 'closed_troubled', 'trouble', 'cold_hollow', 'neutral'],
+  trouble: ['trouble', 'closed_troubled', 'sad', 'serious', 'neutral'],
   angry: ['angry', 'serious', 'cold_hollow', 'trouble', 'neutral'],
   surprise: ['surprise', 'serious', 'trouble', 'neutral'],
   shy: ['shy', 'wry_smile', 'genuine_smile', 'neutral'],
@@ -1523,8 +1629,8 @@ export function evaluateActingLineMatch(params: {
   }
 
   const sameFacialCount = params.consecutiveSameFacialCount ?? 0
-  // 官方近期剧集约 61.7% 跨句延续同一表情（8.8% 连续 >=3 句）：
-  // 情绪表情（sad/trouble/serious/closeeye/cry/angry 等）允许自然延续 3~4 句，连续 >=5 句才温和提示；
+  // 官方近期剧集约 61.7% 跨句延续同一表情；哭泣/悲伤高潮段落需要持续挂着含泪/失落神情 4~8+ 句而非逐句乱跳，
+  // 因此 cry/sad/cold_hollow 允许连续维持至 8 句（>=9 句才温和提示），trouble/serious/angry 允许至 4 句（>=5 句提示），
   // 中性或纯笑脸在连续 >=3 句时提示微调，避免僵笑或全程 face_normal_01。
   const facialRole = facial
     ? inspectModelFacial(params.modelPath, facial, params.modelsRoot).role
@@ -1535,7 +1641,9 @@ export function evaluateActingLineMatch(params: {
     facialRole === 'closed_smile' ||
     facialRole === 'playful'
       ? 3
-      : 5
+      : facialRole === 'cry' || facialRole === 'sad' || facialRole === 'cold_hollow'
+        ? 9
+        : 5
   if (facial && sameFacialCount >= facialHoldLimit) {
     issues.push({
       field: 'repetition',

@@ -744,6 +744,27 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     next()
   })
 
+  // ----- 共享临时文件读取（多段并行导出读取预合成 TTS WAV） -----
+
+  router.get('/temp-file', async (req: Request, res: Response) => {
+    try {
+      const safePath = assertContainedPath(req.query.path, allowedTempRoots, 'temp file path')
+      if (isUnderTombstonedPath(safePath)) {
+        res.status(499).json({ ok: false, error: 'Temp file directory was cleaned up' })
+        return
+      }
+      const data = await fs.promises.readFile(safePath)
+      res.setHeader('Content-Type', 'application/octet-stream')
+      res.send(data)
+    } catch (error) {
+      const status = error instanceof BridgeSecurityError ? error.statusCode : 404
+      res.status(status).json({
+        ok: false,
+        error: error instanceof Error ? error.message : 'Failed to read temp file'
+      })
+    }
+  })
+
   // ----- JSON invoke 通道 -----
 
   router.post('/invoke/:channel', express.json({ limit: '50mb' }), async (req, res) => {
@@ -1146,6 +1167,8 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           recordedBitrate?: number
           /** 输出 codec：hevc（默认）| h264；缺省跟随 host config */
           codec?: string
+          /** 输入流的实际 codec（如 WebCodecs H.264 传入 h264），用于精准附加 BT.709 VUI 标签 */
+          inputCodec?: string
           /** true 时保留输入文件由调用方自行清理（record 会在 finally 中取消 session） */
           keepInputs?: boolean
         }
@@ -1203,6 +1226,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           }
 
           let handledByRust = false
+          const inputCodec = payload.inputCodec ? normalizeVideoCodec(payload.inputCodec) : undefined
           if (isRustExporterAvailable(config.video.useRustExporter !== false)) {
             try {
               const rustRes = await runRustRemux({
@@ -1215,6 +1239,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
                 startFrame: payload.startFrame,
                 transcode,
                 codec: normalizeVideoCodec(payload.codec ?? config.video.codec),
+                inputCodec,
                 encoder: config.video.encoder as VideoEncoderChoice,
                 crf: payload.crf ?? config.video.crf,
                 width: config.video.width,
@@ -1295,10 +1320,21 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
                     safeAudioPath!,
                     partialPath,
                     payload.audioBitrate,
-                    { frameCount, fps, startFrame: payload.startFrame }
+                    {
+                      frameCount,
+                      fps,
+                      startFrame: payload.startFrame,
+                      ...(inputCodec ? { tagBt709Codec: inputCodec } : {})
+                    }
                   )
                 } else {
-                  await apiCopyVideo(safeVideoPath, partialPath, frameCount, fps)
+                  await apiCopyVideo(
+                    safeVideoPath,
+                    partialPath,
+                    frameCount,
+                    fps,
+                    inputCodec
+                  )
                 }
               },
               () => Boolean(taskId && isTaskCancelled(taskId))

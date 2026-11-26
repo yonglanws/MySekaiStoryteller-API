@@ -6,6 +6,16 @@ import type { HostConfig, TtsCharacter } from '../config'
 import type { WsHub, WorkerMessage } from '../bridge/wsHub'
 import type { ExportDispatcher, ExportTask } from '../servers/VideoApiServer'
 import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
+import { SegmentCoordinator } from '../export/segmentCoordinator'
+
+export interface PreparedSegmentPlan {
+  totalFrames: number
+  encodeFps: number
+  audioFilePath?: string
+  ttsWavs: Record<number, { filePath: string; durationMs: number }>
+  diagnostics?: ExportDiagnostics
+  timings?: Record<string, number>
+}
 
 export interface ExportResultPayload {
   taskId: string
@@ -18,6 +28,11 @@ export interface ExportResultPayload {
   timings?: Record<string, number>
   /** 逐句/逐动作/TTS/日志诊断，宿主落盘为 <video>.log.json */
   diagnostics?: ExportDiagnostics
+  /** 分段准备阶段产物（segmentPrepareOnly=true） */
+  prepared?: PreparedSegmentPlan
+  /** 分段视频实际 codec 与色彩转换方式 */
+  segmentCodec?: 'h264' | 'hevc'
+  segmentConvert?: 'browser' | 'ffmpeg'
   error?: string
 }
 
@@ -102,6 +117,8 @@ export class RenderPool implements ExportDispatcher {
   private readonly workers = new Map<string, WorkerState>()
   private readonly readyWaiters = new Map<string, ReadyWaiter[]>()
   private readonly bufferedTasks: ExportTask[] = []
+  private readonly subTaskWaiters = new Map<string, (result: ExportResultPayload) => void>()
+  private readonly segmentCoordinator: SegmentCoordinator
   private stopping = false
   private watchdogInterval: ReturnType<typeof setInterval> | null = null
 
@@ -123,6 +140,12 @@ export class RenderPool implements ExportDispatcher {
     this.logger = logger
     this.config = config
     this.hub = hub
+    this.segmentCoordinator = new SegmentCoordinator(logger, {
+      dispatchSubTask: (subTask) => this.dispatchSubTask(subTask),
+      cancelSubTask: (subTaskId) => this.cancel(subTaskId),
+      readyWorkerCount: () => Array.from(this.workers.values()).filter((w) => w.ready).length,
+      onTaskComplete: (taskId, result) => this.onExportResult?.(taskId, result)
+    })
   }
 
   async start(): Promise<void> {
@@ -154,6 +177,11 @@ export class RenderPool implements ExportDispatcher {
       this.watchdogInterval = null
     }
     this.bufferedTasks.length = 0
+    await this.segmentCoordinator.cancelAll()
+    for (const [subId, waiter] of this.subTaskWaiters.entries()) {
+      this.subTaskWaiters.delete(subId)
+      waiter({ taskId: subId, success: false, error: 'Render pool is stopping' })
+    }
     for (const workerId of Array.from(this.readyWaiters.keys())) {
       this.cancelReadyWaiters(workerId)
     }
@@ -162,6 +190,23 @@ export class RenderPool implements ExportDispatcher {
     )
     this.hub.closeAll()
     this.logger.info('[Pool] All render workers stopped')
+  }
+
+  private emitExportResult(taskId: string, result: ExportResultPayload): void {
+    const waiter = this.subTaskWaiters.get(taskId)
+    if (waiter) {
+      this.subTaskWaiters.delete(taskId)
+      waiter(result)
+      return
+    }
+    this.onExportResult?.(taskId, result)
+  }
+
+  private dispatchSubTask(subTask: ExportTask): Promise<ExportResultPayload> {
+    return new Promise((resolve) => {
+      this.subTaskWaiters.set(subTask.taskId, resolve)
+      this.dispatchDirect(subTask)
+    })
   }
 
   stats(): Record<string, unknown> {
@@ -299,7 +344,7 @@ export class RenderPool implements ExportDispatcher {
       const taskId = worker.busyTaskId
       worker.busy = false
       worker.busyTaskId = null
-      this.onExportResult?.(taskId, {
+      this.emitExportResult(taskId, {
         taskId,
         success: false,
         error: `Render worker ${worker.workerId} page ${reason} during export`
@@ -464,7 +509,7 @@ export class RenderPool implements ExportDispatcher {
       const taskId = worker.busyTaskId
       worker.busy = false
       worker.busyTaskId = null
-      this.onExportResult?.(taskId, {
+      this.emitExportResult(taskId, {
         taskId,
         success: false,
         error: `Render worker ${worker.workerId} crashed during export`
@@ -551,7 +596,7 @@ export class RenderPool implements ExportDispatcher {
 
       if (worker && worker.busyTaskId === result.taskId) {
         this.releaseWorker(worker)
-        this.onExportResult?.(result.taskId, result)
+        this.emitExportResult(result.taskId, result)
       } else {
         this.logger.warn(
           `[Pool] Export-result for unknown/mismatched task: worker=${workerId}, taskId=${result?.taskId}`
@@ -581,7 +626,7 @@ export class RenderPool implements ExportDispatcher {
       const taskId = worker.busyTaskId
       worker.busy = false
       worker.busyTaskId = null
-      this.onExportResult?.(taskId, {
+      this.emitExportResult(taskId, {
         taskId,
         success: false,
         error: `Render worker ${worker.workerId} connection lost during export`
@@ -619,8 +664,21 @@ export class RenderPool implements ExportDispatcher {
   }
 
   dispatch(task: ExportTask): void {
+    if (
+      !this.stopping &&
+      Date.now() < task.addedAt + task.timeoutMs &&
+      !this.segmentCoordinator.isSubTask(task.taskId) &&
+      this.segmentCoordinator.shouldUseParallelSegments(task)
+    ) {
+      this.segmentCoordinator.start(task)
+      return
+    }
+    this.dispatchDirect(task)
+  }
+
+  private dispatchDirect(task: ExportTask): void {
     if (this.stopping || Date.now() >= task.addedAt + task.timeoutMs) {
-      this.onExportResult?.(task.taskId, {
+      this.emitExportResult(task.taskId, {
         taskId: task.taskId,
         success: false,
         error: this.stopping
@@ -675,7 +733,7 @@ export class RenderPool implements ExportDispatcher {
       worker.taskDeadline = null
       worker.abortSent = false
       this.onWorkerCleanup?.(worker.workerId)
-      this.onExportResult?.(task.taskId, {
+      this.emitExportResult(task.taskId, {
         taskId: task.taskId,
         success: false,
         error: `Failed to send task to worker ${worker.workerId}`
@@ -685,10 +743,23 @@ export class RenderPool implements ExportDispatcher {
   }
 
   cancel(taskId: string): Promise<void> {
+    if (this.segmentCoordinator.hasJob(taskId)) {
+      return this.segmentCoordinator.cancel(taskId)
+    }
+
     const bufferedIndex = this.bufferedTasks.findIndex((task) => task.taskId === taskId)
     if (bufferedIndex !== -1) {
       this.bufferedTasks.splice(bufferedIndex, 1)
       this.logger.info(`[Pool] Cancelled buffered task ${taskId}`)
+      const subWaiter = this.subTaskWaiters.get(taskId)
+      if (subWaiter) {
+        this.subTaskWaiters.delete(taskId)
+        subWaiter({
+          taskId,
+          success: false,
+          error: 'Export cancelled by user'
+        })
+      }
       return this.taskHooks?.onTaskCancel
         ? Promise.resolve(this.taskHooks.onTaskCancel(taskId))
         : Promise.resolve()
@@ -744,7 +815,7 @@ export class RenderPool implements ExportDispatcher {
         worker.abortSent = false
         if (taskId) {
           void Promise.resolve(this.taskHooks?.onTaskCancel?.(taskId)).catch(() => {})
-          this.onExportResult?.(taskId, {
+          this.emitExportResult(taskId, {
             taskId,
             success: false,
             error: `Render worker ${worker.workerId} watchdog timeout (no export-result)`
@@ -854,7 +925,7 @@ export class RenderPool implements ExportDispatcher {
       const worker = this.pickIdleWorker()
       if (!worker) return
       const task = this.bufferedTasks.shift()!
-      this.dispatch(task)
+      this.dispatchDirect(task)
     }
   }
 }

@@ -810,7 +810,7 @@ async function downloadBundle(
           ? file.path.replace(/\.sse-motion\.json$/, '.live2d-motion.json')
           : file.path
       const dest = path.join(destDir, ...targetRel.split('/'))
-      if (!options.force && fs.existsSync(dest)) return
+      if (!options.force && fs.existsSync(dest) && fs.statSync(dest).size > 0) return
       const url =
         file.canonicalUrl ?? file.storageUrl ?? assetUrl(libraryRoot, `${bundle}/${file.path}`)
       const data = await fetchBuffer(url, options)
@@ -952,6 +952,33 @@ async function downloadCanonicalModelBundle(
   return { destDir, modelJsonPath, mocBuffer, bytes }
 }
 
+const MOTION_BUNDLES_SIDECAR = '.motion-bundles.json'
+
+function resolveMotionBundles(entry: MoesekaiIndexEntry): {
+  required: string[]
+  optional: string[]
+} {
+  const raw = (
+    entry.motions?.length ? entry.motions : entry.motion ? [entry.motion] : []
+  ).filter((bundle): bundle is string => typeof bundle === 'string' && bundle.length > 0)
+  const required = [...new Set(raw)]
+  const seen = new Set(required)
+  const isV2 =
+    entry.id.startsWith('v2_') || required.some((bundle) => bundle.startsWith('live2d/motion/v2_'))
+  const optional: string[] = []
+  if (isV2) {
+    for (const candidate of live2dMotionSetCandidateNames(entry.id)) {
+      if (candidate.startsWith('v2_')) continue
+      const bundle = `live2d/motion/${candidate}`
+      if (!seen.has(bundle)) {
+        seen.add(bundle)
+        optional.push(bundle)
+      }
+    }
+  }
+  return { required, optional }
+}
+
 /**
  * 下载一个模型包及其动作包，并把动作写成 model3.json 可加载的 `motions/*.motion3.json`。
  *
@@ -1002,15 +1029,13 @@ export async function downloadModel(
     downloadedBytes = downloaded.bytes
   }
 
-  const motionBundles = (
-    entry.motions?.length ? entry.motions : entry.motion ? [entry.motion] : []
-  ).filter((bundle): bundle is string => typeof bundle === 'string' && bundle.length > 0)
-  const uniqueBundles = [...new Set(motionBundles)]
+  const { required: requiredBundles, optional: optionalBundles } = resolveMotionBundles(entry)
 
   // 动作包放在持久缓存里：网络中断后重跑只补缺失文件，同角色不同服装共用
   const motionCache = path.join(options.cacheDir, 'motion')
   const motionDirs: string[] = []
-  for (const bundle of uniqueBundles) {
+  const mergedBundles: string[] = []
+  for (const bundle of requiredBundles) {
     const bundleDir = path.join(motionCache, safeClipName(bundle.replace(/^live2d\/motion\//, '')))
     await withKeyLock(`motion:${bundle}`, () =>
       downloadBundle(libraryRoot, bundle, bundleDir, {
@@ -1019,6 +1044,22 @@ export async function downloadModel(
       })
     )
     motionDirs.push(bundleDir)
+    mergedBundles.push(bundle)
+  }
+  for (const bundle of optionalBundles) {
+    const bundleDir = path.join(motionCache, safeClipName(bundle.replace(/^live2d\/motion\//, '')))
+    try {
+      await withKeyLock(`motion:${bundle}`, () =>
+        downloadBundle(libraryRoot, bundle, bundleDir, {
+          ...options,
+          force: false
+        })
+      )
+      motionDirs.push(bundleDir)
+      mergedBundles.push(bundle)
+    } catch {
+      // 可选基础动作包（如 v2_* 回退到 v1）不存在时忽略，不阻断主流程
+    }
   }
 
   const clips = new Map<string, { filename: string; fadeIn: number; fadeOut: number }>()
@@ -1060,7 +1101,9 @@ export async function downloadModel(
 
       const filename = `${safeClipName(converted.name)}.motion3.json`
       const motionFile = path.join(destDir, 'motions', filename)
-      atomicWrite(motionFile, JSON.stringify(converted.motion3))
+      if (options.force || !fs.existsSync(motionFile) || fs.statSync(motionFile).size === 0) {
+        atomicWrite(motionFile, JSON.stringify(converted.motion3))
+      }
       clips.set(converted.name, {
         filename,
         fadeIn: converted.fadeIn,
@@ -1071,6 +1114,13 @@ export async function downloadModel(
 
   const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as Model3JsonShape
   if (!model3.FileReferences) model3.FileReferences = {}
+  const existingMotions: NonNullable<Model3JsonShape['FileReferences']>['Motions'] = {}
+  for (const [name, list] of Object.entries(model3.FileReferences.Motions ?? {})) {
+    const fileRel = Array.isArray(list) ? list[0]?.File : undefined
+    if (fileRel && fs.existsSync(path.join(destDir, ...fileRel.split('/')))) {
+      existingMotions[name] = list
+    }
+  }
   const motions: Record<
     string,
     Array<{ File: string; FadeInTime: number; FadeOutTime: number }>
@@ -1085,10 +1135,14 @@ export async function downloadModel(
     ]
   }
   model3.FileReferences.Motions = {
-    ...(model3.FileReferences.Motions ?? {}),
+    ...existingMotions,
     ...motions
   }
   atomicWrite(modelJsonPath, JSON.stringify(model3, null, 2))
+  atomicWrite(
+    path.join(destDir, MOTION_BUNDLES_SIDECAR),
+    JSON.stringify({ version: 1, bundles: mergedBundles }, null, 2)
+  )
 
   const names = [...clips.keys()]
   const facials = names.filter((name) => name.startsWith('face_')).length

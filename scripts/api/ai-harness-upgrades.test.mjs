@@ -297,9 +297,11 @@ test('requirement #6 & #7: no forced multi-act prompts and 2-char solo Center cu
   )
   const { story: fixed } = validateAndFixStory(story, view)
   const soloAppears = fixed.snippets.filter(
-    (s) => s.type === 'Move' && s.data?.to?.side === 'Center'
+    (s) => s.type === 'LayoutAppear' && s.data?.to?.side === 'Center'
   )
-  assert.ok(soloAppears.length >= 1, '2-char solo inner-thought cutaway moves speaker to Center')
+  const slideMoves = fixed.snippets.filter((s) => s.type === 'Move')
+  assert.ok(soloAppears.length >= 1, '2-char solo inner-thought cutaway fades speaker to Center')
+  assert.equal(slideMoves.length, 0, '2-char solo cutaway must use fade rather than Move slide')
 })
 
 test('requirement #8: strips spoken parenthetical actions while preserving inner thoughts', () => {

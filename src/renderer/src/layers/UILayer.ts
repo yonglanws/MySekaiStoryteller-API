@@ -122,7 +122,7 @@ export default class UILayer extends BaseLayer {
   }
 
   public async showTextBackground(durationMs = TALK_WINDOW_OPEN_CLOSE_MS): Promise<void> {
-    this.talkWindowHideGen++
+    const gen = ++this.talkWindowHideGen
     this._UITalkShowed = true
     // TalkWindow.Open：PlayActive(1, 0.2)，打字从 OnCompleteOpen 开始。
     const showDuration = Math.max(0, durationMs)
@@ -132,6 +132,19 @@ export default class UILayer extends BaseLayer {
       this.textSprite.show(showDuration),
       this.textSpeakerSprite.show(showDuration)
     ])
+    if (gen === this.talkWindowHideGen) {
+      this._UITalkShowed = true
+    }
+  }
+
+  /** 无缝衔接下一句台词时取消任何残留退场渐变，并同步把对话框拉回完全不透明。 */
+  public ensureTalkWindowVisible(): void {
+    this.talkWindowHideGen++
+    this._UITalkShowed = true
+    void this.textBackgroundSprite.show(0)
+    void this.textUnderlineSprite.show(0)
+    void this.textSprite.show(0)
+    void this.textSpeakerSprite.show(0)
   }
 
   public async startDisplayContent(typingLength?: number): Promise<void> {
@@ -139,13 +152,11 @@ export default class UILayer extends BaseLayer {
   }
 
   public async hideTextBackground(durationMs = 0): Promise<void> {
-    // TalkWindow.Close：200ms 渐隐期间窗口仍算打开（对齐 storyPlan/TimelineCalculator），
-    // 立即关闭（durationMs <= 0，如 HideTalk）则立刻置 false。
+    // 发起关闭即把 _UITalkShowed 置 false：下一句 Talk 若在 200ms 渐隐期开始，
+    // 必须重新走 showTextBackground() 取消本次 hide 并从当前 alpha 顺滑拉回 1。
     const gen = ++this.talkWindowHideGen
+    this._UITalkShowed = false
     const hideDuration = Math.max(0, durationMs)
-    if (hideDuration <= 0) {
-      this._UITalkShowed = false
-    }
     this.stopShakeWindow()
 
     await Promise.all([

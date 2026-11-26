@@ -77,10 +77,10 @@ const VideoSchema = z.object({
   exportMode: z.enum(['fast', 'record']).default('fast'),
   /**
    * fast 模式 WebCodecs 视频目标码率（bps）。
-   * 2D 视觉小说 90% 画面为静态背景+立绘，默认 3.5 Mbps VBR 足够保证文字与 Live2D 边缘锐利，
-   * 避免旧默认 12 Mbps 导致 5 分钟视频膨胀到 238 MB。
+   * 2D 视觉小说 90% 画面为静态背景+立绘，默认 3.2 Mbps VBR 足够保证文字与 Live2D 边缘锐利，
+   * 5 分钟成片约 40-50 MB，且低于 maxOutputMbps 上限无需二次压制。
    */
-  exportBitrate: z.number().default(3_500_000),
+  exportBitrate: z.number().default(3_200_000),
   /**
    * 成品平均视频码率软上限（Mbps，0 = 关闭体积护栏；默认 3.5 Mbps）。
    * 即使 WebCodecs 以 stream-copy 输出（或旧 config.yaml 仍写着 12 Mbps），

@@ -625,6 +625,9 @@ export class App {
             fastFps?: number
             idleChainGapSec?: number
             ttsMode?: 'serial' | 'concurrent'
+            segmentPrepareOnly?: boolean
+            segmentSharedDir?: string
+            segmentRange?: VideoExportOptions['segmentRange']
           }
           tts?: ApiExportTtsConfig
           bgm?: ApiExportBgmConfig
@@ -671,6 +674,9 @@ export class App {
             outputSize: result.outputSize,
             timings: result.timings,
             diagnostics: result.diagnostics,
+            prepared: result.prepared,
+            segmentCodec: result.segmentCodec,
+            segmentConvert: result.segmentConvert,
             error: result.error
           })
           this.logger.info(`api:export-result sent for taskId=${payload.taskId}`)
@@ -726,6 +732,9 @@ export class App {
       fastFps?: number
       idleChainGapSec?: number
       ttsMode?: 'serial' | 'concurrent'
+      segmentPrepareOnly?: boolean
+      segmentSharedDir?: string
+      segmentRange?: VideoExportOptions['segmentRange']
     },
     ttsConfig?: ApiExportTtsConfig,
     bgmConfig?: ApiExportBgmConfig,
@@ -738,6 +747,9 @@ export class App {
     outputSize?: number
     timings?: Record<string, number>
     diagnostics?: import('../managers/video-export/ExportDiagnostics').ExportDiagnostics
+    prepared?: import('../managers/video-export').ExportResult['prepared']
+    segmentCodec?: 'h264' | 'hevc'
+    segmentConvert?: 'browser' | 'ffmpeg'
     error?: string
   }> {
     this.logger.info(
@@ -780,7 +792,7 @@ export class App {
       height: videoConfig.height,
       quality: 'high',
       format: 'mp4',
-      codec: 'h264',
+      codec: videoConfig.codec === 'h264' ? 'h264' : 'h265',
       crf: videoConfig.crf,
       useGpu: true,
       gpuRenderer: 'auto',
@@ -793,9 +805,12 @@ export class App {
       jpegQuality: 0.85,
       batchSize: 30,
       apiMode: true,
-      apiOutputPath: outputPath,
+      apiOutputPath: videoConfig.segmentRange?.outputPath ?? outputPath,
       apiCrf: videoConfig.crf,
-      apiAudioBitrate: videoConfig.audioBitrate
+      apiAudioBitrate: videoConfig.audioBitrate,
+      segmentPrepareOnly: videoConfig.segmentPrepareOnly,
+      segmentSharedDir: videoConfig.segmentSharedDir,
+      segmentRange: videoConfig.segmentRange
     }
 
     try {
@@ -812,13 +827,16 @@ export class App {
 
       return {
         success: true,
-        videoPath: outputPath,
+        videoPath: result.videoPath ?? outputPath,
         // 成片时长以帧泵/编码器统计为准，不使用页内墙钟耗时
         duration: result.duration,
         frameCount: result.frameCount,
         outputSize: result.outputSize,
         timings: result.timings,
-        diagnostics: result.diagnostics
+        diagnostics: result.diagnostics,
+        prepared: result.prepared,
+        segmentCodec: result.segmentCodec,
+        segmentConvert: result.segmentConvert
       }
     } catch (error) {
       this.logger.error('API export failed during rendering', error)

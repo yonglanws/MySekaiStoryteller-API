@@ -506,6 +506,35 @@ export class ResourceCatalog {
         numericId = nextAltId++
       }
 
+      let motions = entry.motions
+      let facials = entry.facials
+      let defaultMotion = entry.defaultMotion
+      let defaultFacial = entry.defaultFacial
+
+      // 已物化到磁盘的云端模型：以本地真实 .model3.json + motions/ 为准，
+      // 防止目录报告了尚未补齐/转换的动作导致渲染端报 motion not found。
+      const localModelJsonPath = path.join(
+        this.config.paths.resources,
+        'models',
+        ...entry.path.split('/')
+      )
+      if (fs.existsSync(localModelJsonPath)) {
+        try {
+          const names = this.readMotionNames(localModelJsonPath)
+          if (names.length > 0) {
+            motions = names.filter((n) => !n.startsWith('face_')).sort()
+            facials = names.filter((n) => n.startsWith('face_')).sort()
+            defaultMotion = pickPreferred(motions, DEFAULT_MOTION_PREFERENCE)
+            defaultFacial = pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE)
+          }
+        } catch (err) {
+          this.logger.warn(
+            `[Catalog] Failed to read cached cloud model3.json for ${entry.path}`,
+            err
+          )
+        }
+      }
+
       usedIds.add(numericId)
       usedCloudIds.add(cloudIdLower)
       models.push({
@@ -513,10 +542,10 @@ export class ResourceCatalog {
         name: entry.name,
         shortName: entry.shortName,
         path: entry.path,
-        motions: entry.motions,
-        facials: entry.facials,
-        defaultMotion: entry.defaultMotion,
-        defaultFacial: entry.defaultFacial,
+        motions,
+        facials,
+        defaultMotion,
+        defaultFacial,
         source: 'cloud',
         cloudId: entry.id,
         characterId: entry.characterId ?? null,
@@ -768,7 +797,11 @@ export class ResourceCatalog {
       }
     }
 
-    return Object.keys(indexed)
+    const modelDir = path.dirname(modelJsonPath)
+    return Object.keys(indexed).filter((key) => {
+      const fileRel = Array.isArray(indexed[key]) ? indexed[key][0]?.File : undefined
+      return Boolean(fileRel && fs.existsSync(path.join(modelDir, ...fileRel.split('/'))))
+    })
   }
 
   private loadImageDetails(resourcesDir: string, imageFiles: string[]): CatalogImage[] {

@@ -32,6 +32,17 @@ export interface ApiExportResponse {
   diagnostics?: ExportDiagnostics
 }
 
+export interface SegmentRangeConfig {
+  index: number
+  count: number
+  startFrame: number
+  endFrame: number
+  totalFrames: number
+  encodeFps: number
+  outputPath: string
+  precomputedTts: Record<number, { filePath: string; durationMs: number }>
+}
+
 export interface VideoConfig {
   width: number
   height: number
@@ -53,6 +64,10 @@ export interface VideoConfig {
   idleChainGapSec: number
   /** TTS 与渲染调度：serial = 先合成再渲染，concurrent = 边渲染边合成 */
   ttsMode: 'serial' | 'concurrent'
+  /** 内部分段并行准备/渲染参数（单任务不设置） */
+  segmentPrepareOnly?: boolean
+  segmentSharedDir?: string
+  segmentRange?: SegmentRangeConfig
 }
 
 export interface ExportTask {
@@ -107,7 +122,8 @@ const TEMP_SWEEP_PREFIXES = [
   'mss-export-',
   'mss-api-audio-',
   'mss-audio-',
-  'mss-fast-'
+  'mss-fast-',
+  'mss-segs-'
 ]
 const TEMP_FILE_MAX_AGE_MS = 6 * 60 * 60 * 1000
 

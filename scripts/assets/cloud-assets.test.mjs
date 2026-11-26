@@ -268,3 +268,165 @@ test('story cloud refs materialize into resources/cloud and rewrite paths', asyn
     await once(server, 'close')
   }
 })
+
+test('ensureModel repairs cached v2 model3.json missing base motionBundle and merges all motions', async () => {
+  const makeMotion = (name) => ({
+    format: 'sse-motion',
+    version: 1,
+    name,
+    sampleRate: 60,
+    startTime: 0,
+    stopTime: 1,
+    loopTime: false,
+    fade: { in: 0.25, out: 0.3 },
+    curves: [
+      {
+        binding: { resolved: { target: 'Parameter', id: 'ParamAngleX' } },
+        kind: 'constant',
+        value: 0.2
+      }
+    ]
+  })
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost')
+    const send = (value, type = 'application/json') => {
+      res.writeHead(200, { 'content-type': type })
+      res.end(typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value))
+    }
+    if (url.pathname === '/library/live2d/model/v2_20mizuki_school01/_ripper.json') {
+      send({ files: [{ path: '20mizuki_uniform2_4_t11.model3.json' }] })
+      return
+    }
+    if (
+      url.pathname ===
+      '/library/live2d/model/v2_20mizuki_school01/20mizuki_uniform2_4_t11.model3.json'
+    ) {
+      send({ FileReferences: { Moc: '20mizuki_uniform2_4_t11.moc3', Textures: [] } })
+      return
+    }
+    if (url.pathname === '/library/live2d/motion/v2_20mizuki_motion_base/_ripper.json') {
+      send({ files: [{ path: 'motion/w-normal07-sad.sse-motion.json' }] })
+      return
+    }
+    if (
+      url.pathname ===
+      '/library/live2d/motion/v2_20mizuki_motion_base/motion/w-normal07-sad.sse-motion.json'
+    ) {
+      send(makeMotion('w-normal07-sad'))
+      return
+    }
+    if (url.pathname === '/library/live2d/motion/20mizuki_motion_base/_ripper.json') {
+      send({ files: [{ path: 'motion/w-normal-sad01.sse-motion.json' }] })
+      return
+    }
+    if (
+      url.pathname ===
+      '/library/live2d/motion/20mizuki_motion_base/motion/w-normal-sad01.sse-motion.json'
+    ) {
+      send(makeMotion('w-normal-sad01'))
+      return
+    }
+    res.writeHead(404)
+    res.end('not found')
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const base = `http://127.0.0.1:${server.address().port}`
+  const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-cloud-repair-'))
+  try {
+    const modelDir = path.join(
+      resourcesDir,
+      'models',
+      'cloud',
+      'v2_20mizuki_school01',
+      '20mizuki_uniform2_4_t11'
+    )
+    fs.mkdirSync(path.join(modelDir, 'motions'), { recursive: true })
+    fs.writeFileSync(path.join(modelDir, '20mizuki_uniform2_4_t11.moc3'), 'moc')
+    fs.writeFileSync(
+      path.join(modelDir, 'motions', 'w-normal07-sad.motion3.json'),
+      JSON.stringify({ Version: 3, Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0] }] })
+    )
+    // Simulate an incomplete cached model3.json (only v2_20mizuki_motion_base, missing w-normal-sad01)
+    const modelJsonPath = path.join(modelDir, '20mizuki_uniform2_4_t11.model3.json')
+    fs.writeFileSync(
+      modelJsonPath,
+      JSON.stringify({
+        Version: 3,
+        FileReferences: {
+          Moc: '20mizuki_uniform2_4_t11.moc3',
+          Textures: [],
+          Motions: {
+            'w-normal07-sad': [{ File: 'motions/w-normal07-sad.motion3.json', FadeInTime: 0.25, FadeOutTime: 0.3 }]
+          }
+        }
+      })
+    )
+
+    const settings = {
+      source: 'moesekai',
+      region: 'jp',
+      indexBase: `${base}/models/`,
+      libraryBase: `${base}/library/`,
+      assetBase: base,
+      soundtrackBase: `${base}/master/`,
+      cacheDir: path.join(resourcesDir, 'cache'),
+      concurrency: 1,
+      timeoutMs: 5_000,
+      retries: 0,
+      cloudCatalog: true,
+      cloudCatalogTtlHours: 6
+    }
+    const catalog = {
+      format: 'msst.cloud-catalog/1',
+      generatedAt: new Date().toISOString(),
+      region: 'jp',
+      sources: { indexUrl: `${base}/models/jp/models.json`, libraryRoot: `${base}/library/` },
+      models: [
+        {
+          id: 'v2_20mizuki_school01',
+          characterId: 20,
+          name: '晓山瑞希',
+          shortName: '瑞希',
+          bundle: 'live2d/model/v2_20mizuki_school01',
+          motionBundles: [
+            'live2d/motion/v2_20mizuki_motion_base',
+            'live2d/motion/20mizuki_motion_base'
+          ],
+          path: 'cloud/v2_20mizuki_school01/20mizuki_uniform2_4_t11/20mizuki_uniform2_4_t11.model3.json',
+          motions: ['w-normal-sad01', 'w-normal07-sad'],
+          facials: [],
+          defaultMotion: 'w-normal07-sad',
+          defaultFacial: ''
+        }
+      ],
+      backgrounds: [],
+      bgm: []
+    }
+    const story = {
+      models: [{ id: 1, model: catalog.models[0].path }],
+      images: [],
+      snippets: []
+    }
+    const logger = { info: () => undefined, warn: () => undefined, error: () => undefined }
+    const ctx = { settings, resourcesDir, catalog, logger }
+
+    const first = await resolveStoryCloudAssets(story, ctx)
+    assert.equal(first.models, 1, 'incomplete cached cloud model must be repaired')
+    const repaired = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8'))
+    assert.ok(repaired.FileReferences.Motions['w-normal07-sad'])
+    assert.ok(
+      repaired.FileReferences.Motions['w-normal-sad01'],
+      'missing motion from base bundle must be merged into model3.json'
+    )
+    assert.ok(fs.existsSync(path.join(modelDir, 'motions', 'w-normal-sad01.motion3.json')))
+
+    // Second run with complete model must be a fast no-op
+    const second = await resolveStoryCloudAssets(story, ctx)
+    assert.equal(second.models, 0, 'complete cached cloud model must not re-download')
+  } finally {
+    server.close()
+    await once(server, 'close')
+    fs.rmSync(resourcesDir, { recursive: true, force: true })
+  }
+})

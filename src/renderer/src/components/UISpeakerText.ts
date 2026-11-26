@@ -38,6 +38,7 @@ export default class UISpeakerText extends Text {
   private readonly frameX: number
   private readonly frameY: number
   private animGen = 0
+  private readonly alphaFilter = new AlphaFilter(0)
 
   constructor(screen_width: number, screen_height: number, y?: number) {
     const k = Math.min(screen_width / SSE_UI_SPEC.refWidth, screen_height / SSE_UI_SPEC.refHeight)
@@ -63,10 +64,7 @@ export default class UISpeakerText extends Text {
     this.frameX = NAME.x * k
     this.frameY = y ?? NAME.y * k
     this.syncPosition()
-
-    const alpha_filter = new AlphaFilter(0)
-    alpha_filter.resolution = 2
-    this.filters = [alpha_filter]
+    this.filters = null
   }
 
   private syncPosition(): void {
@@ -83,37 +81,72 @@ export default class UISpeakerText extends Text {
     this.y = pos.y
   }
 
+  private getCurrentOpacity(): number {
+    if (!this.visible) return 0
+    if (this.filters?.includes(this.alphaFilter)) {
+      return Math.max(0, Math.min(1, this.alphaFilter.alpha))
+    }
+    return 1
+  }
+
+  private syncOpacity(alpha: number): void {
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0))
+    this.alphaFilter.alpha = clamped
+    if (clamped <= 0) {
+      this.visible = false
+      this.filters = null
+    } else if (clamped >= 0.999) {
+      this.visible = true
+      this.filters = null
+    } else {
+      this.visible = true
+      if (this.filters?.[0] !== this.alphaFilter) {
+        this.filters = [this.alphaFilter]
+      }
+    }
+  }
+
   public async show(time: number): Promise<void> {
     const gen = ++this.animGen
     this.syncPosition()
-    this.visible = true
-    const alphaFilter = this.filters![0] as AlphaFilter
-    alphaFilter.alpha = time <= 0 ? 1 : 0
-    if (time > 0) {
-      await AnimationManager.linear((progress) => {
-        if (gen !== this.animGen) return
-        alphaFilter.alpha = progress
-      }, time)
-      if (gen === this.animGen) alphaFilter.alpha = 1
+    if (time <= 0) {
+      this.syncOpacity(1)
+      return
     }
+    const startAlpha = this.getCurrentOpacity()
+    if (startAlpha < 0.999) {
+      this.alphaFilter.alpha = startAlpha
+      this.visible = true
+      if (this.filters?.[0] !== this.alphaFilter) {
+        this.filters = [this.alphaFilter]
+      }
+    } else {
+      this.syncOpacity(1)
+    }
+    await AnimationManager.linear((progress) => {
+      if (gen !== this.animGen) return
+      this.syncOpacity(startAlpha + (1 - startAlpha) * progress)
+    }, time)
+    if (gen === this.animGen) this.syncOpacity(1)
   }
 
   public async hide(time: number): Promise<void> {
     const gen = ++this.animGen
-    const alphaFilter = this.filters![0] as AlphaFilter
     if (time <= 0) {
-      alphaFilter.alpha = 0
-      this.visible = false
+      this.syncOpacity(0)
       return
     }
-    const from = alphaFilter.alpha
+    const from = this.getCurrentOpacity()
+    if (from <= 0) {
+      this.syncOpacity(0)
+      return
+    }
     await AnimationManager.linear((progress) => {
       if (gen !== this.animGen) return
-      alphaFilter.alpha = from * (1 - progress)
+      this.syncOpacity(from * (1 - progress))
     }, time)
     if (gen === this.animGen) {
-      alphaFilter.alpha = 0
-      this.visible = false
+      this.syncOpacity(0)
     }
   }
 }
