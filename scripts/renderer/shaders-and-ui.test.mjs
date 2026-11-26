@@ -336,7 +336,7 @@ test('Ease evaluates exact DOTween OutQuad and OutQuart curves', async () => {
   assert.deepEqual(fast, [1])
 })
 
-test('UITelop restores ui_telop.svg visuals while keeping resetOrigin horizontal-drift fix', async () => {
+test('UITelop aligns with SekaiStoryExporter ScenarioTelop layout while keeping zero horizontal drift', async () => {
   const anim = createImmediateAnimationManager()
   const { load, pixi } = createRendererLoader(new Map([['managers/AnimationManager.ts', anim]]))
   const { default: UITelop } = load('components/UITelop.ts')
@@ -347,9 +347,12 @@ test('UITelop restores ui_telop.svg visuals while keeping resetOrigin horizontal
   assert.equal(telop.visible, false)
   assert.equal(telop.children.length, 2)
   assert.equal(telop.children[0].texture, telopTex)
-  assert.equal(telop.children[0].scale.x, 1)
-  assert.equal(telop.children[0].height, 1080 / 8)
+  assert.equal(telop.children[0].width, 1040)
+  assert.equal(telop.children[0].height, 120)
   assert.equal(telop.children[1].style.fill, '#FFFFFF')
+  assert.equal(telop.children[1].style.fontSize, 44)
+  assert.equal(telop.children[1].x, 960)
+  assert.equal(telop.children[1].y, 540)
 
   telop.text = 'First Telop'
   await telop.show(200)
@@ -372,59 +375,59 @@ test('UITelop restores ui_telop.svg visuals while keeping resetOrigin horizontal
   assert.equal(telop.x, 0, 'third telop hide must still reset origin to x === 0')
 })
 
-test('UIText, UISpeakerText, UITextBackground, and UITextUnderline restore 531004c~1 SVG & typography', () => {
+test('UIText, UISpeakerText, UITextBackground, and UITextUnderline match SekaiStoryExporter parity', () => {
   const anim = createImmediateAnimationManager()
   const { load, pixi } = createRendererLoader(new Map([['managers/AnimationManager.ts', anim]]))
   const { default: UIText } = load('components/UIText.ts')
   const { default: UISpeakerText } = load('components/UISpeakerText.ts')
   const { default: UITextBackground } = load('components/UITextBackground.ts')
   const { default: UITextUnderline } = load('components/UITextUnderline.ts')
+  const { GAME_FONT_BODY_STACK, GAME_FONT_NAME_STACK, sseLineAdvance, sseOutlineThickness } =
+    load('utils/FontLoader.ts')
 
   const uiText = new UIText(1920, 1080)
-  assert.equal(uiText.style.fill, '#FFFFFFF5')
-  assert.equal(uiText.style.stroke, '#4A4968D9')
-  assert.equal(uiText.style.strokeThickness, 1080 / 120)
-  assert.equal(uiText.style.fontSize, 1080 / 26)
-  assert.equal(uiText.style.lineHeight, 1080 / 19)
-  assert.equal(uiText.style.wordWrapWidth, 1920 - (1920 / 8) * 2)
-  assert.equal(uiText.x, 1920 / 8)
-  assert.equal(uiText.y, 1080 / 1.27)
+  assert.equal(uiText.style.fill, '#FFFFFF')
+  assert.equal(uiText.style.fontFamily, GAME_FONT_BODY_STACK)
+  assert.equal(uiText.style.fontWeight, '500')
+  assert.equal(uiText.style.stroke, 'rgba(68, 68, 102, 0.6)')
+  assert.ok(Math.abs(uiText.style.strokeThickness - sseOutlineThickness(44)) < 1e-6)
+  assert.equal(uiText.style.lineJoin, 'round')
+  assert.equal(uiText.style.fontSize, 44)
+  assert.ok(Math.abs(uiText.style.lineHeight - sseLineAdvance(44, -80)) < 1e-6)
+  assert.equal(uiText.style.wordWrapWidth, 1368.3)
+  assert.equal(uiText.x, 250)
+  assert.equal(uiText.y, 858)
 
-  const expectedSpeakerY = 1080 / 1.3 - 1920 / 37
-  const speakerText = new UISpeakerText(1920, 1080, expectedSpeakerY)
-  assert.equal(speakerText.style.fill, '#FFFFFFF5')
-  assert.equal(speakerText.style.stroke, '#4A4968D9')
-  assert.equal(speakerText.style.strokeThickness, 1080 / 120)
-  assert.equal(speakerText.style.fontSize, 1080 / 25)
-  assert.equal(speakerText.style.fontWeight, '600')
+  const speakerText = new UISpeakerText(1920, 1080)
+  assert.equal(speakerText.style.fill, '#EBEBF2')
+  assert.equal(speakerText.style.fontFamily, GAME_FONT_NAME_STACK)
+  assert.equal(speakerText.style.fontWeight, '700')
+  assert.equal(speakerText.style.stroke, 'rgba(68, 68, 102, 0.6)')
+  assert.ok(Math.abs(speakerText.style.strokeThickness - sseOutlineThickness(44)) < 1e-6)
+  assert.equal(speakerText.style.lineJoin, 'round')
+  assert.equal(speakerText.style.fontSize, 44)
   assert.equal(speakerText.anchor.x, 0)
   assert.equal(speakerText.anchor.y, 0)
-  assert.equal(speakerText.x, 1920 / 9)
-  assert.equal(speakerText.y, expectedSpeakerY)
+  assert.equal(speakerText.x, 230)
+  assert.equal(speakerText.y, 790)
 
   const bgTex = new pixi.Texture(1920, 1080)
   const textBg = new UITextBackground(bgTex, 1920, 1080)
   assert.equal(textBg.texture, bgTex)
-  assert.equal(textBg.anchor.x, 0.5)
-  assert.equal(textBg.anchor.y, 0.5)
-  assert.equal(textBg.width, 1920)
-  assert.equal(textBg.height, 1080)
-  assert.equal(textBg.x, 960)
-  assert.equal(textBg.y, 540)
+  assert.equal(textBg.anchor.x, 0)
+  assert.equal(textBg.anchor.y, 0)
+  assert.equal(textBg.x, -440)
+  assert.equal(textBg.y, 768)
+  assert.equal(textBg.width, 2800)
+  assert.equal(textBg.height, 312)
 
   const ulTex = new pixi.Texture(1000, 11)
   const textUl = new UITextUnderline(ulTex, 1920, 1080)
   assert.equal(textUl.texture, ulTex)
-  assert.equal(textUl.width, 1920 / 2)
-  assert.equal(textUl.x, 1920 / 10)
-  assert.equal(textUl.y, 1080 / 1.3)
-
-  const bgSvg = fs.readFileSync(
-    path.join(root, 'src/renderer/assets/ui/ui_text_background.svg'),
-    'utf8'
-  )
-  assert.match(bgSvg, /width="1920"/)
-  assert.match(bgSvg, /height="1080"/)
+  assert.equal(textUl.x, 210)
+  assert.equal(textUl.y, 824)
+  assert.equal(textUl.width, 720)
+  assert.equal(textUl.height, 16)
 })
 
 test('UIPlaceInfo, UIFullScreenText, and UIChoiceDialog manage official state transitions', async () => {

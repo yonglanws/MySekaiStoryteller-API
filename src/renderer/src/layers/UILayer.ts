@@ -56,10 +56,11 @@ export default class UILayer extends BaseLayer {
     this.textBackgroundSprite = new UITextBackground(Texture.from(ui_text_background), w, h)
     this.textUnderlineSprite = new UITextUnderline(Texture.from(ui_text_underline), w, h)
     this.textSprite = new UIText(w, h)
+    this.textSpeakerSprite = new UISpeakerText(w, h)
+    // 官方 `TalkWindow/Window/ContentRoot/Content/Text`：ShakeWindow 同步抖动姓名与正文，底板与底条保持静止
     this.wordsContainer = new Container()
-    this.wordsContainer.addChild(this.textSprite)
+    this.wordsContainer.addChild(this.textSpeakerSprite, this.textSprite)
 
-    this.textSpeakerSprite = new UISpeakerText(w, h, this.textUnderlineSprite.y - w / 37)
     this.telopContainer = new UITelop(Texture.from(ui_telop), w, h)
     this.watermarkSprite = new UIWatermark(w, h)
     this.watermarkSprite.visible = false
@@ -79,7 +80,6 @@ export default class UILayer extends BaseLayer {
       this.textBackgroundSprite,
       this.textUnderlineSprite,
       this.wordsContainer,
-      this.textSpeakerSprite,
       this.placeInfoBanner,
       this.telopContainer,
       this.choiceDialog
@@ -184,8 +184,8 @@ export default class UILayer extends BaseLayer {
   }
 
   /**
-   * 官方 `EffectType 6 ShakeWindow`: 只抖动对话框内 `Words` 正文容器，
-   * 对话框底板、名字底线、姓名文本均静止不动。
+   * 官方 `EffectType 6 ShakeWindow`: 抖动对话框内 `Text` 容器（包含 `Name` 姓名与 `Words` 正文），
+   * 对话框底板与名字底线静止不动（对齐 `SekaiStoryExporter/crates/sse-render/src/lib.rs`）。
    * `DOShakeAnchorPos(Duration, 10, 16, 90, ignoreZ=true, fadeOut=true)`，
    * 与震屏共用 DOTween 分段，但按绝对帧求值（导出时钟单源）。
    */

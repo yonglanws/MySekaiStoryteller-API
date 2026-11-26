@@ -1,13 +1,16 @@
 import { Container, Graphics, Sprite, Text, TextStyle, Texture } from 'pixi.js'
 import { runEasedTween } from '../effects/Ease'
+import { GAME_FONT_BODY_STACK, GAME_FONT_BODY_WEIGHT, SSE_UI_SPEC } from '../utils/FontLoader'
+
+const PLACE = SSE_UI_SPEC.placeInfo
 
 function createPlaceInfoBandTexture(): Texture | null {
   if (typeof document === 'undefined') return null
-  const leftRamp = 152
-  const solid = 580
-  const rightRamp = 152
+  const leftRamp = PLACE.leftRamp
+  const solid = PLACE.solidWidth
+  const rightRamp = PLACE.rightRamp
   const totalW = leftRamp + solid + rightRamp
-  const h = 72
+  const h = PLACE.height
   const canvas = document.createElement('canvas')
   canvas.width = totalW
   canvas.height = h
@@ -16,8 +19,8 @@ function createPlaceInfoBandTexture(): Texture | null {
 
   const grad = ctx.createLinearGradient(0, 0, totalW, 0)
   grad.addColorStop(0, 'rgba(68, 68, 102, 0.0)')
-  grad.addColorStop(leftRamp / totalW, 'rgba(68, 68, 102, 0.82)')
-  grad.addColorStop((leftRamp + solid) / totalW, 'rgba(68, 68, 102, 0.82)')
+  grad.addColorStop(leftRamp / totalW, PLACE.bandColor)
+  grad.addColorStop((leftRamp + solid) / totalW, PLACE.bandColor)
   grad.addColorStop(1, 'rgba(68, 68, 102, 0.0)')
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, totalW, h)
@@ -25,8 +28,9 @@ function createPlaceInfoBandTexture(): Texture | null {
 }
 
 /**
- * 官方 `ScenarioPlaceInfo`（`EffectType 18`）：左上角 `580x72` 地点横幅，`OutQuart 0.2s` 滑入，
- * 在下一句 `Talk` 结束时自动关闭（`close()`）。
+ * 官方 `ScenarioPlaceInfo`（`EffectType 18`）：左上角 `580×64` 地点横幅（`y=31`，两侧各 `152px` 渐变，
+ * `rgba(68, 68, 102, 0.8)`），`OutQuart 0.2s` 滑入，在下一句 `Talk` 结束时自动关闭（`close()`）。
+ * 文字 `[40, 43, 520, 40]`，`40 * k` `SekaiCN-Medium` 白字无描边。
  */
 export default class UIPlaceInfo extends Container {
   private readonly k: number
@@ -37,9 +41,9 @@ export default class UIPlaceInfo extends Container {
 
   constructor(screen_width: number, screen_height: number) {
     super()
-    this.k = Math.min(screen_width / 1920, screen_height / 1080)
+    this.k = Math.min(screen_width / SSE_UI_SPEC.refWidth, screen_height / SSE_UI_SPEC.refHeight)
     const aspect = screen_width / Math.max(1, screen_height)
-    this.hiddenX = (aspect - 580) * this.k
+    this.hiddenX = (aspect - PLACE.solidWidth) * this.k
     this.visible = false
     this.x = this.hiddenX
     this.y = 0
@@ -47,31 +51,31 @@ export default class UIPlaceInfo extends Container {
     const tex = createPlaceInfoBandTexture()
     if (tex && tex.valid && tex.baseTexture?.valid) {
       const sp = new Sprite(tex)
-      sp.x = -152 * this.k
-      sp.y = 31 * this.k
-      sp.width = (152 + 580 + 152) * this.k
-      sp.height = 72 * this.k
+      sp.x = -PLACE.leftRamp * this.k
+      sp.y = PLACE.y * this.k
+      sp.width = (PLACE.leftRamp + PLACE.solidWidth + PLACE.rightRamp) * this.k
+      sp.height = PLACE.height * this.k
       this.addChild(sp)
     } else {
       const g = new Graphics()
-      g.beginFill(0x444466, 0.82)
-      g.drawRect(0, 31 * this.k, 580 * this.k, 72 * this.k)
+      g.beginFill(0x444466, 0.8)
+      g.drawRect(0, PLACE.y * this.k, PLACE.solidWidth * this.k, PLACE.height * this.k)
       g.endFill()
       this.addChild(g)
     }
 
     const style = new TextStyle({
       align: 'left',
-      fill: '#FFFFFF',
-      fontFamily: "'MiSans Medium', sans-serif",
-      fontSize: 38 * this.k,
-      stroke: 'rgba(20, 20, 40, 0.35)',
-      strokeThickness: 1.5 * this.k
+      fill: PLACE.fill,
+      fontFamily: GAME_FONT_BODY_STACK,
+      fontWeight: GAME_FONT_BODY_WEIGHT,
+      fontSize: PLACE.fontSize * this.k,
+      strokeThickness: 0
     })
     this.label = new Text('', style)
     this.label.anchor.set(0, 0.5)
-    this.label.x = 40 * this.k
-    this.label.y = (31 + 36) * this.k
+    this.label.x = PLACE.textX * this.k
+    this.label.y = (PLACE.textY + PLACE.textHeight / 2) * this.k
     this.addChild(this.label)
   }
 
