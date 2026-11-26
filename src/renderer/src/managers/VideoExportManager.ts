@@ -885,7 +885,7 @@ export default class VideoExportManager {
     const fps = options.fps
     const outW = options.width
     const outH = options.height
-    const bitrate = options.exportBitrate ?? 12_000_000
+    const bitrate = options.exportBitrate ?? 3_500_000
     // 编码帧率独立于时间轴：动画仍按 options.fps 的虚拟时间推进，
     // 但每帧 GPU 读回很贵。用 video.fastFps（默认 30）封顶，时长不变。
     const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, fps))
@@ -1040,7 +1040,9 @@ export default class VideoExportManager {
 
     const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
+    let ttsSetupMs = 0
     if (ttsEnabled && serialTts) {
+      const serialTtsStart = virtualClock.realTimeMs()
       onProgress({
         stage: 'loading',
         current: 0,
@@ -1062,6 +1064,7 @@ export default class VideoExportManager {
         await Promise.allSettled([...this.pendingLipSync.values()])
         this.checkAborted()
       }
+      ttsSetupMs = virtualClock.realTimeMs() - serialTtsStart
       if (exportStatus) exportStatus.textContent = '语音合成完成，开始渲染…'
     }
 
@@ -1152,6 +1155,7 @@ export default class VideoExportManager {
       dispatchExportStep?: (ticker: Ticker) => void
       resetExportStepHandlers?: () => void
       setExportStepDriver?: (active: boolean) => void
+      exportStepHandlers?: Set<unknown>
     }
     animationSteps.setExportStepDriver?.(true)
     // 非整除帧率（24/25fps）的连续量插值；30/60fps 余量为 0，不参与任何绘制覆盖
@@ -1238,7 +1242,12 @@ export default class VideoExportManager {
       if (target <= storyStep) return
       const tickStart = virtualClock.realTimeMs()
       await virtualClock.advanceStorySteps(target - storyStep, () => {
+        const handlers = animationSteps.exportStepHandlers
+        const prevSize = handlers ? handlers.size : -1
         animationSteps.dispatchExportStep?.(Ticker.shared)
+        const nextSize = handlers ? handlers.size : -1
+        // 仅当有动画订阅结束（集合缩减）或 mock 未暴露集合时才触发 64 轮微任务冲刷
+        return prevSize < 0 || nextSize !== prevSize
       })
       storyStep = target
       tickMs += virtualClock.realTimeMs() - tickStart
@@ -1311,7 +1320,7 @@ export default class VideoExportManager {
           }
           snapshotMs += virtualClock.realTimeMs() - captureStart
 
-          if (frameIndex % (encodeFps * 5) === 0) {
+          if (frameIndex % (encodeFps * 10) === 0) {
             const v = frameValidator.validateFrame(canvas, frameIndex)
             if (!v.isValid && v.error) {
               VideoExportManager.warmValidatedApps.delete(this.app)
@@ -1984,6 +1993,7 @@ export default class VideoExportManager {
         tickMs: Math.round(tickMs),
         renderMs: Math.round(renderMs),
         snapshotMs: Math.round(snapshotMs),
+        ttsSetupMs: Math.round(ttsSetupMs),
         ttsWaitMs: Math.round(ttsWaitMs),
         encodeMs: Math.round(encodeMs),
         audioMs: Math.round(audioMs),

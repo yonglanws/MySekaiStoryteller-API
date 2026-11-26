@@ -62,7 +62,12 @@ function baseLaunchArgs(config: HostConfig): string[] {
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
     '--disable-dev-shm-usage',
-    '--force-color-profile=srgb'
+    '--force-color-profile=srgb',
+    // 加速无头 WebGL 渲染与 WebCodecs 零拷贝硬件编码（不限帧率、启用 GPU 光栅化）
+    '--ignore-gpu-blocklist',
+    '--enable-gpu-rasterization',
+    '--enable-zero-copy',
+    '--disable-gpu-vsync'
   ]
 
   if (process.platform === 'linux') {

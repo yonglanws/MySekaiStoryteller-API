@@ -113,24 +113,56 @@ export class VirtualClockController {
   }
 
   /**
+   * 检测假时钟内是否有在 `deadline` 之前到期的计时器。
+   * 无到期计时器时可以同步 `clock.tick(FRAME_MS)`，省掉 `tickAsync` 的微任务往返。
+   */
+  private hasDueTimer(deadline: number): boolean {
+    const clockWithTimers = this.clock as unknown as {
+      timers?: Record<string, { callAt?: number }>
+    } | null
+    const timers = clockWithTimers?.timers
+    if (!timers || typeof timers !== 'object') return true
+    for (const id in timers) {
+      const entry = timers[id]
+      if (entry && typeof entry.callAt === 'number' && entry.callAt <= deadline) {
+        return true
+      }
+    }
+    return false
+  }
+
+  /**
    * 推进 `steps` 个固定 1/60 故事步；每步只调用一次 Ticker.shared.update，
    * 并保证 elapsedMS 精确为 1000/60（与真实 rAF 的 16.00ms 脱钩）。
+   *
+   * 性能优化：`onStep` 返回 `false` 且本步无到期计时器时跳过 64 轮微任务空转
+   * （常规剧情中 ~98% 的帧没有定时器或动画收尾事件，跳过空转显著降低 tickMs）。
    */
-  async advanceStorySteps(steps: number, onStep?: (nowMs: number) => void): Promise<void> {
+  async advanceStorySteps(
+    steps: number,
+    onStep?: (nowMs: number) => boolean | void
+  ): Promise<void> {
     if (!this.clock) throw new Error('Virtual clock not installed')
     const count = Math.max(0, Math.floor(steps))
     const ticker = Ticker.shared as Ticker & { lastTime: number }
     for (let i = 0; i < count; i++) {
-      await this.clock.tickAsync(FRAME_MS)
+      const dueTimer = this.hasDueTimer(this.clock.now + FRAME_MS + 1e-6)
+      if (dueTimer) {
+        await this.clock.tickAsync(FRAME_MS)
+      } else {
+        this.clock.tick(FRAME_MS)
+      }
       const now = this.clock.now
       // 强制本次 update 的 elapsedMS = FRAME_MS，不受上一次 rAF/update 影响
       ticker.lastTime = now - FRAME_MS
       ticker.update(now)
-      onStep?.(now)
-      // 让本步完成的片段 Promise/时间戳续体先于下一故事步运行。
-      // handler.resolve() 之后还有 runSnippet/finally/.then 多层续体；LayoutClear
-      // 还要串 delay→hide→move，8 个微任务不够，结束时间会被记到下一帧（+17ms）。
-      for (let k = 0; k < 64; k++) await Promise.resolve()
+      const stepChanged = onStep?.(now)
+      // 仅在本步有计时器触发或动画完成（或旧调用方未返回布尔值）时冲刷深层微任务链；
+      // handler.resolve() 之后还有 runSnippet/finally/.then 多层续体，LayoutClear 串
+      // delay→hide→move，64 次微任务可确保结束时间落在同一故事帧（0ms 漂移）。
+      if (dueTimer || stepChanged !== false) {
+        for (let k = 0; k < 64; k++) await Promise.resolve()
+      }
     }
   }
 

@@ -738,10 +738,13 @@ export async function apiConvertVideoWithCompression(
   const truncationArgs =
     frameCount && frameCount > 0 ? ['-t', frameDurationSeconds(frameCount, fps)] : []
 
+  const gop = Math.max(1, Math.round(fps * 4))
   const buildArgs = (selection: VideoEncoderArgs, filterChain: string): string[] => [
     '-i',
     inputPath,
     ...videoEncoderOutputArgs(selection, filterChain),
+    '-g',
+    String(gop),
     '-c:a',
     'aac',
     '-b:a',
@@ -836,12 +839,15 @@ export async function apiMergeVideoAudioWithCompression(
   })
   const truncationArgs = await audioTruncationArgs(frameCount, fps, audioPath)
 
+  const gop = Math.max(1, Math.round(fps * 4))
   const buildArgs = (selection: VideoEncoderArgs, filterChain: string): string[] => [
     '-i',
     videoPath,
     '-i',
     audioPath,
     ...videoEncoderOutputArgs(selection, filterChain),
+    '-g',
+    String(gop),
     '-c:a',
     'aac',
     '-b:a',

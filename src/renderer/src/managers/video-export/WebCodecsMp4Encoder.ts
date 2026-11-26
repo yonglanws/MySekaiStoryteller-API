@@ -81,6 +81,7 @@ export class WebCodecsMp4Encoder {
   private scaleCanvas: OffscreenCanvas | null = null
   private scaleCtx: OffscreenCanvasRenderingContext2D | null = null
   private yuvConverter: GpuYuv420Converter | null = null
+  private readonly useGpuYuvReadback: boolean
   private dequeueWaiter: (() => void) | null = null
 
   constructor(opts: {
@@ -89,12 +90,18 @@ export class WebCodecsMp4Encoder {
     fps: number
     bitrate: number
     encoderConfig?: VideoEncoderConfig | null
+    /**
+     * 默认 false（零拷贝 `new VideoFrame(canvas)` 直接送 GPU 硬件编码器，避免每帧 3.1MB 同步
+     * `gl.readPixels` 拖慢 ~8.6ms/帧；收尾交由 Rust 导出器做高速 BT.709/tv CRF 压制，既快又省 4-6x 体积）。
+     */
+    useGpuYuvReadback?: boolean
   }) {
     this.width = opts.width
     this.height = opts.height
     this.fps = opts.fps
     this.bitrate = opts.bitrate
     this.preProbedConfig = opts.encoderConfig ?? null
+    this.useGpuYuvReadback = opts.useGpuYuvReadback === true
   }
 
   /** 读取当前 WebGL 渲染器字符串；读取失败返回空字符串 */
@@ -239,9 +246,11 @@ export class WebCodecsMp4Encoder {
           width: opts.width,
           height: opts.height,
           bitrate: opts.bitrate,
+          bitrateMode: 'variable',
           framerate: opts.fps,
           hardwareAcceleration: hw,
-          latencyMode: hw === 'prefer-hardware' ? 'quality' : 'realtime',
+          // realtime 模式禁用硬件编码器多帧前瞻/B 帧队列，避免在同卡 D3D11 上阻塞 WebGL 渲染管线
+          latencyMode: 'realtime',
           avc: { format: 'avc' }
         }
         try {
@@ -396,7 +405,11 @@ export class WebCodecsMp4Encoder {
       }
     })
     this.encoder.configure(config)
-    this.yuvConverter = GpuYuv420Converter.create(this.width, this.height, 0)
+    // 仅在显式开启时启用 WebGL2 YUV 读回；默认走零拷贝 GPU VideoFrame(canvas)，
+    // 消除每帧同步 gl.readPixels 的 ~8.6ms/帧停顿（5 分钟 60fps 省 ~145 秒）。
+    if (this.useGpuYuvReadback) {
+      this.yuvConverter = GpuYuv420Converter.create(this.width, this.height, 0)
+    }
   }
 
   private wakeDequeueWaiter(): void {

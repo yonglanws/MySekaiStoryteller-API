@@ -21,6 +21,19 @@ function formatExportReport(videoPath: string, diagnostics: ExportDiagnostics): 
       `convert: ${meta.convert ?? 'ffmpeg'} color: ${meta.color ?? 'bt709'}`
   )
   lines.push(`duration: ${Math.round(meta.durationMs)}ms frames=${meta.frameCount}`)
+  if (meta.outputSize !== undefined && meta.outputSize > 0) {
+    const sizeMb = meta.outputSize / (1024 * 1024)
+    const durationSec = Math.max(0.001, meta.durationMs / 1000)
+    const avgMbps = (meta.outputSize * 8) / (durationSec * 1_000_000)
+    lines.push(`size: ${sizeMb.toFixed(2)} MB (avg ${avgMbps.toFixed(2)} Mbps)`)
+  }
+  if (meta.timings && typeof meta.timings.wallMs === 'number' && meta.timings.wallMs > 0) {
+    const wallSec = meta.timings.wallMs / 1000
+    const realtimeX = meta.durationMs / Math.max(1, meta.timings.wallMs)
+    const pumpFps =
+      typeof meta.timings.avgPumpFps === 'number' ? ` pumpFps=${meta.timings.avgPumpFps}` : ''
+    lines.push(`perf: wall=${wallSec.toFixed(2)}s (${realtimeX.toFixed(2)}x realtime)${pumpFps}`)
+  }
   lines.push(
     `snippets: ${summary.snippets} talks=${summary.talks} appears=${summary.layoutAppears} ` +
       `clears=${summary.layoutClears}`

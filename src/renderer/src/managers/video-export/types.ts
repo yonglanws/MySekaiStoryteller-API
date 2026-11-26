@@ -20,8 +20,10 @@ export interface VideoExportOptions {
    * - `'record'` / `'stream'`：@deprecated 已废弃，自动委托为 `'fast'`
    */
   exportMode?: 'fast' | 'frames' | 'record' | 'stream'
-  /** fast 模式视频码率（bps），缺省 12Mbps */
+  /** fast 模式视频码率（bps），缺省 3.5Mbps VBR */
   exportBitrate?: number
+  /** 成品平均码率软上限（Mbps，0 = 不限；超限时宿主用 Rust 导出器快速 CRF 压缩） */
+  maxOutputMbps?: number
   /** fast 模式的编码帧率上限（默认 30）；仍不超过 video.fps */
   fastFps?: number
   /**

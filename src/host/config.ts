@@ -75,7 +75,22 @@ const VideoSchema = z.object({
    * - `'record'`：@deprecated 已废弃，加载时打印告警并自动回落为 `'fast'`
    */
   exportMode: z.enum(['fast', 'record']).default('fast'),
-  exportBitrate: z.number().default(12_000_000),
+  /**
+   * fast 模式 WebCodecs 视频目标码率（bps）。
+   * 2D 视觉小说 90% 画面为静态背景+立绘，默认 3.5 Mbps VBR 足够保证文字与 Live2D 边缘锐利，
+   * 避免旧默认 12 Mbps 导致 5 分钟视频膨胀到 238 MB。
+   */
+  exportBitrate: z.number().default(3_500_000),
+  /**
+   * 成品平均视频码率软上限（Mbps，0 = 关闭体积护栏；默认 3.5 Mbps）。
+   * 即使 WebCodecs 以 stream-copy 输出（或旧 config.yaml 仍写着 12 Mbps），
+   * 超限时宿主也会用 Rust 导出器快速 CRF 重编码，同时确保 BT.709/tv 与合理体积。
+   */
+  maxOutputMbps: z.number().min(0).default(3.5),
+  /** 优先使用原生 Rust 导出器（native/mss-export-rs），缺失或关闭时自动回退 JS FFmpeg 管线 */
+  useRustExporter: z.boolean().default(true),
+  /** 并行分段导出上限（参考 SekaiStoryExporter --jobs N；1 = 单段） */
+  exportJobs: z.number().int().min(1).max(8).default(1),
   exportFastEncoder: z.enum(['auto', 'webcodecs', 'frames']).default('auto'),
   /** fast 模式的编码帧率上限（≤ video.fps）；动画仍按 video.fps 推进 */
   fastFps: z.number().default(30),
@@ -449,6 +464,10 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     const v = parseInt(env.MSS_VIDEO_CRF, 10)
     if (Number.isFinite(v)) config.video.crf = v
   }
+  if (env.MSS_VIDEO_RENDER_SCALE) {
+    const v = parseFloat(env.MSS_VIDEO_RENDER_SCALE)
+    if (Number.isFinite(v) && v >= 0.5 && v <= 4) config.video.renderScale = v
+  }
   if (env.MSS_VIDEO_CODEC) {
     const v = env.MSS_VIDEO_CODEC.toLowerCase()
     if (v === 'hevc' || v === 'h264') config.video.codec = v
@@ -468,6 +487,19 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_EXPORT_BITRATE) {
     const v = parseInt(env.MSS_EXPORT_BITRATE, 10)
     if (Number.isFinite(v) && v > 0) config.video.exportBitrate = v
+  }
+  if (env.MSS_MAX_OUTPUT_MBPS) {
+    const v = parseFloat(env.MSS_MAX_OUTPUT_MBPS)
+    if (Number.isFinite(v) && v >= 0) config.video.maxOutputMbps = v
+  }
+  if (env.MSS_USE_RUST_EXPORTER !== undefined) {
+    config.video.useRustExporter = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_USE_RUST_EXPORTER.toLowerCase()
+    )
+  }
+  if (env.MSS_EXPORT_JOBS) {
+    const v = parseInt(env.MSS_EXPORT_JOBS, 10)
+    if (Number.isFinite(v) && v >= 1 && v <= 8) config.video.exportJobs = v
   }
   if (env.MSS_EXPORT_FAST_ENCODER) {
     const v = env.MSS_EXPORT_FAST_ENCODER.toLowerCase()

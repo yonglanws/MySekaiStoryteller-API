@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import '@pixi/unsafe-eval'
 import getSubLogger from '../utils/Logger'
 import { ILogObj, Logger } from 'tslog'
@@ -34,6 +35,16 @@ import {
 } from '../../../common/official/screenShake'
 import { nextPostEffectOwner, type PostEffectOwner } from '../effects/PostEffectSlot'
 import { recordEffectProbe } from '../utils/EffectProbe'
+
+/**
+ * 动态接入 `FontLoader.ts`（由 @font-and-ui 导出 `ensureGameFontsLoaded`）：
+ * 合入后自动加载内置 CN 6.4.0 官服中文字体（SekaiCN-Medium / SekaiCN-Bold），
+ * 合入前在独立分支上回落 FontFaceObserver('MiSans Medium')，零构建耦合。
+ */
+const gameFontLoaderModules =
+  typeof import.meta !== 'undefined' && typeof import.meta.glob === 'function'
+    ? import.meta.glob<{ ensureGameFontsLoaded?: () => Promise<void> }>('../utils/FontLoader.ts')
+    : {}
 
 /** 宿主统一下发的 TTS 配置（config.yaml 的 tts 节） */
 export interface ApiExportTtsConfig {
@@ -227,7 +238,8 @@ export class App {
         autoDensity: true,
         antialias: true,
         resolution,
-        preserveDrawingBuffer: forExport
+        preserveDrawingBuffer: forExport,
+        powerPreference: 'high-performance'
       }
 
       if (forExport) {
@@ -269,14 +281,26 @@ export class App {
   }
 
   public async preloadStoryAssets(): Promise<void> {
-    this.models = await this.storyManager.preloadModels()
-    this.logger.info(`Loaded ${this.models.length} models`)
+    const loadFonts = async (): Promise<void> => {
+      const loader = gameFontLoaderModules['../utils/FontLoader.ts']
+      if (loader) {
+        const mod = await loader()
+        if (typeof mod?.ensureGameFontsLoaded === 'function') {
+          await mod.ensureGameFontsLoaded()
+          return
+        }
+      }
+      await new FontFaceObserver('MiSans Medium', {}).load()
+    }
 
-    this.textures = await this.storyManager.preloadImages()
-    this.logger.info(`Loaded ${this.textures.length} textures`)
-
-    await new FontFaceObserver('MiSans Medium', {}).load()
-    this.logger.info(`Loaded fonts.`)
+    const [models, textures] = await Promise.all([
+      this.storyManager.preloadModels(),
+      this.storyManager.preloadImages(),
+      loadFonts()
+    ])
+    this.models = models
+    this.textures = textures
+    this.logger.info(`Loaded ${this.models.length} models, ${this.textures.length} textures & fonts`)
     preloadCommonInappTextures()
 
     this.logger.info('Preloaded story assets')
@@ -596,6 +620,7 @@ export class App {
             watermarkText?: string
             exportMode?: 'record' | 'fast'
             exportBitrate?: number
+            maxOutputMbps?: number
             exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
             fastFps?: number
             idleChainGapSec?: number
@@ -696,6 +721,7 @@ export class App {
       watermarkText?: string
       exportMode?: 'record' | 'fast'
       exportBitrate?: number
+      maxOutputMbps?: number
       exportFastEncoder?: 'auto' | 'webcodecs' | 'frames'
       fastFps?: number
       idleChainGapSec?: number
@@ -760,6 +786,7 @@ export class App {
       gpuRenderer: 'auto',
       exportMode: 'fast',
       exportBitrate: videoConfig.exportBitrate,
+      maxOutputMbps: videoConfig.maxOutputMbps,
       exportFastEncoder: videoConfig.exportFastEncoder,
       fastFps: videoConfig.fastFps,
       ttsMode: videoConfig.ttsMode ?? 'concurrent',
