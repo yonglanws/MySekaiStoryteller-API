@@ -919,6 +919,14 @@ export interface VideoAudioMuxOptions {
   fps?: number
   /** 视频从故事的哪一帧开始（断点续传）；音频输入按该帧的样本位置起播。 */
   startFrame?: number
+  /** 流拷贝时附加 BT.709 limited-range VUI 标签（h264_metadata / hevc_metadata） */
+  tagBt709Codec?: VideoCodec
+}
+
+function bt709MetadataBsf(codec: VideoCodec): string {
+  return codec === 'hevc'
+    ? 'hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0'
+    : 'h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0'
 }
 
 /**
@@ -935,7 +943,7 @@ export async function apiMuxVideoAudioCopy(
 ): Promise<void> {
   const stat = await fs.promises.stat(videoPath)
   const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
-  const { frameCount, fps, startFrame = 0 } = options
+  const { frameCount, fps, startFrame = 0, tagBt709Codec } = options
 
   const audioInputArgs: string[] = []
   if (startFrame > 0 && fps && fps > 0) {
@@ -946,7 +954,7 @@ export async function apiMuxVideoAudioCopy(
       ? ['-t', frameDurationSeconds(frameCount, fps)]
       : await audioTruncationArgs(undefined, fps ?? 0, audioPath)
 
-  const ffmpegArgs = [
+  const buildArgs = (withBsf: boolean): string[] => [
     '-i',
     videoPath,
     ...audioInputArgs,
@@ -958,6 +966,8 @@ export async function apiMuxVideoAudioCopy(
     '1:a:0',
     '-c:v',
     'copy',
+    ...(withBsf && tagBt709Codec ? ['-bsf:v', bt709MetadataBsf(tagBt709Codec)] : []),
+    ...(withBsf && tagBt709Codec === 'hevc' ? ['-tag:v', 'hvc1'] : []),
     '-c:a',
     'aac',
     '-b:a',
@@ -969,7 +979,15 @@ export async function apiMuxVideoAudioCopy(
     outputPath
   ]
 
-  await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
+  if (tagBt709Codec) {
+    try {
+      await runFfmpegWithProgress(buildArgs(true), estimatedDuration)
+      return
+    } catch {
+      logger.warn('BT.709 VUI bitstream filter copy failed, falling back to plain stream copy')
+    }
+  }
+  await runFfmpegWithProgress(buildArgs(false), estimatedDuration)
 }
 
 /**
@@ -979,16 +997,19 @@ export async function apiCopyVideo(
   inputPath: string,
   outputPath: string,
   frameCount?: number,
-  fps?: number
+  fps?: number,
+  tagBt709Codec?: VideoCodec
 ): Promise<void> {
   const stat = await fs.promises.stat(inputPath)
   const estimatedDuration = Math.max(stat.size / (8000000 / 8), 10)
 
-  const ffmpegArgs = [
+  const buildArgs = (withBsf: boolean): string[] => [
     '-i',
     inputPath,
     '-c:v',
     'copy',
+    ...(withBsf && tagBt709Codec ? ['-bsf:v', bt709MetadataBsf(tagBt709Codec)] : []),
+    ...(withBsf && tagBt709Codec === 'hevc' ? ['-tag:v', 'hvc1'] : []),
     ...(frameCount && frameCount > 0 && fps && fps > 0
       ? ['-t', frameDurationSeconds(frameCount, fps)]
       : []),
@@ -998,7 +1019,15 @@ export async function apiCopyVideo(
     outputPath
   ]
 
-  await runFfmpegWithProgress(ffmpegArgs, estimatedDuration)
+  if (tagBt709Codec) {
+    try {
+      await runFfmpegWithProgress(buildArgs(true), estimatedDuration)
+      return
+    } catch {
+      logger.warn('BT.709 VUI bitstream filter copy failed, falling back to plain stream copy')
+    }
+  }
+  await runFfmpegWithProgress(buildArgs(false), estimatedDuration)
 }
 
 /** '128k' / '1.5M' / '96000' → bps；无法解析返回 fallback */

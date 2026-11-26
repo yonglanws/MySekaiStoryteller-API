@@ -368,6 +368,42 @@ fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize
     Ok(filled)
 }
 
+pub fn bt709_vui_bsf(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => {
+            "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
+        }
+        Codec::Hevc => {
+            "hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
+        }
+    }
+}
+
+/// Detect video stream codec (`h264` or `hevc`) via `ffmpeg -hide_banner -i <video>`.
+pub fn detect_video_codec(ffmpeg: &Path, video: &Path) -> Option<Codec> {
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(video)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("Video:") {
+            let after = line[pos + 6..].trim_start().to_ascii_lowercase();
+            if after.starts_with("hevc") || after.starts_with("h265") {
+                return Some(Codec::Hevc);
+            }
+            if after.starts_with("h264") || after.starts_with("avc") {
+                return Some(Codec::H264);
+            }
+        }
+    }
+    None
+}
+
 pub struct RemuxOptions {
     pub ffmpeg: PathBuf,
     pub video: PathBuf,
@@ -379,6 +415,7 @@ pub struct RemuxOptions {
     pub start_frame: u32,
     pub transcode: bool,
     pub codec: Codec,
+    pub input_codec: Option<Codec>,
     pub encoder_choice: String,
     pub crf: u32,
     pub preset: Option<String>,
@@ -398,7 +435,8 @@ pub struct RemuxResult {
     pub elapsed_ms: u128,
 }
 
-/// Atomic remux or BT.709/tv CRF transcode (with hardware -> software automatic fallback).
+/// Atomic remux (stream-copy + BT.709 VUI bitstream tagging) or BT.709/tv CRF transcode
+/// (with hardware -> software automatic fallback).
 pub fn run_remux(opts: &RemuxOptions) -> Result<RemuxResult, String> {
     let started = Instant::now();
     let input_bytes = std::fs::metadata(&opts.video)
@@ -425,7 +463,10 @@ pub fn run_remux(opts: &RemuxOptions) -> Result<RemuxResult, String> {
     let mut used_encoder = "copy".to_owned();
 
     if !need_transcode {
-        write_output_atomically(&opts.output, |partial| {
+        let detected_codec = opts
+            .input_codec
+            .or_else(|| detect_video_codec(&opts.ffmpeg, &opts.video));
+        let run_copy = |with_bsf: bool, partial: &Path| -> Result<(), String> {
             let mut cmd = Command::new(&opts.ffmpeg);
             cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
                 .arg("-i")
@@ -438,20 +479,22 @@ pub fn run_remux(opts: &RemuxOptions) -> Result<RemuxResult, String> {
                     ]);
                 }
                 cmd.arg("-i").arg(audio_path);
-                cmd.args([
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "1:a:0",
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    &opts.audio_bitrate,
-                ]);
+                cmd.args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]);
+                if with_bsf && let Some(stream_codec) = detected_codec {
+                    cmd.args(["-bsf:v", bt709_vui_bsf(stream_codec)]);
+                    if stream_codec == Codec::Hevc {
+                        cmd.args(["-tag:v", "hvc1"]);
+                    }
+                }
+                cmd.args(["-c:a", "aac", "-b:a", &opts.audio_bitrate]);
             } else {
                 cmd.args(["-c:v", "copy"]);
+                if with_bsf && let Some(stream_codec) = detected_codec {
+                    cmd.args(["-bsf:v", bt709_vui_bsf(stream_codec)]);
+                    if stream_codec == Codec::Hevc {
+                        cmd.args(["-tag:v", "hvc1"]);
+                    }
+                }
             }
             cmd.args(&truncation)
                 .args(["-movflags", "+faststart"])
@@ -465,6 +508,23 @@ pub fn run_remux(opts: &RemuxOptions) -> Result<RemuxResult, String> {
                 return Err(format!("ffmpeg remux exited with {}: {}", out.status, err.trim()));
             }
             Ok(())
+        };
+
+        write_output_atomically(&opts.output, |partial| {
+            if detected_codec.is_some() {
+                match run_copy(true, partial) {
+                    Ok(()) => {
+                        used_encoder = "copy+bt709".to_owned();
+                        Ok(())
+                    }
+                    Err(_) => {
+                        let _ = std::fs::remove_file(partial);
+                        run_copy(false, partial)
+                    }
+                }
+            } else {
+                run_copy(false, partial)
+            }
         })?;
     } else {
         color::check_encode_size(opts.width, opts.height)?;
@@ -582,6 +642,18 @@ mod tests {
         assert_eq!(
             partial_output_path(Path::new("out/ep.mp4")),
             PathBuf::from("out/ep.partial.mp4")
+        );
+    }
+
+    #[test]
+    fn bt709_vui_bsf_matches_h264_and_hevc() {
+        assert_eq!(
+            bt709_vui_bsf(Codec::H264),
+            "h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
+        );
+        assert_eq!(
+            bt709_vui_bsf(Codec::Hevc),
+            "hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
         );
     }
 }

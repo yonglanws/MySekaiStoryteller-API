@@ -818,13 +818,14 @@ export default class VideoExportManager {
     fps: number,
     bitrate: number,
     choice: 'auto' | 'webcodecs' | 'frames',
-    gpuRenderer: 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu' = 'auto'
+    gpuRenderer: 'auto' | 'nvidia' | 'amd' | 'intel' | 'cpu' = 'auto',
+    codec: 'h264' | 'hevc' = 'h264'
   ): Promise<boolean> {
     this.lastWebCodecsProbeConfig = null
     if (choice === 'frames') return false
     if (typeof WebCodecsMp4Encoder?.probeConfig !== 'function') return false
 
-    const cacheKey = `${width}x${height}@${fps}:${bitrate}:${choice}:${gpuRenderer}`
+    const cacheKey = `${width}x${height}@${fps}:${bitrate}:${choice}:${gpuRenderer}:${codec}`
     let appCache = VideoExportManager.webCodecsProbeCache.get(this.app)
     if (appCache?.has(cacheKey)) {
       const cached = appCache.get(cacheKey) ?? null
@@ -837,6 +838,7 @@ export default class VideoExportManager {
       height,
       fps,
       bitrate,
+      codec,
       mode: choice,
       canvas,
       gpuRenderer,
@@ -885,12 +887,35 @@ export default class VideoExportManager {
     const fps = options.fps
     const outW = options.width
     const outH = options.height
-    const bitrate = options.exportBitrate ?? 3_500_000
+    const bitrate = options.exportBitrate ?? 3_200_000
     // 编码帧率独立于时间轴：动画仍按 options.fps 的虚拟时间推进，
     // 但每帧 GPU 读回很贵。用 video.fastFps（默认 30）封顶，时长不变。
     const fastFpsCap = Math.max(1, Math.min(options.fastFps ?? 30, fps))
-    const encodeFps = fastFpsCap
+    const encodeFps = options.segmentRange?.encodeFps ?? fastFpsCap
     const frameMs = 1000 / encodeFps
+    const segmentPrepareOnly = options.segmentPrepareOnly === true
+    const segmentRange = options.segmentRange
+    const isSegmentWorker = Boolean(segmentRange)
+    const startFrame = segmentRange ? segmentRange.startFrame : 0
+    const endFrame = segmentRange ? segmentRange.endFrame : -1
+    const precomputedTts = segmentRange?.precomputedTts
+    const sharedWriteId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const preparedTtsWavs: Record<number, { filePath: string; durationMs: number }> = {}
+    const sharedTtsUploadTasks: Array<Promise<void>> = []
+    const bridgeToken =
+      typeof window !== 'undefined' && typeof window.location?.search === 'string'
+        ? new URLSearchParams(window.location.search).get('token')
+        : null
+    const readBridgeTempFile = async (filePath: string): Promise<ArrayBuffer> => {
+      const url =
+        `/bridge/temp-file?path=${encodeURIComponent(filePath)}` +
+        (bridgeToken ? `&token=${encodeURIComponent(bridgeToken)}` : '')
+      const res = await fetch(url)
+      if (!res.ok) {
+        throw new Error(`Failed to fetch precomputed TTS file: HTTP ${res.status}`)
+      }
+      return res.arrayBuffer()
+    }
 
     this.logger.info('Starting fast export (virtual clock)', {
       fps,
@@ -969,10 +994,10 @@ export default class VideoExportManager {
     const timestampRecorder = new SnippetTimestampRecorder()
     const configuredTtsTimeoutMs = this.app.ttsManager?.getConfig?.().timeoutMs ?? 120_000
     const concurrentPipeline = new ConcurrentExportPipeline({
-      ttsLookahead: 3,
+      ttsLookahead: 4,
       ttsTimeoutMs: Math.max(30_000, configuredTtsTimeoutMs),
       targetFps: fps,
-      maxConcurrentTts: 3,
+      maxConcurrentTts: 4,
       waitMs: (ms) => virtualClock.realSleep(ms),
       nowMs: () => virtualClock.realTimeMs(),
       onTtsReady: ttsEnabled
@@ -985,6 +1010,18 @@ export default class VideoExportManager {
                   buf,
                   this.lipScaleForSnippet(snippets, snippetIndex)
                 )
+                if (segmentPrepareOnly && options.segmentSharedDir) {
+                  const wavPath = `${options.segmentSharedDir}/tts-${snippetIndex}-${sharedWriteId}.wav`
+                  const upload = window.electron.ipcRenderer
+                    .invoke('electron:append-to-file', {
+                      filePath: wavPath,
+                      data: new Uint8Array(buf)
+                    })
+                    .then(() => {
+                      preparedTtsWavs[snippetIndex] = { filePath: wavPath, durationMs: res.duration }
+                    })
+                  sharedTtsUploadTasks.push(upload)
+                }
               }
             }
           }
@@ -992,11 +1029,11 @@ export default class VideoExportManager {
     })
 
     const serialTts = (options.ttsMode ?? 'concurrent') === 'serial'
-    if (ttsEnabled) {
+    if (ttsEnabled && !isSegmentWorker) {
       this.logger.info(
         serialTts
           ? 'Serial mode: Synthesizing all TTS before fast rendering'
-          : 'Concurrent mode: Starting TTS pipeline (maxConcurrentTts=3) alongside rendering'
+          : 'Concurrent mode: Starting TTS pipeline (maxConcurrentTts=4) alongside rendering'
       )
       // 尽早启动 TTS 管线，使其网络合成与 BGM/SE 加载、WebCodecs 探测完全重叠
       concurrentPipeline.startTTSPipeline(
@@ -1009,45 +1046,50 @@ export default class VideoExportManager {
     }
 
     const [useWebCodecs, bgmBuffer] = await Promise.all([
-      this.resolveFastUseWebCodecs(
-        canvas,
-        outW,
-        outH,
-        encodeFps,
-        bitrate,
-        options.exportFastEncoder ?? 'auto',
-        options.gpuRenderer ?? 'auto'
-      ),
-      (async (): Promise<AudioBuffer | null> => {
-        await Promise.all([
-          bgmEnabled && bgmPlan.hasStoryFiles ? bgmPlan.load(audioMuxer) : Promise.resolve(),
-          sePlan.hasChanges ? sePlan.load(audioMuxer) : Promise.resolve()
-        ])
-        if (bgmEnabled && bgmConfig) {
-          audioMuxer.setBGMConfig(bgmConfig)
-          if (useGlobalBgm) {
-            try {
-              return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
-            } catch (error) {
-              this.logger.warn(`Failed to load BGM: ${error}`)
+      segmentPrepareOnly
+        ? Promise.resolve(false)
+        : this.resolveFastUseWebCodecs(
+            canvas,
+            outW,
+            outH,
+            encodeFps,
+            bitrate,
+            options.exportFastEncoder ?? 'auto',
+            options.gpuRenderer ?? 'auto',
+            options.codec === 'h265' ? 'hevc' : 'h264'
+          ),
+      isSegmentWorker
+        ? Promise.resolve(null)
+        : (async (): Promise<AudioBuffer | null> => {
+            await Promise.all([
+              bgmEnabled && bgmPlan.hasStoryFiles ? bgmPlan.load(audioMuxer) : Promise.resolve(),
+              sePlan.hasChanges ? sePlan.load(audioMuxer) : Promise.resolve()
+            ])
+            if (bgmEnabled && bgmConfig) {
+              audioMuxer.setBGMConfig(bgmConfig)
+              if (useGlobalBgm) {
+                try {
+                  return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
+                } catch (error) {
+                  this.logger.warn(`Failed to load BGM: ${error}`)
+                }
+              }
             }
-          }
-        }
-        return null
-      })()
+            return null
+          })()
     ])
     this.checkAborted()
 
     const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     let ttsSetupMs = 0
-    if (ttsEnabled && serialTts) {
+    if (ttsEnabled && !isSegmentWorker && (serialTts || segmentPrepareOnly)) {
       const serialTtsStart = virtualClock.realTimeMs()
       onProgress({
         stage: 'loading',
         current: 0,
         total: 1,
-        message: '正在串行合成语音…',
+        message: '正在合成语音…',
         percentage: 20
       })
       await concurrentPipeline.waitForTTSPipeline()
@@ -1100,13 +1142,19 @@ export default class VideoExportManager {
     }
 
     const createSink = async (): Promise<void> => {
+      if (segmentPrepareOnly) return
       if (sinks.encoder || sinks.jpegSink) return
       const encoderChoice = options.exportFastEncoder ?? 'auto'
       if (useWebCodecs) {
-        const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
-        sinks.tempBaseDir = tempDir
-        const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        const videoFilePath = `${tempDir}/mss-fast-${uniqueSuffix}.mp4`
+        let videoFilePath: string
+        if (isSegmentWorker && segmentRange) {
+          videoFilePath = `${segmentRange.outputPath}.raw.mp4`
+        } else {
+          const tempDir = await window.electron.ipcRenderer.invoke('electron:get-temp-base-dir')
+          sinks.tempBaseDir = tempDir
+          const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          videoFilePath = `${tempDir}/mss-fast-${uniqueSuffix}.mp4`
+        }
         const encoder = new WebCodecsMp4Encoder({
           width: outW,
           height: outH,
@@ -1135,7 +1183,11 @@ export default class VideoExportManager {
 
     await createSink()
     this.lastSinkKind = sinks.encoder ? 'webcodecs' : 'image2pipe'
-    this.lastEncoderLabel = sinks.encoder ? 'webcodecs-h264' : 'ffmpeg'
+    this.lastEncoderLabel = sinks.encoder
+      ? sinks.encoder.encoderCodecKind === 'hevc'
+        ? 'webcodecs-hevc'
+        : 'webcodecs-h264'
+      : 'ffmpeg'
     this.lastConvert = 'ffmpeg'
 
     const realStart = virtualClock.realTimeMs()
@@ -1228,12 +1280,33 @@ export default class VideoExportManager {
     /** 片尾封包是否还在等虚拟时钟：成片拍完后要继续推进故事步让它收尾。 */
     let endingEnvelopePending = false
     let endingEnvelopeDone = false
+    let snippetLoopDone = false
     let pumpError: Error | null = null
     let blackFrameValidationCount = 0
     frameValidator.reset()
     let frameIndex = 0
     /** 已执行的固定 1/60 故事步数 */
     let storyStep = 0
+
+    // !shouldRenderFrame（如 segmentPrepareOnly 或分段 worker 跳过前序帧）时不会经过
+    // encodeFrame / PBO 异步等待；若不在每帧让出宏任务，framePump 会在微任务循环里把
+    // 浏览器网络回调、IPC 与片段协程彻底饿死。用 MessageChannel 实现亚毫秒级宏任务让出。
+    const yieldMacrotask = (() => {
+      if (typeof MessageChannel !== 'undefined') {
+        const channel = new MessageChannel()
+        const queue: Array<() => void> = []
+        channel.port1.onmessage = () => {
+          const resolve = queue.shift()
+          resolve?.()
+        }
+        return () =>
+          new Promise<void>((resolve) => {
+            queue.push(resolve)
+            channel.port2.postMessage(null)
+          })
+      }
+      return () => virtualClock.realSleep(0)
+    })()
 
     /** 输出帧 k 对应的故事帧：floor(k×60/fps)；步数差按 floor 差分，非整除帧率不放大剧情。 */
     const storyStepForFrame = (frame: number): number => storyFrameForVideoFrame(frame, encodeFps)
@@ -1257,7 +1330,13 @@ export default class VideoExportManager {
       try {
         await stageReady
         const shouldStop = (): boolean => {
+          if (isSegmentWorker && endFrame >= 0 && snippetLoopDone && frameIndex >= endFrame) {
+            return true
+          }
           if (!pumpDone) return false
+          if (isSegmentWorker && endFrame >= 0) {
+            return frameIndex >= endFrame
+          }
           if (pumpTargetVirtualMs < 0) return true
           if (frameIndex === 0) return false
           // pumpTargetVirtualMs 是绝对虚拟时刻；成片帧 0 就是 renderStartMs。
@@ -1278,69 +1357,79 @@ export default class VideoExportManager {
           const storyTween = storyFrameTweenForVideoFrame(frameIndex, encodeFps)
           await advanceToStoryStep(baseStoryStep)
 
-          let interpolatedTo: FrameSnapshot | null = null
-          if (storyTween > 1e-9) {
-            if (frameInterpolator.active) {
-              // base 与 base+1 两个故事步之间按余量 lerp 连续量，阶梯量保持 base
-              const fromSnapshot = frameInterpolator.snapshot()
-              await advanceToStoryStep(baseStoryStep + 1)
-              const toSnapshot = frameInterpolator.snapshot()
-              frameInterpolator.apply(fromSnapshot, toSnapshot, storyTween)
-              interpolatedTo = toSnapshot
-            } else {
-              frameInterpolator.logUnavailableOnce()
+          const shouldRenderFrame =
+            !segmentPrepareOnly && frameIndex >= startFrame && (endFrame < 0 || frameIndex < endFrame)
+
+          if (shouldRenderFrame) {
+            let interpolatedTo: FrameSnapshot | null = null
+            if (storyTween > 1e-9) {
+              if (frameInterpolator.active) {
+                // base 与 base+1 两个故事步之间按余量 lerp 连续量，阶梯量保持 base
+                const fromSnapshot = frameInterpolator.snapshot()
+                await advanceToStoryStep(baseStoryStep + 1)
+                const toSnapshot = frameInterpolator.snapshot()
+                frameInterpolator.apply(fromSnapshot, toSnapshot, storyTween)
+                interpolatedTo = toSnapshot
+              } else {
+                frameInterpolator.logUnavailableOnce()
+              }
             }
-          }
 
-          const renderStart = virtualClock.realTimeMs()
-          this.app.pixiApplication.render()
-          renderMs += virtualClock.realTimeMs() - renderStart
-          if (interpolatedTo) {
-            // 插值只影响本帧绘制；恢复 base+1，保证后续模拟连续
-            frameInterpolator.restore(interpolatedTo)
-          }
-
-          const timestampUs = Math.round(frameIndex * (1_000_000 / encodeFps))
-          const durationUs = Math.round(1_000_000 / encodeFps)
-          // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
-          // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
-          const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
-          const tailFrames = Math.ceil(encodeFps * 0.6)
-          const inEndingTail =
-            pumpTargetVirtualMs >= 0 &&
-            nextFrameVirtualMs > pumpTargetVirtualMs - 600 &&
-            frameIndex > Math.max(0, Math.ceil(pumpTargetVirtualMs / frameMs) - tailFrames)
-          const keyFrame = inEndingTail ? frameIndex % 4 === 0 : frameIndex % (encodeFps * 4) === 0
-
-          const captureStart = virtualClock.realTimeMs()
-          if (sinks.encoder) {
-            await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
-          } else if (sinks.jpegSink) {
-            await sinks.jpegSink.captureFrame(canvas)
-          }
-          snapshotMs += virtualClock.realTimeMs() - captureStart
-
-          if (frameIndex % (encodeFps * 10) === 0) {
-            const v = frameValidator.validateFrame(canvas, frameIndex)
-            if (!v.isValid && v.error) {
-              VideoExportManager.warmValidatedApps.delete(this.app)
-              throw new Error(
-                `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
-                  `Brightness: ${v.brightness.toFixed(2)}%`
-              )
+            const renderStart = virtualClock.realTimeMs()
+            this.app.pixiApplication.render()
+            renderMs += virtualClock.realTimeMs() - renderStart
+            if (interpolatedTo) {
+              // 插值只影响本帧绘制；恢复 base+1，保证后续模拟连续
+              frameInterpolator.restore(interpolatedTo)
             }
-            if (v.isBlackScreen) {
-              blackFrameValidationCount++
-              if (blackFrameValidationCount >= 5) {
+
+            const localFrame = frameIndex - startFrame
+            const timestampUs = Math.round(localFrame * (1_000_000 / encodeFps))
+            const durationUs = Math.round(1_000_000 / encodeFps)
+            // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
+            // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
+            const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
+            const tailFrames = Math.ceil(encodeFps * 0.6)
+            const inEndingTail =
+              pumpTargetVirtualMs >= 0 &&
+              nextFrameVirtualMs > pumpTargetVirtualMs - 600 &&
+              frameIndex > Math.max(0, Math.ceil(pumpTargetVirtualMs / frameMs) - tailFrames)
+            const keyFrame =
+              localFrame === 0 ||
+              (inEndingTail ? frameIndex % 4 === 0 : localFrame % (encodeFps * 4) === 0)
+
+            const captureStart = virtualClock.realTimeMs()
+            if (sinks.encoder) {
+              await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
+            } else if (sinks.jpegSink) {
+              await sinks.jpegSink.captureFrame(canvas)
+            }
+            snapshotMs += virtualClock.realTimeMs() - captureStart
+
+            if (localFrame % (encodeFps * 10) === 0) {
+              const v = frameValidator.validateFrame(canvas, frameIndex)
+              if (!v.isValid && v.error) {
                 VideoExportManager.warmValidatedApps.delete(this.app)
                 throw new Error(
-                  `Detected ${blackFrameValidationCount} black frames during fast export. ` +
-                    `Models are not rendering.`
+                  `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
+                    `Brightness: ${v.brightness.toFixed(2)}%`
                 )
               }
-            } else {
-              blackFrameValidationCount = 0
+              if (v.isBlackScreen) {
+                blackFrameValidationCount++
+                if (blackFrameValidationCount >= 5) {
+                  VideoExportManager.warmValidatedApps.delete(this.app)
+                  throw new Error(
+                    `Detected ${blackFrameValidationCount} black frames during fast export. ` +
+                      `Models are not rendering.`
+                  )
+                }
+              } else {
+                blackFrameValidationCount = 0
+              }
             }
+          } else {
+            await yieldMacrotask()
           }
 
           frameIndex++
@@ -1414,11 +1503,30 @@ export default class VideoExportManager {
         await Promise.allSettled(batch)
       }
 
+      const segStartMs = (startFrame / Math.max(1, encodeFps)) * 1000
+      const segEndMs =
+        endFrame >= 0 ? (endFrame / Math.max(1, encodeFps)) * 1000 : Number.POSITIVE_INFINITY
+      const segEndTimelineMs =
+        isSegmentWorker && endFrame >= 0
+          ? Math.max(
+              0,
+              (storyStepForFrame(endFrame) - PLAYCORE_WARMUP_FRAMES) * (1000 / STORY_FPS)
+            )
+          : Number.POSITIVE_INFINITY
+
       for (let i = 0; i < totalSnippets; i++) {
         this.checkAborted()
         if (pumpError) throw pumpError
 
         const snippet = snippets[i]
+        if (isSegmentWorker && timeline[i]) {
+          const preDelayStartMs =
+            timeline[i].delayStartTimeMs ??
+            Math.max(0, timeline[i].startTimeMs - Math.round((snippet.delay || 0) * 1000))
+          if (preDelayStartMs >= segEndTimelineMs) {
+            break
+          }
+        }
         if (snippetHasPreFence(snippet)) {
           await this.app.snippetStrategyManager?.waitForPreFence?.(snippet)
           await flushPendingTimestamps()
@@ -1464,7 +1572,48 @@ export default class VideoExportManager {
             )
           }
         }
-        if (ttsEnabled && talkData) {
+        if (ttsEnabled && isSegmentWorker && talkData) {
+          const pre = precomputedTts?.[i]
+          const ttsDurationMs = pre && pre.durationMs > 0 ? pre.durationMs : 0
+          const silentHoldMs =
+            ttsDurationMs <= 0 &&
+            !(talkData as { voice?: string }).voice &&
+            !hasSpeakableSpeechText(talkData.ttsText ?? '') &&
+            !hasSpeakableSpeechText(talkData.content ?? '')
+              ? SILENT_PUNCTUATION_HOLD_MS
+              : undefined
+          const officialVoiceMs =
+            Number((talkData as { voiceDurationMs?: number }).voiceDurationMs) || 0
+          const plannedMs = officialVoiceMs > 0 ? plannedTalkDurationMs.get(i) : undefined
+          resolvedTalkDurationMs = applyTalkPatch(
+            timeline,
+            i,
+            ttsDurationMs,
+            plannedMs ??
+              this.talkDurationWithMotionGate(
+                talkData as unknown as TalkSnippetLike,
+                ttsDurationMs,
+                this.talkWindowOpenMs(snippets, i, timeline),
+                i,
+                layoutRunningMs,
+                existingMotionSettleMs,
+                silentHoldMs,
+                (snippet.delay || 0) * 1000
+              )
+          )
+          this.app.ttsManager.setTimeline(timeline)
+          const patchedEntry = timeline[i]
+          const overlapsSegment =
+            patchedEntry &&
+            patchedEntry.endTimeMs >= Math.max(0, segStartMs - 5000) &&
+            patchedEntry.startTimeMs <= segEndMs + 500
+          if (ttsDurationMs > 0 && pre?.filePath && overlapsSegment) {
+            const wavBuf = await readBridgeTempFile(pre.filePath)
+            await this.prepareTalkLipSync(wavBuf, i, this.lipScaleForSnippet(snippets, i))
+          } else {
+            this.app.currentTalkLipSync = null
+          }
+        } else if (ttsEnabled && talkData) {
           const ttsReadyNow = concurrentPipeline.isTTSReady(i)
           if (!ttsReadyNow) {
             setPumpPaused(true)
@@ -1611,6 +1760,9 @@ export default class VideoExportManager {
         const plannedDelayStartMs =
           timelineEntry?.delayStartTimeMs ??
           Math.max(0, (timelineEntry?.startTimeMs ?? 0) - Math.round((snippet.delay || 0) * 1000))
+        if (isSegmentWorker && plannedDelayStartMs >= segEndTimelineMs) {
+          break
+        }
         const waitForPlannedStartMs = timelineStartMs + plannedDelayStartMs - virtualClock.now()
         if (waitForPlannedStartMs > 0.5 && !this.isAborted) {
           await AnimationManager.delay(Math.max(0, waitForPlannedStartMs - 0.001))
@@ -1689,6 +1841,126 @@ export default class VideoExportManager {
           )
         } else {
           timestampRecorder.recordSnippet(i, snippet.type, snippetStartedAtMs, performance.now())
+        }
+      }
+
+      snippetLoopDone = true
+
+      if (isSegmentWorker && segmentRange) {
+        setPumpPaused(false)
+        pumpDone = true
+        await framePump
+        if (pumpError) throw pumpError
+
+        virtualClock.uninstall()
+        const finishStart = virtualClock.realTimeMs()
+        const segVideoRaw = sinks.encoder
+          ? await sinks.encoder.finish()
+          : await sinks.jpegSink!.finish()
+        if (sinks.jpegSink?.isPipeMode) {
+          sinks.pipeTempDir = segVideoRaw.replace(/[\\/][^\\/]*$/, '')
+        }
+        encodeMs = virtualClock.realTimeMs() - finishStart
+
+        const segFrames = Math.max(1, segmentRange.endFrame - segmentRange.startFrame)
+        const segDurationSec = segFrames / Math.max(1, encodeFps)
+        const maxOutputMbps = options.maxOutputMbps ?? 3.5
+        const invokeStart = virtualClock.realTimeMs()
+        let finalSegmentPath = segVideoRaw
+        let segmentConvert: 'browser' | 'ffmpeg' = 'browser'
+        const segCodec: 'h264' | 'hevc' = sinks.encoder
+          ? sinks.encoder.encoderCodecKind
+          : options.codec === 'h264'
+            ? 'h264'
+            : 'hevc'
+
+        if (sinks.encoder) {
+          const needsColorConversion = sinks.encoder.requiresColorConversion === true
+          const actualMbps =
+            segDurationSec >= 2 ? (sinks.encoder.writtenBytes * 8) / (segDurationSec * 1_000_000) : 0
+          const needsRemux = needsColorConversion || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
+          if (needsRemux) {
+            const remuxRes = await window.electron.ipcRenderer.invoke(
+              'electron:api-remux-video-from-files',
+              {
+                videoPath: segVideoRaw,
+                outputPath: segmentRange.outputPath,
+                audioBitrate: options.apiAudioBitrate ?? '128k',
+                frameCount: segFrames,
+                fps: encodeFps,
+                transcode: needsColorConversion,
+                inputWidth: outW,
+                inputHeight: outH,
+                crf: options.apiCrf ?? options.crf ?? 23,
+                recordedBitrate: bitrate,
+                inputCodec: segCodec
+              }
+            )
+            if (!remuxRes?.success) {
+              throw new Error(remuxRes?.error || 'Segment video remux failed')
+            }
+            finalSegmentPath = segmentRange.outputPath
+            segmentConvert = 'ffmpeg'
+          }
+        } else if (sinks.jpegSink?.isPipeMode) {
+          const remuxRes = await window.electron.ipcRenderer.invoke(
+            'electron:api-remux-video-from-files',
+            {
+              videoPath: segVideoRaw,
+              outputPath: segmentRange.outputPath,
+              audioBitrate: options.apiAudioBitrate ?? '128k',
+              frameCount: segFrames,
+              fps: encodeFps
+            }
+          )
+          if (!remuxRes?.success) {
+            throw new Error(remuxRes?.error || 'Segment pipe video remux failed')
+          }
+          finalSegmentPath = segmentRange.outputPath
+          segmentConvert = 'ffmpeg'
+        } else {
+          const framesDir = sinks.framesDir || segVideoRaw
+          const encRes = await window.electron.ipcRenderer.invoke('electron:api-encode-frames-video', {
+            framesDir,
+            outputPath: segmentRange.outputPath,
+            fps: encodeFps,
+            audioBitrate: options.apiAudioBitrate ?? '128k',
+            inputWidth: outW,
+            inputHeight: outH
+          })
+          if (!encRes?.success) {
+            throw new Error(encRes?.error || 'Segment frames encode failed')
+          }
+          finalSegmentPath = segmentRange.outputPath
+          segmentConvert = 'ffmpeg'
+        }
+        invokeMs = virtualClock.realTimeMs() - invokeStart
+        VideoExportManager.warmValidatedApps.add(this.app)
+
+        const timings: Record<string, number> = {
+          pumpMs: Math.round(pumpMs),
+          tickMs: Math.round(tickMs),
+          renderMs: Math.round(renderMs),
+          snapshotMs: Math.round(snapshotMs),
+          ttsSetupMs: 0,
+          ttsWaitMs: 0,
+          encodeMs: Math.round(encodeMs),
+          audioMs: 0,
+          invokeMs: Math.round(invokeMs),
+          frames: segFrames,
+          encodedFrames: segFrames,
+          videoDurationMs: Math.round(segDurationSec * 1000),
+          wallMs: Math.round(virtualClock.realTimeMs() - realStart),
+          avgPumpFps: pumpMs > 0 ? Math.round((segFrames / (pumpMs / 1000)) * 10) / 10 : 0
+        }
+        return {
+          success: true,
+          duration: segDurationSec,
+          frameCount: segFrames,
+          videoPath: finalSegmentPath,
+          segmentCodec: segCodec,
+          segmentConvert,
+          timings
         }
       }
 
@@ -1834,20 +2106,23 @@ export default class VideoExportManager {
         }
 
         let path: string
+        const useSharedMixFile = segmentPrepareOnly && Boolean(options.segmentSharedDir)
         if (
           typeof muxer.mixToInt16Chunks === 'function' &&
           typeof muxer.createWavHeader === 'function'
         ) {
           // 流式：先写 44 字节头，再按块追加 Int16 PCM；不再分配整段 Int16 + WAV
-          path = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
-            data: new ArrayBuffer(0),
-            prefix: 'mss-audio',
-            extension: 'wav'
-          })
+          path = useSharedMixFile
+            ? `${options.segmentSharedDir}/mixed-${sharedWriteId}.wav`
+            : await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
+                data: new ArrayBuffer(0),
+                prefix: 'mss-audio',
+                extension: 'wav'
+              })
           try {
             await window.electron.ipcRenderer.invoke('electron:append-to-file', {
               filePath: path,
-              data: muxer.createWavHeader(totalDurationMs)
+              data: new Uint8Array(muxer.createWavHeader(totalDurationMs))
             })
             for await (const chunk of muxer.mixToInt16Chunks(totalDurationMs, mixInputBgm)) {
               await window.electron.ipcRenderer.invoke('electron:append-to-file', {
@@ -1857,9 +2132,11 @@ export default class VideoExportManager {
               })
             }
           } catch (error) {
-            await window.electron.ipcRenderer
-              .invoke('electron:delete-temp-file', { filePath: path })
-              .catch(() => undefined)
+            if (!useSharedMixFile) {
+              await window.electron.ipcRenderer
+                .invoke('electron:delete-temp-file', { filePath: path })
+                .catch(() => undefined)
+            }
             throw error
           }
         } else {
@@ -1874,11 +2151,19 @@ export default class VideoExportManager {
             const mixedAudioBuffer = await muxer.mixAudioTracks!(totalDurationMs, mixInputBgm)
             wavBuffer = await muxer.audioBufferToWav!(mixedAudioBuffer)
           }
-          path = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
-            data: wavBuffer,
-            prefix: 'mss-audio',
-            extension: 'wav'
-          })
+          if (useSharedMixFile) {
+            path = `${options.segmentSharedDir}/mixed-${sharedWriteId}.wav`
+            await window.electron.ipcRenderer.invoke('electron:append-to-file', {
+              filePath: path,
+              data: new Uint8Array(wavBuffer)
+            })
+          } else {
+            path = await window.electron.ipcRenderer.invoke('electron:write-temp-file', {
+              data: wavBuffer,
+              prefix: 'mss-audio',
+              extension: 'wav'
+            })
+          }
         }
         this.pcmCache.clear()
         this.lipSyncCache.clear()
@@ -1898,6 +2183,59 @@ export default class VideoExportManager {
       virtualClock.uninstall()
 
       const finishStart = virtualClock.realTimeMs()
+      if (segmentPrepareOnly) {
+        const [audioFilePath] = await Promise.all([
+          audioTask.then((res) => {
+            audioMs = virtualClock.realTimeMs() - finishStart
+            return res
+          }),
+          Promise.allSettled(sharedTtsUploadTasks)
+        ])
+        sinks.audioFilePath = null
+        const videoDurationMs = (finalFrameCount / Math.max(1, encodeFps)) * 1000
+        const timings: Record<string, number> = {
+          pumpMs: Math.round(pumpMs),
+          tickMs: Math.round(tickMs),
+          renderMs: 0,
+          snapshotMs: 0,
+          ttsSetupMs: Math.round(ttsSetupMs),
+          ttsWaitMs: Math.round(ttsWaitMs),
+          encodeMs: 0,
+          audioMs: Math.round(audioMs),
+          invokeMs: 0,
+          frames: finalFrameCount,
+          encodedFrames: finalFrameCount,
+          videoDurationMs: Math.round(videoDurationMs),
+          wallMs: Math.round(virtualClock.realTimeMs() - realStart),
+          avgPumpFps: 0
+        }
+        const prepResult: ExportResult = {
+          success: true,
+          duration: videoDurationMs / 1000,
+          frameCount: finalFrameCount,
+          timings
+        }
+        this.attachDiagnostics(
+          prepResult,
+          snippets,
+          timeline,
+          timestampRecorder,
+          ttsAudioResults,
+          'fast',
+          options,
+          ttsEnabled
+        )
+        prepResult.prepared = {
+          totalFrames: finalFrameCount,
+          encodeFps,
+          audioFilePath,
+          ttsWavs: preparedTtsWavs,
+          diagnostics: prepResult.diagnostics,
+          timings
+        }
+        return prepResult
+      }
+
       const finishVideoSink = async (): Promise<string> => {
         if (sinks.encoder) {
           return sinks.encoder.finish()
@@ -1939,6 +2277,7 @@ export default class VideoExportManager {
         // WebCodecs 的硬件编码器经常输出 full-range/yuvj420p 且带 sRGB TRC；
         // 此时必须让宿主按统一 BT.709/tv 滤镜链重编码，不能直接 copy 容器。
         const needsColorConversion = sinks.encoder?.requiresColorConversion === true
+        const encoderCodec = sinks.encoder?.encoderCodecKind ?? (options.codec === 'h265' ? 'hevc' : 'h264')
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -1954,13 +2293,16 @@ export default class VideoExportManager {
                   inputWidth: outW,
                   inputHeight: outH,
                   crf: options.apiCrf ?? options.crf ?? 23,
-                  recordedBitrate: bitrate
+                  recordedBitrate: bitrate,
+                  inputCodec: encoderCodec
                 }
               : {})
           }
         )
         if (sinks.encoder) {
-          this.lastEncoderLabel = needsColorConversion ? 'webcodecs-h264+ffmpeg' : 'webcodecs-h264'
+          this.lastEncoderLabel = needsColorConversion
+            ? `webcodecs-${encoderCodec}+ffmpeg`
+            : `webcodecs-${encoderCodec}`
           this.lastConvert = needsColorConversion ? 'ffmpeg' : 'browser'
         }
       } else {
@@ -2131,7 +2473,9 @@ export default class VideoExportManager {
         ? canvas.getContext('webgl2') || canvas.getContext('webgl')
         : null
     const glLost = Boolean(gl && typeof gl.isContextLost === 'function' && gl.isContextLost())
-    const skipWarmValidation = VideoExportManager.warmValidatedApps.has(this.app) && !glLost
+    const skipWarmValidation =
+      options.segmentPrepareOnly === true ||
+      (VideoExportManager.warmValidatedApps.has(this.app) && !glLost)
 
     if (skipWarmValidation) {
       this.logger.info('Warm worker page: skipping redundant WebGL shader/readPixels validation')
@@ -2173,7 +2517,9 @@ export default class VideoExportManager {
 
     // 第一次把角色加进舞台会触发纹理上传/着色器编译（约 50~120ms）。在导出开始前
     // 以 alpha=0.01 预画一帧，让 GPU 资源就绪，但不影响成片。
-    await this.prewarmStoryModels()
+    if (!options.segmentPrepareOnly) {
+      await this.prewarmStoryModels()
+    }
 
     return { canvas, snippets, captureFps }
   }

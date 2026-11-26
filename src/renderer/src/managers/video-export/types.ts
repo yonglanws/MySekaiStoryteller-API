@@ -20,7 +20,7 @@ export interface VideoExportOptions {
    * - `'record'` / `'stream'`：@deprecated 已废弃，自动委托为 `'fast'`
    */
   exportMode?: 'fast' | 'frames' | 'record' | 'stream'
-  /** fast 模式视频码率（bps），缺省 3.5Mbps VBR */
+  /** fast 模式视频码率（bps），缺省 3.2Mbps VBR */
   exportBitrate?: number
   /** 成品平均码率软上限（Mbps，0 = 不限；超限时宿主用 Rust 导出器快速 CRF 压缩） */
   maxOutputMbps?: number
@@ -39,6 +39,18 @@ export interface VideoExportOptions {
   apiOutputPath?: string
   apiCrf?: number
   apiAudioBitrate?: string
+  segmentPrepareOnly?: boolean
+  segmentSharedDir?: string
+  segmentRange?: {
+    index: number
+    count: number
+    startFrame: number
+    endFrame: number
+    totalFrames: number
+    encodeFps: number
+    outputPath: string
+    precomputedTts: Record<number, { filePath: string; durationMs: number }>
+  }
 }
 
 export interface ExportProgress {
@@ -83,10 +95,21 @@ export interface ExportResult {
   duration: number
   frameCount: number
   outputSize?: number
+  videoPath?: string
   /** 分段时间统计（毫秒）：pump/ttsWait/encode/audio/invoke/avgPumpFps/frames */
   timings?: Record<string, number>
   /** 逐句/逐动作/TTS/日志的完整导出诊断，由宿主写成 <video>.log.json */
   diagnostics?: import('./ExportDiagnostics').ExportDiagnostics
+  prepared?: {
+    totalFrames: number
+    encodeFps: number
+    audioFilePath?: string
+    ttsWavs: Record<number, { filePath: string; durationMs: number }>
+    diagnostics?: import('./ExportDiagnostics').ExportDiagnostics
+    timings?: Record<string, number>
+  }
+  segmentCodec?: 'h264' | 'hevc'
+  segmentConvert?: 'browser' | 'ffmpeg'
   error?: string
   performanceMetrics?: ExportPerformanceMetrics
 }

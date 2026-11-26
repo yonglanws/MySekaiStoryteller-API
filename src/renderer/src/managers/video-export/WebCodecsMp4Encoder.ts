@@ -17,6 +17,7 @@ export interface WebCodecsProbeOptions {
   height: number
   fps: number
   bitrate: number
+  codec?: 'h264' | 'hevc'
   mode?: 'auto' | 'webcodecs'
   canvas?: HTMLCanvasElement | null
   glRenderer?: string
@@ -82,6 +83,10 @@ export class WebCodecsMp4Encoder {
   private scaleCtx: OffscreenCanvasRenderingContext2D | null = null
   private yuvConverter: GpuYuv420Converter | null = null
   private readonly useGpuYuvReadback: boolean
+  private pendingPboMeta: Array<{ timestampUs: number; durationUs: number; keyFrame: boolean }> = []
+  private pboReusePool: Uint8Array[] = []
+  private activeMuxerCodec: 'avc' | 'hevc' = 'avc'
+  private totalWrittenBytes = 0
   private dequeueWaiter: (() => void) | null = null
 
   constructor(opts: {
@@ -91,8 +96,9 @@ export class WebCodecsMp4Encoder {
     bitrate: number
     encoderConfig?: VideoEncoderConfig | null
     /**
-     * 默认 false（零拷贝 `new VideoFrame(canvas)` 直接送 GPU 硬件编码器，避免每帧 3.1MB 同步
-     * `gl.readPixels` 拖慢 ~8.6ms/帧；收尾交由 Rust 导出器做高速 BT.709/tv CRF 压制，既快又省 4-6x 体积）。
+     * 默认 true（通过 3-slot 异步 WebGL2 PBO 环在 GPU 上直接转成 BT.709 limited-range I420，
+     * 不阻塞渲染管线，并让宿主可直接走 `-c:v copy` + BT.709 VUI 标签收尾，消除 135s 二次重编码）。
+     * 传 false 时强制走零拷贝 `new VideoFrame(canvas)`（由宿主重编码修正色彩空间）。
      */
     useGpuYuvReadback?: boolean
   }) {
@@ -101,7 +107,7 @@ export class WebCodecsMp4Encoder {
     this.fps = opts.fps
     this.bitrate = opts.bitrate
     this.preProbedConfig = opts.encoderConfig ?? null
-    this.useGpuYuvReadback = opts.useGpuYuvReadback === true
+    this.useGpuYuvReadback = opts.useGpuYuvReadback !== false
   }
 
   /** 读取当前 WebGL 渲染器字符串；读取失败返回空字符串 */
@@ -233,7 +239,14 @@ export class WebCodecsMp4Encoder {
       }
     }
 
-    const codecs = ['avc1.640028', 'avc1.4d4028', 'avc1.42e028', 'avc1.42001f']
+    const avcCodecs = ['avc1.640028', 'avc1.4d4028', 'avc1.42e028', 'avc1.42001f']
+    const hevcCodecs = [
+      'hvc1.1.6.L123.B0',
+      'hev1.1.6.L123.B0',
+      'hvc1.1.6.L120.90',
+      'hev1.1.6.L120.90'
+    ]
+    const codecs = opts.codec === 'hevc' ? [...hevcCodecs, ...avcCodecs] : avcCodecs
     const hwModes: HardwareAcceleration[] =
       mode === 'webcodecs' ? ['prefer-hardware', 'no-preference'] : ['prefer-hardware']
     const shouldBenchmark = opts.benchmark ?? mode === 'auto'
@@ -241,6 +254,7 @@ export class WebCodecsMp4Encoder {
 
     for (const hw of hwModes) {
       for (const codec of codecs) {
+        const isHevc = codec.startsWith('hvc1') || codec.startsWith('hev1')
         const config: VideoEncoderConfig = {
           codec,
           width: opts.width,
@@ -251,7 +265,7 @@ export class WebCodecsMp4Encoder {
           hardwareAcceleration: hw,
           // realtime 模式禁用硬件编码器多帧前瞻/B 帧队列，避免在同卡 D3D11 上阻塞 WebGL 渲染管线
           latencyMode: 'realtime',
-          avc: { format: 'avc' }
+          ...(isHevc ? { hevc: { format: 'hevc' } } : { avc: { format: 'avc' } })
         }
         try {
           const support = await VideoEncoder.isConfigSupported(config)
@@ -324,6 +338,11 @@ export class WebCodecsMp4Encoder {
     this.logger.info(
       `WebCodecs encoder config: codec=${config.codec}, hw=${config.hardwareAcceleration}, bitrate=${this.bitrate}`
     )
+    this.activeMuxerCodec =
+      config.codec.startsWith('hvc1') || config.codec.startsWith('hev1') ? 'hevc' : 'avc'
+    this.pendingPboMeta = []
+    this.pboReusePool = []
+    this.totalWrittenBytes = 0
 
     // 先建空文件（append-to-file 不存在时自动创建），
     // positioned write 需要 r+ 打开已存在的文件
@@ -335,6 +354,7 @@ export class WebCodecsMp4Encoder {
     this.muxer = new Muxer({
       target: new StreamTarget({
         onData: (data: Uint8Array, position: number) => {
+          this.totalWrittenBytes = Math.max(this.totalWrittenBytes, position + data.byteLength)
           const copy = new Uint8Array(data)
           this.writeChain = this.writeChain
             .then(() =>
@@ -354,7 +374,7 @@ export class WebCodecsMp4Encoder {
         chunkSize: 16 * 1024 * 1024
       }),
       video: {
-        codec: 'avc',
+        codec: this.activeMuxerCodec,
         width: this.width,
         height: this.height
       },
@@ -405,10 +425,10 @@ export class WebCodecsMp4Encoder {
       }
     })
     this.encoder.configure(config)
-    // 仅在显式开启时启用 WebGL2 YUV 读回；默认走零拷贝 GPU VideoFrame(canvas)，
-    // 消除每帧同步 gl.readPixels 的 ~8.6ms/帧停顿（5 分钟 60fps 省 ~145 秒）。
+    // 使用 3-slot 异步 PBO 环在 GPU 上完成 RGBA -> BT.709 limited-range I420 转换：
+    // 消除同步 gl.readPixels 停顿，且宿主可直接 `-c:v copy` + BT.709 VUI 标签收尾（~1-3s）。
     if (this.useGpuYuvReadback) {
-      this.yuvConverter = GpuYuv420Converter.create(this.width, this.height, 0)
+      this.yuvConverter = GpuYuv420Converter.create(this.width, this.height, 3)
     }
   }
 
@@ -418,6 +438,57 @@ export class WebCodecsMp4Encoder {
       this.dequeueWaiter = null
       waiter()
     }
+  }
+
+  private async waitEncodeQueueReady(): Promise<void> {
+    while (this.encoder && !this.isDisposed && this.encoder.encodeQueueSize > 8) {
+      const encoder = this.encoder
+      await new Promise<void>((resolve) => {
+        const cleanup = (): void => {
+          if (this.dequeueWaiter === cleanup) {
+            this.dequeueWaiter = null
+          }
+          encoder.removeEventListener('dequeue', cleanup)
+          resolve()
+        }
+        this.dequeueWaiter = cleanup
+        encoder.addEventListener('dequeue', cleanup)
+      })
+      if (this.encodeError) throw this.encodeError
+      if (this.isDisposed || !this.encoder)
+        throw new Error('Encoder disposed during backpressure wait')
+    }
+  }
+
+  private async encodeI420Buffer(
+    yuvBytes: Uint8Array,
+    timestampUs: number,
+    durationUs: number,
+    keyFrame: boolean
+  ): Promise<void> {
+    if (this.encodeError) throw this.encodeError
+    if (this.isDisposed || !this.encoder) throw new Error('Encoder not initialized')
+    await this.waitEncodeQueueReady()
+    const frame = new VideoFrame(yuvBytes, {
+      format: 'I420',
+      codedWidth: this.width,
+      codedHeight: this.height,
+      timestamp: timestampUs,
+      duration: durationUs,
+      colorSpace: {
+        primaries: 'bt709',
+        transfer: 'bt709',
+        matrix: 'bt709',
+        fullRange: false
+      }
+    })
+    try {
+      this.encoder.encode(frame, { keyFrame })
+      this.frameCount++
+    } finally {
+      frame.close()
+    }
+    if (this.encodeError) throw this.encodeError
   }
 
   /**
@@ -436,63 +507,48 @@ export class WebCodecsMp4Encoder {
     if (this.encodeError) throw this.encodeError
     if (this.isDisposed || !this.encoder) throw new Error('Encoder not initialized')
 
-    // 背压：编码队列积压时等待 dequeue，出错或 dispose 时立即唤醒以免帧泵卡死
-    while (this.encoder && !this.isDisposed && this.encoder.encodeQueueSize > 8) {
-      const encoder = this.encoder
-      await new Promise<void>((resolve) => {
-        const cleanup = (): void => {
-          if (this.dequeueWaiter === cleanup) {
-            this.dequeueWaiter = null
-          }
-          encoder.removeEventListener('dequeue', cleanup)
-          resolve()
-        }
-        this.dequeueWaiter = cleanup
-        encoder.addEventListener('dequeue', cleanup)
-      })
-      if (this.encodeError) throw this.encodeError
-      if (this.isDisposed || !this.encoder)
-        throw new Error('Encoder disposed during backpressure wait')
-    }
-
-    let frame: VideoFrame
     if (this.yuvConverter) {
-      const yuvBytes = this.yuvConverter.convertSync(source as TexImageSource)
-      frame = new VideoFrame(yuvBytes, {
-        format: 'I420',
-        codedWidth: this.width,
-        codedHeight: this.height,
-        timestamp: timestampUs,
-        duration: durationUs,
-        colorSpace: {
-          primaries: 'bt709',
-          transfer: 'bt709',
-          matrix: 'bt709',
-          fullRange: false
+      if (typeof this.yuvConverter.enqueueAsync === 'function') {
+        this.pendingPboMeta.push({ timestampUs, durationUs, keyFrame })
+        const recycle = this.pboReusePool.pop()
+        const completed = await this.yuvConverter.enqueueAsync(source as TexImageSource, recycle)
+        if (completed) {
+          const meta = this.pendingPboMeta.shift()
+          if (meta) {
+            await this.encodeI420Buffer(completed, meta.timestampUs, meta.durationUs, meta.keyFrame)
+          }
+          if (completed.byteLength === this.yuvConverter.frameByteLength) {
+            this.pboReusePool.push(completed)
+          }
         }
-      })
-    } else {
-      // 源尺寸 ≠ 编码尺寸（renderScale 超采样）时，经 OffscreenCanvas
-      // 做一次 GPU 缩放；同尺寸则零拷贝直接构造 VideoFrame。
-      let frameSource = source as CanvasImageSource
-      const srcW = (source as { width?: number }).width ?? this.width
-      const srcH = (source as { height?: number }).height ?? this.height
-      if (srcW !== this.width || srcH !== this.height) {
-        if (!this.scaleCanvas) {
-          this.scaleCanvas = new OffscreenCanvas(this.width, this.height)
-          this.scaleCtx = this.scaleCanvas.getContext('2d')
-        }
-        if (this.scaleCtx) {
-          this.scaleCtx.drawImage(source as CanvasImageSource, 0, 0, this.width, this.height)
-          frameSource = this.scaleCanvas
-        }
+        return
       }
-
-      frame = new VideoFrame(frameSource, {
-        timestamp: timestampUs,
-        duration: durationUs
-      })
+      const yuvBytes = this.yuvConverter.convertSync(source as TexImageSource)
+      await this.encodeI420Buffer(yuvBytes, timestampUs, durationUs, keyFrame)
+      return
     }
+
+    await this.waitEncodeQueueReady()
+    // 源尺寸 ≠ 编码尺寸（renderScale 超采样）时，经 OffscreenCanvas
+    // 做一次 GPU 缩放；同尺寸则零拷贝直接构造 VideoFrame。
+    let frameSource = source as CanvasImageSource
+    const srcW = (source as { width?: number }).width ?? this.width
+    const srcH = (source as { height?: number }).height ?? this.height
+    if (srcW !== this.width || srcH !== this.height) {
+      if (!this.scaleCanvas) {
+        this.scaleCanvas = new OffscreenCanvas(this.width, this.height)
+        this.scaleCtx = this.scaleCanvas.getContext('2d')
+      }
+      if (this.scaleCtx) {
+        this.scaleCtx.drawImage(source as CanvasImageSource, 0, 0, this.width, this.height)
+        frameSource = this.scaleCanvas
+      }
+    }
+
+    const frame = new VideoFrame(frameSource, {
+      timestamp: timestampUs,
+      duration: durationUs
+    })
     try {
       this.encoder.encode(frame, { keyFrame })
       this.frameCount++
@@ -507,8 +563,27 @@ export class WebCodecsMp4Encoder {
     if (this.encodeError) throw this.encodeError
     if (!this.encoder || !this.muxer) throw new Error('Encoder not initialized')
 
-    this.yuvConverter?.dispose()
-    this.yuvConverter = null
+    if (this.yuvConverter) {
+      if (typeof this.yuvConverter.drainAllAsync === 'function') {
+        const frameLen = this.yuvConverter.frameByteLength
+        const remaining = await this.yuvConverter.drainAllAsync(
+          () => this.pboReusePool.pop() ?? new Uint8Array(frameLen)
+        )
+        for (const yuvBytes of remaining) {
+          const meta = this.pendingPboMeta.shift()
+          if (meta) {
+            await this.encodeI420Buffer(yuvBytes, meta.timestampUs, meta.durationUs, meta.keyFrame)
+          }
+          if (yuvBytes.byteLength === frameLen) {
+            this.pboReusePool.push(yuvBytes)
+          }
+        }
+      }
+      this.pendingPboMeta = []
+      this.pboReusePool = []
+      this.yuvConverter.dispose()
+      this.yuvConverter = null
+    }
 
     await this.encoder.flush()
     if (this.encodeError) throw this.encodeError
@@ -530,6 +605,14 @@ export class WebCodecsMp4Encoder {
     return this.filePath
   }
 
+  get encoderCodecKind(): 'h264' | 'hevc' {
+    return this.activeMuxerCodec === 'hevc' ? 'hevc' : 'h264'
+  }
+
+  get writtenBytes(): number {
+    return this.totalWrittenBytes
+  }
+
   get frames(): number {
     return this.frameCount
   }
@@ -539,6 +622,7 @@ export class WebCodecsMp4Encoder {
    * Chrome 的画布帧通常以 full-range 送入硬件编码器，SPS/VUI 会写 pc + sRGB；
    * 这种流不能用 `-c:v copy` 直接进成片，必须让宿主 ffmpeg 走
    * `scale=out_color_matrix=bt709:out_range=tv` 才能同时修正像素与元数据。
+   * 若使用 GpuYuv420Converter 送入 BT.709 limited-range I420，编码器实测保持 tv/bt709，此处返回 false。
    */
   get requiresColorConversion(): boolean {
     const cs = this.observedColorSpace
@@ -554,6 +638,8 @@ export class WebCodecsMp4Encoder {
   dispose(): void {
     this.isDisposed = true
     this.wakeDequeueWaiter()
+    this.pendingPboMeta = []
+    this.pboReusePool = []
     this.yuvConverter?.dispose()
     this.yuvConverter = null
     try {

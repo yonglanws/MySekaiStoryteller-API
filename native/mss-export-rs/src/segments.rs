@@ -4,9 +4,13 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use crate::hardware::Codec;
-use crate::pipe::{audio_truncation_args, partial_output_path, write_output_atomically};
+use crate::pipe::{
+    audio_truncation_args, bt709_vui_bsf, detect_video_codec, partial_output_path,
+    write_output_atomically,
+};
 
 /// Minimum frames per parallel segment (longer than 240-frame GOP).
 pub const MIN_SEGMENT_FRAMES: u32 = 300;
@@ -50,7 +54,13 @@ pub fn build_concat_list(fps: u32, segment_entries: &[(PathBuf, u32)]) -> Vec<u8
     list
 }
 
-/// Losslessly join MP4 video segments (`-f concat -safe 0 -c:v copy`) and mux optional WAV audio.
+pub struct ConcatResult {
+    pub file_size: u64,
+    pub elapsed_ms: u128,
+}
+
+/// Losslessly join MP4 video segments (`-f concat -safe 0 -c:v copy` with BT.709 VUI tagging)
+/// and mux optional WAV audio.
 pub fn concat_segments(
     ffmpeg: &Path,
     output: &Path,
@@ -59,7 +69,8 @@ pub fn concat_segments(
     audio: Option<&Path>,
     audio_bitrate: &str,
     entries: &[(PathBuf, u32)],
-) -> Result<u64, String> {
+) -> Result<ConcatResult, String> {
+    let started = Instant::now();
     if entries.is_empty() {
         return Err("concat-segments requires at least one segment".into());
     }
@@ -67,12 +78,17 @@ pub fn concat_segments(
     if total_frames == 0 {
         return Err("concat-segments total frame count must be > 0".into());
     }
+    let detected_codec = entries
+        .first()
+        .and_then(|(first_path, _)| detect_video_codec(ffmpeg, first_path))
+        .unwrap_or(codec);
+
     let list_path = partial_output_path(output).with_extension("segments.txt");
     let list_bytes = build_concat_list(fps, entries);
     std::fs::write(&list_path, &list_bytes)
         .map_err(|e| format!("failed to write concat list: {e}"))?;
 
-    let result = write_output_atomically(output, |partial| {
+    let run_concat = |with_bsf: bool, partial: &Path| -> Result<(), String> {
         let mut cmd = Command::new(ffmpeg);
         cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
             .args(["-f", "concat", "-safe", "0", "-i"])
@@ -84,7 +100,10 @@ pub fn concat_segments(
             cmd.args(["-map", "0:v:0"]);
         }
         cmd.args(["-c:v", "copy"]);
-        if codec == Codec::Hevc {
+        if with_bsf {
+            cmd.args(["-bsf:v", bt709_vui_bsf(detected_codec)]);
+        }
+        if detected_codec == Codec::Hevc {
             cmd.args(["-tag:v", "hvc1"]);
         }
         if audio.is_some() {
@@ -102,13 +121,25 @@ pub fn concat_segments(
             return Err(format!("ffmpeg concat exited with {}: {}", out.status, err.trim()));
         }
         Ok(())
+    };
+
+    let result = write_output_atomically(output, |partial| match run_concat(true, partial) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(partial);
+            run_concat(false, partial)
+        }
     });
 
     let _ = std::fs::remove_file(&list_path);
     result?;
-    std::fs::metadata(output)
+    let file_size = std::fs::metadata(output)
         .map(|m| m.len())
-        .map_err(|e| format!("failed to stat output: {e}"))
+        .map_err(|e| format!("failed to stat output: {e}"))?;
+    Ok(ConcatResult {
+        file_size,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
 }
 
 #[cfg(test)]

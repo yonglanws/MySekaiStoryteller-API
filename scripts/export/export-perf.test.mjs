@@ -63,7 +63,7 @@ function makeToneWavBuffer(durationSec, sampleRate = 48_000, amplitude = 0.2) {
   return buf
 }
 
-test('config.ts defaults exportBitrate=3.5Mbps, maxOutputMbps=3.5, useRustExporter=true, exportJobs=1 and supports env overrides', async (t) => {
+test('config.ts defaults exportBitrate=3.2Mbps, maxOutputMbps=3.5, useRustExporter=true, exportJobs=1 and supports env overrides', async (t) => {
   const envKeys = [
     'MSS_EXPORT_BITRATE',
     'MSS_MAX_OUTPUT_MBPS',
@@ -84,7 +84,7 @@ test('config.ts defaults exportBitrate=3.5Mbps, maxOutputMbps=3.5, useRustExport
 
   const { loadHostConfig } = loadConfigFromTempRepo(tempRepo)
   const cfg = loadHostConfig()
-  assert.equal(cfg.video.exportBitrate, 3_500_000)
+  assert.equal(cfg.video.exportBitrate, 3_200_000)
   assert.equal(cfg.video.maxOutputMbps, 3.5)
   assert.equal(cfg.video.useRustExporter, true)
   assert.equal(cfg.video.exportJobs, 1)
@@ -152,10 +152,12 @@ test('FrameContentValidator fast-path exits after 1 center readPixels on lit fra
   assert.equal(readCalls, 9)
 })
 
-test('WebCodecsMp4Encoder uses variable bitrateMode and skips sync GpuYuv420Converter by default', async () => {
+test('WebCodecsMp4Encoder uses variable bitrateMode and async 3-slot PBO BT.709 I420 by default', async () => {
   const configured = []
   let yuvCreateCalls = 0
+  let yuvRingSize = 0
   let videoFrameInputs = []
+  const pendingPbo = []
 
   class MockVideoFrame {
     constructor(src, init) {
@@ -184,7 +186,7 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and skips sync GpuYuv420Conv
         {
           decoderConfig: {
             codec: 'avc1.640028',
-            colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true }
+            colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false }
           }
         }
       )
@@ -208,9 +210,21 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and skips sync GpuYuv420Conv
         path.join(root, 'src/renderer/src/managers/video-export/GpuYuv420Converter.ts'),
         {
           GpuYuv420Converter: {
-            create: () => {
+            create: (w, h, ring) => {
               yuvCreateCalls++
-              return { convertSync: () => new Uint8Array(12), dispose: () => {} }
+              yuvRingSize = ring
+              const frameByteLength = (w * h * 3) / 2
+              return {
+                frameByteLength,
+                enqueueAsync: async () => {
+                  const buf = new Uint8Array(frameByteLength)
+                  pendingPbo.push(buf)
+                  if (pendingPbo.length > ring) return pendingPbo.shift()
+                  return null
+                },
+                drainAllAsync: async () => pendingPbo.splice(0),
+                dispose: () => {}
+              }
             }
           }
         }
@@ -228,7 +242,7 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and skips sync GpuYuv420Conv
     width: 1920,
     height: 1080,
     fps: 60,
-    bitrate: 3_500_000,
+    bitrate: 3_200_000,
     mode: 'auto',
     glRenderer: 'ANGLE (Intel Iris Xe)',
     isLinux: false,
@@ -241,17 +255,21 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and skips sync GpuYuv420Conv
     width: 1920,
     height: 1080,
     fps: 60,
-    bitrate: 3_500_000,
+    bitrate: 3_200_000,
     encoderConfig: probe.config
   })
-  await enc.initialize('temp-zero-copy.mp4')
+  await enc.initialize('temp-pbo.mp4')
   const fakeCanvas = { width: 1920, height: 1080 }
   await enc.encodeFrame(fakeCanvas, 0, 16667, true)
+  await enc.encodeFrame(fakeCanvas, 16667, 16667, false)
   await enc.finish()
 
-  assert.equal(yuvCreateCalls, 0, 'default WebCodecs path must not create sync GpuYuv420Converter')
-  assert.equal(videoFrameInputs[0].src, fakeCanvas, 'same-size canvas must pass zero-copy directly to VideoFrame')
-  assert.equal(enc.requiresColorConversion, true, 'full-range/sRGB WebCodecs triggers fast host BT.709/tv CRF pass')
+  assert.equal(yuvCreateCalls, 1, 'default WebCodecs path creates async PBO GpuYuv420Converter')
+  assert.equal(yuvRingSize, 3, 'uses 3-slot PBO ring')
+  assert.equal(videoFrameInputs.length, 2, 'drains all queued PBO frames cleanly on finish()')
+  assert.equal(videoFrameInputs[0].init.format, 'I420')
+  assert.equal(videoFrameInputs[0].init.colorSpace.fullRange, false)
+  assert.equal(enc.requiresColorConversion, false, 'BT.709/tv I420 skips second-pass transcode')
   assert.equal(configured[0].bitrateMode, 'variable')
 })
 
@@ -471,4 +489,139 @@ test('native mss-export-rs handles version, segment planning, pipe-encode, mix-w
   assert.equal(remuxRes.ok, true)
   assert.equal(remuxRes.transcoded, true, 'bitrate guardrail must trigger CRF compression')
   assert.equal(remuxRes.encoder, 'libx264')
+
+  // 5) Bitstream-preserving copy + BT.709 VUI tagging when stream already meets maxOutputMbps
+  const copyTaggedPath = path.join(dir, 'copy-tagged.mp4')
+  const copyRes = await rustExporter.runRustRemux({
+    videoPath: compressedPath,
+    audioPath: toneA,
+    outputPath: copyTaggedPath,
+    audioBitrate: '128k',
+    frameCount: 90,
+    fps: 30,
+    transcode: false,
+    codec: 'h264',
+    inputCodec: 'h264',
+    encoder: 'cpu',
+    crf: 24,
+    width: w,
+    height: h,
+    maxOutputMbps: 10.0
+  })
+  assert.equal(copyRes.ok, true)
+  assert.equal(copyRes.transcoded, false, 'compliant stream must use zero-reencode copy')
+  assert.equal(copyRes.encoder, 'copy+bt709')
+  const copyProbe = await execFileAsync(ffmpeg.ffmpegPath(), ['-hide_banner', '-i', copyTaggedPath]).catch(
+    (e) => e
+  )
+  assert.match(String(copyProbe.stderr ?? ''), /yuv420p\(tv, bt709/)
+})
+
+test('SegmentCoordinator orchestrates single-pass prepare, Rust plan-segments, parallel segments, and concat-mix', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mss-seg-coord-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const { SegmentCoordinator } = require(path.join(root, 'out-host/host/export/segmentCoordinator.js'))
+  const { Logger } = require('tslog')
+
+  // Create two tiny valid MP4 segment files + 1 WAV using Rust pipe-encode & mix-wav
+  const w = 128
+  const h = 128
+  const yuv = Buffer.alloc((w * h * 3) / 2, 128)
+  const makeSeg = async (filePath, frames) => {
+    const pipe = rustExporter.RustFramesPipeSession.create({
+      fps: 60,
+      width: w,
+      height: h,
+      crf: 23,
+      encoder: 'cpu',
+      codec: 'h264',
+      frameFormat: 'rawvideo',
+      outputPath: filePath
+    })
+    for (let i = 0; i < frames; i++) await pipe.write(yuv)
+    await pipe.finish()
+  }
+  const mixWav = path.join(dir, 'mix.wav')
+  fs.writeFileSync(path.join(dir, 'tone.wav'), makeToneWavBuffer(1.0))
+  await rustExporter.runRustMixWav({
+    durationMs: 10_000,
+    outputPath: mixWav,
+    tracks: [{ path: path.join(dir, 'tone.wav'), startMs: 0, volume: 0.5 }]
+  })
+
+  const dispatched = []
+  let finalResult = null
+  let doneResolve
+  const donePromise = new Promise((r) => {
+    doneResolve = r
+  })
+
+  const coordinator = new SegmentCoordinator(new Logger({ type: 'hidden' }), {
+    readyWorkerCount: () => 2,
+    onTaskComplete: (_taskId, res) => {
+      finalResult = res
+      doneResolve()
+    },
+    cancelSubTask: async () => {},
+    dispatchSubTask: async (subTask) => {
+      dispatched.push(subTask)
+      if (subTask.videoConfig.segmentPrepareOnly) {
+        return {
+          taskId: subTask.taskId,
+          success: true,
+          prepared: {
+            totalFrames: 600,
+            encodeFps: 60,
+            audioFilePath: mixWav,
+            ttsWavs: {},
+            timings: { ttsSetupMs: 120, audioMs: 40 }
+          }
+        }
+      }
+      const seg = subTask.videoConfig.segmentRange
+      await makeSeg(seg.outputPath, seg.endFrame - seg.startFrame)
+      return {
+        taskId: subTask.taskId,
+        success: true,
+        videoPath: seg.outputPath,
+        frameCount: seg.endFrame - seg.startFrame,
+        segmentCodec: 'h264',
+        segmentConvert: 'browser',
+        timings: { renderMs: 500, pumpMs: 520, tickMs: 10, snapshotMs: 10, encodeMs: 5 }
+      }
+    }
+  })
+
+  const snippets = Array.from({ length: 12 }, (_, idx) => ({
+    type: 'Talk',
+    delay: 1.0,
+    data: { speaker: 'miku', content: `line ${idx} hello world`, modelId: 1 }
+  }))
+  const outputPath = path.join(dir, 'final-ep.mp4')
+  const task = {
+    taskId: 'job-1',
+    story: { models: [], images: [], snippets },
+    outputPath,
+    addedAt: Date.now(),
+    timeoutMs: 120_000,
+    videoConfig: {
+      width: w,
+      height: h,
+      fps: 60,
+      fastFps: 60,
+      codec: 'h264',
+      audioBitrate: '128k',
+      exportJobs: 2
+    }
+  }
+  assert.equal(coordinator.shouldUseParallelSegments(task), true)
+  coordinator.start(task)
+  await donePromise
+
+  assert.equal(finalResult.success, true, finalResult.error)
+  assert.equal(finalResult.frameCount, 600)
+  assert.ok(fs.existsSync(outputPath))
+  assert.ok(finalResult.outputSize > 1000)
+  assert.equal(dispatched.filter((d) => d.videoConfig.segmentPrepareOnly).length, 1)
+  assert.equal(dispatched.filter((d) => d.videoConfig.segmentRange).length, 2)
 })

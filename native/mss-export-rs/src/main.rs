@@ -98,6 +98,7 @@ fn cmd_remux(args: &[String]) -> Result<(), String> {
         start_frame: 0,
         transcode: false,
         codec: Codec::H264,
+        input_codec: None,
         encoder_choice: "auto".to_owned(),
         crf: 23,
         preset: None,
@@ -127,6 +128,11 @@ fn cmd_remux(args: &[String]) -> Result<(), String> {
             "--codec" => {
                 let raw = next_arg(args, &mut i, "--codec")?;
                 opts.codec = Codec::from_name(&raw).ok_or_else(|| format!("unknown codec: {raw}"))?;
+            }
+            "--input-codec" => {
+                let raw = next_arg(args, &mut i, "--input-codec")?;
+                opts.input_codec =
+                    Some(Codec::from_name(&raw).ok_or_else(|| format!("unknown input codec: {raw}"))?);
             }
             "--encoder" => opts.encoder_choice = next_arg(args, &mut i, "--encoder")?,
             "--crf" => opts.crf = parse_u32(&next_arg(args, &mut i, "--crf")?, "--crf")?,
@@ -263,7 +269,7 @@ fn cmd_concat_segments(args: &[String]) -> Result<(), String> {
     if output.as_os_str().is_empty() {
         return Err("concat-segments requires --output".into());
     }
-    let size = concat_segments(
+    let res = concat_segments(
         &ffmpeg,
         &output,
         fps,
@@ -273,10 +279,11 @@ fn cmd_concat_segments(args: &[String]) -> Result<(), String> {
         &entries,
     )?;
     println!(
-        "{{\"ok\":true,\"outputPath\":\"{}\",\"fileSize\":{},\"segments\":{}}}",
+        "{{\"ok\":true,\"outputPath\":\"{}\",\"fileSize\":{},\"segments\":{},\"elapsedMs\":{}}}",
         json_escape(&output.to_string_lossy()),
-        size,
-        entries.len()
+        res.file_size,
+        entries.len(),
+        res.elapsed_ms
     );
     Ok(())
 }
@@ -351,12 +358,18 @@ fn cmd_plan_segments(args: &[String]) -> Result<(), String> {
     let mut start: u32 = 0;
     let mut end: u32 = 0;
     let mut jobs: u32 = 1;
+    let mut fps: u32 = 60;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--start" => start = parse_u32(&next_arg(args, &mut i, "--start")?, "--start")?,
             "--end" => end = parse_u32(&next_arg(args, &mut i, "--end")?, "--end")?,
+            "--frames" => {
+                start = 0;
+                end = parse_u32(&next_arg(args, &mut i, "--frames")?, "--frames")?;
+            }
             "--jobs" => jobs = parse_u32(&next_arg(args, &mut i, "--jobs")?, "--jobs")?,
+            "--fps" => fps = parse_u32(&next_arg(args, &mut i, "--fps")?, "--fps")?.max(1),
             other => return Err(format!("unknown option for plan-segments: {other}")),
         }
         i += 1;
@@ -367,8 +380,9 @@ fn cmd_plan_segments(args: &[String]) -> Result<(), String> {
         .map(|r| format!("{{\"start\":{},\"end\":{}}}", r.start, r.end))
         .collect();
     println!(
-        "{{\"ok\":true,\"minSegmentFrames\":{},\"segments\":[{}]}}",
+        "{{\"ok\":true,\"minSegmentFrames\":{},\"fps\":{},\"segments\":[{}]}}",
         segments::MIN_SEGMENT_FRAMES,
+        fps,
         json_parts.join(",")
     );
     Ok(())
@@ -377,7 +391,7 @@ fn cmd_plan_segments(args: &[String]) -> Result<(), String> {
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let Some(sub) = args.first().map(String::as_str) else {
-        eprintln!("usage: mss-export-rs <version|probe-encoders|remux|pipe-encode|plan-segments|concat-segments|mix-wav> [options]");
+        eprintln!("usage: mss-export-rs <version|probe-encoders|remux|pipe-encode|plan-segments|concat-segments|concat-mix|mix-wav> [options]");
         return ExitCode::from(2);
     };
     let rest = &args[1..];
@@ -390,7 +404,7 @@ fn main() -> ExitCode {
         "remux" => cmd_remux(rest),
         "pipe-encode" => cmd_pipe_encode(rest),
         "plan-segments" => cmd_plan_segments(rest),
-        "concat-segments" => cmd_concat_segments(rest),
+        "concat-segments" | "concat-mix" => cmd_concat_segments(rest),
         "mix-wav" => cmd_mix_wav(rest),
         other => Err(format!("unknown subcommand: {other}")),
     };

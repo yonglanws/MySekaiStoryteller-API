@@ -33,6 +33,7 @@ export interface RustRemuxOptions {
   startFrame?: number
   transcode?: boolean
   codec?: VideoCodec
+  inputCodec?: VideoCodec
   encoder?: VideoEncoderChoice
   crf?: number
   preset?: string
@@ -195,7 +196,8 @@ export async function probeRustHardwareEncoders(
 export async function planRustSegments(
   startFrame: number,
   endFrame: number,
-  jobs: number
+  jobs: number,
+  fps = 60
 ): Promise<Array<{ start: number; end: number }> | null> {
   const binary = resolveRustExporterBinary()
   if (!binary || !isRustExporterEnabledByEnv()) return null
@@ -208,6 +210,8 @@ export async function planRustSegments(
         String(Math.max(0, Math.floor(startFrame))),
         '--end',
         String(Math.max(0, Math.floor(endFrame))),
+        '--fps',
+        String(Math.max(1, Math.round(fps))),
         '--jobs',
         String(Math.max(1, Math.floor(jobs)))
       ],
@@ -264,6 +268,9 @@ export async function runRustRemux(options: RustRemuxOptions): Promise<RustRemux
   if (options.startFrame && options.startFrame > 0) {
     args.push('--start-frame', String(Math.round(options.startFrame)))
   }
+  if (options.inputCodec) {
+    args.push('--input-codec', normalizeVideoCodec(options.inputCodec))
+  }
   if (options.transcode) {
     args.push('--transcode')
   }
@@ -296,13 +303,13 @@ export async function runRustConcatSegments(options: {
   audioPath?: string
   audioBitrate?: string
   segments: RustSegmentEntry[]
-}): Promise<{ ok: boolean; outputPath: string; fileSize: number; segments: number }> {
+}): Promise<{ ok: boolean; outputPath: string; fileSize: number; segments: number; elapsedMs: number }> {
   const binary = resolveRustExporterBinary()
   if (!binary) {
     throw new Error('mss-export-rs binary not found')
   }
   const args = [
-    'concat-segments',
+    'concat-mix',
     '--ffmpeg',
     ffmpegPath(),
     '--output',
@@ -330,6 +337,7 @@ export async function runRustConcatSegments(options: {
     outputPath: string
     fileSize: number
     segments: number
+    elapsedMs: number
   }
 }
 
