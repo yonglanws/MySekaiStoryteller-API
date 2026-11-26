@@ -23,6 +23,12 @@ import {
   resolveScenarioSe
 } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
+import {
+  isGenuineCalmResolution,
+  isInternalThoughtContent,
+  normalizeLayoutTransitionBarriers,
+  syncTalkEmotionContinuity
+} from './officialLinter'
 import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
 import type { RagRetrieveResult } from '../rag/types'
 import { type DialogueLintIssue } from './dialogueLinter'
@@ -159,6 +165,10 @@ export interface StagedDialogueLine {
   pauseBefore?: number
   /** 本句播完后收起对话框 */
   closeWindowAfter?: boolean
+  /** 对话框显示模式（如 Thinking 表示内心独白） */
+  windowDisplayMode?: string
+  /** Talk 效果类型（如 Internal 表示内心独白） */
+  effect?: 'Normal' | 'Internal' | 'Overlap'
 }
 
 export interface StagedDialogue {
@@ -2132,7 +2142,13 @@ export function normalizeDialogue(
     member: StagedCastMember,
     content: string,
     rawEmotion: unknown,
-    meta: { sceneId?: unknown; pauseBefore?: unknown; closeWindowAfter?: unknown } = {}
+    meta: {
+      sceneId?: unknown
+      pauseBefore?: unknown
+      closeWindowAfter?: unknown
+      windowDisplayMode?: unknown
+      effect?: unknown
+    } = {}
   ): void => {
     const text = cleanText(content)
     if (!text) return
@@ -2143,6 +2159,10 @@ export function normalizeDialogue(
     const pauseBefore = pauseRaw >= 1.25 ? 1.5 : pauseRaw >= 0.75 ? 1.0 : pauseRaw >= 0.4 ? 0.5 : 0
     const sceneId = str(meta.sceneId).trim()
     const closeWindowAfter = toBool(meta.closeWindowAfter)
+    const windowDisplayMode = str(meta.windowDisplayMode).trim()
+    const rawEff = str(meta.effect).trim()
+    const effect =
+      rawEff === 'Normal' || rawEff === 'Internal' || rawEff === 'Overlap' ? rawEff : undefined
     lines.push({
       id: `l${lines.length + 1}`,
       speaker: member.name,
@@ -2150,7 +2170,9 @@ export function normalizeDialogue(
       ...(emotion ? { emotion } : {}),
       ...(sceneId ? { sceneId } : {}),
       ...(pauseBefore > 0 ? { pauseBefore } : {}),
-      ...(closeWindowAfter ? { closeWindowAfter: true } : {})
+      ...(closeWindowAfter ? { closeWindowAfter: true } : {}),
+      ...(windowDisplayMode ? { windowDisplayMode } : {}),
+      ...(effect ? { effect } : {})
     })
   }
 
@@ -2184,7 +2206,9 @@ export function normalizeDialogue(
               ? rawLine.closeWindowAfter
               : i === rawLines.length - 1
                 ? turn.closeWindowAfter
-                : false
+                : false,
+            windowDisplayMode: isRecord(rawLine) ? rawLine.windowDisplayMode : turn.windowDisplayMode,
+            effect: isRecord(rawLine) ? rawLine.effect : turn.effect
           }
         )
       }
@@ -2203,7 +2227,9 @@ export function normalizeDialogue(
       pushLine(member, str(item.content ?? item.text ?? item.line), item.emotion, {
         sceneId: item.scene ?? item.sceneId,
         pauseBefore: item.pauseBefore,
-        closeWindowAfter: item.closeWindowAfter
+        closeWindowAfter: item.closeWindowAfter,
+        windowDisplayMode: item.windowDisplayMode,
+        effect: item.effect
       })
     }
   }
@@ -2424,7 +2450,7 @@ export function buildEmotionPrompt(
       '核心原则（双层音色保护）：',
       '1. 普通台词保持角色基础参考音频锁定，靠精细的日语 ttsCaption（语气、呼吸、语速、停顿、情感张力）与轻微语速变化表达细腻表演，绝不改变角色音色底色。',
       '2. ttsCaption 必须严格只写表演与韵律（2~4 个简短日语短语），严禁出现任何年龄/性别/基础声线词（如「若い女性」「少女」「少年」「低い声」「高い声」「幼い声」「アニメ声」「ロリ」等），否则会与角色 LoRA/参考音频冲突。',
-      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；遇到情绪高潮、哭诉、喊叫、耳语或崩溃时忠实标注真实情绪。',
+      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；哭泣/悲伤对峙途中即便出现安抚（「没关系的」）、克制解释或绝望叹息（「可窗户纸一旦破了，我就再也没办法安心笑出来了」），也必须全段持续保持「伤心」，绝不中途掉回「平静」。',
       '4. ttsSpecialScene 仅用于全片真正的高潮爆发/哭喊/哽咽/耳语/回忆转折（占比严格 <= 15%）。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
@@ -2448,11 +2474,11 @@ ${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、
 - **emotion（粗情绪族）**：
   - 平静：仅用于日常寒暄、温和叙述、冷静思考。**绝不要**把喊人（「瑞希っ！」）、含泪道歉（「对不起」「ごめんね」）、哽咽（「可是……可是……！」）或激动呐喊错标为「平静」。
   - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
-  - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求。
+  - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求，以及哭戏途中强忍泪水安慰对方（「没关系的」）、无奈解释（「大家都太温柔了」）或绝望吐露——**哭戏未真正释怀和解前全段保持「伤心」，严禁中途掉回「平静」**。
   - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊。
   - 害羞：被夸、慌张掩饰、不好意思。
   - 惊讶：突然的揭示、意外、倒吸一口气或惊呼。
-  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动；遇到真正的情感转折、哭诉或欢快收尾时忠实切换。
+  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动或哭戏途中掉回「平静」；遇到真正的情感转折、哭诉或欢快收尾时忠实切换。
 - **ttsCaption（日语表演/韵律描述，必填）**：
   - 用 2~4 个自然日语短语描述**语气、呼吸感、语速、停顿、强弱与情绪层次**（例如：「安堵して、柔らかく温かい口調でゆっくり話している。」「息を切らしながら、切羽詰まった様子で必死に呼びかける。」）。
   - **严禁描述说话人的年龄、性别或基础音色**（禁止出现 若い女性/大人の女性/少女/少年/男の子/女の子/低い声/高い声/幼い声/アニメ声 等词）。
@@ -2749,6 +2775,50 @@ export function stabilizeEmotions(
     if (prevIsSingleton && nextIsSingleton && !isEmotionPivotCue(lines[i].content, values[i])) {
       values[i] = values[i - 1]
     }
+  }
+
+  // 5) 防止哭戏/悲伤或争执途中短段（1~4句）意外掉回「平静」：前后同处于「伤心」/「生气」弧光且无真正释怀/欢快收尾时保持情绪连贯
+  const isDenseTenseEmotion = (emo: string): boolean => emo === '伤心' || emo === '生气'
+  for (let start = 1; start < lines.length - 1; start++) {
+    if (values[start] !== '平静') continue
+    let end = start
+    while (end + 1 < lines.length - 1 && values[end + 1] === '平静') {
+      end += 1
+    }
+    const spanLen = end - start + 1
+    if (spanLen <= 4) {
+      const spanScene = lines[start].sceneId
+      let leftTense = ''
+      for (let l = start - 1; l >= Math.max(0, start - 3); l--) {
+        if (spanScene && lines[l].sceneId && lines[l].sceneId !== spanScene) break
+        if (isDenseTenseEmotion(values[l])) {
+          leftTense = values[l]
+          break
+        }
+        if (values[l] !== '惊讶' && values[l] !== '害怕') break
+      }
+      let rightTense = ''
+      for (let r = end + 1; r <= Math.min(lines.length - 1, end + 3); r++) {
+        if (spanScene && lines[r].sceneId && lines[r].sceneId !== spanScene) break
+        if (isDenseTenseEmotion(values[r])) {
+          rightTense = values[r]
+          break
+        }
+        if (values[r] !== '惊讶' && values[r] !== '害怕') break
+      }
+      if (leftTense && rightTense) {
+        const hasResolution = lines
+          .slice(start, end + 1)
+          .some((l) => isGenuineCalmResolution(l.content))
+        if (!hasResolution) {
+          const fillEmotion = leftTense === '伤心' || rightTense === '伤心' ? '伤心' : leftTense
+          for (let k = start; k <= end; k++) {
+            values[k] = fillEmotion
+          }
+        }
+      }
+    }
+    start = end
   }
 
   const result = new Map<string, string>()
@@ -3110,7 +3180,7 @@ export function buildStagingPrompt(
 
   const presenceRule =
     plan.cast.length === 2
-      ? '- **双人同框与单人思考留白（Normal 模式，一律原地淡入淡出）**：本场 2 人，日常对话保持两人在场（Left / Right）；但当角色出现内心独白（如括号心理描写）、独自思索或沉重特写时，**鼓励用 `events[].stageGroup: { activeCast: [角色名] }` 短暂切到单人 Center**（先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入，**严禁 `Move` 横向滑动**），思考结束再切回两人 Left / Right 同框，无需为了“全片同场”而把无关倾听者死板留在台上。此外**同一时间地点连续对话只写 1 幕（s1）即可，切勿硬拆成 s2/s3**；仅当真正切换地点、跳过时段、切入回忆或出入 SEKAI 时才新开幕次。'
+      ? '- **双人同框与单人思考留白（Normal 模式，一律原地淡入淡出）**：本场 2 人，日常对话保持两人在场（Left / Right）；但当角色出现内心独白（如括号心理描写）、独自思索或沉重特写时，**必须在第一句独白（`lineId`）就用 `events[].stageGroup: { activeCast: [角色名] }` 短暂切到单人 Center**（先双人同时 `LayoutClear` 原地淡出，再等淡出完成后 `LayoutAppear(Center)` 原地淡入；**严禁第一句独白还站在 Left/Right 到第二句才切，也严禁 `Move` 横向滑动**），思考结束在紧接的下一句非独白台词切回两人 Left / Right 同框，无需为了“全片同场”而把无关倾听者死板留在台上。此外**同一时间地点连续对话只写 1 幕（s1）即可，切勿硬拆成 s2/s3**；仅当真正切换地点、跳过时段、切入回忆或出入 SEKAI 时才新开幕次。'
       : '- **多人动态分组与自然分幕（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），按对话节奏在幕次或 events.stageGroup 中轮换 1~2 人在场，通过 `LayoutClear` + `LayoutAppear` 原地淡出淡入切换，严禁 3 人以上同时挤在台上，也严禁横向滑动。同一时间地点无需硬拆幕次，仅切换地点/时段/回忆/SEKAI 时再新开幕。'
 
   return {
@@ -3308,6 +3378,54 @@ function enrichStagingBaseline(
       const ev = ensureEvent(i)
       if (line.pauseBefore && !ev.pauseBefore) ev.pauseBefore = line.pauseBefore
       if (line.closeWindowAfter && !ev.closeWindowAfter) ev.closeWindowAfter = true
+    }
+  }
+
+  // 思考/内心独白切镜对齐：绝不在第一句独白仍站在 Left/Right，到第二句才切 Center
+  if (plan.cast.length >= 2) {
+    const isThinkingLine = (line: StagedDialogueLine): boolean =>
+      line.windowDisplayMode === 'Thinking' ||
+      line.effect === 'Internal' ||
+      isInternalThoughtContent(line.content)
+    const isExplicitThinking = (line: StagedDialogueLine): boolean =>
+      line.windowDisplayMode === 'Thinking' || line.effect === 'Internal'
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (!isThinkingLine(line)) continue
+      const speakerMember = plan.cast.find((c) => c.name === line.speaker)
+      if (!speakerMember) continue
+      const evCurr = eventsByLine.get(i)
+      // 若第二句独白才有 stageGroup=[speaker]，提前到第一句独白
+      if (!evCurr?.stageGroup && i + 1 < lines.length) {
+        const nextLine = lines[i + 1]
+        const evNext = eventsByLine.get(i + 1)
+        if (
+          nextLine.speaker === line.speaker &&
+          isThinkingLine(nextLine) &&
+          evNext?.stageGroup?.activeCast.length === 1 &&
+          evNext.stageGroup.activeCast[0] === speakerMember.modelId
+        ) {
+          ensureEvent(i).stageGroup = { ...evNext.stageGroup }
+          delete evNext.stageGroup
+        }
+      }
+      // 显式 Thinking/Internal 或 >=2 句同人连续括号内心独白（无 stageGroup）时自动切到 Center，并在独白结束恢复双人
+      let runEnd = i
+      while (
+        runEnd + 1 < lines.length &&
+        lines[runEnd + 1].speaker === line.speaker &&
+        isThinkingLine(lines[runEnd + 1])
+      ) {
+        runEnd += 1
+      }
+      const hasGroupInRun = Array.from({ length: runEnd - i + 1 }, (_, off) =>
+        eventsByLine.get(i + off)?.stageGroup
+      ).some(Boolean)
+      if (!hasGroupInRun && (isExplicitThinking(line) || runEnd > i)) {
+        ensureEvent(i).stageGroup = { activeCast: [speakerMember.modelId] }
+      }
+      i = runEnd
     }
   }
 
@@ -4299,6 +4417,7 @@ export function composeStory(
   let lastSilentReactionLine = -10
   let lastSilentReactionTargetId: number | null = null
   let silentReactionsEmitted = 0
+  let thinkingSoloReturnCast: number[] | null = null
   const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
   const closeWindowBeforeBreak = (): void => {
@@ -4468,10 +4587,9 @@ export function composeStory(
       }
     }
     if (outgoing.length > 0) closeWindowBeforeBreak()
-    const clearedCount = clearActors(outgoing)
+    clearActors(outgoing)
     ensureNormalLayoutMode()
 
-    const overlapsPreceding = !options.hadPrecedingClear && clearedCount > 0
     const lineAtEntry = dialogue.lines[lineIndex]
     const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
@@ -4558,7 +4676,7 @@ export function composeStory(
         view.exampleFacial(id) ||
         view.defaultFacial(id)
       const isHolo = hologramSet.has(id)
-      const waitFirst = !overlapsPreceding && idx === 0
+      const waitFirst = idx === 0
       snippets.push({
         type: 'LayoutAppear',
         wait: waitFirst,
@@ -4715,6 +4833,7 @@ export function composeStory(
   for (let index = 0; index < dialogue.lines.length; index++) {
     const nextScene = sceneByStart.get(index)
     if (nextScene) {
+      thinkingSoloReturnCast = null
       closeWindowBeforeBreak()
       stopShakeScreenIfNeeded()
       resetCameraIfNeeded()
@@ -4959,16 +5078,32 @@ export function composeStory(
     const member = cast.find((entry) => entry.name === line.speaker)
     if (!member) continue
     const ev = eventByIndex.get(index)
+    const isThinkingLine =
+      line.windowDisplayMode === 'Thinking' ||
+      line.effect === 'Internal' ||
+      isInternalThoughtContent(line.content)
 
-    // 多人戏若本句说话人尚未在场，安全入场或以 Normal 模式（<=2 人）交叠淡出淡入轮换
+    // 多人戏若本句说话人尚未在场，安全入场或以 Normal 模式（<=2 人）原地淡出淡入切镜
     if (ev?.stageGroup && plan.cast.length >= 2) {
       const targetGroup = ev.stageGroup.activeCast.includes(member.modelId)
         ? ev.stageGroup.activeCast.slice(0, 2)
         : [member.modelId, ...ev.stageGroup.activeCast.slice(0, 1)]
+      const prevIds = [...onStage.keys()]
+      if (isThinkingLine && targetGroup.length === 1 && prevIds.length >= 2) {
+        thinkingSoloReturnCast = prevIds
+      } else {
+        thinkingSoloReturnCast = null
+      }
       appearActors(targetGroup, index, {
         walkInSet: new Set(ev.stageGroup.walkIn ?? []),
         walkOutSet: new Set(ev.stageGroup.walkOut ?? [])
       })
+    } else if (!isThinkingLine && thinkingSoloReturnCast) {
+      const restoreIds = thinkingSoloReturnCast.includes(member.modelId)
+        ? thinkingSoloReturnCast
+        : [member.modelId, ...thinkingSoloReturnCast.slice(0, 1)]
+      thinkingSoloReturnCast = null
+      appearActors(restoreIds, index)
     } else if (!onStage.has(member.modelId)) {
       if (plan.cast.length >= 3) {
         const currentIds = [...onStage.keys()]
@@ -5386,6 +5521,8 @@ export function composeStory(
         content: line.content,
         ttsText: line.ttsText ?? '',
         emotion: line.emotion ?? '',
+        ...(line.windowDisplayMode ? { windowDisplayMode: line.windowDisplayMode } : {}),
+        ...(line.effect ? { effect: line.effect } : {}),
         ...(line.ttsCaption ? { ttsCaption: line.ttsCaption } : {}),
         ...(typeof line.ttsSpeed === 'number' ? { ttsSpeed: line.ttsSpeed } : {}),
         ...(line.ttsSpecialScene ? { ttsSpecialScene: true } : {}),
@@ -5646,6 +5783,9 @@ export function composeStory(
     delay: 0,
     data: { duration: 600, color: 'black' }
   })
+
+  normalizeLayoutTransitionBarriers(snippets)
+  syncTalkEmotionContinuity(snippets, { models, view })
 
   return { models, images, snippets }
 }

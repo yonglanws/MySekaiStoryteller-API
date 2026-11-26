@@ -11,6 +11,7 @@ import { Logger } from 'tslog'
 import { LlmClient } from '../../out-host/host/ai/llm.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
+import { alignStoryTtsEmotionsAndCaptions } from '../../out-host/host/ai/ttsText.js'
 import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
 import {
   applyVoiceDirectionPlan,
@@ -495,4 +496,334 @@ test('TTSService forwards ttsCaption/ttsSpeed/ttsSpecialScene and invalidates ca
   assert.equal(sentPayloads[1].irodori.ref_wav, '/sad.wav')
   assert.equal(sentPayloads[1].irodori.cfg_scale_caption, 3.6)
   assert.equal(sentPayloads[1].speed, 0.88)
+})
+
+test('alignStoryTtsEmotionsAndCaptions repairs crying-scene emotion, emojis, captions, and specialScene', () => {
+  const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  const story = {
+    models: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    snippets: [
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          modelId: 2,
+          content: '呼……总算追上你了……',
+          emotion: '平静',
+          ttsText: '😮‍💨 ふぅ……やっと追いついた……',
+          actions: [{ at: 0, modelId: 2, facial: 'face_trouble_01', motion: 'e-normal-sigh01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '……对不起，绘名。',
+          emotion: '伤心',
+          ttsText: '🥺 ……ごめんね、絵名。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_nhisad_02', motion: 'w-normal-sad01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '没关系的。我都知道。',
+          emotion: '平静',
+          ttsText: '大丈夫だよ😊。ボク、わかってるから。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_closeeye_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '……回不去了，绘名。',
+          emotion: '伤心',
+          ttsText: '🐢 ……もう戻れないんだよ、絵名。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_sad_06' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          modelId: 2,
+          content: '瑞希就是瑞希啊。你是我最重要的朋友……',
+          emotion: '伤心',
+          ttsText: '瑞希は瑞希だよ🤭。私にとって、一番大切な友達なのに……',
+          actions: [{ at: 0, modelId: 2, facial: 'face_cry_03', motion: 'w-normal-trouble01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '可窗户纸一旦破了，我就再也没办法安心笑出来了。',
+          emotion: '平静',
+          ttsText: 'でも、一度知られてしまったら……😮‍💨 もう、安心して笑うことなんてできないんだ。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_closeeye_01', motion: 'w-normal-sigh01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          modelId: 2,
+          content: '瑞希——！！',
+          emotion: '伤心',
+          ttsText: '瑞希ぃ——！！',
+          actions: [{ at: 0, modelId: 2, facial: 'face_cry_03', motion: 'w-normal-sad01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          modelId: 2,
+          content: '…………',
+          emotion: '伤心',
+          ttsText: '',
+          actions: [{ at: 0, modelId: 2, facial: 'face_cry_02' }]
+        }
+      }
+    ]
+  }
+
+  const res = alignStoryTtsEmotionsAndCaptions(story, { emotionLabels: labels })
+  assert.ok(res.updatedEmotions >= 2)
+  assert.ok(res.updatedCaptions >= 6)
+  assert.ok(res.updatedEmojis >= 3)
+
+  const talks = story.snippets.map((s) => s.data)
+  // Neutral sigh before sad run stays 平静 with 😮‍💨 intact
+  assert.equal(talks[0].emotion, '平静')
+  assert.ok(talks[0].ttsText.includes('😮‍💨'))
+  // Misplaced 平静 inside sad run upgraded to 伤心, joyful 😊 stripped, 🥺 anchored
+  assert.equal(talks[2].emotion, '伤心')
+  assert.ok(!/[😊🤭😆😏🫶🎵]/u.test(talks[2].ttsText))
+  assert.ok(/[😭🥺]/u.test(talks[2].ttsText))
+  // 🐢-only sad line gets 🥺 while keeping <= 2 emojis
+  assert.ok(/[😭🥺]/u.test(talks[3].ttsText))
+  assert.ok(talks[3].ttsText.includes('🐢'))
+  // face_cry_03 line with 友達 strips 🤭 and adds 🥺/😭
+  assert.ok(!talks[4].ttsText.includes('🤭'))
+  assert.ok(/[😭🥺]/u.test(talks[4].ttsText))
+  // ZWJ 😮‍💨 preserved on sigh-resignation line upgraded to 伤心
+  assert.equal(talks[5].emotion, '伤心')
+  assert.ok(talks[5].ttsText.includes('😮‍💨'))
+  // Peak cry shout gets 😭 + ttsSpecialScene (<= floor(8 * 0.15) = 1)
+  assert.ok(talks[6].ttsText.includes('😭'))
+  assert.equal(talks[6].ttsSpecialScene, true)
+  const specialCount = talks.filter((t) => t.ttsSpecialScene === true).length
+  assert.equal(specialCount, 1)
+  // All verbal lines receive non-empty identity-free Japanese ttsCaption
+  for (const t of talks.slice(0, 7)) {
+    assert.ok(typeof t.ttsCaption === 'string' && t.ttsCaption.length > 0)
+    assert.ok(!/若い女性|少女|少年|低い声|高い声/.test(t.ttsCaption))
+  }
+  // Bare punctuation line keeps empty ttsText
+  assert.equal(talks[7].ttsText, '')
+})
+
+test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, and zero happy emojis', async (t) => {
+  const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  const agentDraft = {
+    models: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: 'w-normal-default01',
+          facial: 'face_normal_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: 'e-normal-default01',
+          facial: 'face_sad_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      ...Array.from({ length: 7 }, (_, i) => ({
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: i % 2 === 0 ? '瑞希' : '绘名',
+          modelId: i % 2 === 0 ? 1 : 2,
+          content:
+            i === 2
+              ? '没关系的。我都知道。'
+              : i === 6
+                ? '瑞希——！！别走啊！！'
+                : '对不起……我真的回不去了。',
+          emotion: i === 2 ? '平静' : '伤心',
+          actions: [
+            {
+              at: 0,
+              modelId: i % 2 === 0 ? 1 : 2,
+              facial: 'face_sad_01',
+              motion: i % 2 === 0 ? 'w-normal-nod01' : 'e-normal-sigh01'
+            }
+          ]
+        }
+      }))
+    ]
+  }
+
+  let translatePrompt = ''
+  let turn = 0
+  const server = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    const system = body.messages.find((m) => m.role === 'system')?.content ?? ''
+    const user = body.messages.find((m) => m.role === 'user')?.content ?? ''
+
+    let message
+    if (system.includes('中日翻译')) {
+      translatePrompt = user
+      const parsedItems = JSON.parse(user.slice(user.indexOf('[')))
+      message = {
+        content: JSON.stringify(
+          parsedItems.map((it, idx) =>
+            idx === 2
+              ? '大丈夫だよ😊、ボクわかってるから。'
+              : idx === 6
+                ? '瑞希ぃ——！！行かないでよ！！'
+                : `ごめんね、もう戻れないんだ（${idx}）。`
+          )
+        )
+      }
+    } else if (turn === 0) {
+      turn += 1
+      message = {
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_save',
+            type: 'function',
+            function: {
+              name: 'save_story_draft',
+              arguments: JSON.stringify(agentDraft)
+            }
+          }
+        ]
+      }
+    } else {
+      turn += 1
+      message = {
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_final',
+            type: 'function',
+            function: {
+              name: 'finalize_story_draft',
+              arguments: JSON.stringify({ note: 'ok' })
+            }
+          }
+        ]
+      }
+    }
+
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify({
+        model: 'mock-agent-model',
+        choices: [{ message }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+      })
+    )
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  process.env.MSS_TEST_LLM_KEY = 'test-key'
+  const settings = {
+    enabled: true,
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    apiKeyEnv: 'MSS_TEST_LLM_KEY',
+    model: 'mock-agent-model',
+    temperature: 0.7,
+    maxTokens: 4096,
+    timeoutMs: 10_000,
+    retries: 0,
+    repairRounds: 0,
+    pipeline: 'agent',
+    agentMaxSteps: 8,
+    jsonMode: 'off',
+    translateForTts: true,
+    targetMinutes: 0.3,
+    systemPrompt: '',
+    personaDirs: [],
+    personas: []
+  }
+
+  const writer = new StoryWriter(
+    new LlmClient(settings, new Logger({ type: 'hidden' })),
+    settings,
+    catalog,
+    new Logger({ type: 'hidden' }),
+    labels
+  )
+  const { story, meta } = await writer.generate({ prompt: '瑞希和绘名哭戏', pipeline: 'agent' })
+  assert.equal(meta.agentMode, 'native')
+  assert.ok(translatePrompt.includes('ttsCaption'), 'pre-translation alignment passes ttsCaption to translator')
+
+  const talks = story.snippets.filter((s) => s.type === 'Talk')
+  assert.equal(talks.length, 7)
+  // Misplaced 平静 upgraded to 伤心 before & after translation
+  assert.equal(talks[2].data.emotion, '伤心')
+  assert.ok(!talks[2].data.ttsText.includes('😊'), 'stray joyful emoji stripped on crying line')
+  assert.ok(/[😭🥺]/u.test(talks[2].data.ttsText))
+  // Climax line promoted to ttsSpecialScene (<= floor(7 * 0.15) = 1)
+  assert.equal(talks[6].data.ttsSpecialScene, true)
+  assert.ok(talks[6].data.ttsText.includes('😭'))
+  assert.ok(talks.every((tk) => typeof tk.data.ttsCaption === 'string' && tk.data.ttsCaption.length > 0))
 })

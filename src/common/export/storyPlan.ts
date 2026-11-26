@@ -4,9 +4,10 @@ import { visibleTextLength } from '../official/text'
 import { hasSpeakableSpeechText } from '../tts/speechText'
 import {
   APPEAR_SHOWN_MOVE_FRAMES,
+  CHARACTER_FADE_IN_PLACE_MS,
   CHARACTER_FADE_MS,
   FRAME_MS,
-  HIDE_DELAY_IN_PLACE_MS,
+  HIDE_DELAY_IN_PLACE_SMOOTH_MS,
   MOVE_SPEED_DURATION_MS,
   PLAYCORE_WARMUP_FRAMES,
   SECONDS_DURATION_SNIPPET_TYPES,
@@ -172,9 +173,11 @@ export function bakeStoryPlan(
   options: StoryPlanOptions = {}
 ): StoryPlan {
   const isExport = options.exportFps !== undefined
-  // 角色淡入固定 100ms（6 帧），与成片帧率无关。
-  const fadeFrames = msToFrameCount(CHARACTER_FADE_MS)
-  const appearFadeFrames = 1 + fadeFrames
+  // 角色滑动淡入/淡出固定 100ms（6 帧）；原地淡入/淡出 350ms（21 帧），与成片帧率无关。
+  const slideFadeFrames = msToFrameCount(CHARACTER_FADE_MS)
+  const inPlaceFadeFrames = msToFrameCount(CHARACTER_FADE_IN_PLACE_MS)
+  const appearSlideFrames = 1 + slideFadeFrames
+  const appearInPlaceFrames = 1 + inPlaceFadeFrames
   let talkWindowOpen = false
   let talkWindowClosesAtFrame: number | null = null
   let runningFenceEndFrame = 0
@@ -418,7 +421,7 @@ export function bakeStoryPlan(
         // 官方 `at = frame + (hidden && motion)`：类型分支（淡入/滑入）延后一帧；
         // 新角色从 from 滑向 to，片段只等淡入，滑入继续在后台。
         const layoutAt = startFrame + (!shown && hasMotion ? 1 : 0)
-        const fadeEnd = layoutAt + appearFadeFrames
+        const fadeEnd = layoutAt + (moved ? appearSlideFrames : appearInPlaceFrames)
         if (shown) {
           layout = {
             kind: 'appear',
@@ -457,17 +460,17 @@ export function bakeStoryPlan(
         } else if (moved) {
           layout = {
             kind: 'clear',
-            fadeStartFrame: startFrame + Math.max(0, moveFrames - fadeFrames),
-            fadeEndFrame: startFrame + Math.max(fadeFrames, moveFrames),
+            fadeStartFrame: startFrame + Math.max(0, moveFrames - slideFadeFrames),
+            fadeEndFrame: startFrame + Math.max(slideFadeFrames, moveFrames),
             moveEndFrame: startFrame + moveFrames
           }
           activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)
         } else {
-          const hideDelayFrames = msToFrameCount(HIDE_DELAY_IN_PLACE_MS)
+          const hideDelayFrames = msToFrameCount(HIDE_DELAY_IN_PLACE_SMOOTH_MS)
           layout = {
             kind: 'clear',
             fadeStartFrame: startFrame + hideDelayFrames,
-            fadeEndFrame: startFrame + hideDelayFrames + Math.max(1, fadeFrames),
+            fadeEndFrame: startFrame + hideDelayFrames + Math.max(1, inPlaceFadeFrames),
             moveEndFrame: startFrame
           }
           activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.fadeEndFrame ?? startFrame)

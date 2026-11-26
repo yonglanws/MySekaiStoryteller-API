@@ -22,6 +22,7 @@ import * as officialLinterMod from './officialLinter'
 import * as personasMod from './personas'
 import { buildActingExample, isBackViewModel, isStandingMotion, type CatalogView } from './prompt'
 import * as scenarioCuesMod from './scenarioCues'
+import { alignStoryTtsEmotionsAndCaptions } from './ttsText'
 import { validateAndFixStory } from './validate'
 
 export type MotionSemanticRole =
@@ -1230,6 +1231,8 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
   let soloTalkCount = 0
   const onStage = new Set<number>()
   const emotionCounts = new Map<string, number>()
+  let calmOnCryOrSadFacialCount = 0
+  let missingCaptionCount = 0
   const distinctMotions = new Set<string>()
   const distinctFacials = new Set<string>()
   const motionRunByModel = new Map<number, { motion: string; run: number }>()
@@ -1288,6 +1291,18 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
         (typeof d.facial === 'string' && d.facial.trim() ? d.facial : '')
       const mStr = typeof speakerMotion === 'string' ? speakerMotion.trim() : ''
       const fStr = typeof speakerFacial === 'string' ? speakerFacial.trim() : ''
+      const allSpeakerFacials = [
+        fStr,
+        ...speakerActs
+          .map((a) => (typeof a.facial === 'string' ? a.facial.trim() : ''))
+          .filter(Boolean)
+      ].join(' ')
+      if ((!emoStr || emoStr === '平静') && /(?:cry|sad|nhisad|heartbreak|desperate)/i.test(allSpeakerFacials)) {
+        calmOnCryOrSadFacialCount += 1
+      }
+      if (typeof d.ttsCaption !== 'string' || !d.ttsCaption.trim()) {
+        missingCaptionCount += 1
+      }
       if (mStr) {
         talkWithMotion += 1
         distinctMotions.add(mStr)
@@ -1368,6 +1383,16 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
   if (talkCount >= 16 && dominantEmotion && (dominantEmotionShare ?? 0) >= 0.8) {
     reviewFocusPoints.push(
       `情绪标签有 ${((dominantEmotionShare ?? 0) * 100).toFixed(0)}% 锁死在「${dominantEmotion}」：可按情绪铺垫、试探、动摇、收尾的层次微调 emotion，避免语音全程单调`
+    )
+  }
+  if (calmOnCryOrSadFacialCount > 0) {
+    reviewFocusPoints.push(
+      `发现 ${calmOnCryOrSadFacialCount} 条哭泣/悲伤表情（face_cry_*/face_sad_*）错标为「平静」或空情绪：请在 update_talk 中改标为「伤心」，避免哭戏 TTS 笑场`
+    )
+  }
+  if (talkCount >= 8 && missingCaptionCount === talkCount) {
+    reviewFocusPoints.push(
+      '当前草稿缺少逐句日语 ttsCaption（含哭腔/高潮 ttsSpecialScene）：建议在重要情感转折与高潮哭喊句补上 ttsCaption（严禁年龄/性别词）与 ttsSpecialScene: true（<=15%）'
     )
   }
   if (talkCount >= 12 && talkWithMotionShare > 0.9) {
@@ -1804,6 +1829,18 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   },
                   content: { type: 'string' },
                   emotion: { type: 'string' },
+                  ttsCaption: {
+                    type: 'string',
+                    description: '可选：IrodoriTTS 逐句日语声演/韵律描述（不含年龄/性别/声线词）'
+                  },
+                  ttsSpeed: {
+                    type: 'number',
+                    description: '可选：IrodoriTTS 语速微调（常规 0.92~1.08，高潮 0.85~1.18）'
+                  },
+                  ttsSpecialScene: {
+                    type: 'boolean',
+                    description: '可选：极端哭喊/崩溃/耳语高潮句设为 true（整场 <= 15%）'
+                  },
                   delay: { type: 'number' },
                   closeWindowOnFinish: { type: 'boolean' },
                   motion: {
@@ -1894,7 +1931,8 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             },
             emotionalContinuityAndVoice: {
               type: 'string',
-              description: '评估角色口吻真实度、情绪过渡自然度（避免整场锁死单一情绪标签）与潜台词'
+              description:
+                '评估角色口吻真实度、情绪过渡自然度（严禁在哭泣/悲伤/紧绷段穿插「平静」标签，避免哭戏 TTS 笑场）与关键句 ttsCaption/ttsSpecialScene 声演设计'
             },
             audioAndSeDesign: {
               type: 'string',
@@ -1939,6 +1977,18 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                   snippets: { type: 'array', items: { type: 'object' } },
                   content: { type: 'string' },
                   emotion: { type: 'string' },
+                  ttsCaption: {
+                    type: 'string',
+                    description: '可选：IrodoriTTS 逐句日语声演/韵律描述（不含年龄/性别/声线词）'
+                  },
+                  ttsSpeed: {
+                    type: 'number',
+                    description: '可选：IrodoriTTS 语速微调（常规 0.92~1.08，高潮 0.85~1.18）'
+                  },
+                  ttsSpecialScene: {
+                    type: 'boolean',
+                    description: '可选：极端哭喊/崩溃/耳语高潮句设为 true（整场 <= 15%）'
+                  },
                   delay: { type: 'number' },
                   closeWindowOnFinish: { type: 'boolean' },
                   motion: { type: 'string' },
@@ -3104,6 +3154,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           if (op === 'update_talk') {
             if (typeof opObj.content === 'string') d.content = opObj.content
             if (typeof opObj.emotion === 'string') d.emotion = opObj.emotion
+            if (typeof opObj.ttsCaption === 'string') d.ttsCaption = opObj.ttsCaption
+            if (typeof opObj.ttsSpeed === 'number' && Number.isFinite(opObj.ttsSpeed)) {
+              d.ttsSpeed = opObj.ttsSpeed
+            }
+            if (typeof opObj.ttsSpecialScene === 'boolean') {
+              if (opObj.ttsSpecialScene) d.ttsSpecialScene = true
+              else delete d.ttsSpecialScene
+            }
             if (typeof opObj.closeWindowOnFinish === 'boolean') {
               if (opObj.closeWindowOnFinish) d.closeWindowOnFinish = true
               else delete d.closeWindowOnFinish
@@ -3629,7 +3687,7 @@ export async function runAgenticStoryGeneration(
     .join('；')
   const emotionNote =
     emotionLabels.length > 0
-      ? `每条 Talk 填 emotion（可选：${emotionLabels.join('、')}，日常陈述选「${emotionLabels.includes('平静') ? '平静' : emotionLabels[0]}」）。`
+      ? `每条 Talk 填 emotion（可选：${emotionLabels.join('、')}，日常陈述选「${emotionLabels.includes('平静') ? '平静' : emotionLabels[0]}」）；**严禁在哭泣/悲伤/道歉/恳求/告别段中间切回「平静」**（即使台词表面说「没关系」「只是吓了一跳」也必须标「伤心」）。请同时为哭腔/情绪转折/高潮句写简短日语 \`ttsCaption\`（仅描述语气/呼吸/颤抖/停顿，严禁出現年龄/性别/声线词）与 \`ttsSpeed\`（沉重哭诉 0.90~0.96，急促喊叫 1.04~1.12），全片最痛哭/撕裂高潮（<= 15%）设 \`ttsSpecialScene: true\`。`
       : ''
 
   const sharedRules = [
@@ -3699,7 +3757,20 @@ export async function runAgenticStoryGeneration(
     | { ok: true; story: StoryData; warnings: string[] }
     | { ok: false; error: string; candidateObj?: Record<string, unknown> } => {
     try {
-      const { story, warnings } = validateAndFixStory(candidate, view, logger, { emotionLabels })
+      const prepared =
+        candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+          ? structuredClone(candidate as Record<string, unknown>)
+          : candidate
+      if (
+        prepared &&
+        typeof prepared === 'object' &&
+        !Array.isArray(prepared) &&
+        Array.isArray((prepared as Record<string, unknown>).snippets)
+      ) {
+        // 在 validateAndFixStory 的表情冲突修复前先对齐错标「平静」的哭泣/悲伤台词，防止 face_sad_*/face_cry_* 被覆盖
+        alignStoryTtsEmotionsAndCaptions(prepared as unknown as StoryData, { emotionLabels })
+      }
+      const { story, warnings } = validateAndFixStory(prepared, view, logger, { emotionLabels })
       const actingReport = runActingAndFidelityAudit(story, view)
       const report = actingReport.officialReport
       const issues: string[] = []

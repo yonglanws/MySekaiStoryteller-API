@@ -54,6 +54,8 @@ export interface IrodoriLineOverride {
   ttsSpeed?: number
   ttsSpecialScene?: boolean
   cfgScaleCaption?: number
+  /** 可选：当前句情绪标签，用于在构造请求前剥离与悲伤/愤怒冲突的欢快表情 */
+  emotion?: string
 }
 
 export interface ResolveIrodoriVoiceOptions {
@@ -114,6 +116,9 @@ export const IRODORI_UNSAFE_EMOJIS = [
   '📞',
   '🤐'
 ] as const
+
+/** 在悲伤/哭泣/愤怒/惊愕语境中必须剥离的欢快/调侃类表情 */
+export const IRODORI_JOYFUL_EMOJIS = ['🤭', '😆', '😊', '😏', '🫶', '🎵'] as const
 
 const NORMAL_SPEED_MIN = 0.92
 const NORMAL_SPEED_MAX = 1.08
@@ -245,6 +250,11 @@ const UNSAFE_EMOJI_PATTERN = new RegExp(
   'gu'
 )
 
+const JOYFUL_EMOJI_PATTERN = new RegExp(
+  IRODORI_JOYFUL_EMOJIS.map((e) => e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
+  'gu'
+)
+
 const SAFE_EMOJI_SET = new Set<string>(IRODORI_SAFE_EMOJIS)
 
 /** 匹配单/组合 Emoji（含 ZWJ 与 FE0F 变体选择符，如 😮‍💨、⏸️、🌬️） */
@@ -253,6 +263,18 @@ const EMOJI_TOKEN_PATTERN =
 
 /** 仅含标点/省略号/破折号/叹号/孤立促音/空白的非语言行（无实词） */
 const BARE_NON_VERBAL_PATTERN = /^[\s….\-—–―ー〜～!！?？、,，。・♪っッ「」『』（）()]+$/u
+
+/** 提取文本中的所有 Irodori Emoji（保留 ZWJ 与 FE0F）。 */
+export function extractIrodoriEmojis(input: string): string[] {
+  return String(input ?? '').match(EMOJI_TOKEN_PATTERN) ?? []
+}
+
+/** 剥离欢快/调侃类内联表情（保留悲伤/紧张表情与 ZWJ/FE0F）。 */
+export function stripJoyfulIrodoriEmojis(input: string, includeRelieved = false): string {
+  const withoutJoyful = String(input ?? '').replace(JOYFUL_EMOJI_PATTERN, '')
+  const cleaned = includeRelieved ? withoutJoyful.replace(/😌/gu, '') : withoutJoyful
+  return cleaned.replace(/[ \t]{2,}/g, ' ').trim()
+}
 
 export function countIrodoriEmojis(input: string): number {
   const matches = String(input ?? '').match(EMOJI_TOKEN_PATTERN)
@@ -327,7 +349,12 @@ export function normalizeIrodoriSpeechText(
   emotion?: string
 ): NormalizedIrodoriSpeech {
   const sanitizedCaption = sanitizeIrodoriCaption(caption ?? '')
-  const cleaned = enforceIrodoriEmojiBudget(input, MAX_EMOJIS_PER_LINE)
+  const emotionLabel = text(emotion)
+  const emotionFiltered =
+    emotionLabel === '伤心' || emotionLabel === '生气'
+      ? stripJoyfulIrodoriEmojis(input, true)
+      : input
+  const cleaned = enforceIrodoriEmojiBudget(emotionFiltered, MAX_EMOJIS_PER_LINE)
   if (!cleaned) {
     return {
       text: '',
@@ -458,7 +485,7 @@ export function buildIrodoriSpeechRequest(
 ): Record<string, unknown> {
   const isSpecialScene = Boolean(lineOverride?.ttsSpecialScene)
   const rawCaption = lineOverride?.ttsCaption?.trim() ? lineOverride.ttsCaption : voice.caption
-  const normalized = normalizeIrodoriSpeechText(input, rawCaption)
+  const normalized = normalizeIrodoriSpeechText(input, rawCaption, lineOverride?.emotion)
   const finalInput = normalized.skip ? '' : normalized.text
   const finalCaption = normalized.caption ?? sanitizeIrodoriCaption(rawCaption ?? '')
 

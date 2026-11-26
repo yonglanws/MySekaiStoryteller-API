@@ -1,7 +1,12 @@
 import { ILogObj, Logger } from 'tslog'
 import { DEFAULT_BGM_FADE_MS, MAX_BGM_FADE_MS } from '../../common/audio/bgm'
 import { StorySchema, type StoryData } from '../../common/types/Story'
-import { enforceOfficialStoryInvariants, type OfficialLintReport } from './officialLinter'
+import {
+  enforceOfficialStoryInvariants,
+  isExplicitThinkingTalkSnippet,
+  normalizeLayoutTransitionBarriers,
+  type OfficialLintReport
+} from './officialLinter'
 import { repairSpokenStageDirections } from './dialogueLinter'
 import * as facialSemanticsMod from './facialSemantics'
 import * as personasMod from './personas'
@@ -1171,10 +1176,62 @@ function validateActions(
  */
 function normalizeScene(story: JsonRecord, warn?: (message: string) => void): void {
   const visible = new Map<number, JsonRecord>()
+  const lastFacialByModel = new Map<number, string>()
+  let thinkingReturnCast: Array<{ id: number; side: string; facial: string }> | null = null
   let layoutMode: 'Normal' | 'Three' = 'Normal'
   const rewrittenSnippets: JsonRecord[] = []
   let normalizedSlides = 0
   let convertedMoves = 0
+  let normalizedThinkingCuts = 0
+
+  const restoreDuoFromThinking = (): void => {
+    if (!thinkingReturnCast || thinkingReturnCast.length < 2) {
+      thinkingReturnCast = null
+      return
+    }
+    if (visible.size === 1) {
+      const [[soloId, soloPos]] = [...visible.entries()]
+      const soloSide = toStr(soloPos.side, 'Center')
+      rewrittenSnippets.push({
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          modelId: soloId,
+          from: { side: soloSide, offset: 0 },
+          to: { side: soloSide, offset: 0 },
+          motion: '',
+          facial: '',
+          moveSpeed: 'Normal'
+        }
+      })
+      visible.delete(soloId)
+    }
+    thinkingReturnCast.forEach((actor, idx) => {
+      if (visible.has(actor.id)) return
+      const pos: JsonRecord = { side: actor.side, offset: 0 }
+      const isFirst = idx === 0
+      rewrittenSnippets.push({
+        type: 'LayoutAppear',
+        wait: isFirst,
+        progressBehavior: isFirst ? 'WaitFinished' : 'Now',
+        delay: 0,
+        data: {
+          modelId: actor.id,
+          from: { side: actor.side, offset: 0 },
+          to: { side: actor.side, offset: 0 },
+          motion: '',
+          facial: lastFacialByModel.get(actor.id) ?? actor.facial,
+          facialFirst: true,
+          moveSpeed: 'Normal',
+          hologram: false
+        }
+      })
+      visible.set(actor.id, pos)
+    })
+    thinkingReturnCast = null
+  }
 
   const checkSlotAvailable = (
     targetSide: string,
@@ -1200,6 +1257,7 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
     const label = `snippets[${index}] ${kind}`
 
     if (kind === 'ChangeLayoutMode') {
+      thinkingReturnCast = null
       const mode = toStr(data.mode) === 'Three' ? 'Three' : 'Normal'
       if (mode === 'Normal' && visible.size >= 3) {
         throw new Error(`${label} 场上已有 3 名角色，需先 LayoutClear 退场后再切回 Normal`)
@@ -1210,6 +1268,7 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
       continue
     }
     if (kind === 'LayoutAppear') {
+      thinkingReturnCast = null
       if (typeof modelId !== 'number') throw new Error(`${label} 缺少 modelId`)
       if (visible.has(modelId)) throw new Error(`${label} 角色已在场，不能重复入场`)
       const maxOnStage = layoutMode === 'Three' ? 3 : 2
@@ -1237,10 +1296,12 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
       data.to = position
       data.from = { side, offset: 0 }
       visible.set(modelId, position)
+      if (toStr(data.facial).trim()) lastFacialByModel.set(modelId, toStr(data.facial).trim())
       rewrittenSnippets.push(snippet)
       continue
     }
     if (kind === 'LayoutClear' || kind === 'Move') {
+      if (kind === 'LayoutClear') thinkingReturnCast = null
       if (typeof modelId !== 'number' || !visible.has(modelId)) {
         throw new Error(`${label} 角色不在场`)
       }
@@ -1327,6 +1388,9 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
       continue
     }
     if (kind === 'LayoutDepth' || kind === 'CharacterShake') {
+      if (thinkingReturnCast && typeof modelId === 'number' && !visible.has(modelId)) {
+        restoreDuoFromThinking()
+      }
       if (typeof modelId !== 'number' || !visible.has(modelId)) {
         throw new Error(`${label} 角色不在场`)
       }
@@ -1334,6 +1398,70 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
       continue
     }
     if (kind === 'Talk' || kind === 'Motion' || kind === 'DoParam') {
+      if (
+        kind === 'Talk' &&
+        layoutMode === 'Normal' &&
+        typeof modelId === 'number' &&
+        modelId !== -1 &&
+        isExplicitThinkingTalkSnippet(snippet) &&
+        visible.size >= 2
+      ) {
+        const snapshot = [...visible.entries()].map(([id, pos]) => ({
+          id,
+          side: toStr(pos.side, 'Left'),
+          facial: lastFacialByModel.get(id) ?? ''
+        }))
+        snapshot.forEach((actor, idx) => {
+          const isFirst = idx === 0
+          rewrittenSnippets.push({
+            type: 'LayoutClear',
+            wait: isFirst,
+            progressBehavior: isFirst ? 'WaitFinished' : 'Now',
+            delay: 0,
+            data: {
+              modelId: actor.id,
+              from: { side: actor.side, offset: 0 },
+              to: { side: actor.side, offset: 0 },
+              motion: '',
+              facial: '',
+              moveSpeed: 'Normal'
+            }
+          })
+          visible.delete(actor.id)
+        })
+        rewrittenSnippets.push({
+          type: 'LayoutAppear',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: {
+            modelId,
+            from: { side: 'Center', offset: 0 },
+            to: { side: 'Center', offset: 0 },
+            motion: '',
+            facial: lastFacialByModel.get(modelId) ?? '',
+            facialFirst: true,
+            moveSpeed: 'Normal',
+            hologram: false
+          }
+        })
+        visible.set(modelId, { side: 'Center', offset: 0 })
+        thinkingReturnCast = snapshot
+        normalizedThinkingCuts += 1
+      } else if (
+        thinkingReturnCast &&
+        ((kind === 'Talk' && !isExplicitThinkingTalkSnippet(snippet)) ||
+          (kind !== 'Talk' && typeof modelId === 'number' && !visible.has(modelId)))
+      ) {
+        restoreDuoFromThinking()
+      }
+
+      if (thinkingReturnCast && kind === 'Talk' && Array.isArray(data.actions)) {
+        data.actions = (data.actions as JsonRecord[]).filter(
+          (act) => !isRecord(act) || toNumber(act.modelId, modelId as number) === modelId
+        )
+      }
+
       if (modelId !== -1 && (typeof modelId !== 'number' || !visible.has(modelId))) {
         throw new Error(`${label} 说话/动作角色必须已入场且未退场`)
       }
@@ -1349,7 +1477,13 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
           ) {
             throw new Error(`${label}.actions 的角色不在场，不能表演听者反应`)
           }
+          if (toStr(action.facial).trim()) {
+            lastFacialByModel.set(action.modelId, toStr(action.facial).trim())
+          }
         }
+      }
+      if (typeof modelId === 'number' && modelId !== -1 && toStr(data.facial).trim()) {
+        lastFacialByModel.set(modelId, toStr(data.facial).trim())
       }
       if (kind === 'Motion' && 'actions' in data && snippet.progressBehavior === undefined) {
         snippet.wait = true
@@ -1358,12 +1492,16 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
     rewrittenSnippets.push(snippet)
   }
 
+  normalizeLayoutTransitionBarriers(rewrittenSnippets, warn)
   story.snippets = rewrittenSnippets
   if (normalizedSlides > 0) {
     warn?.(`已将 ${normalizedSlides} 处滑动入出场/偏移规范化为槽位原地渐变（offset: 0）`)
   }
   if (convertedMoves > 0) {
     warn?.(`已将 ${convertedMoves} 处跨槽位 Move 滑动转换为原地渐变切镜（LayoutClear + LayoutAppear）`)
+  }
+  if (normalizedThinkingCuts > 0) {
+    warn?.(`已将 ${normalizedThinkingCuts} 处思考模式段落自动转为双人先退场、再单人 Center 淡入`)
   }
 }
 
@@ -2312,7 +2450,9 @@ export function validateAndFixStory(
       )
     }
   }
-  const lint = enforceOfficialStoryInvariants(story, view, warn)
+  const lint = enforceOfficialStoryInvariants(story, view, warn, {
+    emotionLabels: options.emotionLabels
+  })
 
   const parsed = StorySchema.parse(story)
   return { story: parsed, warnings, lint }

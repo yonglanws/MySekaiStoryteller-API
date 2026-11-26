@@ -428,7 +428,7 @@ test('LayoutAppearSnippet in-place fade-in resets stale alpha when offstage, set
     `fresh offstage appear must zero opacity before adding to layer: ${calls.join(',')}`
   )
   assert.ok(showArgs, 'show must be called')
-  assert.equal(showArgs[0], 100, 'official character_fade_duration = 100ms')
+  assert.equal(showArgs[0], 350, 'in-place character fade-in = 350ms (21 frames)')
   // branchDelay (1 frame) + holdFrames (1 frame) = 2 * (1000/60) = 33.333ms after t=500
   assert.ok(
     Math.abs(showArgs[3] - (500 + (2 * 1000) / 60)) < 1e-6,

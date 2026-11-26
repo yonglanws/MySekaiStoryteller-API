@@ -141,7 +141,7 @@ const IrodoriSchema = z.object({
   responseFormat: z.enum(['wav']).default('wav'),
   numSteps: z.number().int().positive().default(40),
   cfgScaleText: z.number().default(3.0),
-  cfgScaleCaption: z.number().default(3.0),
+  cfgScaleCaption: z.number().default(3.5),
   cfgScaleSpeaker: z.number().default(5.0),
   durationScale: z.number().default(1.0),
   chunkingEnabled: z.boolean().default(true),
@@ -158,10 +158,10 @@ const IrodoriSchema = z.object({
   speakerKvMinT: z.number().min(0).max(1).default(0.9),
   /** 可选：限制 speakerKvScale 作用的最多层数 */
   speakerKvMaxLayers: z.number().int().positive().optional(),
-  /** 音色锁策略：normal=普通句锁定基础参考音频，仅 ttsSpecialScene 解锁；off=允许按 emotion 切换 */
-  timbreLockMode: z.enum(['normal', 'off']).default('normal'),
+  /** 音色锁策略：off=依赖 LoRA+speakerKvScale 锁身份并按 emotion 切换参考音频；normal=普通句锁基础参考音频，仅 ttsSpecialScene 解锁 */
+  timbreLockMode: z.enum(['normal', 'off']).default('off'),
   /** 特殊场景（ttsSpecialScene=true）时的 cfg_scale_caption 引导强度 */
-  specialSceneCfgScaleCaption: z.number().positive().default(3.6),
+  specialSceneCfgScaleCaption: z.number().positive().default(4.2),
   /** 内置 AI 提示词可用的情绪标签；角色 emotions 里的标签也会自动并入 */
   emotionLabels: z.array(z.string()).default([])
 })
@@ -535,6 +535,26 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_IRODORI_NUM_STEPS) {
     const v = parseInt(env.MSS_IRODORI_NUM_STEPS, 10)
     if (Number.isFinite(v) && v > 0) config.tts.irodori.numSteps = v
+  }
+  if (env.MSS_IRODORI_TIMBRE_LOCK_MODE) {
+    const mode = env.MSS_IRODORI_TIMBRE_LOCK_MODE.toLowerCase()
+    if (mode === 'normal' || mode === 'off') config.tts.irodori.timbreLockMode = mode
+  }
+  if (env.MSS_IRODORI_CFG_SCALE_CAPTION) {
+    const v = parseFloat(env.MSS_IRODORI_CFG_SCALE_CAPTION)
+    if (Number.isFinite(v) && v >= 0) config.tts.irodori.cfgScaleCaption = v
+  }
+  if (env.MSS_IRODORI_SPECIAL_CFG_SCALE_CAPTION) {
+    const v = parseFloat(env.MSS_IRODORI_SPECIAL_CFG_SCALE_CAPTION)
+    if (Number.isFinite(v) && v > 0) config.tts.irodori.specialSceneCfgScaleCaption = v
+  }
+  if (env.MSS_IRODORI_SPEAKER_KV_SCALE) {
+    const v = parseFloat(env.MSS_IRODORI_SPEAKER_KV_SCALE)
+    if (Number.isFinite(v) && v > 0) config.tts.irodori.speakerKvScale = v
+  }
+  if (env.MSS_IRODORI_SPEAKER_KV_MIN_T) {
+    const v = parseFloat(env.MSS_IRODORI_SPEAKER_KV_MIN_T)
+    if (Number.isFinite(v) && v >= 0 && v <= 1) config.tts.irodori.speakerKvMinT = v
   }
   if (env.MSS_RECORD_TARGET_SIZE_MB) {
     const v = parseInt(env.MSS_RECORD_TARGET_SIZE_MB, 10)

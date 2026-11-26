@@ -4,10 +4,10 @@ import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
 import {
   APPEAR_FADE_TOTAL_FRAMES,
+  APPEAR_IN_PLACE_FADE_TOTAL_FRAMES,
   APPEAR_SHOWN_MOVE_MS,
-  CHARACTER_FADE_MS,
   FRAME_MS,
-  framesForSeconds,
+  msToFrameCount,
   resolveCharacterFadeMs
 } from '../../../common/official/timing'
 import {
@@ -140,15 +140,15 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     // CharacterMoveTo(SideTo) 与淡入并发，片段只等淡入（滑入继续在后台）。
 
     const isExporting = Boolean(AnimationManager.isExporting?.())
-    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS)
+    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS, !is_moved)
     const moveMs = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
     // 官方 `at = frame + (hidden && motion)`：带 motion 的新角色，类型分支（淡入/滑入）
     // 延后一帧；动作本身仍在 act 启动。
     const branchDelayMs = entryMotion ? FRAME_MS : 0
-    const holdFrames = Math.max(
-      0,
-      APPEAR_FADE_TOTAL_FRAMES - framesForSeconds(CHARACTER_FADE_MS / 1000)
-    )
+    const totalAppearFrames = is_moved
+      ? APPEAR_FADE_TOTAL_FRAMES
+      : APPEAR_IN_PLACE_FADE_TOTAL_FRAMES
+    const holdFrames = Math.max(0, totalAppearFrames - msToFrameCount(fadeMs))
     const fadeTotalMs = holdFrames * FRAME_MS + fadeMs
     // Talk 的布局门只等片段本身（淡入结束）；后台滑入不阻塞下一句
     // （参考 `layout_running` 只看片段，`motions_settled` 只看 body motion）。

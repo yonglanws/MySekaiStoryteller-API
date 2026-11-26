@@ -980,6 +980,9 @@ export function auditEpisode(scenario, episodeId, runtime) {
         const forced = !wasVisible && hasMotion ? 1 : 0
         const at = entry.startFrame + forced
         const expectedMove = wasVisible ? timing.APPEAR_SHOWN_MOVE_FRAMES : moveFrames
+        const expectedAppearFrames = moved
+          ? timing.APPEAR_FADE_TOTAL_FRAMES
+          : timing.APPEAR_IN_PLACE_FADE_TOTAL_FRAMES
         if (wasVisible) {
           if (layout.fadeStartFrame !== null || layout.fadeEndFrame !== null) {
             frameFails(fails, episodeId, i, 'shown appear must not fade')
@@ -988,7 +991,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
           if (layout.fadeStartFrame !== at + 1) {
             frameFails(fails, episodeId, i, `appear fadeStart ${layout.fadeStartFrame}`)
           }
-          if (layout.fadeEndFrame !== at + timing.APPEAR_FADE_TOTAL_FRAMES) {
+          if (layout.fadeEndFrame !== at + expectedAppearFrames) {
             frameFails(fails, episodeId, i, `appear fadeEnd ${layout.fadeEndFrame}`)
           }
         }
@@ -998,13 +1001,13 @@ export function auditEpisode(scenario, episodeId, runtime) {
         }
         const expectedDuration = wasVisible
           ? timing.APPEAR_SHOWN_MOVE_FRAMES
-          : timing.APPEAR_FADE_TOTAL_FRAMES + forced
+          : expectedAppearFrames + forced
         if (entry.durationFrames !== expectedDuration) {
           frameFails(fails, episodeId, i, `appear duration ${entry.durationFrames}`)
         }
         const activeSlideEnd = wasVisible
           ? layout.moveEndFrame
-          : Math.max(at + timing.APPEAR_FADE_TOTAL_FRAMES, moved ? layout.moveEndFrame : 0)
+          : Math.max(at + expectedAppearFrames, moved ? layout.moveEndFrame : 0)
         activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
@@ -1038,11 +1041,11 @@ export function auditEpisode(scenario, episodeId, runtime) {
         } else {
           if (
             layout.fadeStartFrame !==
-            entry.startFrame + timing.msToFrameCount(timing.HIDE_DELAY_IN_PLACE_MS)
+            entry.startFrame + timing.msToFrameCount(timing.HIDE_DELAY_IN_PLACE_SMOOTH_MS)
           ) {
             frameFails(fails, episodeId, i, `clear in-place fadeStart ${layout.fadeStartFrame}`)
           }
-          if (entry.durationFrames !== timing.HIDE_IN_PLACE_TOTAL_FRAMES) {
+          if (entry.durationFrames !== timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES) {
             frameFails(fails, episodeId, i, `clear in-place duration ${entry.durationFrames}`)
           }
         }

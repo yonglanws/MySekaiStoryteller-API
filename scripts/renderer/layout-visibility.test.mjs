@@ -51,7 +51,7 @@ function fixture(calls) {
       path.join(renderer, 'managers/AnimationManager.ts'),
       {
         default: {
-          // 只让 Clear 的 150ms 延迟挂起，Appear 的 1 帧 hold 直接放行。
+          // 只让 Clear 的后台淡出/延迟挂起，Appear 的 1 帧 hold 直接放行。
           async delay(ms) {
             calls.push(`delay:${ms}`)
             if (ms >= 100 && !gate.released) await gate.promise
@@ -110,7 +110,7 @@ function fixture(calls) {
   return { load, gate }
 }
 
-function makeModel(calls) {
+function makeModel(calls, gate) {
   let generation = 0
   return {
     alpha: 1,
@@ -148,6 +148,7 @@ function makeModel(calls) {
     },
     async hide(time, token) {
       calls.push(`hide:${time}:${token}`)
+      if (!gate.released) await gate.promise
       if (token !== undefined && !this.isVisibilityCurrent(token)) return
       this.alpha = 0
     },
@@ -214,7 +215,7 @@ const clearData = {
 test('an appear during a background clear fades in and survives the stale clear', async () => {
   const calls = []
   const f = fixture(calls)
-  const model = makeModel(calls)
+  const model = makeModel(calls, f.gate)
   const shown = new Set([1])
   const app = makeApp(model, shown, calls)
   const LayoutAppearSnippet = f.load('snippets/LayoutAppearSnippet.ts').default
@@ -223,31 +224,27 @@ test('an appear during a background clear fades in and survives the stale clear'
   const clearing = new LayoutClearSnippet(app, clearData).runSnippet()
   await new Promise((resolve) => setImmediate(resolve))
   assert.ok(
-    calls.some((call) => call === 'delay:150'),
-    `clear should be waiting in its 0.15s delay: ${calls.join(',')}`
+    calls.some((call) => call === 'hide:350:0'),
+    `clear should be mid-fade in its 350ms in-place hide: ${calls.join(',')}`
   )
 
   const appearing = new LayoutAppearSnippet(app, appearData).runSnippet()
   await new Promise((resolve) => setImmediate(resolve))
   assert.ok(
-    calls.some((call) => call.startsWith('show:')),
+    calls.some((call) => call.startsWith('show:350:')),
     `appear must fade in while the clear is still pending: ${calls.join(',')}`
   )
 
   f.gate.release()
   await Promise.all([clearing, appearing])
-  assert.equal(
-    calls.some((call) => call.startsWith('hide:')),
-    false,
-    calls.join(',')
-  )
+  assert.equal(model.alpha, 1, 'stale clear must not zero alpha after appear')
   assert.equal(calls.includes('removeModel'), false, calls.join(','))
   assert.equal(shown.has(1), true, 'character must stay on stage after the stale clear')
 
-  // 新 Appear 之后，下一次 Clear 必须按在场 0.25s 退场。
+  // 新 Appear 之后，下一次 Clear 必须按在场 350ms 退场。
   await new LayoutClearSnippet(app, clearData).runSnippet()
   assert.ok(
-    calls.some((call) => call.startsWith('hide:')),
+    calls.some((call) => call === 'hide:350:1'),
     calls.join(',')
   )
   assert.equal(calls.includes('removeModel'), true, calls.join(','))
@@ -257,7 +254,7 @@ test('an appear during a background clear fades in and survives the stale clear'
 test('a clear of a character that is already hidden finishes immediately', async () => {
   const calls = []
   const f = fixture(calls)
-  const model = makeModel(calls)
+  const model = makeModel(calls, f.gate)
   const shown = new Set()
   const app = makeApp(model, shown, calls)
   const LayoutClearSnippet = f.load('snippets/LayoutClearSnippet.ts').default

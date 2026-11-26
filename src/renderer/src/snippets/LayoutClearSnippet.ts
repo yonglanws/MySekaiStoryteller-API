@@ -2,7 +2,10 @@ import PositionRel from '../types/PositionRel'
 import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
-import { HIDE_DELAY_IN_PLACE_MS, resolveCharacterFadeMs } from '../../../common/official/timing'
+import {
+  HIDE_DELAY_IN_PLACE_SMOOTH_MS,
+  resolveCharacterFadeMs
+} from '../../../common/official/timing'
 import {
   type ExtendedModelLayer,
   nowMs,
@@ -42,12 +45,11 @@ export default class LayoutClearSnippet extends BaseSnippet {
     )
 
     const isExporting = Boolean(AnimationManager.isExporting?.())
-    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS)
     const is_moved = from.x !== to.x || from.y !== to.y
+    const fadeMs = resolveCharacterFadeMs(isExporting, AnimationManager.exportEncodeFPS, !is_moved)
     const move_duration_ms = is_moved ? StageUtils.move_speed_to_num(this.data.data.moveSpeed) : 0
-    const totalClearMs = is_moved
-      ? Math.max(fadeMs, move_duration_ms)
-      : HIDE_DELAY_IN_PLACE_MS + fadeMs
+    const inPlaceDelayMs = HIDE_DELAY_IN_PLACE_SMOOTH_MS
+    const totalClearMs = is_moved ? Math.max(fadeMs, move_duration_ms) : inPlaceDelayMs + fadeMs
     const clearStartMs = nowMs()
     recordLayoutRunningEnd(this.app, clearStartMs + totalClearMs)
 
@@ -80,9 +82,9 @@ export default class LayoutClearSnippet extends BaseSnippet {
       : null
 
     // HideCharacter(id, delay)：
-    // - 原地：delay 0.15s，然后 0.1s 淡出，共 0.25s；
+    // - 原地：0ms 前导 + 350ms（21 帧）平滑淡出；
     // - 滑动：delay = max(0, move_duration - 0.1s)，淡出结束时正好滑到位。
-    const delay_ms = is_moved ? Math.max(0, move_duration_ms - fadeMs) : HIDE_DELAY_IN_PLACE_MS
+    const delay_ms = is_moved ? Math.max(0, move_duration_ms - fadeMs) : inPlaceDelayMs
     if (delay_ms > 0) {
       await AnimationManager.delay(delay_ms)
       if (visibilityToken !== undefined && !model.isVisibilityCurrent?.(visibilityToken)) return

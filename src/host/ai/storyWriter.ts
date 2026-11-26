@@ -48,7 +48,12 @@ import {
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
 import { runAgenticStoryGeneration, type DirectorReviewRecord } from './agentTools'
-import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
+import {
+  alignStoryTtsEmotionsAndCaptions,
+  ensureJapaneseTtsText,
+  type TtsBatchTranslator,
+  type TtsTranslationItem
+} from './ttsText'
 import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
 import { RerankClient, resolveRerankConfig } from '../rag/rerankClient'
 import { AdaptiveRagRetriever } from '../rag/retriever'
@@ -497,10 +502,12 @@ export class StoryWriter {
         const validated = validateAndFixStory(parsed, view, this.logger, {
           emotionLabels: this.emotionLabels
         })
+        alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
         let ttsTranslated = 0
         if (options.translateForTts ?? this.settings.translateForTts) {
           ttsTranslated = await this.translateTtsText(validated.story, options.signal)
         }
+        alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
         return {
           story: validated.story,
           meta: {
@@ -560,9 +567,24 @@ export class StoryWriter {
         logger: this.logger,
         signal: options.signal
       })
+      // 先对齐错标「平静」并补齐 ttsCaption / ttsSpecialScene，让后续翻译器拿到准确的声演上下文
+      const alignedBefore = alignStoryTtsEmotionsAndCaptions(agentRes.story, {
+        emotionLabels: this.emotionLabels
+      })
       let ttsTranslated = 0
       if (options.translateForTts ?? this.settings.translateForTts) {
         ttsTranslated = await this.translateTtsText(agentRes.story, options.signal)
+      }
+      const alignedAfter = alignStoryTtsEmotionsAndCaptions(agentRes.story, {
+        emotionLabels: this.emotionLabels
+      })
+      const totalEmo = alignedBefore.updatedEmotions + alignedAfter.updatedEmotions
+      const totalCap = alignedBefore.updatedCaptions + alignedAfter.updatedCaptions
+      const totalSpec = alignedBefore.updatedSpecialScenes + alignedAfter.updatedSpecialScenes
+      if (totalEmo > 0 || totalCap > 0 || alignedAfter.updatedEmojis > 0 || totalSpec > 0) {
+        this.logger.info(
+          `[TTS] 情绪对齐（agent）：emotion=${totalEmo} caption=${totalCap} emoji=${alignedAfter.updatedEmojis} special=${totalSpec}`
+        )
       }
       return {
         story: agentRes.story,
@@ -1174,6 +1196,19 @@ export class StoryWriter {
     if (translateForTts) {
       ttsTranslated += await this.translateTtsText(validated.story, options.signal)
     }
+    const alignedStaged = alignStoryTtsEmotionsAndCaptions(validated.story, {
+      emotionLabels: this.emotionLabels
+    })
+    if (
+      alignedStaged.updatedEmotions > 0 ||
+      alignedStaged.updatedCaptions > 0 ||
+      alignedStaged.updatedEmojis > 0 ||
+      alignedStaged.updatedSpecialScenes > 0
+    ) {
+      this.logger.info(
+        `[TTS] 情绪对齐（staged）：emotion=${alignedStaged.updatedEmotions} caption=${alignedStaged.updatedCaptions} emoji=${alignedStaged.updatedEmojis} special=${alignedStaged.updatedSpecialScenes}`
+      )
+    }
 
     const activeIds = new Set(validated.story.models.map((entry) => entry.id))
     const cast = view.models.filter((entry) => activeIds.has(entry.id)).map((entry) => entry.name)
@@ -1313,7 +1348,8 @@ export class StoryWriter {
       '翻译规则：',
       '1. 严格结合每句提供的说话人、口吻提示、日文称呼约定、情绪标签（emotion）与日语声演指令（ttsCaption），翻出地道、口语化、符合角色人称与敬语习惯的日语。',
       '2. 每条译文都必须含假名，不要输出纯汉字（例如「了解」写成「了解だよ」「了解です」）。保留自然的停顿与语气（……、っ、！、？、——）。',
-      '3. 可在情绪鲜明的自然断句处按需加入 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。',
+      '3. 按情绪与声演指令在自然断句处使用 0~1 个（长句最多 2 个）Irodori 官方内联演技表情：🤭(轻笑) 😮‍💨(叹气) 🥺(颤声/委屈/忍泪) 😰(慌张/结巴) 😆(开心) 😊(愉快) 😠(生气) 😭(哭泣/呜咽/撕裂恳求) 😲(惊讶) 🫣(害羞) 😌(安心) 🙄(无语) 😏(调侃) 🫶(温柔) ⏸️(停顿) ⏩(语速加快) 🐢(放慢) 😮(倒吸气) 🌬️(喘气) 👂(耳语)。普通叙述句可以不加；禁止使用 🥵👅💋😴🥤🥴👃 等不安全表情。\n' +
+        '   - **哭泣/悲伤/愧疚/告别硬性规则**：当 `emotion` 为「伤心」或 `ttsCaption` 含哭腔/颤抖/悲痛时，**必须在台词自然断句处加入 `😭`（哭泣/呜咽/撕裂呐喊/恳求）或 `🥺`（忍泪/哽咽/含泪道歉）或 `😮‍💨`（无力叹息）**——尤其台词表面出现「大丈夫」「友達」「冗談」「笑う」「一緒」等正面词汇但语境悲伤时，务必加 `🥺`/`😭` 锚定悲伤声线，防止 TTS 读出笑意！**严禁**在「伤心」「生气」「惊讶」台词中使用 `🤭 😆 😊 😏 🫶 🎵 😌` 等欢快/安心表情。',
       '4. 非语言语气句（如「……呜」「……っ」「嗯……」等）请译为自然的日语拟声或副语言提示，不要只输出裸标点或孤立促音「……っ」。',
       '5. 只输出说出口或内心独白的台词正文，严禁插入「(笑)」「（ため息）」等括号动作提示。',
       ...(addressLines.length > 0
