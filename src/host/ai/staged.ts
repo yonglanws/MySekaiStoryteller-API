@@ -1,4 +1,4 @@
-import type { CatalogModel } from '../resources/resourceCatalog'
+import { resolveRegisteredSeFile, type CatalogModel } from '../resources/resourceCatalog'
 import * as corpusExamplesMod from './corpusExamples'
 import { selectUnitFewShotExcerpts } from './corpusExamples'
 import * as personasMod from './personas'
@@ -19,8 +19,7 @@ import {
 import {
   CURATED_SCENARIO_EFFECTS,
   isVirtualSingerModel,
-  normalizeScenarioEffectName,
-  resolveScenarioSe
+  normalizeScenarioEffectName
 } from './scenarioCues'
 import { hasTranslationContent } from './ttsText'
 import {
@@ -358,7 +357,12 @@ interface FacialSemanticsStagedExt {
     prevTense?: boolean
     isListener?: boolean
     restrainedRole?: boolean
+    cheerfulScene?: boolean
   }) => { ok: boolean; reason?: string }
+  isCheerfulComedyContext?: (
+    lines: ReadonlyArray<{ content?: string; emotion?: string; sceneId?: string }>,
+    index: number
+  ) => boolean
   pickMoodMatchedMotion?: (
     motions: string[],
     mood: facialSemanticsMod.TargetMood,
@@ -451,6 +455,7 @@ function isMotionCompatibleWithContext(params: {
   prevTense: boolean
   isListener?: boolean
   restrainedRole?: boolean
+  cheerfulScene?: boolean
 }): boolean {
   if (!params.motion.trim()) return true
   const lower = params.motion.toLowerCase()
@@ -466,7 +471,8 @@ function isMotionCompatibleWithContext(params: {
         content: params.line.content,
         prevTense: params.prevTense,
         isListener: params.isListener,
-        restrainedRole: params.restrainedRole
+        restrainedRole: params.restrainedRole,
+        cheerfulScene: params.cheerfulScene
       }).ok
     ) {
       return false
@@ -477,9 +483,18 @@ function isMotionCompatibleWithContext(params: {
   const monologue = /^[（(]/.test(text) && /[）)]$/.test(text)
   const isTense = params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble'
   const isJoyful =
-    /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(lower)
+    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(
+      lower
+    )
   const isNegative = /angry|disgust|sad|cry|sigh/.test(lower)
-  if (isTense && isJoyful) return false
+  const isGenuineHappy = facialSemanticsMod.isGenuineHappyOrReconciliation(text)
+  if (
+    isTense &&
+    isJoyful &&
+    !(params.prevTense && mood === 'smile' && isGenuineHappy && emo === '开心')
+  ) {
+    return false
+  }
   if (mood === 'smile' && !params.prevTense && isNegative) return false
   if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
   const isQuestionLine = /[？?]|难道|为什么|怎么|吗/.test(text)
@@ -692,11 +707,22 @@ const shouldAvoidIncongruousSmile = (
   return SMILE_FACIAL_RE.test(facial) && line.emotion !== '开心' && isSilentBeatLine(line.content)
 }
 
+function isCheerfulComedyLines(
+  lines: ReadonlyArray<{ content: string; emotion?: string; sceneId?: string }>,
+  index: number
+): boolean {
+  if (typeof facialStagedApi.isCheerfulComedyContext === 'function') {
+    return facialStagedApi.isCheerfulComedyContext(lines, index)
+  }
+  return false
+}
+
 function isPrecededByTenseBeat(
   lines: ReadonlyArray<{ content: string; emotion?: string; sceneId?: string }>,
   index: number,
   lookback = 3
 ): boolean {
+  if (isCheerfulComedyLines(lines, index)) return false
   const currentSceneId = lines[index]?.sceneId
   const start = Math.max(0, index - lookback)
   for (let j = index - 1; j >= start; j--) {
@@ -3615,8 +3641,9 @@ function enrichStagingBaseline(
         else if (/bell|上课|下课|铃声/.test(text)) cue = 'se00249_b.mp3'
         else if (/Nightcord|上线|通话|麦/.test(text)) cue = 'se00084_b.mp3'
         else if (/拍照|快门/.test(text)) cue = 'se00075_b.mp3'
-        if (cue && !seHits.some((h) => Math.abs(h.idx - i) < 6)) {
-          seHits.push({ idx: i, file: cue })
+        const resolved = cue ? resolveRegisteredSeFile(view, cue)?.file ?? null : null
+        if (resolved && !seHits.some((h) => Math.abs(h.idx - i) < 6)) {
+          seHits.push({ idx: i, file: resolved })
         }
       }
       for (const hit of seHits) {
@@ -3791,7 +3818,7 @@ export function normalizeStaging(
 
     if (isRecord(item.se) || typeof item.se === 'string') {
       const rawSe = isRecord(item.se) ? (item.se.file ?? item.se.cue ?? item.se.id) : item.se
-      const file = view.canonicalSe?.(rawSe) ?? resolveScenarioSe(str(rawSe))?.file ?? null
+      const file = resolveRegisteredSeFile(view, rawSe)?.file ?? null
       if (file) {
         ev.se = {
           file,
@@ -5415,6 +5442,7 @@ export function composeStory(
     }
 
     // 防止说话人连续多句卡死在 face_normal_01 或同一表情，也防止表情/动作与剧情情绪冲突
+    const cheerfulScene = isCheerfulComedyLines(dialogue.lines, index)
     const precededByTense = isPrecededByTenseBeat(dialogue.lines, index)
     const speakerModelPath = view.modelById(member.modelId)?.path
     const speakerRestrained = isRestrainedRole(member.role) || isRestrainedRole(member.name)
@@ -5485,7 +5513,8 @@ export function composeStory(
           modelPath: speakerModelPath,
           line,
           prevTense: precededByTense,
-          restrainedRole: speakerRestrained
+          restrainedRole: speakerRestrained,
+          cheerfulScene
         })
         const repeatedTooLong =
           allowStaleCheck &&

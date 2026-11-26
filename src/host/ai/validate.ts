@@ -11,7 +11,8 @@ import { repairSpokenStageDirections } from './dialogueLinter'
 import * as facialSemanticsMod from './facialSemantics'
 import * as personasMod from './personas'
 import { isStandingMotion, type CatalogView } from './prompt'
-import { normalizeScenarioEffectName, resolveScenarioSe } from './scenarioCues'
+import { normalizeScenarioEffectName } from './scenarioCues'
+import { resolveRegisteredSeFile } from '../resources/resourceCatalog'
 import * as ttsTextMod from './ttsText'
 import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
 
@@ -117,6 +118,7 @@ interface FacialSemanticsValidationExt {
     isMonologue?: boolean
     isListener?: boolean
     restrainedRole?: boolean
+    cheerfulScene?: boolean
     modelsRoot?: string
   }) => { ok: boolean; reason?: string }
   isMotionCompatibleWithLine?: (params: {
@@ -127,6 +129,7 @@ interface FacialSemanticsValidationExt {
     prevTense?: boolean
     isListener?: boolean
     restrainedRole?: boolean
+    cheerfulScene?: boolean
   }) => { ok: boolean; reason?: string }
   pickMoodMatchedMotion?: (
     motions: string[],
@@ -200,6 +203,7 @@ function isFacialStrictlyCompatible(params: {
   isMonologue?: boolean
   isListener?: boolean
   restrainedRole: boolean
+  cheerfulScene?: boolean
 }): boolean {
   if (!params.facial.trim()) return true
   const baseCheck =
@@ -268,6 +272,7 @@ function isMotionMoodCompatible(params: {
   prevTense: boolean
   isListener?: boolean
   restrainedRole: boolean
+  cheerfulScene?: boolean
 }): boolean {
   if (!params.motion.trim()) return true
   if (typeof facialValidationApi.isMotionCompatibleWithLine === 'function') {
@@ -283,9 +288,18 @@ function isMotionMoodCompatible(params: {
   const isTense =
     params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble' || emo === '害怕'
   const isJoyfulMotion =
-    /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(lower)
+    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(
+      lower
+    )
   const isNegativeMotion = /angry|disgust|sad|cry|sigh/.test(lower)
-  if (isTense && isJoyfulMotion) return false
+  const isGenuineHappy = facialSemanticsMod.isGenuineHappyOrReconciliation(text)
+  if (
+    isTense &&
+    isJoyfulMotion &&
+    !(params.prevTense && mood === 'smile' && isGenuineHappy && emo === '开心')
+  ) {
+    return false
+  }
   if (mood === 'smile' && !params.prevTense && isNegativeMotion) return false
   if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
   // 悲伤/绝望/沉重独白句严禁切换为打招呼/惊讶/生气等与情绪脱节的动作；
@@ -475,6 +489,42 @@ function pickCompatibleFacialFallback(
   return ensureRealCatalogAnimation(view, modelId, 'facial', neutral)
 }
 
+function isSceneCutSnippet(snippet: JsonRecord): boolean {
+  const kind = toStr(snippet.type)
+  const data = isRecord(snippet.data) ? snippet.data : undefined
+  return (
+    kind === 'BlackOut' ||
+    kind === 'SekaiOut' ||
+    (kind === 'SideFade' && toStr(data?.mode, 'Out').toLowerCase() === 'out') ||
+    kind === 'ChangeBackgroundImage'
+  )
+}
+
+function isCheerfulComedySnippetContext(snippets: JsonRecord[], snippetIndex: number): boolean {
+  let sceneStart = snippetIndex
+  while (sceneStart > 0 && !isSceneCutSnippet(snippets[sceneStart - 1])) {
+    sceneStart -= 1
+  }
+  let sceneEnd = snippetIndex
+  while (sceneEnd + 1 < snippets.length && !isSceneCutSnippet(snippets[sceneEnd + 1])) {
+    sceneEnd += 1
+  }
+  const talks: Array<{ content: string; emotion: string }> = []
+  let targetTalkIdx = -1
+  let lastTalkBeforeOrAt = -1
+  for (let idx = sceneStart; idx <= sceneEnd; idx++) {
+    const s = snippets[idx]
+    if (!isRecord(s) || s.type !== 'Talk' || !isRecord(s.data)) continue
+    const talkIdx = talks.length
+    talks.push({ content: toStr(s.data.content), emotion: toStr(s.data.emotion) })
+    if (idx === snippetIndex) targetTalkIdx = talkIdx
+    if (idx <= snippetIndex) lastTalkBeforeOrAt = talkIdx
+  }
+  if (talks.length === 0) return false
+  const probeIdx = targetTalkIdx >= 0 ? targetTalkIdx : Math.max(0, lastTalkBeforeOrAt)
+  return facialSemanticsMod.isCheerfulComedyContext(talks, probeIdx)
+}
+
 function repairActingMismatches(
   story: JsonRecord,
   view: CatalogView,
@@ -489,7 +539,8 @@ function repairActingMismatches(
     modelPath: string | undefined,
     facial: string,
     emotion?: string,
-    content?: string
+    content?: string,
+    cheerfulScene = false
   ): void => {
     if (modelId === -1) return
     const emo = (emotion ?? '').trim()
@@ -497,8 +548,12 @@ function repairActingMismatches(
       actorState.set(modelId, null)
       return
     }
+    if (cheerfulScene && emo === '开心') {
+      actorState.set(modelId, null)
+      return
+    }
     if (emo === '生气') {
-      actorState.set(modelId, 'angry')
+      actorState.set(modelId, cheerfulScene ? null : 'angry')
       return
     }
     if (emo === '伤心' || emo === '害怕') {
@@ -688,8 +743,10 @@ function repairActingMismatches(
     const content = toStr(data.content)
     const emotion = toStr(data.emotion)
     const monologue = isInnerMonologueText(content)
+    const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
+    const effectivePrevTense = tenseTracker.tense && !cheerfulScene
     if (speakerId === -1) {
-      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
       continue
     }
 
@@ -702,11 +759,12 @@ function repairActingMismatches(
       if (isListener && facial) {
         const lState = actorState.get(actorId) ?? null
         const isLockedTense =
-          lState === 'angry' ||
-          lState === 'sad' ||
-          lState === 'cry' ||
-          lState === 'serious' ||
-          (lState === 'trouble' && tenseTracker.tense)
+          !cheerfulScene &&
+          (lState === 'angry' ||
+            lState === 'sad' ||
+            lState === 'cry' ||
+            lState === 'serious' ||
+            (lState === 'trouble' && effectivePrevTense))
         if (
           isLockedTense &&
           lState &&
@@ -745,10 +803,11 @@ function repairActingMismatches(
           modelPath: actorModel.path,
           emotion,
           content,
-          prevTense: tenseTracker.tense,
+          prevTense: effectivePrevTense,
           isMonologue: !isListener && monologue,
           isListener,
-          restrainedRole: restrained
+          restrainedRole: restrained,
+          cheerfulScene
         })
         if (!ok) {
           const replacement = pickCompatibleFacialFallback(
@@ -756,7 +815,7 @@ function repairActingMismatches(
             actorId,
             content,
             emotion,
-            tenseTracker.tense,
+            effectivePrevTense,
             restrained,
             { isMonologue: !isListener && monologue, isListener, avoidFacial: curFacial }
           )
@@ -776,9 +835,10 @@ function repairActingMismatches(
           modelPath: actorModel.path,
           emotion,
           content,
-          prevTense: tenseTracker.tense,
+          prevTense: effectivePrevTense,
           isListener,
-          restrainedRole: restrained
+          restrainedRole: restrained,
+          cheerfulScene
         })
       ) {
         const mood = inferValidationMood(content, emotion)
@@ -816,17 +876,17 @@ function repairActingMismatches(
         }
       }
     }
-    updateActorState(speakerId, speakerModel?.path, speakerFacial, emotion, content)
+    updateActorState(speakerId, speakerModel?.path, speakerFacial, emotion, content, cheerfulScene)
     if (Array.isArray(data.actions)) {
       for (const act of data.actions) {
         if (!isRecord(act)) continue
         const aid = toNumber(act.modelId, speakerId)
         if (aid !== speakerId && toStr(act.facial)) {
-          updateActorState(aid, view.modelById(aid)?.path, toStr(act.facial))
+          updateActorState(aid, view.modelById(aid)?.path, toStr(act.facial), undefined, undefined, cheerfulScene)
         }
       }
     }
-    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
   }
 }
 
@@ -853,7 +913,8 @@ export function ensureListenerReactivity(
   const tenseTracker: facialSemanticsMod.SceneTenseTracker = { tense: false, calmRun: 0 }
   let injectedCount = 0
 
-  for (const snippet of snippets) {
+  for (let snippetIdx = 0; snippetIdx < snippets.length; snippetIdx++) {
+    const snippet = snippets[snippetIdx]
     if (!isRecord(snippet) || !isRecord(snippet.data)) continue
     const kind = toStr(snippet.type)
     const data = snippet.data
@@ -1037,7 +1098,9 @@ export function ensureListenerReactivity(
     justAppeared.clear()
     prevContent = content
     prevEmotion = emotion
-    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, {
+      cheerfulScene: isCheerfulComedySnippetContext(snippets, snippetIdx)
+    })
   }
 
   if (injectedCount > 0) {
@@ -2179,12 +2242,15 @@ export function validateAndFixStory(
 
     if (kind === 'PlaySe') {
       const rawFile = cleanPath(data.file)
-      const canonical = view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
-      if (!canonical) {
+      const resolved = resolveRegisteredSeFile(view, rawFile)
+      if (!resolved) {
         droppedSnippets.add(index)
         continue
       }
-      data.file = canonical
+      if (resolved.remapped) {
+        warn(`snippets[${index}] PlaySe '${rawFile}' 不在本地 SE 目录，已映射为 ${resolved.file}`)
+      }
+      data.file = resolved.file
       data.volume = Math.min(4, Math.max(0, toNumber(data.volume, 1)))
       data.loop = toBool(data.loop, false)
       data.fadeMs = Math.min(10000, Math.max(0, toNumber(data.fadeMs, 0)))
@@ -2194,12 +2260,15 @@ export function validateAndFixStory(
 
     if (kind === 'StopSe') {
       const rawFile = cleanPath(data.file)
-      const canonical = view.canonicalSe?.(rawFile) ?? resolveScenarioSe(rawFile)?.file ?? rawFile
-      if (!canonical) {
+      const resolved = resolveRegisteredSeFile(view, rawFile)
+      if (!resolved) {
         droppedSnippets.add(index)
         continue
       }
-      data.file = canonical
+      if (resolved.remapped) {
+        warn(`snippets[${index}] StopSe '${rawFile}' 不在本地 SE 目录，已映射为 ${resolved.file}`)
+      }
+      data.file = resolved.file
       data.fadeMs = Math.min(10000, Math.max(0, toNumber(data.fadeMs, 0)))
       snippet.data = data
       continue
