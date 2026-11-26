@@ -63,8 +63,6 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['scared', 1],
   ['serious', 1],
   ['wandahoi', 1],
-  ['sleep', 1],
-  ['delicious', 1],
   ['pose', 1],
   ['default', 1]
 ]
@@ -621,6 +619,14 @@ export class CatalogView {
 
     const keywords = extractQueryKeywords(query)
     const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
+    const isTenseQuery =
+      /追|逃|对峙|冲突|吵|哭|泪|道歉|告别|压抑|低沉|沉重|紧张|不安|严肃|秘密|隐瞒|害怕|悬疑|暗涌|夜晚|深夜|暴雨|雨|伤心|生气/.test(
+        query
+      )
+    const isWarmQuery =
+      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(
+        query
+      ) && !isTenseQuery
     const scoreOf = (detail: CatalogBgm): number => {
       let score = detail.source === 'local' ? 6 : 0
       const hay =
@@ -630,6 +636,21 @@ export class CatalogView {
       }
       for (const u of unitHints) {
         if (detail.unit === u) score += 6
+      }
+      if (isTenseQuery) {
+        if (/低沉|克制|压抑|悲伤|感伤|忧郁|紧绷|紧张|紧迫|暗涌|悬疑|冲突|告[白别]|沉重|严肃|dramatic|tense|sad|melanchol|thorns/i.test(hay)) {
+          score += 10
+        }
+        if (/日常|闲聊|温馨|轻松|欢快|搞笑|喜剧|轻缓|居家/i.test(hay)) {
+          score -= 5
+        }
+      } else if (isWarmQuery) {
+        if (/日常|轻松|温暖|温馨|欢快|元气|活泼|轻缓|居家|搞笑|slapstick/i.test(hay)) {
+          score += 10
+        }
+        if (/压抑|低沉|悲伤|紧绷|冲突|告别/i.test(hay)) {
+          score -= 5
+        }
       }
       if (
         /经典|日常|温暖|泪|紧绷|暗涌|普通|平凡|宁静|slapstick|into deep/i.test(
@@ -1169,7 +1190,7 @@ export class CatalogView {
 }
 
 const STORY_SYSTEM_PROMPT =
-  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。所有入场/退场与切镜（包括单人 Center 思考模式切换）一律采用槽位原地渐变淡入淡出（from == to，offset=0，moveSpeed Normal），严禁使用 LeftOver/RightOver 或 Move 横向滑动；93% 台词 delay 为 0。'
+  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟（约 28~36 句 Talk，按约 7 秒/句换算）的紧凑短戏，禁止超长剧情；对话多少按角色人设自行把握。所有入场/退场与切镜（包括单人 Center 思考模式切换）一律采用槽位原地渐变淡入淡出（from == to，offset=0，moveSpeed Normal），严禁使用 LeftOver/RightOver 或 Move 横向滑动；93% 台词 delay 为 0。'
 
 const CHAT_SYSTEM_PROMPT =
   '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，所有入场/退场一律采用槽位原地渐变淡入淡出（from == to，offset=0，moveSpeed Normal），严禁滑动入出场。'
@@ -1378,7 +1399,7 @@ export function buildActingExample(view: CatalogView): string {
 // 提示词与 AstrBot 插件保持同一套实测规则；{占位符} 用单遍替换，避免人格文本注入。
 const STORY_PROMPT = `# 视觉小说剧本生成
 
-你是 Project SEKAI 风格视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏，完整、自然，但不要写成超长剧情。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
+你是 Project SEKAI 风格视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏（按 PJSK 配音与停顿约 7 秒/句换算，每分钟约 9~12 句 Talk，如 3 分钟约 28~36 句、4~5 分钟约 38~48 句），凝练完整，不要写成超长剧情或连排重复独白。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数。一场只演完一件事或一个情绪转折就退场，禁止把整段人生、多条支线或连续多场戏塞进这一次。
 表演克制、贴近原作：93% 的台词 delay 为 0，所有入场/退场及思考模式切镜一律使用槽位原地淡入与原地淡出（from == to，offset=0，moveSpeed Normal），严禁 LeftOver/RightOver 滑入滑出与 Move 横向滑动。
 
@@ -1443,7 +1464,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 \`\`\`
 
 ## 动作/表情关键词（名称由英文语义 + 编号组成；直接输出完整名称）
-- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / pose 摆姿势 / default 默认站姿（sleep 困倦 / delicious 好吃 仅限真实睡觉或吃喝台词，平时禁用）
 - 表情：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
 
 ## 可用动作（按角色分组；直接输出完整名称）
@@ -1473,7 +1494,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 6. 台词排版遵守「台词排版硬规则」：换行写作 \\n、禁止连续 \\n、每行不超 30 字宽、每条最多 3 行
 7. Talk.delay 默认 0（>=85%），仅刻意停顿用 1.0/1.5
 8. 背景必须从「可用背景」清单按场景内容选择，禁止编造不存在的背景
-9. 成片约 {target_minutes} 分钟的短戏：只演一件事或一次情绪弧光就收，禁止超长剧情
+9. 成片约 {target_minutes} 分钟的短戏（按约 7 秒/句换算，每分钟约 9~12 句 Talk，3 分钟约 28~36 句）：只演一件事或一次情绪弧光就收，禁止超长剧情与重复独白
 10. 真冬禁止过于开心的表情与欢快动作；笑梦口号写 Wonderhoy、机器人写宁宁号
 
 场景：{scene}`
@@ -1508,7 +1529,7 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 - **默认只演说话者**：听者大多数时候安静倾听，偶有表情/轻微动作，每句最多 1 项。
 - **动作要有语义、幅度克制**：动作与表情同向，禁止大动作；同一角色连续多句换不同动作。
 - 只使用对应角色清单里明确列出的完整名称；不确定就省略，不要猜编号。
-- 动作关键词：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 动作关键词：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / pose 摆姿势 / default 默认站姿（sleep 困倦 / delicious 好吃 仅限真实睡眠或吃喝台词，平时禁用）
 - 表情关键词：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
 - 可用动作：{motion_list}
 - 可用表情：{facial_list}
