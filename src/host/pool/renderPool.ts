@@ -55,6 +55,8 @@ interface WorkerState {
   abortSent: boolean
   /** 失败重启定时器，stop/close 时需清理 */
   relaunchTimer: ReturnType<typeof setTimeout> | null
+  /** 导出中 WS 短暂断开时的重连宽限定时器，重连或销毁时需清理 */
+  wsReconnectTimer: ReturnType<typeof setTimeout> | null
 }
 
 interface ReadyWaiter {
@@ -65,6 +67,8 @@ interface ReadyWaiter {
 const WORKER_READY_TIMEOUT_MS = 60000
 const RELAUNCH_DELAY_MS = 30000
 const BROWSER_CLOSE_TIMEOUT_MS = 5000
+/** 导出进行中发生 WS 瞬断时的重连宽限（browser-bridge 每 2s 重连一次） */
+const WS_RECONNECT_GRACE_MS = 45000
 /** 看门狗巡检间隔 */
 const WATCHDOG_INTERVAL_MS = 15000
 /** 超过任务超时后、强制回收前的宽限（等待渲染端优雅退出） */
@@ -76,6 +80,8 @@ function baseLaunchArgs(config: HostConfig): string[] {
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
+    '--disable-hang-monitor',
+    '--disable-ipc-flooding-protection',
     '--disable-dev-shm-usage',
     '--force-color-profile=srgb',
     // 加速无头 WebGL 渲染与 WebCodecs 零拷贝硬件编码（不限帧率、启用 GPU 光栅化）
@@ -239,8 +245,41 @@ export class RenderPool implements ExportDispatcher {
       recovering: false,
       taskDeadline: null,
       abortSent: false,
-      relaunchTimer: null
+      relaunchTimer: null,
+      wsReconnectTimer: null
     }
+  }
+
+  private clearWsReconnectTimer(worker: WorkerState): void {
+    if (worker.wsReconnectTimer) {
+      clearTimeout(worker.wsReconnectTimer)
+      worker.wsReconnectTimer = null
+    }
+  }
+
+  private isBrowserAlive(worker: WorkerState): boolean {
+    if (!worker.browser) return false
+    const browser = worker.browser as unknown as {
+      isConnected?: () => boolean
+      connected?: boolean
+    }
+    if (typeof browser.isConnected === 'function') return browser.isConnected()
+    return browser.connected !== false
+  }
+
+  private isBrowserAndPageAlive(worker: WorkerState): boolean {
+    if (!this.isBrowserAlive(worker) || !worker.page) return false
+    const page = worker.page as unknown as { isClosed?: () => boolean; closed?: boolean }
+    if (typeof page.isClosed === 'function') return !page.isClosed()
+    return page.closed !== true
+  }
+
+  private failBusyTask(worker: WorkerState, error: string): void {
+    if (!worker.busyTaskId) return
+    const taskId = worker.busyTaskId
+    worker.busy = false
+    worker.busyTaskId = null
+    this.emitExportResult(taskId, { taskId, success: false, error })
   }
 
   private cancelReadyWaiters(workerId: string): void {
@@ -333,23 +372,14 @@ export class RenderPool implements ExportDispatcher {
   private handleUnexpectedPageLoss(worker: WorkerState, page: Page, reason: string): void {
     if (worker.page !== page || this.stopping || worker.recovering) return
     this.logger.warn(`[Pool] Worker ${worker.workerId} page ${reason}, recovering...`)
+    this.clearWsReconnectTimer(worker)
     worker.page = null
     worker.ready = false
     worker.wsConnected = false
     worker.taskDeadline = null
     worker.abortSent = false
     this.onWorkerCleanup?.(worker.workerId)
-
-    if (worker.busyTaskId) {
-      const taskId = worker.busyTaskId
-      worker.busy = false
-      worker.busyTaskId = null
-      this.emitExportResult(taskId, {
-        taskId,
-        success: false,
-        error: `Render worker ${worker.workerId} page ${reason} during export`
-      })
-    }
+    this.failBusyTask(worker, `Render worker ${worker.workerId} page ${reason} during export`)
 
     void this.recoverWorker(worker)
   }
@@ -496,6 +526,7 @@ export class RenderPool implements ExportDispatcher {
   private handleBrowserDisconnected(worker: WorkerState): void {
     if (this.stopping) return
     this.logger.warn(`[Pool] Worker ${worker.workerId} browser disconnected, relaunching...`)
+    this.clearWsReconnectTimer(worker)
     this.cancelReadyWaiters(worker.workerId)
     worker.browser = null
     worker.page = null
@@ -504,17 +535,7 @@ export class RenderPool implements ExportDispatcher {
     worker.taskDeadline = null
     worker.abortSent = false
     this.onWorkerCleanup?.(worker.workerId)
-
-    if (worker.busyTaskId) {
-      const taskId = worker.busyTaskId
-      worker.busy = false
-      worker.busyTaskId = null
-      this.emitExportResult(taskId, {
-        taskId,
-        success: false,
-        error: `Render worker ${worker.workerId} crashed during export`
-      })
-    }
+    this.failBusyTask(worker, `Render worker ${worker.workerId} crashed during export`)
 
     void this.launchWorker(worker).catch((err) =>
       this.logger.error(`[Pool] Worker ${worker.workerId} relaunch failed`, err)
@@ -526,6 +547,7 @@ export class RenderPool implements ExportDispatcher {
       clearTimeout(worker.relaunchTimer)
       worker.relaunchTimer = null
     }
+    this.clearWsReconnectTimer(worker)
     this.cancelReadyWaiters(worker.workerId)
     this.onWorkerCleanup?.(worker.workerId)
 
@@ -574,10 +596,30 @@ export class RenderPool implements ExportDispatcher {
   // ----- 事件入口（main 接线到 WsHub）-----
 
   handleWorkerReady(workerId: string): void {
-    this.logger.info(`[Pool] Worker ${workerId} bridge connected`)
     const worker = this.workers.get(workerId)
+    const wasReconnecting = Boolean(worker?.wsReconnectTimer)
     if (worker) {
+      this.clearWsReconnectTimer(worker)
       worker.wsConnected = true
+      if (
+        !this.stopping &&
+        !worker.launching &&
+        !worker.recovering &&
+        worker.page &&
+        this.isBrowserAlive(worker)
+      ) {
+        worker.ready = true
+      }
+    }
+    if (wasReconnecting) {
+      this.logger.info(
+        `[Pool] Worker ${workerId} bridge reconnected (busyTaskId=${worker?.busyTaskId ?? 'none'})`
+      )
+      if (worker && !worker.busy) {
+        this.flushBufferedTasks()
+      }
+    } else {
+      this.logger.info(`[Pool] Worker ${workerId} bridge connected`)
     }
     const waiters = this.readyWaiters.get(workerId)
     if (waiters) {
@@ -616,22 +658,47 @@ export class RenderPool implements ExportDispatcher {
       worker.wsConnected = false
     }
     if (!worker || !worker.browser || this.stopping || worker.recovering || worker.launching) return
+
+    // 导出进行中若浏览器与页面仍存活（如 frames-stream 高负载导致的 WS 瞬断），
+    // 给页面侧 browser-bridge（每 2s 自动重连）保留宽限窗口，避免过早杀死正在渲染的浏览器。
+    if (worker.busyTaskId && this.isBrowserAndPageAlive(worker)) {
+      if (worker.wsReconnectTimer) return
+      worker.ready = false
+      this.logger.warn(
+        `[Pool] Worker ${worker.workerId} WS disconnected during task ${worker.busyTaskId}, ` +
+          `waiting up to ${WS_RECONNECT_GRACE_MS}ms for reconnect`
+      )
+      worker.wsReconnectTimer = setTimeout(() => {
+        worker.wsReconnectTimer = null
+        if (
+          worker.wsConnected ||
+          this.stopping ||
+          worker.recovering ||
+          worker.launching ||
+          !worker.browser
+        ) {
+          return
+        }
+        this.logger.warn(
+          `[Pool] Worker ${worker.workerId} WS failed to reconnect within ${WS_RECONNECT_GRACE_MS}ms, recovering...`
+        )
+        worker.ready = false
+        worker.taskDeadline = null
+        worker.abortSent = false
+        this.onWorkerCleanup?.(workerId)
+        this.failBusyTask(worker, `Render worker ${worker.workerId} connection lost during export`)
+        void this.recoverWorker(worker)
+      }, WS_RECONNECT_GRACE_MS)
+      worker.wsReconnectTimer.unref?.()
+      return
+    }
+
+    this.clearWsReconnectTimer(worker)
     worker.ready = false
     worker.taskDeadline = null
     worker.abortSent = false
     this.onWorkerCleanup?.(workerId)
-
-    // WS 断开：若正在导出则视为失败，重启浏览器以清除旧页面和 GPU 状态。
-    if (worker.busyTaskId) {
-      const taskId = worker.busyTaskId
-      worker.busy = false
-      worker.busyTaskId = null
-      this.emitExportResult(taskId, {
-        taskId,
-        success: false,
-        error: `Render worker ${worker.workerId} connection lost during export`
-      })
-    }
+    this.failBusyTask(worker, `Render worker ${worker.workerId} connection lost during export`)
 
     void this.recoverWorker(worker)
   }
@@ -640,6 +707,7 @@ export class RenderPool implements ExportDispatcher {
 
   /** 释放 worker（含按导出次数回收），并冲刷排队的任务 */
   private releaseWorker(worker: WorkerState): void {
+    this.clearWsReconnectTimer(worker)
     worker.busy = false
     worker.busyTaskId = null
     worker.taskDeadline = null
@@ -808,6 +876,7 @@ export class RenderPool implements ExportDispatcher {
             `force-recycling page`
         )
         // 回调可能同步派发下一任务；先隔离旧 worker，避免把新任务派到即将关闭的页。
+        this.clearWsReconnectTimer(worker)
         worker.ready = false
         worker.busy = false
         worker.busyTaskId = null

@@ -3,6 +3,7 @@ import { ExportLogger } from './ExportLogger'
 import { GpuYuv420Converter } from './GpuYuv420Converter'
 
 const DEFAULT_MAX_PROBE_MS = 150
+const PROBE_WARMUP_FRAMES = 2
 const PROBE_FRAME_COUNT = 5
 const VALID_COLOR_PRIMARIES = new Set<VideoColorPrimaries>(['bt709', 'bt470bg', 'smpte170m'])
 const VALID_COLOR_TRANSFER = new Set<VideoTransferCharacteristics>([
@@ -180,20 +181,35 @@ export class WebCodecsMp4Encoder {
     })
     try {
       encoder.configure(config)
-      const t0 = performance.now()
-      for (let i = 0; i < PROBE_FRAME_COUNT; i++) {
+      const encodeSyntheticFrame = (frameIndex: number, keyFrame: boolean): void => {
         if (surface.ctx) {
-          surface.ctx.fillStyle = `rgb(${i * 40}, 64, 128)`
+          surface.ctx.fillStyle = `rgb(${(frameIndex * 40) % 256}, 64, 128)`
           surface.ctx.fillRect(0, 0, width, height)
         }
         const vf = new VideoFrame(surface.canvas, {
-          timestamp: Math.round((i * 1_000_000) / fps)
+          timestamp: Math.round((frameIndex * 1_000_000) / fps)
         })
         try {
-          encoder.encode(vf, { keyFrame: i === 0 })
+          encoder.encode(vf, { keyFrame })
         } finally {
           vf.close()
         }
+      }
+
+      // 预热帧 + flush 吸收 D3D11/QSV 硬件编码器冷启动（约 180–230ms），
+      // 仅对稳态 5 帧编码测速，避免将一次性初始化误判为软编而回落 frames-stream。
+      for (let i = 0; i < PROBE_WARMUP_FRAMES; i++) {
+        encodeSyntheticFrame(i, i === 0)
+      }
+      await encoder.flush()
+      if (err || chunks < PROBE_WARMUP_FRAMES) {
+        return { ok: false, elapsedMs: 0 }
+      }
+
+      chunks = 0
+      const t0 = performance.now()
+      for (let i = 0; i < PROBE_FRAME_COUNT; i++) {
+        encodeSyntheticFrame(PROBE_WARMUP_FRAMES + i, i === 0)
       }
       await encoder.flush()
       const elapsedMs = performance.now() - t0

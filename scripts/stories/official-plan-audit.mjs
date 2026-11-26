@@ -829,12 +829,16 @@ export function auditEpisode(scenario, episodeId, runtime) {
   let talks = 0
   let layouts = 0
   let actions = 0
-  let windowOpen = false
+  let talkWindowOpen = false
+  let talkWindowClosesAtFrame = null
   let cursorFrame = timing.PLAYCORE_WARMUP_FRAMES
-  let runningEndFrame = 0
+  let runningFenceEndFrame = 0
   let activeLayoutEndFrame = 0
   let lastEndFrame = 0
+  let fstSlots = 0
+  let fstDialogOpen = false
   const visibleModels = new Set()
+  const lastIndex = story.snippets.length - 1
   for (let i = 0; i < story.snippets.length; i++) {
     const snippet = story.snippets[i]
     const entry = baked.entries[i]
@@ -847,7 +851,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
       frameFails(fails, episodeId, i, `blocking ${entry.blocking} != ${blocking}`)
     }
     if (blocking) {
-      cursorFrame = Math.max(cursorFrame, runningEndFrame)
+      cursorFrame = Math.max(cursorFrame, runningFenceEndFrame)
     }
     if (entry.delayStartFrame !== cursorFrame) {
       frameFails(
@@ -865,35 +869,47 @@ export function auditEpisode(scenario, episodeId, runtime) {
         `start ${entry.startFrame} != cursor ${cursorFrame} + delay ${delayFrames}`
       )
     }
+    if (talkWindowClosesAtFrame !== null && talkWindowClosesAtFrame <= entry.startFrame) {
+      talkWindowOpen = false
+      talkWindowClosesAtFrame = null
+    }
     // timeline 的 durationMs 已由 framesToMs 量化；再走 f32 秒累加会多一帧。
     // 1ms 是状态片段“同帧完成”的标记，不占故事帧。
     const timelineFrames =
       timelineEntry.durationMs > 0 && timelineEntry.durationMs < timing.FRAME_MS
         ? 0
         : timing.msToFrameCount(timelineEntry.durationMs)
-    if (entry.durationFrames !== timelineFrames) {
+    let expectedWaitFrames = timelineFrames
+    if (snippet.type !== 'Talk' && snippet.type !== 'FullScreenText' &&
+      snippet.type !== 'LayoutAppear' && snippet.type !== 'LayoutClear' && snippet.type !== 'Move' &&
+      timing.SECONDS_DURATION_SNIPPET_TYPES.has(snippet.type)) {
+      const rawDuration = typeof snippet.data?.duration === 'number' ? snippet.data.duration : 0
+      const durationMs = timing.normalizeEffectDurationMs(rawDuration, 0)
+      expectedWaitFrames = timing.framesForSeconds(durationMs / 1000)
+    }
+
+    const isNotLast = i < lastIndex
+    const finishFrame = entry.startFrame + entry.durationFrames
+    const expectedEndFrame = finishFrame + (isNotLast ? 1 : 0)
+    if (entry.endFrame !== expectedEndFrame) {
       frameFails(
         fails,
         episodeId,
         i,
-        `duration ${entry.durationFrames} != timeline ${timelineFrames}`
+        `end ${entry.endFrame} != start ${entry.startFrame} + duration ${entry.durationFrames}${isNotLast ? ' + 1' : ''}`
       )
     }
-    if (entry.endFrame !== entry.startFrame + entry.durationFrames) {
-      frameFails(
-        fails,
-        episodeId,
-        i,
-        `end ${entry.endFrame} != start ${entry.startFrame} + duration ${entry.durationFrames}`
-      )
-    }
-    runningEndFrame = Math.max(runningEndFrame, entry.endFrame)
-    lastEndFrame = Math.max(lastEndFrame, entry.endFrame)
+    const taskRan = delayFrames > 0 || entry.durationFrames > 0
+    const hasFence = taskRan && isNotLast
+    runningFenceEndFrame = Math.max(runningFenceEndFrame, finishFrame + (hasFence ? 1 : 0))
+    lastEndFrame = Math.max(lastEndFrame, finishFrame)
 
     if (snippet.type === 'Talk') {
       talks++
-      const expectedWindow = windowOpen ? 0 : timing.msToFrames(timing.TALK_WINDOW_OPEN_CLOSE_MS)
-      windowOpen = !snippet.data?.closeWindowOnFinish
+      const expectedWindow = talkWindowOpen
+        ? 0
+        : timing.TALK_WINDOW_OPEN_CLOSE_FRAMES
+      talkWindowOpen = true
       const talk = entry.talk
       if (!talk) {
         frameFails(fails, episodeId, i, 'Talk missing plan')
@@ -937,6 +953,9 @@ export function auditEpisode(scenario, episodeId, runtime) {
           `Talk duration ${entry.durationFrames} != ${talk.computedEndFrame - entry.startFrame}`
         )
       }
+      if (snippet.data?.closeWindowOnFinish === true) {
+        talkWindowClosesAtFrame = talk.computedEndFrame + timing.TALK_WINDOW_OPEN_CLOSE_FRAMES
+      }
       for (const action of entry.actions) {
         actions++
         if (action.at !== 0 || action.frame !== entry.startFrame) {
@@ -952,7 +971,35 @@ export function auditEpisode(scenario, episodeId, runtime) {
     }
 
     if (snippet.type === 'HideTalk') {
-      windowOpen = false
+      talkWindowOpen = false
+      talkWindowClosesAtFrame = null
+    }
+
+    if (snippet.type === 'FullScreenText') {
+      const fst = entry.fst
+      if (!fst) {
+        frameFails(fails, episodeId, i, 'FullScreenText missing plan')
+        continue
+      }
+      const nextType = isNotLast ? story.snippets[i + 1].type : ''
+      const first = !fstDialogOpen
+      const last = nextType !== 'FullScreenText' && snippet.data?.keepBars !== true
+      if (first) fstSlots = 0
+      fstDialogOpen = !last
+      const slots = timing.fullScreenTextSlots(fstSlots, String(snippet.data?.text ?? ''))
+      fstSlots = slots
+      const expectedFst = timing.fullScreenTextFrames({ first, last, slots })
+      const expectedFstDur =
+        expectedFst.textEndFrame + expectedFst.holdFrames + expectedFst.fadeFrames
+      if (entry.durationFrames !== expectedFstDur) {
+        frameFails(
+          fails,
+          episodeId,
+          i,
+          `FullScreenText duration ${entry.durationFrames} != ${expectedFstDur}`
+        )
+      }
+      continue
     }
 
     if (
@@ -1005,9 +1052,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
         if (entry.durationFrames !== expectedDuration) {
           frameFails(fails, episodeId, i, `appear duration ${entry.durationFrames}`)
         }
-        const activeSlideEnd = wasVisible
-          ? layout.moveEndFrame
-          : Math.max(at + expectedAppearFrames, moved ? layout.moveEndFrame : 0)
+        const activeSlideEnd = wasVisible ? layout.moveEndFrame : at + expectedAppearFrames
         activeLayoutEndFrame = Math.max(activeLayoutEndFrame, activeSlideEnd)
         visibleModels.add(modelId)
       } else if (snippet.type === 'LayoutClear') {
@@ -1063,6 +1108,16 @@ export function auditEpisode(scenario, episodeId, runtime) {
         }
         activeLayoutEndFrame = Math.max(activeLayoutEndFrame, layout.moveEndFrame)
       }
+      continue
+    }
+
+    if (entry.durationFrames !== expectedWaitFrames) {
+      frameFails(
+        fails,
+        episodeId,
+        i,
+        `duration ${entry.durationFrames} != expected ${expectedWaitFrames}`
+      )
     }
   }
 

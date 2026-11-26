@@ -721,3 +721,207 @@ test('SegmentCoordinator orchestrates single-pass prepare, Rust plan-segments, p
   assert.equal(dispatched.filter((d) => d.videoConfig.segmentPrepareOnly).length, 1)
   assert.equal(dispatched.filter((d) => d.videoConfig.segmentRange).length, 2)
 })
+
+test('WebCodecsMp4Encoder.probeConfig warms up 2 frames before timing steady-state 5-frame encode in auto mode', async () => {
+  let nowMock = 1000
+  let coldInitMs = 225
+  let steadyMs = 32
+  let encodeCalls = 0
+  let flushCount = 0
+
+  class MockVideoFrame {
+    constructor(_src, _init) {}
+    close() {}
+  }
+
+  class MockVideoEncoder {
+    static async isConfigSupported(cfg) {
+      return { supported: true, config: { ...cfg } }
+    }
+    constructor(init) {
+      this._init = init
+      this._pending = 0
+    }
+    configure() {}
+    encode() {
+      encodeCalls++
+      this._pending++
+    }
+    async flush() {
+      flushCount++
+      nowMock += flushCount === 1 ? coldInitMs : steadyMs
+      const count = this._pending
+      this._pending = 0
+      for (let i = 0; i < count; i++) {
+        this._init.output({ type: i === 0 ? 'key' : 'delta', byteLength: 4 })
+      }
+    }
+    close() {}
+  }
+
+  const loader = createRendererLoader(
+    new Map([['mp4-muxer', { Muxer: class {}, StreamTarget: class {} }]]),
+    {
+      VideoEncoder: MockVideoEncoder,
+      VideoFrame: MockVideoFrame,
+      OffscreenCanvas: class {
+        constructor(w, h) {
+          this.width = w
+          this.height = h
+        }
+        getContext() {
+          return { fillRect: () => {}, fillStyle: '' }
+        }
+      },
+      performance: { now: () => nowMock }
+    }
+  )
+
+  const { WebCodecsMp4Encoder } = loader.load('managers/video-export/WebCodecsMp4Encoder.ts')
+
+  // Cold D3D11/QSV init (225ms) happens during 2-frame warmup; steady-state 5 frames (32ms) passes <= 150ms
+  const passed = await WebCodecsMp4Encoder.probeConfig({
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrate: 5_500_000,
+    mode: 'auto',
+    glRenderer: 'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11)',
+    isLinux: false
+  })
+  assert.ok(passed, 'cold warmup >150ms with fast steady-state must pass auto probe')
+  assert.equal(passed.config.hardwareAcceleration, 'prefer-hardware')
+  assert.equal(passed.elapsedMs, 32)
+  assert.equal(encodeCalls, 7, '2 warmup frames + 5 benchmark frames')
+  assert.equal(flushCount, 2, 'warmup flush + benchmark flush')
+
+  // Slow steady-state (>150ms post-warmup) still rejects and falls back
+  encodeCalls = 0
+  flushCount = 0
+  coldInitMs = 200
+  steadyMs = 190
+  const rejected = await WebCodecsMp4Encoder.probeConfig({
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrate: 5_500_000,
+    mode: 'auto',
+    glRenderer: 'ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11)',
+    isLinux: false
+  })
+  assert.equal(rejected, null, 'slow post-warmup steady-state must still reject')
+})
+
+test('RenderPool preserves busy export across transient WS disconnect/reconnect and recovers after grace timeout', async (t) => {
+  const { EventEmitter } = await import('node:events')
+  const { chromium } = await import('playwright')
+  const { Logger } = await import('tslog')
+  const { RenderPool } = require(path.join(root, 'out-host/host/pool/renderPool.js'))
+
+  const clock = FakeTimers.install({
+    now: 1_000_000,
+    toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval']
+  })
+
+  const browsers = []
+  const results = []
+  const sent = []
+
+  t.mock.method(chromium, 'launch', async () => {
+    const browser = new EventEmitter()
+    browser.connected = true
+    browser.pages = []
+    browser.isConnected = () => browser.connected
+    browser.newPage = async () => {
+      const page = new EventEmitter()
+      page.closed = false
+      page.isClosed = () => page.closed
+      page.goto = async (url) => {
+        page.workerId = new URL(url).searchParams.get('worker')
+        pool.handleWorkerReady(page.workerId)
+      }
+      page.evaluate = async () => 'ANGLE (Intel Iris Xe)'
+      page.close = async () => {
+        if (page.closed) return
+        page.closed = true
+        page.emit('close')
+      }
+      browser.pages.push(page)
+      return page
+    }
+    browser.close = async () => {
+      if (!browser.connected) return
+      browser.connected = false
+      for (const page of browser.pages) await page.close()
+      browser.emit('disconnected')
+    }
+    browsers.push(browser)
+    return browser
+  })
+
+  const config = {
+    server: { port: 9881 },
+    render: {
+      workers: 1,
+      workerRecycleExports: 0,
+      browserChannels: [],
+      extraChromeArgs: '',
+      minFreeMemoryMb: 0
+    },
+    tts: { characters: [] },
+    bgm: { enabled: false }
+  }
+
+  const pool = new RenderPool(new Logger({ type: 'hidden' }), config, {
+    send(workerId, message) {
+      sent.push({ workerId, ...message })
+      return true
+    },
+    closeAll: () => {}
+  })
+  pool.onExportResult = (taskId, result) => results.push({ taskId, ...result })
+
+  t.after(async () => {
+    await pool.stop()
+    clock.uninstall()
+  })
+
+  await pool.start()
+
+  const makeTask = (taskId) => ({
+    taskId,
+    addedAt: Date.now(),
+    timeoutMs: 1_800_000,
+    story: { models: [], images: [], snippets: [] },
+    outputPath: `${taskId}.mp4`,
+    videoConfig: {}
+  })
+
+  // 1. Transient WS drop + reconnect within grace period keeps export alive
+  pool.dispatch(makeTask('transient-ok'))
+  pool.handleWorkerDisconnected('w1')
+  await clock.tickAsync(5_000)
+  assert.equal(browsers.length, 1, 'browser must not be killed during reconnect grace window')
+  assert.equal(results.length, 0)
+
+  pool.handleWorkerReady('w1')
+  pool.handleWorkerMessage('w1', {
+    type: 'api:export-result',
+    args: [{ taskId: 'transient-ok', success: true }]
+  })
+  assert.equal(results.length, 1)
+  assert.equal(results[0].success, true)
+  assert.equal(pool.stats().readyWorkers, 1, 'reconnected worker stays ready after task completes')
+
+  // 2. Permanent WS drop past 45s grace period fails task and recovers worker
+  pool.dispatch(makeTask('lost-forever'))
+  pool.handleWorkerDisconnected('w1')
+  await clock.tickAsync(45_000)
+  assert.equal(results.length, 2)
+  assert.equal(results[1].taskId, 'lost-forever')
+  assert.equal(results[1].success, false)
+  assert.match(results[1].error, /connection lost during export/)
+  assert.equal(browsers[0].connected, false)
+  assert.equal(browsers.length, 2)
+  assert.equal(pool.stats().readyWorkers, 1)
+})
