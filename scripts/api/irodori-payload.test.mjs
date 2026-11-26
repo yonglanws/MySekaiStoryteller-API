@@ -233,3 +233,78 @@ test('collects unique emotion labels in configuration order', () => {
   )
   assert.deepEqual(labels, ['平静', '开心', '生气', '伤心'])
 })
+
+test('normalizeIrodoriSpeechText strips joyful emojis on sad/angry lines while preserving ZWJ/VS16', () => {
+  const sad = normalizeIrodoriSpeechText(
+    '大丈夫だよ😊🤭😮‍💨、本当に😆？🌬️',
+    '涙をこらえながら静かに話す。',
+    '伤心'
+  )
+  assert.equal(sad.skip, false)
+  assert.ok(!/[😊🤭😆]/u.test(sad.text))
+  assert.ok(sad.text.includes('😮‍💨'), 'ZWJ 😮‍💨 must remain intact')
+  assert.ok(sad.text.includes('🌬️'), 'VS16 🌬️ must remain intact')
+
+  const angry = normalizeIrodoriSpeechText('冗談じゃないよ😏🎵！😠', '', '生气')
+  assert.equal(angry.skip, false)
+  assert.ok(!/[😏🎵]/u.test(angry.text))
+  assert.ok(angry.text.includes('😠'))
+})
+
+test('buildIrodoriSpeechRequest with timbreLockMode=off selects sad.wav and applies cfg_scale_caption + speaker_kv_scale', () => {
+  const base = {
+    refAudioPath: '/models/mizuki/emotion_refs/main.wav',
+    loraAdapter: '/models/mizuki/lora_adapter',
+    caption: '落ち着いた口調で話している。'
+  }
+  const emotions = [
+    {
+      emotion: '伤心',
+      refAudioPath: '/models/mizuki/emotion_refs/sad.wav',
+      caption: '悲しげで、今にも泣きそうな声で話している。',
+      speed: 0.94
+    }
+  ]
+  const cfg = {
+    ...defaults,
+    cfgScaleCaption: 3.5,
+    cfgScaleSpeaker: 5.0,
+    speakerKvScale: 1.15,
+    speakerKvMinT: 0.9,
+    timbreLockMode: 'off',
+    specialSceneCfgScaleCaption: 4.2
+  }
+
+  const normalSadVoice = resolveIrodoriVoice(base, emotions, '伤心', {
+    timbreLockMode: 'off',
+    lineOverride: { ttsCaption: '声を震わせて控えめに話す。', ttsSpeed: 0.94 }
+  })
+  assert.equal(normalSadVoice.refAudioPath, '/models/mizuki/emotion_refs/sad.wav')
+  const normalPayload = buildIrodoriSpeechRequest('🥺 ……もう戻れないんだよ。', normalSadVoice, cfg, 1.0, {
+    ttsCaption: '声を震わせて控えめに話す。',
+    ttsSpeed: 0.94,
+    emotion: '伤心'
+  })
+  assert.equal(normalPayload.irodori.ref_wav, '/models/mizuki/emotion_refs/sad.wav')
+  assert.equal(normalPayload.irodori.cfg_scale_caption, 3.5)
+  assert.equal(normalPayload.irodori.speaker_kv_scale, 1.15)
+  assert.equal(normalPayload.irodori.cfg_scale_speaker, 5.0)
+
+  const climaxPayload = buildIrodoriSpeechRequest(
+    '😭 ボク、もう……耐えられないんだよ……😊',
+    normalSadVoice,
+    cfg,
+    1.0,
+    {
+      ttsCaption: '涙をこらえきれず、声を震わせて悲痛に訴えかける。',
+      ttsSpeed: 0.88,
+      ttsSpecialScene: true,
+      emotion: '伤心'
+    }
+  )
+  assert.equal(climaxPayload.irodori.ref_wav, '/models/mizuki/emotion_refs/sad.wav')
+  assert.equal(climaxPayload.irodori.cfg_scale_caption, 4.2)
+  assert.equal(climaxPayload.irodori.cfg_scale_speaker, 5.0)
+  assert.ok(!climaxPayload.input.includes('😊'), 'joyful emoji must be stripped on sad line')
+  assert.ok(climaxPayload.input.includes('😭'))
+})

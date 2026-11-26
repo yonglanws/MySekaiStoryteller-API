@@ -1,7 +1,12 @@
 import type { ILogObj, Logger } from 'tslog'
 import type { StoryData } from '../../common/types/Story'
 import { isJapaneseSpeechText } from '../../common/tts/speechText'
-import { enforceIrodoriEmojiBudget } from '../../common/tts/irodori'
+import {
+  enforceIrodoriEmojiBudget,
+  extractIrodoriEmojis,
+  sanitizeIrodoriCaption,
+  stripJoyfulIrodoriEmojis
+} from '../../common/tts/irodori'
 
 /** 零宽字符（ZWSP / ZWNJ / Word Joiner / BOM；保留 \u200D ZWJ 以免破坏 😮‍💨 等 Irodori 组合 Emoji） */
 const ZERO_WIDTH_CHARS_RE = /[\u200B\u200C\u2060\uFEFF]/gu
@@ -233,4 +238,410 @@ export async function ensureJapaneseTtsText(
     throw new TtsTextTranslationError(missing)
   }
   return { translated, missing }
+}
+
+const SORROWFUL_EMOJI_SET = new Set(['😭', '🥺', '😮‍💨', '😰', '😟', '😖', '🤧'])
+const ANGRY_EMOJI_SET = new Set(['😠', '😰', '😖', '🌬️', '😭'])
+const SHOCK_EMOJI_SET = new Set(['😲', '😱', '😮', '😰'])
+const VOICE_SPECIAL_SCENE_MAX_RATIO = 0.15
+
+interface TalkSignalProfile {
+  snippetIndex: number
+  data: Record<string, unknown>
+  content: string
+  ttsText: string
+  emotion: string
+  isCryFacial: boolean
+  isSadFacial: boolean
+  isTroubleFacial: boolean
+  isCloseEyeFacial: boolean
+  isAngryFacial: boolean
+  isShockFacial: boolean
+  isSmileFacial: boolean
+  isSighMotion: boolean
+  hasCryOrBreakupCue: boolean
+  hasSorrowfulToneCue: boolean
+  hasPositiveSurfaceWords: boolean
+  hasBreathOrPantCue: boolean
+  isShouting: boolean
+  isMonologue: boolean
+  baseSadOrCry: boolean
+}
+
+export interface AlignTtsEmotionsResult {
+  updatedEmotions: number
+  updatedCaptions: number
+  updatedEmojis: number
+  updatedSpecialScenes: number
+}
+
+function extractSpeakerSignals(data: Record<string, unknown>): {
+  facials: string[]
+  motions: string[]
+} {
+  const modelId = typeof data.modelId === 'number' ? data.modelId : undefined
+  const facials: string[] = []
+  const motions: string[] = []
+  if (typeof data.facial === 'string' && data.facial.trim()) facials.push(data.facial.trim())
+  if (typeof data.motion === 'string' && data.motion.trim()) motions.push(data.motion.trim())
+  if (Array.isArray(data.actions)) {
+    for (const act of data.actions) {
+      if (!act || typeof act !== 'object') continue
+      const rec = act as Record<string, unknown>
+      if (modelId !== undefined && rec.modelId !== undefined && rec.modelId !== modelId) continue
+      if (typeof rec.facial === 'string' && rec.facial.trim()) facials.push(rec.facial.trim())
+      if (typeof rec.motion === 'string' && rec.motion.trim()) motions.push(rec.motion.trim())
+    }
+  }
+  return { facials, motions }
+}
+
+function buildTalkSignalProfile(
+  snippetIndex: number,
+  data: Record<string, unknown>
+): TalkSignalProfile {
+  const content = typeof data.content === 'string' ? data.content.trim() : ''
+  const ttsText = typeof data.ttsText === 'string' ? stripZeroWidthChars(data.ttsText).trim() : ''
+  const emotion = typeof data.emotion === 'string' ? data.emotion.trim() : ''
+  const { facials, motions } = extractSpeakerSignals(data)
+  const facialJoined = facials.join(' ').toLowerCase()
+  const motionJoined = motions.join(' ').toLowerCase()
+  const combinedText = `${content}\n${ttsText}`
+
+  const isCryFacial = /(?:^|_)cry|ecry|teary|nhicry/.test(facialJoined)
+  const isSadFacial =
+    /(?:^|_)(?:sad|heartbreak|desperate|regret|lookdown|sigh|nhisad)/.test(facialJoined) ||
+    /face_dark.*sad/.test(facialJoined)
+  const isTroubleFacial = /(?:^|_)(?:trouble|worry|dizzy|breath)/.test(facialJoined)
+  const isCloseEyeFacial = /closeeye/.test(facialJoined)
+  const isAngryFacial = /(?:^|_)(?:angry|disgust|scream|hate|complain)/.test(facialJoined)
+  const isShockFacial = /(?:^|_)(?:surprise|shock|scared|nsscared|baffling|notice)/.test(
+    facialJoined
+  )
+  const isSmileFacial = /(?:^|_)(?:smile|wink|smug|doya|sparkling|play|delicious)/.test(
+    facialJoined
+  )
+  const isSighMotion = /sigh/.test(motionJoined)
+
+  const hasCryOrBreakupCue =
+    /对不起|抱歉|别走|不要走|求你|回不去|再见|受不了|逃走|逃がし|怎么可能|可恶|哭|眼泪|哽咽|ごめん|行かないで|戻れない|さよなら|耐えられない|くそっ|信じたい|許して|助けて/.test(
+      combinedText
+    )
+  const hasSorrowfulToneCue =
+    /瞒着|顾虑|小心翼翼|难过|伤心|痛苦|委屈|孤独|寂寞|害怕|不安|勉强|装作|避开|停顿|再也没办法|笑不出来|勇気なんて|傷つけ|気を遣う|腫れ物|笑うことなんてできない|押し殺|嫌われる|隠してた|泣|涙|つら|苦し/.test(
+      combinedText
+    )
+  const hasPositiveSurfaceWords =
+    /大丈夫|友達|冗談|笑|一緒|楽し|嬉し|安心|温柔|優し|没关系|朋友|开玩笑/.test(combinedText)
+  const hasBreathOrPantCue = /はぁ……はぁ|ふぅ……|息を|🌬️/.test(combinedText)
+  const isShouting = /！！|!!|——！！|——!!/.test(combinedText)
+  const isMonologue = /^[（(].*[）)]$/s.test(content)
+
+  const baseSadOrCry =
+    emotion === '伤心' || isCryFacial || isSadFacial || hasCryOrBreakupCue || hasSorrowfulToneCue
+
+  return {
+    snippetIndex,
+    data,
+    content,
+    ttsText,
+    emotion,
+    isCryFacial,
+    isSadFacial,
+    isTroubleFacial,
+    isCloseEyeFacial,
+    isAngryFacial,
+    isShockFacial,
+    isSmileFacial,
+    isSighMotion,
+    hasCryOrBreakupCue,
+    hasSorrowfulToneCue,
+    hasPositiveSurfaceWords,
+    hasBreathOrPantCue,
+    isShouting,
+    isMonologue,
+    baseSadOrCry
+  }
+}
+
+function buildAlignedTtsCaption(emotion: string, profile: TalkSignalProfile): string {
+  if (emotion === '伤心') {
+    if (profile.isCryFacial && (profile.isShouting || profile.hasCryOrBreakupCue)) {
+      return '涙をこらえきれず、声を震わせて悲痛に訴えかける。'
+    }
+    if (profile.isCryFacial) {
+      return '今にも泣き崩れそうな声で、言葉を詰まらせながら話す。'
+    }
+    if (/对不起|抱歉|ごめん|すみません/.test(`${profile.content}\n${profile.ttsText}`)) {
+      return '申し訳なさに声を落とし、震えを抑えながら静かに謝る。'
+    }
+    if (profile.isSighMotion || /😮‍💨/.test(profile.ttsText)) {
+      return '諦めと切なさを滲ませ、小さなため息混じりに呟く。'
+    }
+    if (profile.isMonologue) {
+      return '胸の奥で押し殺すように、寂しく静かな独白を漏らす。'
+    }
+    return '悲しみを堪えながら、少し潤んだ控えめな口調で話す。'
+  }
+  if (emotion === '生气') {
+    if (profile.hasBreathOrPantCue) {
+      return '息を切らしながら、焦りと必死さを込めて呼びかける。'
+    }
+    if (profile.isShouting) {
+      return '感情が高ぶり、必死に相手を止めようと強い口調で叫ぶ。'
+    }
+    return '苛立ちと真剣さを滲ませ、少し強い語気で問い詰める。'
+  }
+  if (emotion === '惊讶') {
+    return '思いがけない言葉に息をのみ、動揺した様子で問い返す。'
+  }
+  if (emotion === '害羞') {
+    return '少し照れながら、控えめに視線を逸らして話す。'
+  }
+  if (emotion === '开心') {
+    return '柔らかく明るい表情が伝わるような、温かく軽やかな口調で話す。'
+  }
+  if (profile.isMonologue) {
+    return '心の中で確かめるように、落ち着いた静かなトーンで呟く。'
+  }
+  return '落ち着いた自然なペースで、相手に向き合って静かに話す。'
+}
+
+function prependOrAnchorEmoji(ttsText: string, emoji: string): string {
+  if (!ttsText) return ttsText
+  // 已有 2 个非目标类表情（如 🐢）时，优先保住情绪表情并裁剪总数至 <= 2
+  const leadingMatch = /^(……+|[.]{3,})\s*/u.exec(ttsText)
+  const combined = leadingMatch
+    ? `${leadingMatch[1]}${emoji} ${ttsText.slice(leadingMatch[0].length)}`.trim()
+    : `${emoji} ${ttsText}`.trim()
+  return enforceIrodoriEmojiBudget(combined, 2)
+}
+
+function scoreSpecialClimax(emotion: string, profile: TalkSignalProfile): number {
+  if (emotion === '平静' || emotion === '开心' || emotion === '害羞') return 0
+  let score = 0
+  if (emotion === '伤心') score += 2
+  if (emotion === '生气') score += 1
+  if (profile.isCryFacial) score += 3
+  if (profile.isShouting) score += 3
+  if (profile.hasCryOrBreakupCue) score += 2
+  if (profile.ttsText.includes('😭')) score += 2
+  const caption = typeof profile.data.ttsCaption === 'string' ? profile.data.ttsCaption : ''
+  if (/涙|泣|悲痛|叫|震/.test(caption)) score += 1
+  return score
+}
+
+/**
+ * 语音情绪与 Irodori 表演一致性对齐（同时服务 native agent 与 staged 流水线）：
+ * 1. 把哭泣/悲伤/紧绷语境中错标的「平静」纠正为「伤心」（或「生气」「惊讶」）；
+ * 2. 在悲伤/愤怒/惊愕语境下剥离欢快表情（🤭😆😊😏🫶🎵😌），防止 TTS 笑场；
+ * 3. 为缺少情绪锚点的哭泣/悲伤句（含「大丈夫」「友達」「冗談」「笑」等正字面词）补齐 😭/🥺/😮‍💨，
+ *    严格遵守 <= 2 表情预算并保留 \u200D / \uFE0F；
+ * 4. 补齐缺失的日语 ttsCaption（清洗身份词）、ttsSpeed 与高潮句 ttsSpecialScene（<= 15% 上限）。
+ */
+export function alignStoryTtsEmotionsAndCaptions(
+  story: StoryData,
+  options: { emotionLabels?: string[] } = {}
+): AlignTtsEmotionsResult {
+  const allowedLabels = new Set(
+    (options.emotionLabels ?? []).map((label) => label.trim()).filter(Boolean)
+  )
+  const canUseLabel = (label: string): boolean =>
+    allowedLabels.size === 0 || allowedLabels.has(label)
+
+  const profiles: TalkSignalProfile[] = []
+  story.snippets.forEach((snippet, idx) => {
+    if (snippet.type !== 'Talk' || !('data' in snippet) || !snippet.data) return
+    profiles.push(buildTalkSignalProfile(idx, snippet.data as unknown as Record<string, unknown>))
+  })
+
+  if (profiles.length === 0) {
+    return {
+      updatedEmotions: 0,
+      updatedCaptions: 0,
+      updatedEmojis: 0,
+      updatedSpecialScenes: 0
+    }
+  }
+
+  let updatedEmotions = 0
+  let updatedCaptions = 0
+  let updatedEmojis = 0
+  let updatedSpecialScenes = 0
+
+  const effectiveEmotions: string[] = profiles.map((p) => p.emotion)
+
+  // Pass 1: 结合自身面部表情、台词线索与上下文窗口修正错标情绪
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i]
+    let hasPrevSad = false
+    let hasNextSad = false
+    let hasNearbySadFacial = false
+    for (let d = -3; d <= -1; d++) {
+      const nb = profiles[i + d]
+      if (!nb) continue
+      if (nb.emotion === '伤心' || nb.isCryFacial || nb.hasCryOrBreakupCue || nb.hasSorrowfulToneCue) {
+        hasPrevSad = true
+      }
+      if (Math.abs(d) <= 2 && nb.isSadFacial) hasNearbySadFacial = true
+    }
+    for (let d = 1; d <= 3; d++) {
+      const nb = profiles[i + d]
+      if (!nb) continue
+      if (nb.emotion === '伤心' || nb.isCryFacial || nb.hasCryOrBreakupCue || nb.hasSorrowfulToneCue) {
+        hasNextSad = true
+      }
+      if (Math.abs(d) <= 2 && nb.isSadFacial) hasNearbySadFacial = true
+    }
+    const inSadContext = hasPrevSad || (hasNextSad && (p.hasCryOrBreakupCue || p.hasSorrowfulToneCue))
+    const hasSadTextSignal = p.hasCryOrBreakupCue || p.hasSorrowfulToneCue || p.hasPositiveSurfaceWords
+
+    let nextEmotion = p.emotion
+    if (p.isCryFacial && p.emotion !== '伤心' && canUseLabel('伤心')) {
+      nextEmotion = '伤心'
+    } else if (!p.emotion || p.emotion === '平静') {
+      if (
+        ((p.isSadFacial && (inSadContext || hasNextSad || hasNearbySadFacial || hasSadTextSignal)) ||
+          (hasPrevSad &&
+            (p.isTroubleFacial || p.isCloseEyeFacial) &&
+            (hasNextSad || hasNearbySadFacial || hasSadTextSignal)) ||
+          (inSadContext && (p.hasCryOrBreakupCue || p.hasSorrowfulToneCue))) &&
+        canUseLabel('伤心')
+      ) {
+        nextEmotion = '伤心'
+      } else if (p.isAngryFacial && canUseLabel('生气')) {
+        nextEmotion = '生气'
+      } else if (p.isShockFacial && canUseLabel('惊讶')) {
+        nextEmotion = '惊讶'
+      }
+    }
+
+    if (nextEmotion !== p.emotion) {
+      p.data.emotion = nextEmotion
+      p.emotion = nextEmotion
+      updatedEmotions += 1
+    }
+    effectiveEmotions[i] = nextEmotion
+  }
+
+  // Pass 2: 清洗欢快表情、补齐哭泣/悲伤/紧张表情、补齐 ttsCaption 与 ttsSpeed
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i]
+    const emo = effectiveEmotions[i]
+    const isSadOrCrying = emo === '伤心' || p.isCryFacial
+    const isAngryOrTense = !isSadOrCrying && (emo === '生气' || p.isAngryFacial)
+    const isShocked = !isSadOrCrying && !isAngryOrTense && (emo === '惊讶' || p.isShockFacial)
+
+    // 2a. 仅对含可翻译内容且已有日文 ttsText 的句子做表情约束
+    if (
+      hasTranslationContent(p.content) &&
+      p.ttsText &&
+      isJapaneseText(p.ttsText)
+    ) {
+      let nextTts = stripZeroWidthChars(p.ttsText)
+      if (isSadOrCrying || isAngryOrTense || isShocked) {
+        const stripped = stripJoyfulIrodoriEmojis(nextTts, isSadOrCrying || isAngryOrTense)
+        if (stripped && isJapaneseText(stripped)) {
+          nextTts = stripped
+        }
+      }
+
+      const tokens = extractIrodoriEmojis(nextTts)
+      if (isSadOrCrying) {
+        const hasSorrow = tokens.some((tok) => SORROWFUL_EMOJI_SET.has(tok))
+        if (!hasSorrow) {
+          const isDesperateCry =
+            p.isCryFacial &&
+            (p.isShouting || p.hasCryOrBreakupCue || p.data.ttsSpecialScene === true)
+          const chosen = isDesperateCry || (p.isShouting && emo === '伤心')
+            ? '😭'
+            : p.isSighMotion && !p.isCryFacial && !p.hasPositiveSurfaceWords && !p.hasCryOrBreakupCue
+              ? '😮‍💨'
+              : '🥺'
+          nextTts = prependOrAnchorEmoji(nextTts, chosen)
+        }
+      } else if (isAngryOrTense) {
+        const hasAngry = tokens.some((tok) => ANGRY_EMOJI_SET.has(tok))
+        if (!hasAngry && (p.isAngryFacial || p.isShouting)) {
+          nextTts = prependOrAnchorEmoji(nextTts, '😠')
+        }
+      } else if (isShocked) {
+        const hasShock = tokens.some((tok) => SHOCK_EMOJI_SET.has(tok))
+        if (!hasShock && (p.isShockFacial || /[？?][！!]|[！!][？?]/.test(p.content))) {
+          nextTts = prependOrAnchorEmoji(nextTts, '😲')
+        }
+      }
+
+      nextTts = enforceIrodoriEmojiBudget(nextTts, 2)
+      if (nextTts !== p.ttsText) {
+        p.data.ttsText = nextTts
+        p.ttsText = nextTts
+        updatedEmojis += 1
+      }
+    }
+
+    // 2b. 补齐并清洗日语 ttsCaption（严禁年龄/性别身份词）
+    const existingCaption =
+      typeof p.data.ttsCaption === 'string' ? sanitizeIrodoriCaption(p.data.ttsCaption) : ''
+    if (existingCaption) {
+      if (existingCaption !== p.data.ttsCaption) {
+        p.data.ttsCaption = existingCaption
+      }
+    } else if (hasTranslationContent(p.content)) {
+      const generated = sanitizeIrodoriCaption(buildAlignedTtsCaption(emo, p))
+      if (generated) {
+        p.data.ttsCaption = generated
+        updatedCaptions += 1
+      }
+    }
+
+    // 2c. 补齐合理语速微调（不覆盖模型已有合法值）
+    if (
+      (typeof p.data.ttsSpeed !== 'number' || !Number.isFinite(p.data.ttsSpeed)) &&
+      hasTranslationContent(p.content)
+    ) {
+      if (emo === '伤心') {
+        p.data.ttsSpeed = p.data.ttsSpecialScene === true ? 0.88 : p.isSighMotion ? 0.95 : 0.94
+      } else if (emo === '生气') {
+        p.data.ttsSpeed = p.isShouting || p.hasBreathOrPantCue ? 1.05 : 1.03
+      } else if (emo === '惊讶') {
+        p.data.ttsSpeed = 1.04
+      }
+    }
+  }
+
+  // Pass 3: 若整场缺少 ttsSpecialScene（典型于 native agent 输出），在 15% 上限内晋升最强哭喊/撕裂高潮句
+  const maxSpecial = Math.floor(profiles.length * VOICE_SPECIAL_SCENE_MAX_RATIO)
+  const existingSpecialCount = profiles.filter((p) => p.data.ttsSpecialScene === true).length
+  if (existingSpecialCount < maxSpecial) {
+    const remainingSlots = maxSpecial - existingSpecialCount
+    const candidates = profiles
+      .map((p, idx) => ({
+        idx,
+        profile: p,
+        score: p.data.ttsSpecialScene === true ? 0 : scoreSpecialClimax(effectiveEmotions[idx], p)
+      }))
+      .filter((entry) => entry.score >= 5 && hasTranslationContent(entry.profile.content))
+      .sort((a, b) => b.score - a.score || a.idx - b.idx)
+      .slice(0, remainingSlots)
+
+    for (const candidate of candidates) {
+      candidate.profile.data.ttsSpecialScene = true
+      if (
+        effectiveEmotions[candidate.idx] === '伤心' &&
+        (typeof candidate.profile.data.ttsSpeed !== 'number' ||
+          candidate.profile.data.ttsSpeed >= 0.92)
+      ) {
+        candidate.profile.data.ttsSpeed = 0.88
+      }
+      updatedSpecialScenes += 1
+    }
+  }
+
+  return {
+    updatedEmotions,
+    updatedCaptions,
+    updatedEmojis,
+    updatedSpecialScenes
+  }
 }

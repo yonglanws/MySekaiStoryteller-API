@@ -479,7 +479,11 @@ export class TTSService {
       voice.speed ?? '',
       voice.numSteps ?? this.config.irodori.numSteps ?? '',
       this.config.irodori.cfgScaleText ?? '',
+      this.config.irodori.cfgScaleCaption ?? '',
+      this.config.irodori.specialSceneCfgScaleCaption ?? '',
       this.config.irodori.cfgScaleSpeaker ?? '',
+      this.config.irodori.speakerKvScale ?? '',
+      this.config.irodori.speakerKvMinT ?? '',
       text
     ].join(':')
     const cached = this.audioCache.get(cacheKey)
@@ -498,12 +502,14 @@ export class TTSService {
       }
     }
 
+    const effectiveOverride: IrodoriLineOverride | undefined =
+      lineOverride || emotion ? { ...lineOverride, ...(emotion ? { emotion } : {}) } : undefined
     const payload = buildIrodoriSpeechRequest(
       text,
       voice,
       this.config.irodori,
       speedFactor ?? this.config.speedFactor,
-      lineOverride
+      effectiveOverride
     )
     if (!String(payload.input ?? '').trim()) {
       return {
@@ -513,6 +519,14 @@ export class TTSService {
         error: 'Skipped empty or non-verbal Irodori TTS input'
       }
     }
+    const irodoriMeta = (payload.irodori ?? {}) as Record<string, unknown>
+    this.logger.info(
+      `Irodori TTS [${characterName}/${emotion || 'default'}] ref=${String(
+        irodoriMeta.ref_wav ?? (Array.isArray(irodoriMeta.ref_wavs) ? irodoriMeta.ref_wavs[0] : '')
+      )} cfg_cap=${String(irodoriMeta.cfg_scale_caption ?? '')} special=${
+        lineOverride?.ttsSpecialScene ? 'true' : 'false'
+      } caption="${String(irodoriMeta.caption ?? '')}" input="${String(payload.input ?? '').slice(0, 60)}"`
+    )
     try {
       const audioBuffer = await this.fetchAudio(`${baseUrl}/v1/audio/speech`, payload)
       if (!audioBuffer || audioBuffer.byteLength === 0) {
