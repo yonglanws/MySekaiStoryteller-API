@@ -65,6 +65,7 @@ export class WebCodecsMp4Encoder {
   private readonly height: number
   private readonly fps: number
   private readonly bitrate: number
+  private readonly keyframeIntervalFrames: number
   private preProbedConfig: VideoEncoderConfig | null
 
   private encoder: VideoEncoder | null = null
@@ -106,6 +107,7 @@ export class WebCodecsMp4Encoder {
     this.height = opts.height
     this.fps = opts.fps
     this.bitrate = opts.bitrate
+    this.keyframeIntervalFrames = Math.max(1, Math.round(opts.fps * 2))
     this.preProbedConfig = opts.encoderConfig ?? null
     this.useGpuYuvReadback = opts.useGpuYuvReadback !== false
   }
@@ -336,7 +338,7 @@ export class WebCodecsMp4Encoder {
       throw new Error('WebCodecs H.264 encoding not supported in this browser')
     }
     this.logger.info(
-      `WebCodecs encoder config: codec=${config.codec}, hw=${config.hardwareAcceleration}, bitrate=${this.bitrate}`
+      `WebCodecs encoder config: codec=${config.codec}, hw=${config.hardwareAcceleration}, bitrate=${this.bitrate}, keyframeInterval=${this.keyframeIntervalFrames}`
     )
     this.activeMuxerCodec =
       config.codec.startsWith('hvc1') || config.codec.startsWith('hev1') ? 'hevc' : 'avc'
@@ -460,6 +462,12 @@ export class WebCodecsMp4Encoder {
     }
   }
 
+  /** 周期性插入 IDR 关键帧（默认每 2 秒 = fps*2 帧），让硬件编码器在长淡入淡出后及时刷新量化。 */
+  private resolveKeyFrame(requestedKeyFrame: boolean): boolean {
+    if (requestedKeyFrame || this.frameCount === 0) return true
+    return this.frameCount % this.keyframeIntervalFrames === 0
+  }
+
   private async encodeI420Buffer(
     yuvBytes: Uint8Array,
     timestampUs: number,
@@ -483,7 +491,7 @@ export class WebCodecsMp4Encoder {
       }
     })
     try {
-      this.encoder.encode(frame, { keyFrame })
+      this.encoder.encode(frame, { keyFrame: this.resolveKeyFrame(keyFrame) })
       this.frameCount++
     } finally {
       frame.close()
@@ -550,7 +558,7 @@ export class WebCodecsMp4Encoder {
       duration: durationUs
     })
     try {
-      this.encoder.encode(frame, { keyFrame })
+      this.encoder.encode(frame, { keyFrame: this.resolveKeyFrame(keyFrame) })
       this.frameCount++
     } finally {
       frame.close()

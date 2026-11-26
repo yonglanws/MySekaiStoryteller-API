@@ -1466,3 +1466,138 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
   assert.equal(leanOut.directorReview.appliedOperationsCount, 1)
   assert.equal(leanOut.story.snippets.filter((s) => s.type === 'PlaySe').length, 1)
 })
+
+test('agentic harness: rejects food/sleep prop motions without cues, flags angry-listener smile flips, and reports over-budget telemetry', async () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01', 'w-adult-delicious01', 'w-normal-sleep01'],
+        facials: ['face_normal_01', 'face_smile_01', 'face_sad_01', 'face_trouble_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-angry01', 'w-normal-sigh01'],
+        facials: ['face_normal_01', 'face_smile_01', 'face_angry_01', 'face_trouble_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '天台·黄昏', description: '学校天台' }],
+    voices: [],
+    bgm: ['bgm00297.mp3'],
+    bgmDetails: [{ file: 'bgm00297.mp3', name: '剧情曲', description: '低沉压抑的对话配乐' }]
+  })
+  const logger = new Logger({ type: 'hidden' })
+  const toolkit = createStoryAgentToolkit({
+    view,
+    personas: [],
+    emotionLabels: ['平静', '开心', '伤心', '生气'],
+    targetMinutes: 3,
+    logger
+  })
+
+  const bloatedWithPropLeak = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_normal_01', moveSpeed: 'Normal' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_angry_01', moveSpeed: 'Normal' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '你别再跑了！',
+          emotion: '生气',
+          modelId: 2,
+          actions: [{ at: 0, modelId: 2, motion: 'w-normal-angry01', facial: 'face_angry_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '今天天台风好大呀，下去吧？',
+          emotion: '开心',
+          modelId: 1,
+          actions: [
+            { at: 0, modelId: 1, motion: 'w-adult-delicious01', facial: 'face_smile_01' },
+            { at: 0, modelId: 2, facial: 'face_smile_01' }
+          ]
+        }
+      },
+      ...Array.from({ length: 42 }, (_, idx) => ({
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: idx % 2 === 0 ? '瑞希' : '绘名',
+          content: `第 ${idx + 3} 句对话。`,
+          emotion: '平静',
+          modelId: idx % 2 === 0 ? 1 : 2,
+          ...(idx === 41 ? { closeWindowOnFinish: true } : {}),
+          actions: [{ at: 0, modelId: idx % 2 === 0 ? 1 : 2, motion: 'w-normal-nod01', facial: 'face_normal_01' }]
+        }
+      })),
+      {
+        type: 'LayoutClear',
+        wait: true,
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Normal' }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Normal' }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const critique = JSON.parse(await toolkit.execute('critique_story_draft', { story: bloatedWithPropLeak }))
+  assert.ok(
+    critique.diagnostics.some((d) => d.code === 'prop_food_motion_without_food_cue'),
+    'delicious motion without food cue must be flagged'
+  )
+  assert.ok(
+    critique.diagnostics.some((d) => d.code === 'listener_tense_smile_flip'),
+    'angry listener flipping to face_smile_01 must be flagged'
+  )
+  assert.ok(
+    critique.directorTelemetry.reviewFocusPoints.some((p) => p.includes('超出目标 3 分钟')),
+    '44 talks on targetMinutes=3 must trigger pacing warning'
+  )
+  assert.ok(
+    critique.directorTelemetry.reviewFocusPoints.some((p) => p.includes('开场前段未设置 BGM')),
+    'missing opening BGM must trigger BGM warning'
+  )
+})

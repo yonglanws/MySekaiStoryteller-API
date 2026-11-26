@@ -243,7 +243,13 @@ export async function ensureJapaneseTtsText(
 const SORROWFUL_EMOJI_SET = new Set(['😭', '🥺', '😮‍💨', '😰', '😟', '😖', '🤧'])
 const ANGRY_EMOJI_SET = new Set(['😠', '😰', '😖', '🌬️', '😭'])
 const SHOCK_EMOJI_SET = new Set(['😲', '😱', '😮', '😰'])
-const VOICE_SPECIAL_SCENE_MAX_RATIO = 0.15
+const TRICKY_BRIGHT_LEXICAL_RE =
+  /大丈夫|友達|冗談|笑|一緒|楽し|嬉し|安心|温柔|優し|バカ|馬鹿|平気|没关系|朋友|开玩笑|笨蛋/
+
+const SPOKEN_STRIP_RE =
+  /(?:\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}\uFE0F?)*)|[\s….\-—–―〜～!！?？、,，。・♪「」『』（）()]+/gu
+
+const countSpokenChars = (text: string): number => text.replace(SPOKEN_STRIP_RE, '').length
 
 interface TalkSignalProfile {
   snippetIndex: number
@@ -331,8 +337,7 @@ function buildTalkSignalProfile(
     /瞒着|顾虑|小心翼翼|难过|伤心|痛苦|委屈|孤独|寂寞|害怕|不安|勉强|装作|避开|停顿|再也没办法|笑不出来|勇気なんて|傷つけ|気を遣う|腫れ物|笑うことなんてできない|押し殺|嫌われる|隠してた|泣|涙|つら|苦し/.test(
       combinedText
     )
-  const hasPositiveSurfaceWords =
-    /大丈夫|友達|冗談|笑|一緒|楽し|嬉し|安心|温柔|優し|没关系|朋友|开玩笑/.test(combinedText)
+  const hasPositiveSurfaceWords = TRICKY_BRIGHT_LEXICAL_RE.test(combinedText)
   const hasBreathOrPantCue = /はぁ……はぁ|ふぅ……|息を|🌬️/.test(combinedText)
   const isShouting = /！！|!!|——！！|——!!/.test(combinedText)
   const isMonologue = /^[（(].*[）)]$/s.test(content)
@@ -407,14 +412,80 @@ function buildAlignedTtsCaption(emotion: string, profile: TalkSignalProfile): st
   return '落ち着いた自然なペースで、相手に向き合って静かに話す。'
 }
 
+const VOICE_SPECIAL_SCENE_MAX_RATIO = 0.15
+
 function prependOrAnchorEmoji(ttsText: string, emoji: string): string {
   if (!ttsText) return ttsText
   // 已有 2 个非目标类表情（如 🐢）时，优先保住情绪表情并裁剪总数至 <= 2
-  const leadingMatch = /^(……+|[.]{3,})\s*/u.exec(ttsText)
+  const leadingMatch = /^(……+|[.]{3,}|[—―]+)\s*/u.exec(ttsText)
   const combined = leadingMatch
     ? `${leadingMatch[1]}${emoji} ${ttsText.slice(leadingMatch[0].length)}`.trim()
     : `${emoji} ${ttsText}`.trim()
   return enforceIrodoriEmojiBudget(combined, 2)
+}
+
+/**
+ * 为悲伤/哭泣台词确保哭腔表情出现在句首（第 0 帧）或关键明亮词从句之前：
+ * - 若整句没有悲伤表情，直接在句首锚定；
+ * - 若唯一悲伤表情位于句尾（末尾之后无实词），前移到句首，防止整句先以平调/亮调合成；
+ * - 若悲伤表情在句中，且前半句含「笑/冗談/大丈夫/バカ/友達」等易飘亮词，或处于哭戏/高潮长句开头，
+ *   在句首补一个 🥺/😭（总表情数仍控制在 <= 2），从第 0 帧锁定哭腔声线。
+ */
+function ensureSorrowEmojiFraming(
+  ttsText: string,
+  chosen: string,
+  profile: TalkSignalProfile,
+  emotion: string
+): string {
+  const tokens = extractIrodoriEmojis(ttsText)
+  const firstSorrowIdx = tokens.findIndex((tok) => SORROWFUL_EMOJI_SET.has(tok))
+  if (firstSorrowIdx === -1) {
+    return prependOrAnchorEmoji(ttsText, chosen)
+  }
+
+  const firstSorrow = tokens[firstSorrowIdx]
+  const pos = ttsText.indexOf(firstSorrow)
+  const beforeFirst = pos >= 0 ? ttsText.slice(0, pos) : ''
+  const afterFirst = pos >= 0 ? ttsText.slice(pos + firstSorrow.length) : ''
+  const spokenBefore = countSpokenChars(beforeFirst)
+  const spokenAfter = countSpokenChars(afterFirst)
+
+  // 已经在第 0 帧（表情前没有实词，仅有前导省略号/破折号/空白）
+  if (spokenBefore === 0) {
+    return ttsText
+  }
+
+  // 悲伤表情落在句尾（后面没有实词）：前移到句首
+  if (spokenAfter === 0 && tokens.length === 1) {
+    const withoutTrailing = `${beforeFirst}${afterFirst}`.replace(/[ \t]{2,}/g, ' ').trim()
+    return prependOrAnchorEmoji(withoutTrailing, firstSorrow)
+  }
+
+  const prefixHasTrickyCue = TRICKY_BRIGHT_LEXICAL_RE.test(beforeFirst)
+  const isDesperateCry =
+    profile.isCryFacial &&
+    (profile.isShouting || profile.hasCryOrBreakupCue || profile.data.ttsSpecialScene === true)
+  const needsFrame0Anchor =
+    prefixHasTrickyCue ||
+    (spokenBefore >= 4 &&
+      (profile.hasPositiveSurfaceWords ||
+        profile.isCryFacial ||
+        profile.hasCryOrBreakupCue ||
+        profile.data.ttsSpecialScene === true))
+
+  if (!needsFrame0Anchor) {
+    return ttsText
+  }
+
+  // 句首补齐哭腔锚点；若句首存在加速表情 ⏩ 会在悲伤句引发急促亮调，先剥离再锚定
+  const strippedPace = ttsText.replace(/⏩/gu, '').replace(/[ \t]{2,}/g, ' ').trim()
+  const frame0Emoji =
+    isDesperateCry || (profile.isShouting && emotion === '伤心')
+      ? '😭'
+      : firstSorrow === '😭' && !prefixHasTrickyCue
+        ? '😭'
+        : '🥺'
+  return prependOrAnchorEmoji(strippedPace, frame0Emoji)
 }
 
 function scoreSpecialClimax(emotion: string, profile: TalkSignalProfile): number {
@@ -548,18 +619,15 @@ export function alignStoryTtsEmotionsAndCaptions(
 
       const tokens = extractIrodoriEmojis(nextTts)
       if (isSadOrCrying) {
-        const hasSorrow = tokens.some((tok) => SORROWFUL_EMOJI_SET.has(tok))
-        if (!hasSorrow) {
-          const isDesperateCry =
-            p.isCryFacial &&
-            (p.isShouting || p.hasCryOrBreakupCue || p.data.ttsSpecialScene === true)
-          const chosen = isDesperateCry || (p.isShouting && emo === '伤心')
-            ? '😭'
-            : p.isSighMotion && !p.isCryFacial && !p.hasPositiveSurfaceWords && !p.hasCryOrBreakupCue
-              ? '😮‍💨'
-              : '🥺'
-          nextTts = prependOrAnchorEmoji(nextTts, chosen)
-        }
+        const isDesperateCry =
+          p.isCryFacial &&
+          (p.isShouting || p.hasCryOrBreakupCue || p.data.ttsSpecialScene === true)
+        const chosen = isDesperateCry || (p.isShouting && emo === '伤心')
+          ? '😭'
+          : p.isSighMotion && !p.isCryFacial && !p.hasPositiveSurfaceWords && !p.hasCryOrBreakupCue
+            ? '😮‍💨'
+            : '🥺'
+        nextTts = ensureSorrowEmojiFraming(nextTts, chosen, p, emo)
       } else if (isAngryOrTense) {
         const hasAngry = tokens.some((tok) => ANGRY_EMOJI_SET.has(tok))
         if (!hasAngry && (p.isAngryFacial || p.isShouting)) {
@@ -580,32 +648,40 @@ export function alignStoryTtsEmotionsAndCaptions(
       }
     }
 
-    // 2b. 补齐并清洗日语 ttsCaption（严禁年龄/性别身份词）
-    const existingCaption =
-      typeof p.data.ttsCaption === 'string' ? sanitizeIrodoriCaption(p.data.ttsCaption) : ''
+    // 2b. 补齐并清洗日语 ttsCaption（严禁年龄/性别身份词；伤心句严禁积极/笑颜词根）
+    const rawExistingCaption =
+      typeof p.data.ttsCaption === 'string' ? p.data.ttsCaption : ''
+    const existingCaption = rawExistingCaption ? sanitizeIrodoriCaption(rawExistingCaption, emo) : ''
     if (existingCaption) {
-      if (existingCaption !== p.data.ttsCaption) {
+      if (existingCaption !== rawExistingCaption) {
         p.data.ttsCaption = existingCaption
+        updatedCaptions += 1
       }
     } else if (hasTranslationContent(p.content)) {
-      const generated = sanitizeIrodoriCaption(buildAlignedTtsCaption(emo, p))
+      const generated = sanitizeIrodoriCaption(buildAlignedTtsCaption(emo, p), emo)
       if (generated) {
         p.data.ttsCaption = generated
         updatedCaptions += 1
       }
     }
 
-    // 2c. 补齐合理语速微调（不覆盖模型已有合法值）
-    if (
-      (typeof p.data.ttsSpeed !== 'number' || !Number.isFinite(p.data.ttsSpeed)) &&
-      hasTranslationContent(p.content)
-    ) {
-      if (emo === '伤心') {
-        p.data.ttsSpeed = p.data.ttsSpecialScene === true ? 0.88 : p.isSighMotion ? 0.95 : 0.94
-      } else if (emo === '生气') {
-        p.data.ttsSpeed = p.isShouting || p.hasBreathOrPantCue ? 1.05 : 1.03
-      } else if (emo === '惊讶') {
-        p.data.ttsSpeed = 1.04
+    // 2c. 补齐合理语速微调（不覆盖模型已有合法值；非喊叫的伤心+正面词句防止过快飘亮）
+    if (hasTranslationContent(p.content)) {
+      if (typeof p.data.ttsSpeed !== 'number' || !Number.isFinite(p.data.ttsSpeed)) {
+        if (emo === '伤心') {
+          p.data.ttsSpeed = p.data.ttsSpecialScene === true ? 0.88 : p.isSighMotion ? 0.95 : 0.94
+        } else if (emo === '生气') {
+          p.data.ttsSpeed = p.isShouting || p.hasBreathOrPantCue ? 1.05 : 1.03
+        } else if (emo === '惊讶') {
+          p.data.ttsSpeed = 1.04
+        }
+      } else if (
+        emo === '伤心' &&
+        !p.isShouting &&
+        p.hasPositiveSurfaceWords &&
+        p.data.ttsSpeed > 0.96
+      ) {
+        p.data.ttsSpeed = 0.95
       }
     }
   }

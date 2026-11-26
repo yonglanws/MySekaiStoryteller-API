@@ -393,7 +393,7 @@ const MOTION_LABEL_FALLBACK: Array<[RegExp, string]> = [
   [/tilthead|tilt/i, '歪头'],
   [/shakehead/i, '摇头'],
   [/glad|happy|cheer|joy/i, '开心欢呼'],
-  [/wink|smug|doya|pose|delicious/i, '俏皮/得意'],
+  [/wink|smug|doya|pose/i, '俏皮/得意'],
   [/shy|blush|fidget/i, '害羞/局促'],
   [/trouble|worry/i, '为难'],
   [/sad|sigh|lookdown|cry/i, '低落/叹气'],
@@ -403,7 +403,8 @@ const MOTION_LABEL_FALLBACK: Array<[RegExp, string]> = [
   [/surprise|shock|scared/i, '惊讶'],
   [/relief/i, '松口气'],
   [/greeting|wave/i, '打招呼'],
-  [/sleep/i, '困倦']
+  [/delicious|eat|drink/i, '吃喝/美味(仅限食物饮品)'],
+  [/sleep/i, '困倦(仅限犯困睡眠)']
 ]
 
 function annotateMotionForDirection(modelPath: string | undefined, motionName: string): string {
@@ -439,6 +440,10 @@ function inferMotionMoodKey(
   return prevTense ? 'trouble' : 'neutral'
 }
 
+const FOOD_DRINK_CUE_RE =
+  /吃|喝|美味|好吃|甜品|蛋糕|面包|拉面|茶|咖啡|点心|便当|饮料|食物|品尝|味道|饿|嘴馋|delicious|eat|drink/i
+const SLEEP_CUE_RE = /困|睡|熬夜|累|疲惫|打哈欠|睡着|午睡|晚安|想睡|sleep|tired|yawn/i
+
 function isMotionCompatibleWithContext(params: {
   motion: string
   modelPath?: string
@@ -448,6 +453,10 @@ function isMotionCompatibleWithContext(params: {
   restrainedRole?: boolean
 }): boolean {
   if (!params.motion.trim()) return true
+  const lower = params.motion.toLowerCase()
+  const text = (params.line.content ?? '').trim()
+  if (/delicious|eat|drink/i.test(lower) && !FOOD_DRINK_CUE_RE.test(text)) return false
+  if (/sleep/i.test(lower) && !SLEEP_CUE_RE.test(text)) return false
   if (typeof facialStagedApi.isMotionCompatibleWithLine === 'function') {
     if (
       !facialStagedApi.isMotionCompatibleWithLine({
@@ -463,10 +472,8 @@ function isMotionCompatibleWithContext(params: {
       return false
     }
   }
-  const lower = params.motion.toLowerCase()
   const mood = inferMotionMoodKey(params.line, params.prevTense)
   const emo = (params.line.emotion ?? '').trim()
-  const text = (params.line.content ?? '').trim()
   const monologue = /^[（(]/.test(text) && /[）)]$/.test(text)
   const isTense = params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble'
   const isJoyful =
@@ -544,7 +551,12 @@ function pickFollowupMotion(
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
-  const nonStanding = collectModelNonStandingMotions(view, modelId)
+  const nonStanding = collectModelNonStandingMotions(view, modelId).filter((m) => {
+    const lineText = moodContext?.line?.content ?? ''
+    if (/delicious|eat|drink/i.test(m) && !FOOD_DRINK_CUE_RE.test(lineText)) return false
+    if (/sleep/i.test(m) && !SLEEP_CUE_RE.test(lineText)) return false
+    return true
+  })
   const moodKey = inferMotionMoodKey(moodContext?.line, Boolean(moodContext?.prevTense))
   const isTense = Boolean(
     moodContext?.prevTense || moodKey === 'sad' || moodKey === 'angry' || moodKey === 'trouble'
@@ -618,7 +630,9 @@ function pickAppearFallbackMotion(
       view.exampleMotion(modelId) || view.defaultMotion(modelId)
     )
   }
-  const nonStanding = collectModelNonStandingMotions(view, modelId)
+  const nonStanding = collectModelNonStandingMotions(view, modelId).filter(
+    (m) => !/delicious|eat|drink|sleep/i.test(m)
+  )
   const entryRe = tense
     ? /trouble|sad|cry|sigh|think|lookaway/i
     : /tilthead|lookaway|greeting|nod|forward|relief|think|shy/i
@@ -651,6 +665,7 @@ export interface SubtleFacialContext {
   precededByTense?: boolean
   modelPath?: string
   restrained?: boolean
+  listenerPrevEmotion?: string
 }
 
 const isSilentBeatLine = (text: string): boolean => SILENT_LINE_RE.test((text ?? '').trim())
@@ -901,7 +916,21 @@ function pickListenerReactionFacial(
   const speakerEmotion = speakerLine.emotion ?? ''
   const text = speakerLine.content ?? ''
   const restrained = isRestrainedRole(listenerRole) || isRestrainedRole(model.name)
-  const precededByTense = Boolean(context.precededByTense)
+  const listenerPrevEmo = (context.listenerPrevEmotion ?? '').trim()
+  const currentFacialRole = currentFacial
+    ? inspectModelFacial(context.modelPath ?? model.path, currentFacial).role
+    : 'neutral'
+  const listenerHadTenseMood =
+    listenerPrevEmo === '生气' ||
+    listenerPrevEmo === '伤心' ||
+    listenerPrevEmo === '害怕' ||
+    currentFacialRole === 'angry' ||
+    currentFacialRole === 'sad' ||
+    currentFacialRole === 'cry' ||
+    currentFacialRole === 'trouble' ||
+    currentFacialRole === 'cold_hollow' ||
+    currentFacialRole === 'closed_troubled'
+  const precededByTense = Boolean(context.precededByTense) || listenerHadTenseMood
 
   const isScoldingOrConfronting =
     speakerEmotion === '生气' ||
@@ -932,13 +961,21 @@ function pickListenerReactionFacial(
   }
   if (speakerEmotion === '惊讶') {
     return pickFacialFromHints(
-      allFacials,
+      precededByTense ? safeListenerPool : allFacials,
       [/surprise|notice|baffling/i, /serious|smallmouth|trouble/i],
       currentFacial,
-      /angry|disgust|cry/i
+      precededByTense ? /angry|disgust|cry|smile|smug|wink|sparkling/i : /angry|disgust|cry/i
     )
   }
   if (speakerEmotion === '害羞') {
+    if (precededByTense) {
+      return pickFacialFromHints(
+        safeListenerPool,
+        [/serious|trouble|notice/i, /smallmouth|closeeye|normal/i],
+        currentFacial,
+        FACIAL_SMILE_EXCLUDE_RE
+      )
+    }
     return pickFacialFromHints(
       allFacials,
       restrained
@@ -949,6 +986,14 @@ function pickListenerReactionFacial(
     )
   }
   if (speakerEmotion === '开心') {
+    if (precededByTense) {
+      return pickFacialFromHints(
+        safeListenerPool,
+        [/trouble|worry|serious|sad/i, /smallmouth|closeeye|lookaway|normal/i],
+        currentFacial,
+        FACIAL_SMILE_EXCLUDE_RE
+      )
+    }
     return pickFacialFromHints(
       allFacials,
       restrained
@@ -968,7 +1013,7 @@ function pickListenerReactionFacial(
       precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
     )
   }
-  if (precededByTense ? /♪|～♪|太好了/.test(text) : /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
+  if (!precededByTense && /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
     return pickFacialFromHints(
       allFacials,
       restrained
@@ -1167,7 +1212,7 @@ function castBlock(plan: StagedCastPlan): string {
 }
 
 function lineBudget(targetMinutes: number): number {
-  return Math.max(12, Math.min(108, Math.round(targetMinutes * 16)))
+  return Math.max(10, Math.min(80, Math.round(targetMinutes * 10)))
 }
 
 function titleOrDefault(value: unknown, fallback: string): string {
@@ -1376,7 +1421,7 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
 ${options.scene}
 
 - 语言：中文（台词 content 用中文，日文 ttsText 由宿主另行翻译）
-- 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词
+- 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词（按 PJSK 配音与停顿约 7 秒/句换算，凝练紧凑，切勿注水拉长）
 - 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线${preCastRagBlock}
 
 ## 可选角色（modelId — 显示名；若角色有 [服装: 校服=ID...]，按场景时段与场合直接选对应服装 modelId）
@@ -1396,7 +1441,7 @@ ${bgmList || '（可使用 keep 或 silence）'}
   - 每幕写明 \`id\`（s1/s2/s3）、\`summary\`、\`background\`（必须来自可用背景清单）、\`ambient\`（normal/evening/night）、\`activeCast\`（1~2 名本幕起手在场角色名，Normal 模式每次最多 2 人）。
   - 合理规划转场与标题条：首幕可用 \`telop\`（时间/气氛短标题，如「放学后」）或 \`placeInfo\`（左上角地点条）；后续幕次可用 \`transitionIn\`：\`sideFade\`（横向遮罩擦除）、\`flashback\`（白光闪入回忆：WhiteOut->FlashbackIn->WhiteIn）、\`sekaiIn\`/\`sekaiOut\`（出入 SEKAI）或 \`black\`。
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
-  - 善用 BGM 弧光：在情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
+  - 善用 BGM 弧光：首幕（s1）必须从可用 BGM 清单选择贴合气氛的开场配乐（严禁首幕大段无声，只有 2~4 句冷开场且第 5 句前切入 BGM 才可留空）；中后段情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
 - title 是短标题（不超过 12 个字），logline 一句话，outline 4~6 条写“发生什么”。
 - **深度意图拆解（understanding）**：提炼显性要求（explicitRequests）、潜台词（implicitSubtext）、角色关系张力（relationshipDynamic）、情绪弧光（emotionalArc）、中段转折点（turningPoint：情绪温度在哪一拍转向及动因）、开场日常意象（openingMotif：前 1~4 句出现的具体物件或感官细节）、收尾回扣（closingCallback：结尾 2~3 句怎样轻巧呼应开场意象，替代说教总结）、各角色表里动机（characterGoals：想得到什么 vs 隐瞒什么）、官方连续性钩子（canonHooks）与禁忌避坑清单（avoidList）。
 - **两两称呼表（pairwiseAddress）**：列出入选角色彼此的准确官方中文称呼与日文称呼/敬语（如 zh/ja），供后续对白与日文配音翻译严格遵守。
@@ -2082,14 +2127,14 @@ ${fewShotExcerpts}
 `
     : ''
 }
-## 台词要求（按 ${budget} 句的场次计算）
-- 语言：中文；总共 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句（目标约 ${budget} 句）；
-  少于 ${Math.max(12, Math.round(budget * 0.88))} 句或超过 ${Math.round(budget * 1.08)} 句都视为不合格。
+## 台词要求（按 ${budget} 句的场次计算，约 ${options.targetMinutes} 分钟）
+- 语言：中文；总共 ${Math.max(10, Math.round(budget * 0.92))}~${Math.max(14, Math.round(budget * 1.2))} 句（目标约 ${budget} 句，按 PJSK 配音与停留约 7 秒/句换算）；
+  少于 ${Math.max(10, Math.round(budget * 0.92))} 句或超过 ${Math.max(14, Math.round(budget * 1.2))} 句都视为不合格。
 - 用 turns 组织：一个角色的一次发言 = 一个 turn，turn 里放 1~6 条 lines。
   lines 元素优先直接写字符串；需要刻意沉默/转场收窗时可写成对象 \`{"content":"...","pauseBefore":1.0,"closeWindowAfter":true}\`（pauseBefore 仅在重大停顿或反应前用 \`1.0\` 或 \`1.5\`，其余句留空即 \`0\`）。
-  整场约 ${Math.max(8, Math.round(budget / 2.1))} 个 turns，长短要有明显起伏（官方一半以上是单句）：
-  约 45% 的 turn 只放 1 条（短反应、抢话、被打断），至少 ${Math.max(10, Math.round(budget * 0.4))} 个；
-  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~5 条，只有情绪最重或回忆处才允许写成 5~6 条的稍长一段（全片 1~2 处即可，禁止连排长独白）。
+  整场约 ${Math.max(6, Math.round(budget / 2.1))} 个 turns，长短要有明显起伏（官方一半以上是单句）：
+  约 45% 的 turn 只放 1 条（短反应、抢话、被打断），至少 ${Math.max(6, Math.round(budget * 0.4))} 个；
+  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~5 条，只有情绪最重或回忆处才允许写成 5~6 条的稍长一段（全片最多 1 处即可，严禁多处连排长独白或重复车轱辘把篇幅拖超）。
 - 句长与排版（对应官方 30 字宽文本框）：
   - 平均 17~20 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
   - 约 1/6 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
@@ -2102,8 +2147,8 @@ ${fewShotExcerpts}
   - 欲言又止：全片至少 3~4 处把话说到一半改成破折号或省略号，或先答非所问再绕回来。${craftAnchors ? `\n${craftAnchors}` : ''}${termHint}
 
 ## 写完后自检（不要输出自检过程）
-- 总句数是否在 ${Math.max(12, Math.round(budget * 0.88))}~${Math.round(budget * 1.08)} 句？
-- 是否有约 ${Math.max(10, Math.round(budget * 0.4))} 个单条 turn、足够短反应与长句？
+- 总句数是否在 ${Math.max(10, Math.round(budget * 0.92))}~${Math.max(14, Math.round(budget * 1.2))} 句？
+- 是否有约 ${Math.max(6, Math.round(budget * 0.4))} 个单条 turn、足够短反应与长句，且没有拖沓重复独白？
 - 出场角色是否均来自上方名单（共 ${plan.cast.length} 名），每行不超过 30 字宽、最多 3 行？
 
 ## 输出 JSON
@@ -2270,7 +2315,15 @@ export function buildDialogueLengthPrompt(
 ): StagedMessages {
   const base = buildDialoguePrompt(view, plan, options)
   const raw = typeof previous === 'string' ? previous : JSON.stringify(previous)
-  const upper = Math.round(requiredLines * 1.15)
+  const budget = lineBudget(options.targetMinutes)
+  const maxBudgetLines = Math.max(14, Math.round(budget * 1.2))
+  const effectiveRequired = Math.min(requiredLines, Math.max(10, Math.round(budget * 1.05)))
+  const upper = Math.min(
+    maxBudgetLines,
+    Math.max(effectiveRequired + 2, Math.round(effectiveRequired * 1.15))
+  )
+  const effectiveRequiredChars =
+    requiredChars > 0 ? Math.min(requiredChars, Math.round(budget * 20)) : 0
   const actualChars = countDialogueChars(
     (() => {
       try {
@@ -2281,22 +2334,22 @@ export function buildDialogueLengthPrompt(
       }
     })()
   )
-  const charRule = requiredChars
-    ? `- 总字数至少 ${requiredChars} 字（上一轮约 ${actualChars} 字），平均每句 17~20 字；`
+  const charRule = effectiveRequiredChars
+    ? `- 总字数控制在 ${effectiveRequiredChars}~${Math.round(budget * 24)} 字（上一轮约 ${actualChars} 字），平均每句 16~20 字；`
     : ''
   const actualMean = actualLines > 0 ? (actualChars / actualLines).toFixed(1) : '0'
-  const longRule = requiredChars
-    ? `- 上一轮平均每句只有 ${actualMean} 字；这一轮至少 ${Math.ceil(requiredLines * 0.6)} 句 15 字以上，
-  2~6 字的短反应不超过 1/5，不要用大量短句凑句数。`
+  const longRule = effectiveRequiredChars
+    ? `- 上一轮平均每句只有 ${actualMean} 字；这一轮把部分碎句充实到 15 字以上，2~6 字短反应占约 1/6 即可。`
     : ''
   const castNames = plan.cast.map((c) => c.name).join('、')
+  const lengthProblemNote =
+    actualLines >= effectiveRequired
+      ? `上一轮已有 ${actualLines} 句台词（已达到约 ${budget} 句目标），但总字数略少（约 ${actualChars} 字）。请保持总句数严格在 ${Math.max(actualLines, effectiveRequired)}~${upper} 句以内，仅适度充实过于单薄的句子，**严禁为了凑字数增加多余独白或拉长超过 ${upper} 句**：`
+      : `上一轮只写了 ${actualLines} 句台词${effectiveRequiredChars ? `、约 ${actualChars} 字` : ''}，\n少于要求的 ${effectiveRequired} 句${effectiveRequiredChars ? ` / ${effectiveRequiredChars} 字` : ''}。请保留原来的小事件和人物关系，\n重写一份完整台词稿：\n- 总句数严格控制在 ${effectiveRequired}~${upper} 句（目标约 ${budget} 句，禁止超预算注水），仍然用 turns 结构，每个 turn 1~6 条 lines；`
   return {
     system: base.system,
     user: `${base.user}\n\n## 上一轮的问题
-上一轮只写了 ${actualLines} 句台词${requiredChars ? `、约 ${actualChars} 字` : ''}，
-少于要求的 ${requiredLines} 句${requiredChars ? ` / ${requiredChars} 字` : ''}。请保留原来的小事件和人物关系，
-重写一份完整台词稿：
-- 总句数 ${requiredLines}~${upper} 句，仍然用 turns 结构，每个 turn 1~6 条 lines；
+${lengthProblemNote}
 ${charRule}
 ${longRule}
 - 不要靠重复台词凑数；补足对话的来回、停顿、短反应和情绪铺垫；
@@ -2450,7 +2503,7 @@ export function buildEmotionPrompt(
       '核心原则（双层音色保护）：',
       '1. 普通台词保持角色基础参考音频锁定，靠精细的日语 ttsCaption（语气、呼吸、语速、停顿、情感张力）与轻微语速变化表达细腻表演，绝不改变角色音色底色。',
       '2. ttsCaption 必须严格只写表演与韵律（2~4 个简短日语短语），严禁出现任何年龄/性别/基础声线词（如「若い女性」「少女」「少年」「低い声」「高い声」「幼い声」「アニメ声」「ロリ」等），否则会与角色 LoRA/参考音频冲突。',
-      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；哭泣/悲伤对峙途中即便出现安抚（「没关系的」）、克制解释或绝望叹息（「可窗户纸一旦破了，我就再也没办法安心笑出来了」），也必须全段持续保持「伤心」，绝不中途掉回「平静」。',
+      '3. 严禁把真正的情绪爆发、哭腔、喊叫、脆弱道歉或震惊错标为「平静」；哭泣/悲伤对峙途中即便出现安抚（「没关系的」）、克制解释或绝望叹息（「可窗户纸一旦破了，我就再也没办法安心笑出来了」），也必须全段持续保持「伤心」，绝不中途掉回「平静」；只有到真正释怀和解或夕阳余韵收尾时，才允许自然过渡到舒缓的「平静」或「开心」。',
       '4. ttsSpecialScene 仅用于全片真正的高潮爆发/哭喊/哽咽/耳语/回忆转折（占比严格 <= 15%）。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
@@ -2475,10 +2528,11 @@ ${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、
   - 平静：仅用于日常寒暄、温和叙述、冷静思考。**绝不要**把喊人（「瑞希っ！」）、含泪道歉（「对不起」「ごめんね」）、哽咽（「可是……可是……！」）或激动呐喊错标为「平静」。
   - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
   - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求，以及哭戏途中强忍泪水安慰对方（「没关系的」）、无奈解释（「大家都太温柔了」）或绝望吐露——**哭戏未真正释怀和解前全段保持「伤心」，严禁中途掉回「平静」**。
+  - 结尾呼吸感与余韵过渡：当冲突在结尾真正走向释怀、夕阳缓和或安静接纳时（如「夕阳沉下去了」「再等我一会儿」），允许结尾数句自然过渡到柔和释放的「平静」或「开心」（搭配安堵/温柔的 ttsCaption），让情绪弧光有呼吸落点，不要把整场几十句锁死在单一哭腔。
   - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊。
   - 害羞：被夸、慌张掩饰、不好意思。
   - 惊讶：突然的揭示、意外、倒吸一口气或惊呼。
-  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动或哭戏途中掉回「平静」；遇到真正的情感转折、哭诉或欢快收尾时忠实切换。
+  - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动或哭戏途中掉回「平静」；遇到真正的情感转折、哭诉、结尾释怀或欢快收尾时忠实切换。
 - **ttsCaption（日语表演/韵律描述，必填）**：
   - 用 2~4 个自然日语短语描述**语气、呼吸感、语速、停顿、强弱与情绪层次**（例如：「安堵して、柔らかく温かい口調でゆっくり話している。」「息を切らしながら、切羽詰まった様子で必死に呼びかける。」）。
   - **严禁描述说话人的年龄、性别或基础音色**（禁止出现 若い女性/大人の女性/少女/少年/男の子/女の子/低い声/高い声/幼い声/アニメ声 等词）。
@@ -3218,7 +3272,7 @@ ${presenceRule}
   - 突发惊吓可用 \`characterShake: { modelId, axis: "X"|"Y" }\`；大喊/震惊句可用 \`camera: { kind: "shakeWindow" }\` 或 \`shakeScreen\`。
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与场景**：可选 \`Telop\`（开场/跳时间小标题）、\`PlaceInfo\`（地点条）、\`SideFade\`（\`transitionIn: "sideFade"\`）、回忆（\`transitionIn: "flashback"\`, \`isFlashback: true\`）、出入 SEKAI（\`sekaiIn\`/\`sekaiOut\`）、天气/氛围粒子（${CURATED_SCENARIO_EFFECTS.join('/')}）。
-- **BGM 与停顿节奏**：大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
+- **BGM 与停顿节奏**：首幕（s1）必须从可用 BGM 清单选定契合开场氛围的曲目（例如追逐/对峙/低落选戏剧或沉重曲，日常/喜剧选轻快日常曲）；若刻意做冷开场，最多留 2~4 句静音并在第 5 句（l5）前用 \`bgmCut\` 切入 BGM，**严禁前段大段无声**。大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。中后段转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
 - **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
 ## 输出 JSON
@@ -3346,6 +3400,76 @@ export function fallbackStaging(
   return enrichStagingBaseline({ scenes, events: [] }, view, plan, dialogue)
 }
 
+function pickOpeningBgmForScene(
+  view: CatalogView,
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  sceneSummary = ''
+): string {
+  const queryParts = [
+    plan.event,
+    plan.logline,
+    plan.understanding?.emotionalArc ?? '',
+    sceneSummary,
+    ...dialogue.lines.slice(0, 12).map((l) => `${l.emotion ?? ''} ${l.content}`)
+  ].filter(Boolean)
+  const query = queryParts.join(' ')
+  const choices = view.bgmPromptChoices(36, query)
+  const pool =
+    choices.length > 0
+      ? choices
+      : view.bgmDetailsList().filter((detail) => (detail.description ?? '').trim().length > 0)
+  if (pool.length === 0) return ''
+
+  const openingEmos = dialogue.lines.slice(0, 12).map((l) => (l.emotion ?? '').trim())
+  const tenseCue =
+    openingEmos.some((e) => e === '伤心' || e === '生气' || e === '害怕') ||
+    /追|逃|对峙|冲突|吵|哭|泪|道歉|告别|压抑|低沉|沉重|紧张|不安|严肃|秘密|隐瞒|害怕|悬疑|暗涌|夜晚|深夜|暴雨|雨/.test(
+      query
+    )
+  const warmCue =
+    !tenseCue &&
+    (openingEmos.some((e) => e === '开心') ||
+      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(query))
+
+  let best = pool[0]
+  let bestScore = -Infinity
+  for (let idx = 0; idx < pool.length; idx++) {
+    const item = pool[idx]
+    const hay =
+      `${item.file} ${item.name} ${item.mood ?? ''} ${item.category ?? ''} ${item.description} ${(item.tags ?? []).join(' ')}`.toLowerCase()
+    let score = -idx * 0.01
+    if (tenseCue) {
+      if (
+        /低沉|克制|压抑|悲伤|感伤|忧郁|紧绷|紧张|紧迫|暗涌|悬疑|冲突|告[白别]|沉重|严肃|dramatic|tense|sad|melanchol|thorns/i.test(
+          hay
+        )
+      ) {
+        score += 20
+      }
+      if (/日常|闲聊|温馨|轻松|欢快|搞笑|喜剧|轻缓|居家/i.test(hay)) {
+        score -= 10
+      }
+    } else if (warmCue) {
+      if (/轻松|日常|温暖|温馨|欢快|元气|活泼|轻缓|居家|搞笑|slapstick/i.test(hay)) {
+        score += 20
+      }
+      if (/压抑|低沉|悲伤|紧绷|冲突|告别/i.test(hay)) {
+        score -= 10
+      }
+    } else {
+      if (/轻松|日常|轻缓|温暖|平稳|宁静/i.test(hay)) {
+        score += 8
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score
+      best = item
+    }
+  }
+  return best.file
+}
+
 function enrichStagingBaseline(
   staging: StagedStaging,
   view: CatalogView,
@@ -3358,6 +3482,29 @@ function enrichStagingBaseline(
   const eventsByLine = new Map<number, StagedStagingEvent>()
   for (const ev of staging.events) {
     eventsByLine.set(ev.lineIndex, ev)
+  }
+
+  // 开场首幕 BGM 兜底：长场次禁止因 scene0.bgm 留空或无效 silence 导致前几分钟全程无声；
+  // 仅当刻意冷开场并在第 5 句（index <= 5）前显式切入 BGM 时才允许 scene0 静音开场。
+  if (lines.length >= 6 && staging.scenes.length > 0) {
+    const scene0 = staging.scenes[0]
+    const hasEarlyBgmPlay =
+      staging.events.some(
+        (ev) => ev.lineIndex <= 5 && ev.bgmCut?.action === 'play' && Boolean(ev.bgmCut.file)
+      ) ||
+      staging.scenes
+        .slice(1)
+        .some(
+          (s) => s.fromIndex <= 5 && Boolean(s.bgm) && s.bgm !== 'silence' && s.bgm !== 'keep'
+        )
+    const missingOrLongSilence =
+      !scene0.bgm || scene0.bgm === 'keep' || (scene0.bgm === 'silence' && !hasEarlyBgmPlay)
+    if (missingOrLongSilence) {
+      const openingBgm = pickOpeningBgmForScene(view, plan, dialogue, plan.scenes?.[0]?.summary ?? '')
+      if (openingBgm) {
+        scene0.bgm = openingBgm
+      }
+    }
   }
 
   const ensureEvent = (lineIndex: number): StagedStagingEvent => {
@@ -3857,7 +4004,7 @@ ${castLines}${formatWorldviewCueBlock(options.ragContext)}
 ${dialogueLines}
 
 ## 动作/表情关键词（名称由英文语义 + 编号组成；直接输出完整名称）
-- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / sleep 困倦 / delicious 好吃 / pose 摆姿势 / default 默认站姿
+- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / pose 摆姿势 / default 默认站姿（sleep 困倦 / delicious 好吃 仅限真实睡眠或吃喝台词，平时禁用）
 - 表情：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
 
 ## 可用动作（必须使用对应角色的完整名称）
@@ -3879,13 +4026,13 @@ ${
 - **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
 - **静默反应**：官方全量剧本里，台词之外的独立 Motion 约每 2 句 1 个；本场每 2~4 句可安排 1 个 \`silentMotion\`（听者反应、环境小动作或停顿），让双方表演自然接力。
-- **听者反应对齐官方 PJSK（禁止句中错峰刷屏）**：同一句 \`Talk\` 绝不同时触发说话者与听者的身体动作；当 A 连续说话时，听者 B 优先仅切 **纯表情（只写 \`facial\`，不写 \`motion\`）** 在 \`at: 0\` 自然过渡，或仅在真正情绪转折点通过 \`silentMotion\` / 独立 \`Motion\` 片段表现听者身体反应。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上。
+- **听者反应对齐官方 PJSK（禁止句中错峰刷屏与情绪倒错）**：同一句 \`Talk\` 绝不同时触发说话者与听者的身体动作；当 A 连续说话时，听者 B 优先仅切 **纯表情（只写 \`facial\`，不写 \`motion\`）** 在 \`at: 0\` 自然过渡，或仅在真正情绪转折点通过 \`silentMotion\` / 独立 \`Motion\` 片段表现听者身体反应。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上；**若听者刚才还处于「生气」或「伤心」，即使说话者强颜欢笑打岔，听者也严禁切回 \`face_smile_*\` 笑脸**。
 - **表情严格贴合语境与括号语义**：务必看清上方表情清单括号里的具体含义（例如 \`face_smile_05(苦笑/勉强笑)\`、\`face_trouble_02(苦笑/嘴角上扬)\`、\`face_closeeye_02(闭眼微笑)\`、\`face_darknormal_01(阴沉面无表情)\`），悲伤/哭泣/生气/道歉/沉重对峙语境严禁错选真笑、含泪微笑或嘴角上扬表情（除非台词明确写到苦笑/含泪安抚微笑）。${
       hasEmotionTags
         ? '〔情绪〕只代表 TTS 语音基调，**严禁把〔平静〕死板锁死在 face_normal_01**！即使在〔平静〕段内，也要根据每句台词的实际语气细腻切换微表情：温和/寒暄/赞同/调侃用真正的微笑或俏皮；认真/思索/倾听用 serious / closeeye / smallmouth / notice；无奈/窘迫/犹豫用 trouble / lookaway / worry / 苦笑；只有毫无波澜的平铺陈述才用 normal。'
         : '随每句台词语气细腻切换表情：温和/寒暄/赞同用微笑；认真/思索用 serious / closeeye / smallmouth；无奈/犹豫用 trouble / lookaway / worry；开心/伤心/生气/惊讶/害羞严格对应各自语义表情。'
     }
-- **哭戏/高潮持续表情与自然换姿**：在哭泣/崩溃/泪目表白段落（连续 4~8+ 句），应持续保持 \`face_cry_*\` / \`face_sad_*\` 哭泣神情，期间通过微妙身体动作或省略 \`motion\` 保持情绪连贯，**严禁每句机械乱跳表情（如哭泣途中有事无事切回 face_closeeye_01 或 face_trouble_02）**！日常段同一角色跨句延续同一表情也很自然，善用角色丰富的动作变体与贴合气氛的跨风格动作（不必锁死 4~5 个动作循环）；**朝比奈真冬**保持克制内敛的表情与动作。
+- **哭戏/高潮持续表情与结尾呼吸感**：在哭泣/崩溃/泪目表白段落（连续 4~8+ 句），应持续保持 \`face_cry_*\` / \`face_sad_*\` 哭泣神情，期间通过微妙身体动作或省略 \`motion\` 保持情绪连贯，**严禁每句机械乱跳表情（如哭泣途中有事无事切回 face_closeeye_01 或 face_trouble_02）**；当剧情临近结尾真正走向夕阳缓和、释怀或安静接纳时，允许过渡到舒缓释放的神情（如微闭眼/轻柔倾听/释然神态）让情绪弧光自然落地。日常段同一角色跨句延续同一表情也很自然，善用角色丰富的动作变体与贴合气氛的跨风格动作（不必锁死 4~5 个动作循环）；**朝比奈真冬**保持克制内敛的表情与动作。
 - 背景的时段（白天/黄昏/夜晚）和室内外要和台词写的时间一致；优先选有描述的条目。
 
 ## 输出 JSON
@@ -4414,6 +4561,7 @@ export function composeStory(
   let cameraDirty = false
   let shakeScreenActive = false
   let lastSpeakerId: number | null = null
+  const lastEmotionByActor = new Map<number, string>()
   let lastSilentReactionLine = -10
   let lastSilentReactionTargetId: number | null = null
   let silentReactionsEmitted = 0
@@ -4622,16 +4770,26 @@ export function composeStory(
       const surroundingTense = dialogue.lines
         .slice(Math.max(0, lineIndex - 2), Math.min(dialogue.lines.length, lineIndex + 6))
         .some((l) => TENSE_EMOTION_SET.has(l.emotion ?? ''))
-      const entryMotion =
-        directedMotion && !isStandingMotion(directedMotion)
-          ? directedMotion
-          : pickAppearFallbackMotion(
-              view,
-              id,
-              usedEntryMotions,
-              firstFutureTalkMotion,
-              surroundingTense
-            )
+      const entryMemberPath = view.modelById(id)?.path
+      const directedMotionOk =
+        Boolean(directedMotion) &&
+        !isStandingMotion(directedMotion!) &&
+        isMotionCompatibleWithContext({
+          motion: directedMotion!,
+          modelPath: entryMemberPath,
+          line: firstLineForMember ?? { content: '', emotion: surroundingTense ? '伤心' : '平静' },
+          prevTense: surroundingTense,
+          restrainedRole: isRestrainedRole(member?.role ?? '') || isRestrainedRole(member?.name ?? '')
+        })
+      const entryMotion = directedMotionOk
+        ? directedMotion!
+        : pickAppearFallbackMotion(
+            view,
+            id,
+            usedEntryMotions,
+            firstFutureTalkMotion,
+            surroundingTense
+          )
       if (entryMotion) usedEntryMotions.add(entryMotion)
       const firstLineIdx = firstLineForMember ? dialogue.lines.indexOf(firstLineForMember) : -1
       const entryPrecededByTense =
@@ -4755,7 +4913,23 @@ export function composeStory(
   // ---- 开场首幕 -------------------------------------------------------------------------------------------
   const scene0 = effectiveStaging.scenes[0]
   if (scene0) {
-    applyBgmDirective(scene0.bgm || direction.bgm, 600)
+    let initialBgm = scene0.bgm || direction.bgm
+    if (dialogue.lines.length >= 6 && (!initialBgm || initialBgm === 'keep' || initialBgm === 'silence')) {
+      const hasEarlyBgmPlay =
+        effectiveStaging.events.some(
+          (ev) => ev.lineIndex <= 5 && ev.bgmCut?.action === 'play' && Boolean(ev.bgmCut.file)
+        ) ||
+        effectiveStaging.scenes
+          .slice(1)
+          .some(
+            (s) => s.fromIndex <= 5 && Boolean(s.bgm) && s.bgm !== 'silence' && s.bgm !== 'keep'
+          )
+      if (!initialBgm || initialBgm === 'keep' || (initialBgm === 'silence' && !hasEarlyBgmPlay)) {
+        const picked = pickOpeningBgmForScene(view, plan, dialogue, plan.scenes?.[0]?.summary ?? '')
+        if (picked) initialBgm = picked
+      }
+    }
+    applyBgmDirective(initialBgm, 600)
     ensureNormalLayoutMode()
     const bgId = registerImage(scene0.background)
     snippets.push({
@@ -5366,26 +5540,46 @@ export function composeStory(
       const listenerMotion: string | undefined =
         listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
       const listenerPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+      const listenerPrevEmo = lastEmotionByActor.get(directed.listener.modelId) ?? ''
+      const listenerPrevFacialRole = listenerState?.lastFacial
+        ? inspectModelFacial(listenerModelPath ?? '', listenerState.lastFacial).role
+        : 'neutral'
+      const listenerHadTenseMood =
+        listenerPrevEmo === '生气' ||
+        listenerPrevEmo === '伤心' ||
+        listenerPrevEmo === '害怕' ||
+        listenerPrevFacialRole === 'angry' ||
+        listenerPrevFacialRole === 'sad' ||
+        listenerPrevFacialRole === 'cry' ||
+        listenerPrevFacialRole === 'trouble' ||
+        listenerPrevFacialRole === 'cold_hollow' ||
+        listenerPrevFacialRole === 'closed_troubled'
       const listenerFacialRaw = directed.listener.facial
-      const listenerFacial = shouldAvoidIncongruousSmile(
-        listenerFacialRaw,
-        line,
-        listenerPrecededByTense,
-        { modelPath: listenerModelPath, restrained: listenerRestrained }
-      )
-        ? pickListenerReactionFacial(
-            view,
-            directed.listener.modelId,
-            line,
-            listenerMember?.role,
-            listenerState?.lastFacial,
-            {
-              precededByTense: listenerPrecededByTense,
-              modelPath: listenerModelPath,
-              restrained: listenerRestrained
-            }
-          )
-        : listenerFacialRaw
+      const forbiddenTenseSmile =
+        Boolean(listenerFacialRaw) &&
+        (listenerHadTenseMood || listenerPrecededByTense) &&
+        (SMILE_FACIAL_RE.test(listenerFacialRaw!) ||
+          isSmileLikeFacial(listenerFacialRaw!, listenerModelPath))
+      const listenerFacial =
+        forbiddenTenseSmile ||
+        shouldAvoidIncongruousSmile(listenerFacialRaw, line, listenerPrecededByTense, {
+          modelPath: listenerModelPath,
+          restrained: listenerRestrained
+        })
+          ? pickListenerReactionFacial(
+              view,
+              directed.listener.modelId,
+              line,
+              listenerMember?.role,
+              listenerState?.lastFacial,
+              {
+                precededByTense: listenerPrecededByTense || listenerHadTenseMood,
+                modelPath: listenerModelPath,
+                restrained: listenerRestrained,
+                listenerPrevEmotion: listenerPrevEmo
+              }
+            )
+          : listenerFacialRaw
       const speakerBodyActedThisLine = actions.some(
         (a) =>
           a.modelId === member.modelId &&
@@ -5421,6 +5615,57 @@ export function composeStory(
       actorState.appearedWithMotion = false
     }
 
+    // 预判下一句是否会立即对 targetId 执行 LayoutClear（如独白切回双人、stageGroup 换人/换槽、三人轮换退场或切入下一幕），
+    // 防止在即将 LayoutClear 前发射独立 Motion 造成 400ms 被腰斩异常。
+    const willActorClearImmediatelyAfter = (
+      targetId: number,
+      includeSceneCurtain = true
+    ): boolean => {
+      if (!onStage.has(targetId)) return true
+      const nextIndex = index + 1
+      if (nextIndex >= dialogue.lines.length) return true
+      if (sceneByStart.has(nextIndex)) return includeSceneCurtain
+      const nLine = dialogue.lines[nextIndex]
+      const nMember = cast.find((c) => c.name === nLine.speaker)
+      if (!nMember) return false
+      const nEv = eventByIndex.get(nextIndex)
+      const nIsThinking =
+        nLine.windowDisplayMode === 'Thinking' ||
+        nLine.effect === 'Internal' ||
+        isInternalThoughtContent(nLine.content)
+      const currentSide = onStage.get(targetId)?.side
+
+      let nextGroup: number[] | null = null
+      if (nEv?.stageGroup && plan.cast.length >= 2) {
+        nextGroup = nEv.stageGroup.activeCast.includes(nMember.modelId)
+          ? nEv.stageGroup.activeCast.slice(0, 2)
+          : [nMember.modelId, ...nEv.stageGroup.activeCast.slice(0, 1)]
+      } else if (!nIsThinking && thinkingSoloReturnCast) {
+        nextGroup = thinkingSoloReturnCast.includes(nMember.modelId)
+          ? thinkingSoloReturnCast
+          : [nMember.modelId, ...thinkingSoloReturnCast.slice(0, 1)]
+      } else if (!onStage.has(nMember.modelId)) {
+        if (plan.cast.length >= 3) {
+          const currentIds = [...onStage.keys()]
+          const keepId = currentIds.includes(member.modelId)
+            ? member.modelId
+            : currentIds[currentIds.length - 1]
+          nextGroup =
+            currentIds.length < 2 ? [...currentIds, nMember.modelId] : [keepId, nMember.modelId]
+        } else {
+          nextGroup = cast.map((c) => c.modelId)
+        }
+      }
+
+      if (!nextGroup) return false
+      const validNext = nextGroup.filter((id) => cast.some((c) => c.modelId === id)).slice(0, 2)
+      if (validNext.length === 0) return false
+      if (!validNext.includes(targetId)) return true
+      if (validNext.length === 1 && currentSide !== 'Center') return true
+      if (validNext.length >= 2 && currentSide === 'Center') return true
+      return false
+    }
+
     const explicitSilentReaction = Boolean(ev?.silentReaction || directed?.silentMotion)
     let autoSilentTargetId: number | null = null
     const hasZeroMotionActorOnStage = [...onStage.entries()].some(
@@ -5445,6 +5690,7 @@ export function composeStory(
         .filter(
           ([pid, pst]) =>
             index > pst.appearedAtLine &&
+            !willActorClearImmediatelyAfter(pid) &&
             (pid !== nextSpeakerId || nextTalkPause >= 0.8 || !nextSpeakerHasImmediateMotion)
         )
         .sort(([aid], [bid]) => (totalBodyMotions.get(aid) ?? 0) - (totalBodyMotions.get(bid) ?? 0))
@@ -5533,6 +5779,7 @@ export function composeStory(
     })
     windowOpen = !closeAfter
     lastSpeakerId = member.modelId
+    if (line.emotion) lastEmotionByActor.set(member.modelId, line.emotion)
 
     // 随本句 Talk 同步触发的镜头推进/震动放在 Talk 之后并置 Now，保证在本句起始帧同步启动而非提前在上句抢跑
     if (ev?.camera && ev.camera.kind !== 'zoomReset') {
@@ -5619,10 +5866,15 @@ export function composeStory(
     if (hasSilentAfter) {
       const offTurnCandidateId =
         [...onStage.entries()].find(
-          ([id, st]) => id !== nextSpeakerId && id !== member.modelId && index > st.appearedAtLine
+          ([id, st]) =>
+            id !== nextSpeakerId &&
+            id !== member.modelId &&
+            index > st.appearedAtLine &&
+            !willActorClearImmediatelyAfter(id)
         )?.[0] ??
         [...onStage.entries()].find(
-          ([id, st]) => id !== nextSpeakerId && index > st.appearedAtLine
+          ([id, st]) =>
+            id !== nextSpeakerId && index > st.appearedAtLine && !willActorClearImmediatelyAfter(id)
         )?.[0]
       const partnerId = [...onStage.keys()].find((id) => id !== member.modelId)
       const targetId: number =
@@ -5646,13 +5898,20 @@ export function composeStory(
         targetId === member.modelId &&
         !hasTranslationContent(line.content) &&
         actedBodyThisLine.has(member.modelId)
-      if (targetId !== -1 && onStage.has(targetId) && !avoidClobberingShortSelfMotion) {
+      const isExplicitStagingSilent = Boolean(ev?.silentReaction && onStage.has(ev.silentReaction.modelId))
+      if (
+        targetId !== -1 &&
+        onStage.has(targetId) &&
+        !avoidClobberingShortSelfMotion &&
+        !willActorClearImmediatelyAfter(targetId, !isExplicitStagingSilent)
+      ) {
         const targetState = onStage.get(targetId)!
         const targetMember = cast.find((c) => c.modelId === targetId)
         const targetModelPath = view.modelById(targetId)?.path
         const fromPendingListener =
           pendingListenerMotion?.modelId === targetId ? pendingListenerMotion : null
         const silentPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+        const targetPrevEmo = lastEmotionByActor.get(targetId) ?? ''
         const targetRestrained =
           isRestrainedRole(targetMember?.role ?? '') || isRestrainedRole(targetMember?.name ?? '')
         const rawSilentMotion = ev?.silentReaction?.motion || fromPendingListener?.motion || ''
@@ -5678,14 +5937,21 @@ export function composeStory(
             { line, prevTense: silentPrecededByTense, restrained: targetRestrained }
           )
         const rawSilentFacial = ev?.silentReaction?.facial || fromPendingListener?.facial || ''
-        const safeSilentFacial = shouldAvoidIncongruousSmile(
-          rawSilentFacial,
-          line,
-          silentPrecededByTense,
-          { modelPath: targetModelPath }
-        )
-          ? ''
-          : rawSilentFacial
+        const targetHadTense =
+          silentPrecededByTense ||
+          targetPrevEmo === '生气' ||
+          targetPrevEmo === '伤心' ||
+          targetPrevEmo === '害怕'
+        const safeSilentFacial =
+          (rawSilentFacial &&
+            targetHadTense &&
+            (SMILE_FACIAL_RE.test(rawSilentFacial) ||
+              isSmileLikeFacial(rawSilentFacial, targetModelPath))) ||
+          shouldAvoidIncongruousSmile(rawSilentFacial, line, silentPrecededByTense, {
+            modelPath: targetModelPath
+          })
+            ? ''
+            : rawSilentFacial
         const holdExistingCryFacial =
           !safeSilentFacial &&
           Boolean(targetState.lastFacial) &&
@@ -5717,7 +5983,11 @@ export function composeStory(
                     line,
                     targetMember?.role,
                     targetState.lastFacial,
-                    { precededByTense: silentPrecededByTense, modelPath: targetModelPath }
+                    {
+                      precededByTense: targetHadTense,
+                      modelPath: targetModelPath,
+                      listenerPrevEmotion: targetPrevEmo
+                    }
                   )
               : '') ||
           ''

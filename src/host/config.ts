@@ -77,16 +77,16 @@ const VideoSchema = z.object({
   exportMode: z.enum(['fast', 'record']).default('fast'),
   /**
    * fast 模式 WebCodecs 视频目标码率（bps）。
-   * 2D 视觉小说 90% 画面为静态背景+立绘，默认 3.2 Mbps VBR 足够保证文字与 Live2D 边缘锐利，
-   * 5 分钟成片约 40-50 MB，且低于 maxOutputMbps 上限无需二次压制。
+   * 1080p 60fps 下默认 5.5 Mbps VBR 可避免转场淡入淡出与字幕边缘产生 16x16 宏块残影，
+   * 且低于 maxOutputMbps 上限无需二次压制。
    */
-  exportBitrate: z.number().default(3_200_000),
+  exportBitrate: z.number().default(5_500_000),
   /**
-   * 成品平均视频码率软上限（Mbps，0 = 关闭体积护栏；默认 3.5 Mbps）。
+   * 成品平均视频码率软上限（Mbps，0 = 关闭体积护栏；默认 6.5 Mbps）。
    * 即使 WebCodecs 以 stream-copy 输出（或旧 config.yaml 仍写着 12 Mbps），
    * 超限时宿主也会用 Rust 导出器快速 CRF 重编码，同时确保 BT.709/tv 与合理体积。
    */
-  maxOutputMbps: z.number().min(0).default(3.5),
+  maxOutputMbps: z.number().min(0).default(6.5),
   /** 优先使用原生 Rust 导出器（native/mss-export-rs），缺失或关闭时自动回退 JS FFmpeg 管线 */
   useRustExporter: z.boolean().default(true),
   /** 并行分段导出上限（参考 SekaiStoryExporter --jobs N；1 = 单段） */

@@ -878,3 +878,198 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
   const compLint = enforceOfficialStoryInvariants(composed, view)
   assert.equal(compLint.passed, true, `unexpected issues: ${compLint.issues.join('; ')}`)
 })
+
+test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before LayoutClear, and listener tense-smile guard', async () => {
+  const { CatalogView } = await import('../../out-host/host/ai/prompt.js')
+  const {
+    buildDialogueLengthPrompt,
+    buildDialoguePrompt,
+    composeStory,
+    normalizeDirection,
+    normalizeStaging
+  } = await import('../../out-host/host/ai/staged.js')
+
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-sad01',
+          'w-normal-sigh01',
+          'w-normal-glad01',
+          'w-adult-delicious01',
+          'w-normal-sleep01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_sad_01',
+          'face_sad_02',
+          'face_trouble_01',
+          'face_angry_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-sad01',
+          'w-normal-trouble01',
+          'w-normal-angry01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_sad_01',
+          'face_trouble_01',
+          'face_angry_01',
+          'face_serious_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '天台·黄昏', description: '学校天台' }],
+    voices: [],
+    bgm: ['bg1.mp3', 'bgm00297.mp3'],
+    bgmDetails: [
+      { file: 'bg1.mp3', name: '日常轻音乐', description: '轻缓居家，适合日常闲聊、温馨轻松' },
+      { file: 'bgm00297.mp3', name: 'event_thorns_2024', description: '情绪低沉、克制，适合冲突后的告白告别压抑对话' }
+    ]
+  })
+
+  const plan = {
+    title: '天台对峙',
+    event: '追逐到天台后的争执与告白',
+    logline: '瑞希逃跑被绘名追上',
+    outline: ['走廊追逐', '天台对峙'],
+    cast: [
+      { modelId: 1, name: '瑞希', fullName: '晓山瑞希', path: view.models[0].path, role: '逃避' },
+      { modelId: 2, name: '绘名', fullName: '东云绘名', path: view.models[1].path, role: '追问' }
+    ],
+    background: 'bg_rooftop.jpg'
+  }
+
+  // 1) Pacing calibration: targetMinutes=3 -> ~28~36 lines (not 48+), and dialogue-expand never inflates past budget
+  const dlgPrompt3 = buildDialoguePrompt(view, plan, {
+    scene: '天台对峙',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.match(dlgPrompt3.user, /目标约 30 句/)
+  assert.match(dlgPrompt3.user, /28~36 句/)
+  const expandPrompt = buildDialogueLengthPrompt(
+    view,
+    plan,
+    { scene: '天台对峙', personas: [], targetMinutes: 3 },
+    { title: '天台对峙', lines: [] },
+    31,
+    42,
+    750
+  )
+  assert.doesNotMatch(expandPrompt.user, /42~48 句/)
+  assert.match(expandPrompt.user, /32~36 句/)
+
+  // 2) scene0 missing/long-silence BGM picks fitting dramatic BGM; short <=4-line cold open preserves silence
+  const lines = [
+    { id: 'l1', speaker: '绘名', content: '瑞希！等一下，你跑什么啊！', emotion: '生气' },
+    { id: 'l2', speaker: '瑞希', content: '……绘名？怎么跑这么急呀～', emotion: '开心' },
+    { id: 'l3', speaker: '瑞希', content: '今天风好大，我们下去吧！', emotion: '开心' },
+    { id: 'l4', speaker: '绘名', content: '别开玩笑了！', emotion: '生气' },
+    { id: 'l5', speaker: '瑞希', content: '（……胃里一阵阵往上翻。）', emotion: '伤心', windowDisplayMode: 'Thinking' },
+    { id: 'l6', speaker: '绘名', content: '……你还在发抖。', emotion: '伤心' },
+    { id: 'l7', speaker: '瑞希', content: '对不起，绘名……', emotion: '伤心' },
+    { id: 'l8', speaker: '绘名', content: '……别再一个人躲着了。', emotion: '伤心' }
+  ]
+  const dialogue = { title: '天台对峙', lines }
+  const noOpenBgmStaging = normalizeStaging(
+    {
+      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', activeCast: ['瑞希', '绘名'], bgm: 'silence' }],
+      events: [
+        { lineId: 'l5', stageGroup: { activeCast: ['瑞希'] }, silentReaction: { modelId: 1, motion: 'w-normal-sigh01' } },
+        { lineId: 'l6', stageGroup: { activeCast: ['瑞希', '绘名'] } },
+        { lineId: 'l8', bgmCut: { action: 'play', file: 'bgm00297.mp3' } }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  assert.equal(noOpenBgmStaging.scenes[0].bgm, 'bgm00297.mp3', 'tense drama scene0 fills fitting dramatic opening BGM instead of long silence')
+
+  const coldOpenStaging = normalizeStaging(
+    {
+      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', activeCast: ['瑞希', '绘名'], bgm: 'silence' }],
+      events: [{ lineId: 'l3', bgmCut: { action: 'play', file: 'bgm00297.mp3' } }]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  assert.equal(coldOpenStaging.scenes[0].bgm, 'silence', 'intentional 2-line cold open entering BGM at l3 is preserved')
+
+  // 3) Trailing standalone Motion before LayoutClear is suppressed, w-adult-delicious01 is blocked on non-food lines,
+  //    and angry listener Ena never flips to face_smile_01 when Mizuki puts on fake cheer (l2)
+  const dir = normalizeDirection(
+    {
+      background: 'bg_rooftop.jpg',
+      lines: [
+        { id: 'l1', motion: 'w-normal-angry01', facial: 'face_angry_01' },
+        {
+          id: 'l2',
+          motion: 'w-normal-glad01',
+          facial: 'face_smile_01',
+          listener: { modelId: 2, facial: 'face_smile_01' }
+        },
+        { id: 'l3', motion: 'w-adult-delicious01', facial: 'face_smile_01' },
+        { id: 'l4', motion: 'w-normal-angry01', facial: 'face_angry_01' },
+        { id: 'l5', motion: 'w-normal-sad01', facial: 'face_sad_01', silentMotion: true },
+        { id: 'l6', facial: 'face_sad_01' },
+        { id: 'l7', motion: 'w-normal-sigh01', facial: 'face_sad_02' },
+        { id: 'l8', motion: 'w-normal-nod01', facial: 'face_sad_01' }
+      ]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const story = composeStory(view, plan, dialogue, dir, noOpenBgmStaging)
+  assert.equal(story.snippets[0].type, 'ChangeBgm')
+  assert.equal(story.snippets[0].data.file, 'bgm00297.mp3')
+
+  // Check no standalone Motion immediately precedes a LayoutClear of the same modelId
+  for (let i = 0; i < story.snippets.length - 1; i++) {
+    const curr = story.snippets[i]
+    const next = story.snippets[i + 1]
+    if (curr.type === 'Motion' && next.type === 'LayoutClear') {
+      assert.notEqual(
+        curr.data.modelId,
+        next.data.modelId,
+        `standalone Motion at snippets[${i}] must not immediately precede LayoutClear of same modelId`
+      )
+    }
+  }
+
+  // Check l2 listener Ena did not get face_smile_01 after her angry l1
+  const l2Talk = story.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('跑这么急'))
+  const enaListenerAct = (l2Talk.data.actions ?? []).find((a) => a.modelId === 2)
+  if (enaListenerAct?.facial) {
+    assert.notEqual(enaListenerAct.facial, 'face_smile_01', 'angry listener must not flip to smile')
+  }
+
+  // Check w-adult-delicious01 was stripped/replaced on non-food rooftop wind line
+  const serialized = JSON.stringify(story.snippets)
+  assert.equal(serialized.includes('w-adult-delicious01'), false, 'non-food line must never emit delicious motion')
+})

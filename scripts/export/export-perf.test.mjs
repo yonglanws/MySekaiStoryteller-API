@@ -63,7 +63,7 @@ function makeToneWavBuffer(durationSec, sampleRate = 48_000, amplitude = 0.2) {
   return buf
 }
 
-test('config.ts defaults exportBitrate=3.2Mbps, maxOutputMbps=3.5, useRustExporter=true, exportJobs=1 and supports env overrides', async (t) => {
+test('config.ts defaults exportBitrate=5.5Mbps, maxOutputMbps=6.5, useRustExporter=true, exportJobs=1 and supports env overrides', async (t) => {
   const envKeys = [
     'MSS_EXPORT_BITRATE',
     'MSS_MAX_OUTPUT_MBPS',
@@ -84,8 +84,8 @@ test('config.ts defaults exportBitrate=3.2Mbps, maxOutputMbps=3.5, useRustExport
 
   const { loadHostConfig } = loadConfigFromTempRepo(tempRepo)
   const cfg = loadHostConfig()
-  assert.equal(cfg.video.exportBitrate, 3_200_000)
-  assert.equal(cfg.video.maxOutputMbps, 3.5)
+  assert.equal(cfg.video.exportBitrate, 5_500_000)
+  assert.equal(cfg.video.maxOutputMbps, 6.5)
   assert.equal(cfg.video.useRustExporter, true)
   assert.equal(cfg.video.exportJobs, 1)
 
@@ -152,11 +152,12 @@ test('FrameContentValidator fast-path exits after 1 center readPixels on lit fra
   assert.equal(readCalls, 9)
 })
 
-test('WebCodecsMp4Encoder uses variable bitrateMode and async 3-slot PBO BT.709 I420 by default', async () => {
+test('WebCodecsMp4Encoder uses variable bitrateMode, periodic 2s keyframes, and async 3-slot PBO BT.709 I420 by default', async () => {
   const configured = []
   let yuvCreateCalls = 0
   let yuvRingSize = 0
   let videoFrameInputs = []
+  const encodeCalls = []
   const pendingPbo = []
 
   class MockVideoFrame {
@@ -179,7 +180,9 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and async 3-slot PBO BT.709 
     configure(cfg) {
       configured.push(cfg)
     }
-    encode() {}
+    encode(_frame, opts) {
+      encodeCalls.push({ keyFrame: Boolean(opts?.keyFrame) })
+    }
     async flush() {
       this._init.output(
         { type: 'key', byteLength: 8 },
@@ -242,7 +245,7 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and async 3-slot PBO BT.709 
     width: 1920,
     height: 1080,
     fps: 60,
-    bitrate: 3_200_000,
+    bitrate: 5_500_000,
     mode: 'auto',
     glRenderer: 'ANGLE (Intel Iris Xe)',
     isLinux: false,
@@ -255,22 +258,115 @@ test('WebCodecsMp4Encoder uses variable bitrateMode and async 3-slot PBO BT.709 
     width: 1920,
     height: 1080,
     fps: 60,
-    bitrate: 3_200_000,
+    bitrate: 5_500_000,
     encoderConfig: probe.config
   })
   await enc.initialize('temp-pbo.mp4')
   const fakeCanvas = { width: 1920, height: 1080 }
-  await enc.encodeFrame(fakeCanvas, 0, 16667, true)
-  await enc.encodeFrame(fakeCanvas, 16667, 16667, false)
+  for (let f = 0; f < 122; f++) {
+    await enc.encodeFrame(fakeCanvas, Math.round(f * 16666.67), 16667, false)
+  }
   await enc.finish()
 
   assert.equal(yuvCreateCalls, 1, 'default WebCodecs path creates async PBO GpuYuv420Converter')
   assert.equal(yuvRingSize, 3, 'uses 3-slot PBO ring')
-  assert.equal(videoFrameInputs.length, 2, 'drains all queued PBO frames cleanly on finish()')
+  assert.equal(videoFrameInputs.length, 122, 'drains all queued PBO frames cleanly on finish()')
+  assert.equal(encodeCalls[0].keyFrame, true, 'frame 0 always forces keyframe')
+  assert.equal(encodeCalls[1].keyFrame, false, 'intermediate frame does not force keyframe')
+  assert.equal(encodeCalls[119].keyFrame, false, 'frame 119 does not force keyframe')
+  assert.equal(encodeCalls[120].keyFrame, true, 'frame 120 (fps*2) forces periodic keyframe')
+  assert.equal(encodeCalls[121].keyFrame, false)
   assert.equal(videoFrameInputs[0].init.format, 'I420')
   assert.equal(videoFrameInputs[0].init.colorSpace.fullRange, false)
   assert.equal(enc.requiresColorConversion, false, 'BT.709/tv I420 skips second-pass transcode')
   assert.equal(configured[0].bitrateMode, 'variable')
+})
+
+test('ConcurrentExportPipeline logs wire-level Irodori emotion, ref_wav, cfg_scale_caption, and specialScene telemetry per line', async () => {
+  const loader = createRendererLoader()
+  const { exportLogBus } = loader.load('managers/video-export/ExportLogBus.ts')
+  exportLogBus.reset()
+  const { ConcurrentExportPipeline } = loader.load('managers/video-export/ConcurrentExportPipeline.ts')
+
+  const mockVoice = {
+    refAudioPath: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/emotion_refs/main.wav',
+    loraAdapter: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/lora_adapter',
+    caption: '落ち着いた、穏やかな口調で話している。',
+    emotions: [
+      {
+        emotion: '伤心',
+        refAudioPath: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/emotion_refs/sad.wav',
+        caption: '悲しげで、今にも泣きそうな声で話している。',
+        speed: 0.94
+      }
+    ]
+  }
+  const ttsManager = {
+    setCurrentTime: () => {},
+    getConfig: () => ({
+      provider: 'irodori',
+      defaultRefAudioPath: '',
+      speedFactor: 1.0,
+      irodori: {
+        model: 'irodori-tts',
+        responseFormat: 'wav',
+        numSteps: 40,
+        cfgScaleText: 3.0,
+        cfgScaleCaption: 3.5,
+        cfgScaleSpeaker: 5.0,
+        durationScale: 1.0,
+        chunkingEnabled: true,
+        chunkMinChars: 80,
+        seed: -1,
+        defaultLoraAdapter: '',
+        defaultCaption: '',
+        speakerKvScale: 1.15,
+        speakerKvMinT: 0.9,
+        timbreLockMode: 'off',
+        specialSceneCfgScaleCaption: 4.2
+      }
+    }),
+    getService: () => ({
+      getCharacterVoice: (name) => (name === '瑞希' ? mockVoice : undefined)
+    }),
+    synthesizeWithText: async () => ({ success: true, duration: 1850 }),
+    translateAndSynthesize: async () => ({ success: false, duration: 0 })
+  }
+
+  const pipeline = new ConcurrentExportPipeline({
+    ttsLookahead: 2,
+    ttsTimeoutMs: 5000,
+    targetFps: 60,
+    nowMs: () => Date.now(),
+    waitMs: (ms) => new Promise((r) => setTimeout(r, ms))
+  })
+  pipeline.startTTSPipeline(
+    [
+      {
+        type: 'Talk',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……我已经受够了。',
+          ttsText: '😭……もう限界だよ。',
+          emotion: '伤心',
+          ttsCaption: '涙をこらえながら、震える声で呟く。',
+          ttsSpecialScene: true
+        }
+      }
+    ],
+    ttsManager
+  )
+  await pipeline.waitForTTSPipeline()
+
+  const logs = exportLogBus.snapshot().map((e) => e.message)
+  const ttsLine = logs.find((msg) => msg.includes('TTS [0] "瑞希": success'))
+  assert.ok(ttsLine, `expected per-line TTS log in exportLogBus, got ${JSON.stringify(logs)}`)
+  assert.match(ttsLine, /emo=伤心/)
+  assert.match(ttsLine, /ref=emotion_refs\/sad\.wav/)
+  assert.match(ttsLine, /cfg_cap=4\.2/)
+  assert.match(ttsLine, /special=true/)
+  assert.match(ttsLine, /caption="涙をこらえながら、震える声で呟く。"/)
 })
 
 test('VirtualClockController skips idle microtask spin while still firing timers on exact story frames', async (t) => {

@@ -21,11 +21,14 @@ export type FacialSemanticRole =
   | 'sleepy'
   | 'other'
 
+export type MotionContextTag = 'food' | 'sleep' | 'sing'
+
 export interface FacialInspection {
   role: FacialSemanticRole
   label: string
   fromMotion3: boolean
   mouthForm?: number
+  contextTag?: MotionContextTag
 }
 
 export type MotionSemanticRole =
@@ -53,6 +56,7 @@ export interface MotionInspection {
   style: string
   durationSec?: number
   fromMotion3: boolean
+  contextTag?: MotionContextTag
 }
 
 export type DramaticContextMood =
@@ -215,7 +219,13 @@ function classifyByName(facialName: string): FacialInspection {
   if (/^face_smile/.test(lower)) {
     return { role: 'genuine_smile', label: '微笑', fromMotion3: false }
   }
-  if (/^face_(?:wink|smug|doya|play|sing|sparkling|delicious|eat|interest|spoony)/.test(lower)) {
+  if (/^face_(?:delicious|eat)/.test(lower)) {
+    return { role: 'other', contextTag: 'food', label: '享用美食/饮品', fromMotion3: false }
+  }
+  if (/^face_(?:sing|mic)/.test(lower)) {
+    return { role: 'other', contextTag: 'sing', label: '歌唱/舞台', fromMotion3: false }
+  }
+  if (/^face_(?:wink|smug|doya|play|sparkling|interest|spoony)/.test(lower)) {
     return { role: 'playful', label: '俏皮/得意/闪亮', fromMotion3: false }
   }
   if (/^face_closeeye/.test(lower)) {
@@ -247,7 +257,7 @@ function classifyByName(facialName: string): FacialInspection {
     return { role: 'shy', label: '害羞/微红', fromMotion3: false }
   }
   if (/^face_sleepy/.test(lower)) {
-    return { role: 'sleepy', label: '犯困/倦意', fromMotion3: false }
+    return { role: 'sleepy', contextTag: 'sleep', label: '犯困/倦意', fromMotion3: false }
   }
   if (/^face_(?:normal|smallmouth|lookaway|robot)/.test(lower)) {
     return { role: 'neutral', label: '平静自然', fromMotion3: false }
@@ -397,6 +407,15 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
     return { role: 'shy', label: '脸红/害羞', fromMotion3: true, mouthForm }
   }
 
+  // 上下文限定表情（如 face_delicious / face_eat / face_sing / face_sleepy）与显式俏皮表情（smug/wink/doya）不误判为苦笑
+  const namedBase = classifyByName(facialName)
+  if (namedBase.contextTag) {
+    return { ...namedBase, fromMotion3: true, mouthForm }
+  }
+  if (/^face_(?:wink|smug|doya|play|sparkling|interest|spoony)/.test(lower) && !darkPrefix) {
+    return { role: 'playful', label: '俏皮/得意/闪亮', fromMotion3: true, mouthForm }
+  }
+
   // 无论文件名前缀如何（如 face_trouble_02 / face_normal_* / face_sad_* / face_cry_01 无泪等），
   // 只要 ParamMouthForm >= 0.2 即存在明显嘴角上扬笑意，必须标为苦笑或微笑，绝不能混入普通 trouble/sad！
   if (mouthForm >= 0.2) {
@@ -417,6 +436,10 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
       fromMotion3: true,
       mouthForm
     }
+  }
+
+  if (/^face_(?:serious|sharp|purpose|fight)/.test(lower) && !darkPrefix) {
+    return { role: 'serious', label: '认真/锐利', fromMotion3: true, mouthForm }
   }
 
   if (browAngle <= -0.3 && mouthForm <= 0.05) {
@@ -470,17 +493,22 @@ export function annotateFacialName(
 
 function parseMotionStem(motionName: string): { style: string; stem: string } {
   const clean = motionName.trim()
-  const lower = clean.toLowerCase()
-  const parts = lower.split('-')
-  const style = parts.length >= 3 ? parts[1] : ''
-  const tail = parts[parts.length - 1] ?? lower
-  const stem = tail
+  const rawParts = clean.split('-')
+  const style = rawParts.length >= 3 ? rawParts[1].toLowerCase() : ''
+  // 先剥离大写变体后缀（如 sleepB / deliciousB），再转小写并去数字后缀
+  const rawTail = (rawParts[rawParts.length - 1] ?? clean)
     .replace(/_nb$/i, '')
-    .replace(/\d+[a-z]?$/i, '')
     .replace(/[A-Z]$/, '')
+  const stem = rawTail
+    .toLowerCase()
+    .replace(/\d+[a-z]?$/i, '')
     .replace(/^nb/, '')
   return { style, stem }
 }
+
+const FOOD_MOTION_STEM_RE = /^(?:delicious|eat|eating|drink|drinking)/
+const SLEEP_MOTION_STEM_RE = /^(?:sleep|sleeping|yawn|yawning)/
+const SING_MOTION_STEM_RE = /^(?:sing|singing|mic|microphone)$|^sing_|_sing$|^mic_|_mic$/
 
 function classifyMotionByName(motionName: string): MotionInspection {
   const clean = motionName.trim()
@@ -550,13 +578,39 @@ function classifyMotionByName(motionName: string): MotionInspection {
   if (stem === 'greeting') {
     return { role: 'greeting', label: '打招呼/致意', style, fromMotion3: false }
   }
+  if (FOOD_MOTION_STEM_RE.test(stem)) {
+    return {
+      role: 'other',
+      contextTag: 'food',
+      label: '享用美食/饮品',
+      style,
+      fromMotion3: false
+    }
+  }
+  if (SLEEP_MOTION_STEM_RE.test(stem)) {
+    return {
+      role: 'other',
+      contextTag: 'sleep',
+      label: '犯困/打盹',
+      style,
+      fromMotion3: false
+    }
+  }
+  if (SING_MOTION_STEM_RE.test(stem)) {
+    return {
+      role: 'other',
+      contextTag: 'sing',
+      label: '歌唱/舞台',
+      style,
+      fromMotion3: false
+    }
+  }
   if (
     stem === 'glad' ||
     stem === 'poseglad' ||
     stem === 'guts' ||
     stem === 'wandahoi' ||
-    stem === 'joy' ||
-    stem === 'delicious'
+    stem === 'joy'
   ) {
     return {
       role: 'glad',
@@ -599,7 +653,6 @@ function classifyMotionByName(motionName: string): MotionInspection {
   if (
     stem === 'think' ||
     stem.startsWith('look') ||
-    stem === 'sleep' ||
     stem === 'guruguru' ||
     stem === 'yurayura'
   ) {
@@ -611,9 +664,7 @@ function classifyMotionByName(motionName: string): MotionInspection {
         stem.includes('lookright') ||
         stem.includes('lookside')
           ? '移开视线/环顾'
-          : stem === 'sleep'
-            ? '犯困/迷糊'
-            : '思索/沉吟',
+          : '思索/沉吟',
       style,
       fromMotion3: false
     }
@@ -845,6 +896,31 @@ const EXPLICIT_WRY_SMILE_TEXT_RE =
   /(?:苦笑|勉强笑|强颜欢笑|含泪笑|自嘲|微笑|笑着|没事的|没关系|别担心|不用担心|安心)/
 const CRY_DESPAIR_CONFRONT_RE =
   /(?:哭|泣|泪|呜咽|嗚咽|别走|再见|窒息|崩溃|绝望|受不了|不行啊|做不到|对不起|抱歉|后悔|没能|不要|别再|少啰嗦|闭嘴|滚|干嘛|为什么)/
+export const GENUINE_HAPPY_OR_RECONCILIATION_RE =
+  /(?:太好了|好耶|太棒了|哈哈|嘻嘻|嘿嘿|和好|原谅|终于放心|松了口气|雨过天晴|真开心|好开心|真高兴|好高兴|最喜欢|谢谢你|真期待|好期待|不愧是|Wonderhoy|よかった)/
+const FOOD_CONTEXT_TEXT_RE =
+  /(?:吃|喝|尝|味道|美味|好吃|好喝|甜点|甜品|蛋糕|点心|松饼|面包|饼干|咖啡|红茶|绿茶|奶茶|茶|饮料|果汁|拉面|料理|便当|午饭|晚饭|早饭|吃饭|零食|糖|水果|草莓|饿|饱|口渴|干杯|品尝|美食|食堂|餐厅|咖啡厅|甜点店|食|飲|おいしい|スイーツ|ケーキ|パン|コーヒー|紅茶|お茶|食べ|飲み|お腹)/i
+const SLEEP_CONTEXT_TEXT_RE =
+  /(?:好困|犯困|想睡|睡觉|午睡|小睡|打盹|瞌睡|打哈欠|哈欠|好累|累了|疲惫|疲倦|熬夜|失眠|通宵|没睡|睡着|睡意|困意|晚安|闭目养神|寝|眠|あくび|うとうと|おやすみ)/i
+const SING_CONTEXT_TEXT_RE =
+  /(?:唱歌|唱|歌声|清唱|合唱|主唱|副歌|旋律|曲子|乐曲|歌曲|歌词|演出|舞台|live|演唱会|麦克风|话筒|排练|练歌|试唱|哼歌|哼唱|うた|歌|ライブ|マイク)/i
+
+function isContextTagCompatibleWithText(
+  tag: MotionContextTag | undefined,
+  content: string
+): { ok: boolean; reason?: string } {
+  if (!tag) return { ok: true }
+  if (tag === 'food' && !FOOD_CONTEXT_TEXT_RE.test(content)) {
+    return { ok: false, reason: 'food_motion_without_food_context' }
+  }
+  if (tag === 'sleep' && !SLEEP_CONTEXT_TEXT_RE.test(content)) {
+    return { ok: false, reason: 'sleep_motion_without_sleep_context' }
+  }
+  if (tag === 'sing' && !SING_CONTEXT_TEXT_RE.test(content)) {
+    return { ok: false, reason: 'sing_motion_without_sing_context' }
+  }
+  return { ok: true }
+}
 
 /**
  * 校验某句台词的 facial 是否与情绪标签、文本语境及前一拍气氛明显冲突。
@@ -875,6 +951,10 @@ export function isFacialCompatibleWithLine(params: {
   const info = inspectModelFacial(modelPath, facial, modelsRoot)
   const emo = (emotion ?? '').trim()
   const text = content.trim()
+  const ctxTagCheck = isContextTagCompatibleWithText(info.contextTag, text)
+  if (!ctxTagCheck.ok) {
+    return ctxTagCheck
+  }
   const ctx = inferDramaticContext({
     content: text,
     emotion: emo,
@@ -923,7 +1003,23 @@ export function isFacialCompatibleWithLine(params: {
     return { ok: false, reason: 'negative_context_smile' }
   }
 
-  // 2) 克制型角色（真冬等）或上一拍仍在紧张氛围中，无明确正向台词时不用阳光大笑
+  // 2) 紧张对峙打圆场/强装轻松或克制型角色：未真正和好/明确开心时，禁用纯正阳光大笑/闭眼大笑（保留苦笑 wry_smile 给说话者掩饰）
+  const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text)
+  if (
+    prevTense &&
+    !isGenuineHappyOrReconcile &&
+    (info.role === 'genuine_smile' ||
+      info.role === 'closed_smile' ||
+      info.role === 'playful' ||
+      (Boolean(isListener) &&
+        (info.role === 'wry_smile' ||
+          info.role === 'tearful_smile' ||
+          (hasPositiveMouth &&
+            info.role !== 'surprise' &&
+            !(info.role === 'shy' && emo === '害羞')))))
+  ) {
+    return { ok: false, reason: 'restrained_or_tense_smile' }
+  }
   if (
     (restrainedRole || prevTense) &&
     !hasPosCue &&
@@ -940,8 +1036,10 @@ export function isFacialCompatibleWithLine(params: {
     return { ok: false, reason: 'restrained_or_tense_smile' }
   }
 
-  // 3) 台词和情绪明确开心轻松时，不挂哭泣/暴怒/阴暗冷脸/困扰
+  // 3) 台词和情绪明确开心轻松（且非对峙强装轻松/听者承压）时，不挂哭泣/暴怒/阴暗冷脸/困扰
   if (
+    !isListener &&
+    !(prevTense && !isGenuineHappyOrReconcile) &&
     (emo === '开心' || (hasPosCue && !hasNegCue && !prevTense)) &&
     (info.role === 'sad' ||
       info.role === 'angry' ||
@@ -1027,6 +1125,11 @@ export function isMotionCompatibleWithLine(params: {
   if (info.role === 'special') {
     return { ok: false, reason: 'special_clear_motion_in_dialogue' }
   }
+  const text = (params.content ?? '').trim()
+  const ctxTagCheck = isContextTagCompatibleWithText(info.contextTag, text)
+  if (!ctxTagCheck.ok) {
+    return ctxTagCheck
+  }
 
   const ctx = inferDramaticContext({
     content: params.content,
@@ -1037,20 +1140,29 @@ export function isMotionCompatibleWithLine(params: {
     restrainedRole: params.restrainedRole
   })
   const tense = ctx.tense || Boolean(params.prevTense)
+  const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text)
 
-  // 1) 负面/悲伤/道歉/紧张/愤怒语境禁止用欢快/得意/打招呼动作（glad / playful / greeting）
+  // 1) 负面/悲伤/道歉/紧张/愤怒语境或对峙未和好时的强装欢快打圆场：禁止欢快/得意/打招呼动作（glad / playful / greeting）
   if (
     (ctx.mood === 'sad_regret' ||
       ctx.mood === 'angry_frustration' ||
       ctx.apologyOrRegret ||
-      (tense && !ctx.cheerful)) &&
+      (tense && !isGenuineHappyOrReconcile)) &&
     (info.role === 'glad' || info.role === 'playful' || info.role === 'greeting')
   ) {
-    return { ok: false, reason: 'cheerful_motion_on_tense_or_sad_line' }
+    return {
+      ok: false,
+      reason:
+        tense && ctx.mood === 'cheerful_banter'
+          ? 'glad_motion_on_tense_deflection'
+          : 'cheerful_motion_on_tense_or_sad_line'
+    }
   }
 
-  // 2) 开心/温柔安抚语境禁止用生气/沮丧/摇头否定动作
+  // 2) 开心/温柔安抚语境（且非紧张对峙打圆场）禁止用生气/沮丧/摇头否定动作
   if (
+    !params.isListener &&
+    !(tense && !isGenuineHappyOrReconcile) &&
     (ctx.mood === 'cheerful_banter' || ctx.mood === 'gentle_reassure') &&
     (info.role === 'angry' ||
       info.role === 'sad' ||
@@ -1076,7 +1188,6 @@ export function isMotionCompatibleWithLine(params: {
   }
 
   const emo = (params.emotion ?? '').trim()
-  const text = (params.content ?? '').trim()
   const isDespair = DESPAIR_TEXT_RE.test(text)
   const isGenuineShock = emo === '惊讶' || GENUINE_SURPRISE_TEXT_RE.test(text)
 
@@ -1226,9 +1337,10 @@ export function pickMoodMatchedFacial(
           : FACIAL_ROLES_BY_MOOD[targetMood]
 
   for (const wantedRole of roles) {
-    const hit = facials.find(
-      (f) => inspectModelFacial(modelPath, f, modelsRoot).role === wantedRole
-    )
+    const hit = facials.find((f) => {
+      const info = inspectModelFacial(modelPath, f, modelsRoot)
+      return !info.contextTag && info.role === wantedRole
+    })
     if (hit) return hit
   }
   if (
@@ -1239,8 +1351,10 @@ export function pickMoodMatchedFacial(
     targetMood === 'gentle'
   ) {
     const safeFallback = facials.find((f) => {
-      const role = inspectModelFacial(modelPath, f, modelsRoot).role
+      const info = inspectModelFacial(modelPath, f, modelsRoot)
+      const role = info.role
       return (
+        !info.contextTag &&
         role !== 'surprise' &&
         role !== 'angry' &&
         role !== 'genuine_smile' &&
@@ -1249,6 +1363,105 @@ export function pickMoodMatchedFacial(
       )
     })
     if (safeFallback) return safeFallback
+  }
+  return pickNeutralFacial(facials, undefined, modelPath, restrainedRole, modelsRoot)
+}
+
+export type ActorTenseState = 'angry' | 'sad' | 'cry' | 'serious' | 'trouble' | null
+
+export function facialRoleToTenseState(role: FacialSemanticRole): ActorTenseState {
+  if (role === 'angry') return 'angry'
+  if (role === 'cry' || role === 'tearful_smile') return 'cry'
+  if (role === 'sad' || role === 'cold_hollow') return 'sad'
+  if (role === 'serious') return 'serious'
+  if (role === 'trouble' || role === 'closed_troubled') return 'trouble'
+  return null
+}
+
+export function isGenuineHappyOrReconciliation(content: string): boolean {
+  return (
+    GENUINE_HAPPY_OR_RECONCILIATION_RE.test(content) && !NEGATIVE_TEXT_CUE_RE.test(content)
+  )
+}
+
+export function isCalmReassureResolution(content: string, emotion: string): boolean {
+  const emo = emotion.trim()
+  if (emo === '生气' || emo === '伤心' || emo === '害怕') return false
+  if (isGenuineHappyOrReconciliation(content)) return true
+  return (
+    REASSURE_TEXT_RE.test(content) &&
+    !APOLOGY_REGRET_RE.test(content) &&
+    !DESPAIR_TEXT_RE.test(content)
+  )
+}
+
+export interface SceneTenseTracker {
+  tense: boolean
+  calmRun: number
+}
+
+export function updateSceneTenseAfterTalk(
+  tracker: SceneTenseTracker,
+  content: string,
+  emotion: string
+): void {
+  const emo = emotion.trim()
+  const text = content.trim()
+  const isExplicitTense =
+    emo === '生气' ||
+    emo === '伤心' ||
+    emo === '害怕' ||
+    ANGRY_TEXT_RE.test(text) ||
+    APOLOGY_REGRET_RE.test(text) ||
+    SELF_BLAME_REGRET_RE.test(text) ||
+    DESPAIR_TEXT_RE.test(text) ||
+    /(?:骗人|糟糕|难过|哭|呜)/.test(text)
+  if (isExplicitTense) {
+    tracker.tense = true
+    tracker.calmRun = 0
+    return
+  }
+  if (isCalmReassureResolution(text, emo)) {
+    tracker.tense = false
+    tracker.calmRun = 0
+    return
+  }
+  if (emo === '平静' || emo === '') {
+    tracker.calmRun += 1
+    if (tracker.calmRun >= 2) {
+      tracker.tense = false
+    }
+  } else {
+    tracker.calmRun = 0
+  }
+}
+
+export function pickListenerFallbackFacial(
+  facials: string[],
+  tenseState: Exclude<ActorTenseState, null>,
+  modelPath?: string,
+  restrainedRole?: boolean,
+  modelsRoot?: string
+): string {
+  const preferredRoles: FacialSemanticRole[] =
+    tenseState === 'angry' || tenseState === 'serious'
+      ? ['serious', 'trouble', 'sad', 'closed_troubled', 'neutral', 'closed_neutral']
+      : tenseState === 'cry' || tenseState === 'sad'
+        ? ['sad', 'trouble', 'serious', 'closed_troubled', 'neutral', 'closed_neutral']
+        : ['trouble', 'serious', 'sad', 'closed_troubled', 'neutral', 'closed_neutral']
+
+  if (tenseState === 'angry' || tenseState === 'serious') {
+    const seriousNamed = facials.find(
+      (f) => /^face_(?:dark)?serious/i.test(f) && !isSmileLikeFacial(f, modelPath, modelsRoot)
+    )
+    if (seriousNamed) return seriousNamed
+  }
+  for (const role of preferredRoles) {
+    const hit = facials.find((f) => {
+      const info = inspectModelFacial(modelPath, f, modelsRoot)
+      return !info.contextTag && info.role === role
+    })
+    if (hit) return hit
   }
   return pickNeutralFacial(facials, undefined, modelPath, restrainedRole, modelsRoot)
 }
@@ -1350,10 +1563,13 @@ export function pickMoodMatchedMotion(
 
   return (
     pickFromRoles(false) ||
-    pool.find(
-      (m) => !avoid?.has(m) && !isOppositeRole(inspectModelMotion(modelPath, m, modelsRoot).role)
-    ) ||
+    pool.find((m) => {
+      if (avoid?.has(m)) return false
+      const info = inspectModelMotion(modelPath, m, modelsRoot)
+      return !info.contextTag && !isOppositeRole(info.role)
+    }) ||
     pickFromRoles(true) ||
+    pool.find((m) => !avoid?.has(m) && !inspectModelMotion(modelPath, m, modelsRoot).contextTag) ||
     pool.find((m) => !avoid?.has(m)) ||
     pool[0] ||
     ''

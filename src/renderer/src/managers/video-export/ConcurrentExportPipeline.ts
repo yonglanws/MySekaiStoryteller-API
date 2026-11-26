@@ -2,6 +2,81 @@ import { ExportLogger } from './ExportLogger'
 import type { TTSManager } from '../TTSManager'
 import type { SnippetData } from '../../../../common/types/Story'
 import { hasSpeakableSpeechText } from '../../../../common/tts/speechText'
+import {
+  buildIrodoriSpeechRequest,
+  resolveIrodoriVoice,
+  type IrodoriLineOverride,
+  type IrodoriVoiceConfig
+} from '../../../../common/tts/irodori'
+
+function formatShortRefPath(refPath: string): string {
+  const normalized = refPath.trim().replace(/\\/g, '/')
+  if (!normalized) return ''
+  const parts = normalized.split('/').filter(Boolean)
+  return parts.length >= 2 ? parts.slice(-2).join('/') : parts[0] || ''
+}
+
+function buildTtsTelemetrySummary(
+  ttsManager: TTSManager,
+  talk: {
+    speaker: string
+    content: string
+    ttsText: string
+    emotion: string
+    ttsCaption?: string
+    ttsSpeed?: number
+    ttsSpecialScene?: boolean
+  },
+  lineOverride?: IrodoriLineOverride
+): string {
+  const emotionLabel = talk.emotion || 'default'
+  const ttsConfig = ttsManager.getConfig?.()
+  if (ttsConfig?.provider !== 'irodori') {
+    const specialPart =
+      talk.ttsSpecialScene !== undefined ? `, special=${talk.ttsSpecialScene ? 'true' : 'false'}` : ''
+    const captionRaw = talk.ttsCaption?.replace(/\s+/g, ' ').trim() ?? ''
+    const captionPart = captionRaw
+      ? `, caption="${captionRaw.length > 48 ? `${captionRaw.slice(0, 48)}…` : captionRaw}"`
+      : ''
+    return `, emo=${emotionLabel}${specialPart}${captionPart}`
+  }
+
+  const charConfig = ttsManager.getService?.()?.getCharacterVoice?.(talk.speaker)
+  const base: IrodoriVoiceConfig = {
+    refAudioPath: charConfig?.refAudioPath || ttsConfig.defaultRefAudioPath,
+    refAudioPaths: charConfig?.refAudioPaths,
+    loraAdapter: charConfig?.loraAdapter || ttsConfig.irodori.defaultLoraAdapter,
+    caption: charConfig?.caption || charConfig?.promptText || ttsConfig.irodori.defaultCaption,
+    speed: charConfig?.speed,
+    numSteps: charConfig?.numSteps
+  }
+  const timbreLockMode = ttsConfig.irodori.timbreLockMode ?? 'normal'
+  const voice = resolveIrodoriVoice(base, charConfig?.emotions, talk.emotion, {
+    timbreLockMode,
+    lineOverride
+  })
+  const effectiveOverride: IrodoriLineOverride | undefined =
+    lineOverride || talk.emotion
+      ? { ...lineOverride, ...(talk.emotion ? { emotion: talk.emotion } : {}) }
+      : undefined
+  const payload = buildIrodoriSpeechRequest(
+    talk.ttsText || talk.content,
+    voice,
+    ttsConfig.irodori,
+    ttsConfig.speedFactor,
+    effectiveOverride
+  )
+  const meta = (payload.irodori ?? {}) as Record<string, unknown>
+  const rawRef = String(
+    meta.ref_wav ?? (Array.isArray(meta.ref_wavs) ? meta.ref_wavs[0] : '') ?? ''
+  )
+  const shortRef = formatShortRefPath(rawRef) || 'none'
+  const cfgCap = meta.cfg_scale_caption ?? ''
+  const special = talk.ttsSpecialScene ? 'true' : 'false'
+  const caption = String(meta.caption ?? '').replace(/\s+/g, ' ').trim()
+  const captionShort = caption.length > 48 ? `${caption.slice(0, 48)}…` : caption
+  return `, emo=${emotionLabel}, ref=${shortRef}, cfg_cap=${String(cfgCap)}, special=${special}${captionShort ? `, caption="${captionShort}"` : ''}`
+}
 
 export interface ConcurrentPipelineConfig {
   ttsLookahead: number
@@ -264,18 +339,17 @@ export class ConcurrentExportPipeline {
             duration: result.duration
           }
 
+          const telemetry = buildTtsTelemetrySummary(ttsManager, talk, lineOverride)
           if (result.success) {
             this.metrics.ttsSuccessCount++
             synthesizedDurations.set(talk.index, result.duration)
-            if (completed % 10 === 0) {
-              this.logger.info(
-                `TTS [${talk.index}] "${talk.speaker}": success, duration=${result.duration}ms, latency=${latency.toFixed(0)}ms`
-              )
-            }
+            this.logger.info(
+              `TTS [${talk.index}] "${talk.speaker}": success, duration=${result.duration}ms, latency=${latency.toFixed(0)}ms${telemetry}`
+            )
           } else {
             this.metrics.ttsFailureCount++
             this.logger.warn(
-              `TTS [${talk.index}] "${talk.speaker}": failed, latency=${latency.toFixed(0)}ms`
+              `TTS [${talk.index}] "${talk.speaker}": failed, latency=${latency.toFixed(0)}ms${telemetry}`
             )
           }
         }

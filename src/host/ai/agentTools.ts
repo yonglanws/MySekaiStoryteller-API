@@ -272,6 +272,7 @@ export interface StoryAgentToolkitDeps {
   view: CatalogView
   personas: personasMod.PersonaEntry[]
   emotionLabels?: string[]
+  targetMinutes?: number
   ragRetriever?: AdaptiveRagRetriever | null
   logger: Logger<ILogObj>
 }
@@ -358,7 +359,7 @@ const MOTION_CLASS_TABLE: Array<{
   { re: /tilthead|tilt/i, role: 'tilthead', label: '歪头疑惑/思考' },
   { re: /shakehead/i, role: 'shakehead', label: '摇头否定' },
   { re: /glad|happy|cheer|joy/i, role: 'glad', label: '开心欢呼' },
-  { re: /wink|smug|doya|pose|delicious|sing/i, role: 'playful', label: '俏皮/得意/摆姿势' },
+  { re: /wink|smug|doya|pose|sing/i, role: 'playful', label: '俏皮/得意/摆姿势' },
   { re: /shy|blush|fidget/i, role: 'shy', label: '害羞/局促' },
   { re: /trouble|worry/i, role: 'trouble', label: '为难/困扰' },
   { re: /sad|sigh|lookdown|cry/i, role: 'sad', label: '低落/叹气' },
@@ -368,7 +369,8 @@ const MOTION_CLASS_TABLE: Array<{
   { re: /surprise|shock|scared/i, role: 'surprise', label: '惊讶/受惊' },
   { re: /relief/i, role: 'relief', label: '松一口气' },
   { re: /greeting|wave/i, role: 'greeting', label: '打招呼/挥手' },
-  { re: /sleep|stretch/i, role: 'special', label: '倦意/特殊动作' }
+  { re: /delicious|eat|drink/i, role: 'special', label: '吃喝/品尝（仅限食物饮品场景）' },
+  { re: /sleep|stretch/i, role: 'special', label: '倦意/睡眠（仅限困倦睡眠场景）' }
 ]
 
 const MOOD_QUERY_SYNONYMS: Array<{ kw: RegExp; tokens: string[] }> = [
@@ -509,6 +511,9 @@ function inferDramaticMoodFallback(params: {
 
 const NEGATIVE_MOTION_ROLES = new Set<MotionSemanticRole>(['sad', 'angry', 'trouble'])
 const JOYFUL_MOTION_ROLES = new Set<MotionSemanticRole>(['glad', 'playful'])
+const FOOD_DRINK_CUE_RE =
+  /吃|喝|美味|好吃|甜品|蛋糕|面包|拉面|茶|咖啡|点心|便当|饮料|食物|品尝|味道|饿|嘴馋|delicious|eat|drink/i
+const SLEEP_CUE_RE = /困|睡|熬夜|累|疲惫|打哈欠|睡着|午睡|晚安|想睡|sleep|tired|yawn/i
 
 function checkMotionCompatibility(params: {
   motion: string
@@ -522,6 +527,12 @@ function checkMotionCompatibility(params: {
   restrainedRole?: boolean
 }): MotionCompatibilityResult {
   if (!params.motion.trim()) return { ok: true }
+  if (/delicious|eat|drink/i.test(params.motion) && !FOOD_DRINK_CUE_RE.test(params.content)) {
+    return { ok: false, reason: 'prop_food_motion_without_food_cue' }
+  }
+  if (/sleep/i.test(params.motion) && !SLEEP_CUE_RE.test(params.content)) {
+    return { ok: false, reason: 'sleep_motion_without_sleep_cue' }
+  }
   if (typeof facialApi.isMotionCompatibleWithLine === 'function') {
     return facialApi.isMotionCompatibleWithLine(params)
   }
@@ -697,9 +708,167 @@ function recommendForLine(
   }
 }
 
+function appendContextAndListenerGuards(
+  story: StoryData,
+  view: CatalogView,
+  base: ActingFidelityReport
+): ActingFidelityReport {
+  const extraDiagnostics: ActingFidelityDiagnostic[] = []
+  const lastEmotionByModel = new Map<number, string>()
+  let prevContent = ''
+  let prevEmotion = ''
+  let talkIdx = 0
+  let addedFacialMismatch = 0
+  let addedMotionMismatch = 0
+
+  const hasDiagAt = (
+    snippetIndex: number,
+    modelId: number,
+    field: 'motion' | 'facial',
+    code?: string
+  ): boolean =>
+    base.diagnostics.some(
+      (d) =>
+        d.snippetIndex === snippetIndex &&
+        d.modelId === modelId &&
+        d.field === field &&
+        (!code || d.code === code)
+    )
+
+  for (let i = 0; i < story.snippets.length; i++) {
+    const snippet = story.snippets[i]
+    if (snippet.type !== 'Talk' || !('data' in snippet) || !snippet.data) continue
+    talkIdx += 1
+    const data = snippet.data as unknown as Record<string, unknown>
+    const content = String(data.content ?? '')
+    const emotion = String(data.emotion ?? '')
+    const speaker = String(data.speaker ?? '')
+    const modelId = typeof data.modelId === 'number' ? data.modelId : -1
+    if (modelId === -1) {
+      prevContent = content
+      prevEmotion = emotion
+      continue
+    }
+    const actions = Array.isArray(data.actions)
+      ? (data.actions as Array<Record<string, unknown>>)
+      : []
+    const speakerActs = actions.filter((a) => a && a.modelId === modelId)
+    const primaryMotion =
+      (typeof speakerActs[0]?.motion === 'string' ? speakerActs[0].motion : '') ||
+      (typeof data.motion === 'string' ? data.motion : '')
+    const primaryFacial =
+      (typeof speakerActs[0]?.facial === 'string' ? speakerActs[0].facial : '') ||
+      (typeof data.facial === 'string' ? data.facial : '')
+    const model = view.modelById(modelId)
+
+    if (primaryMotion) {
+      const propReason =
+        /delicious|eat|drink/i.test(primaryMotion) && !FOOD_DRINK_CUE_RE.test(content)
+          ? 'prop_food_motion_without_food_cue'
+          : /sleep/i.test(primaryMotion) && !SLEEP_CUE_RE.test(content)
+            ? 'sleep_motion_without_sleep_cue'
+            : ''
+      if (propReason && !hasDiagAt(i, modelId, 'motion', propReason)) {
+        addedMotionMismatch += 1
+        const rec = model
+          ? recommendForLine(view, model, {
+              content,
+              emotion,
+              prevContent,
+              prevEmotion,
+              limit: 3
+            })
+          : { facials: [], motions: [] }
+        extraDiagnostics.push({
+          snippetIndex: i,
+          lineNumber: talkIdx,
+          modelId,
+          speaker,
+          content: content.slice(0, 60),
+          emotion,
+          facial: primaryFacial,
+          motion: primaryMotion,
+          inferredMood: 'neutral',
+          field: 'motion',
+          code: propReason,
+          severity: 'high',
+          message: `动作 ${annotateMotion(model?.path, primaryMotion)} 仅限特定食物/睡眠语境(${propReason})`,
+          recommendedFacials: rec.facials,
+          recommendedMotions: rec.motions
+        })
+      }
+    }
+
+    for (const act of actions) {
+      const lid = typeof act?.modelId === 'number' ? act.modelId : -1
+      const lFacial = typeof act?.facial === 'string' ? act.facial.trim() : ''
+      if (lid !== -1 && lid !== modelId && lFacial && !hasDiagAt(i, lid, 'facial')) {
+        const lPrevEmo = lastEmotionByModel.get(lid) ?? ''
+        const lModel = view.modelById(lid)
+        if (
+          (lPrevEmo === '生气' || lPrevEmo === '伤心') &&
+          facialSemanticsMod.isSmileLikeFacial(lFacial, lModel?.path)
+        ) {
+          addedFacialMismatch += 1
+          const lRec = lModel
+            ? recommendForLine(view, lModel, {
+                content,
+                emotion,
+                prevContent,
+                prevEmotion,
+                prevTense: true,
+                isListener: true,
+                limit: 3
+              })
+            : { facials: [], motions: [] }
+          extraDiagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkIdx,
+            modelId: lid,
+            speaker: lModel ? view.shortName(lModel) : String(lid),
+            content: content.slice(0, 60),
+            emotion,
+            facial: lFacial,
+            motion: '',
+            inferredMood: 'sad_regret',
+            field: 'facial',
+            code: 'listener_tense_smile_flip',
+            severity: 'high',
+            message: `听者前序情绪为「${lPrevEmo}」，切忌突然切为笑脸 ${annotateFacial(lModel?.path, lFacial)}`,
+            recommendedFacials: lRec.facials,
+            recommendedMotions: lRec.motions
+          })
+        }
+      }
+    }
+    if (emotion) lastEmotionByModel.set(modelId, emotion)
+    prevContent = content
+    prevEmotion = emotion
+  }
+
+  if (extraDiagnostics.length === 0) return base
+  const diagnostics = [...extraDiagnostics, ...base.diagnostics].sort(
+    (a, b) =>
+      (a.severity === 'high' ? 0 : 1) - (b.severity === 'high' ? 0 : 1) ||
+      a.snippetIndex - b.snippetIndex
+  )
+  return {
+    ...base,
+    diagnostics,
+    facialMismatchCount: base.facialMismatchCount + addedFacialMismatch,
+    motionMismatchCount: base.motionMismatchCount + addedMotionMismatch,
+    score: Math.max(0, base.score - extraDiagnostics.length * 15),
+    passed: false
+  }
+}
+
 function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingFidelityReport {
   if (typeof officialLinterApi.auditStoryActingAndFidelity === 'function') {
-    return officialLinterApi.auditStoryActingAndFidelity(story, view)
+    return appendContextAndListenerGuards(
+      story,
+      view,
+      officialLinterApi.auditStoryActingAndFidelity(story, view)
+    )
   }
   const officialReport = officialLinterMod.lintOfficialStory(story, view)
   const diagnostics: ActingFidelityDiagnostic[] = []
@@ -711,6 +880,7 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
 
   const lastFacialByModel = new Map<number, { facial: string; run: number }>()
   const lastMotionByModel = new Map<number, { motion: string; run: number }>()
+  const lastEmotionByModel = new Map<number, string>()
   const onStage = new Set<number>()
   const listenerIdleTalks = new Map<number, number>()
   let lastBgmKey: string | null = null
@@ -1038,6 +1208,49 @@ function runActingAndFidelityAudit(story: StoryData, view: CatalogView): ActingF
     }
 
     const lineCtx = inferDramaticMoodFallback({ content, emotion, prevContent, prevEmotion })
+    for (const act of actions) {
+      const lid = typeof act.modelId === 'number' ? act.modelId : -1
+      const lFacial = typeof act.facial === 'string' ? act.facial.trim() : ''
+      if (lid !== -1 && lid !== modelId && lFacial) {
+        const lPrevEmo = lastEmotionByModel.get(lid) ?? ''
+        const lModel = view.modelById(lid)
+        if (
+          (lPrevEmo === '生气' || lPrevEmo === '伤心') &&
+          facialSemanticsMod.isSmileLikeFacial(lFacial, lModel?.path)
+        ) {
+          facialMismatchCount += 1
+          const lRec = lModel
+            ? recommendForLine(view, lModel, {
+                content,
+                emotion,
+                prevContent,
+                prevEmotion,
+                prevTense: true,
+                isListener: true,
+                limit: 3
+              })
+            : { facials: [], motions: [] }
+          diagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkIdx,
+            modelId: lid,
+            speaker: lModel ? view.shortName(lModel) : String(lid),
+            content: content.slice(0, 60),
+            emotion,
+            facial: lFacial,
+            motion: '',
+            inferredMood: 'sad_regret',
+            field: 'facial',
+            code: 'listener_tense_smile_flip',
+            severity: 'high',
+            message: `听者前序情绪为「${lPrevEmo}」，切忌突然切为笑脸 ${annotateFacial(lModel?.path, lFacial)}`,
+            recommendedFacials: lRec.facials,
+            recommendedMotions: lRec.motions
+          })
+        }
+      }
+    }
+    if (emotion) lastEmotionByModel.set(modelId, emotion)
     prevTense = lineCtx.tense
     prevContent = content
     prevEmotion = emotion
@@ -1208,7 +1421,10 @@ function isStoryObjectCandidate(val: unknown): boolean {
   return Array.isArray(rec.snippets)
 }
 
-function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorStageTelemetry {
+function buildDirectorStageTelemetry(
+  story: Record<string, unknown>,
+  targetMinutes?: number
+): DirectorStageTelemetry {
   const snippets = Array.isArray(story.snippets)
     ? (story.snippets as Array<Record<string, unknown>>)
     : []
@@ -1217,6 +1433,7 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
   let bgmCueCount = 0
   let firstTalkIdx = -1
   let firstBgmIdx = -1
+  let firstBgmPlayTalkCount = -1
   let hasBgmSilenceCut = false
   let standaloneMotionCount = 0
   let moveCount = 0
@@ -1253,6 +1470,9 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
       bgmCueCount += 1
       if (firstBgmIdx === -1) firstBgmIdx = i
       if (d.stop === true) hasBgmSilenceCut = true
+      else if (firstBgmPlayTalkCount === -1 && typeof d.file === 'string' && d.file.trim()) {
+        firstBgmPlayTalkCount = talkCount
+      }
     } else if (kind === 'Motion') {
       standaloneMotionCount += 1
     } else if (kind === 'Move') {
@@ -1329,7 +1549,9 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
     ? story.bgm.length > 0
     : typeof story.bgm === 'string' && story.bgm.trim().length > 0
   const hasOpeningBgm =
-    hasTopLevelBgm || (firstBgmIdx !== -1 && (firstTalkIdx === -1 || firstBgmIdx < firstTalkIdx))
+    hasTopLevelBgm ||
+    (firstBgmPlayTalkCount !== -1 && firstBgmPlayTalkCount <= 4) ||
+    (firstBgmIdx !== -1 && (firstTalkIdx === -1 || firstBgmIdx < firstTalkIdx))
   const talkWithMotionShare = talkCount > 0 ? Number((talkWithMotion / talkCount).toFixed(2)) : 0
   const talkFacialOnlyShare = talkCount > 0 ? Number((talkFacialOnly / talkCount).toFixed(2)) : 0
   const talkStillShare = talkCount > 0 ? Number((talkStill / talkCount).toFixed(2)) : 0
@@ -1357,8 +1579,18 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
   }
   if (talkCount >= 8 && !hasOpeningBgm) {
     reviewFocusPoints.push(
-      '开场未设置 BGM（前半段静音）：请确认是否为刻意冷开场，否则在首句 Talk 前补充 ChangeBgm'
+      '开场前段未设置 BGM（严禁大段无声冷开场）：请在首句 Talk 前用 ChangeBgm 配上贴合氛围的曲目（除非刻意仅留 2~4 句冷开场并在第 5 句前切入 ChangeBgm）'
     )
+  }
+  if (typeof targetMinutes === 'number' && targetMinutes >= 0.5) {
+    const maxTalksForBudget = Math.max(12, Math.round(targetMinutes * 12.5))
+    const minTalksForBudget = Math.max(8, Math.round(targetMinutes * 9.5))
+    const idealMaxTalks = Math.max(minTalksForBudget + 4, Math.round(targetMinutes * 12))
+    if (talkCount > maxTalksForBudget) {
+      reviewFocusPoints.push(
+        `全片共 ${talkCount} 句 Talk（按约 7 秒/句约 ${((talkCount * 7) / 60).toFixed(1)} 分钟，超出目标 ${targetMinutes} 分钟）：请用 delete/update_talk 精简重复独白或合并铺垫，收束至 ${minTalksForBudget}~${idealMaxTalks} 句`
+      )
+    }
   }
   if (talkCount >= 18 && !hasBgmSilenceCut && bgmCueCount <= 1) {
     reviewFocusPoints.push(
@@ -1436,7 +1668,7 @@ function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorSt
  * - 对白、舞台、剧情表情动作逐句质检（validate_dialogue_draft, critique_story_draft, validate_story_draft）
  */
 export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgentToolkit {
-  const { view, personas, emotionLabels = [], ragRetriever, logger } = deps
+  const { view, personas, emotionLabels = [], targetMinutes, ragRetriever, logger } = deps
 
   let savedPlan: SavedStoryPlan | null = null
   let savedDraft: Record<string, unknown> | null = null
@@ -2142,7 +2374,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
   const runCompactAudit = (candidate: Record<string, unknown>): Record<string, unknown> => {
     try {
       const audited = auditDraftCandidate(candidate)
-      const directorTelemetry = buildDirectorStageTelemetry(candidate)
+      const directorTelemetry = buildDirectorStageTelemetry(candidate, targetMinutes)
       return {
         schemaValid: true,
         officialPassed: audited.officialPassed,
@@ -3421,7 +3653,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           : 15
       try {
         const audited = auditDraftCandidate(candidate)
-        const directorTelemetry = buildDirectorStageTelemetry(candidate)
+        const directorTelemetry = buildDirectorStageTelemetry(candidate, targetMinutes)
         return JSON.stringify({
           schemaValid: true,
           readyToFinalize: audited.readyToFinalize,
@@ -3673,6 +3905,7 @@ export async function runAgenticStoryGeneration(
     view,
     personas,
     emotionLabels,
+    targetMinutes,
     ragRetriever,
     logger
   })
@@ -3687,29 +3920,31 @@ export async function runAgenticStoryGeneration(
     .join('；')
   const emotionNote =
     emotionLabels.length > 0
-      ? `每条 Talk 填 emotion（可选：${emotionLabels.join('、')}，日常陈述选「${emotionLabels.includes('平静') ? '平静' : emotionLabels[0]}」）；**严禁在哭泣/悲伤/道歉/恳求/告别段中间切回「平静」**（即使台词表面说「没关系」「只是吓了一跳」也必须标「伤心」）。请同时为哭腔/情绪转折/高潮句写简短日语 \`ttsCaption\`（仅描述语气/呼吸/颤抖/停顿，严禁出現年龄/性别/声线词）与 \`ttsSpeed\`（沉重哭诉 0.90~0.96，急促喊叫 1.04~1.12），全片最痛哭/撕裂高潮（<= 15%）设 \`ttsSpecialScene: true\`。`
+      ? `每条 Talk 填 emotion（可选：${emotionLabels.join('、')}，日常陈述选「${emotionLabels.includes('平静') ? '平静' : emotionLabels[0]}」）；**严禁在哭泣/悲伤/道歉/恳求/对峙段中间掉回「平静」**（即使台词表面说「没关系」「只是吓了一跳」也必须标「伤心」），但当剧情真正进入结尾释怀、夕阳缓和或安静接纳余韵时，允许自然过渡到温和释放的「平静」或「开心」让情绪弧光呼吸。请同时为哭腔/情绪转折/高潮句写简短日语 \`ttsCaption\`（仅描述语气/呼吸/颤抖/停顿，严禁出現年龄/性别/声线词）与 \`ttsSpeed\`（沉重哭诉 0.90~0.96，急促喊叫 1.04~1.12），全片最痛哭/撕裂高潮（<= 15%）设 \`ttsSpecialScene: true\`。`
       : ''
 
   const sharedRules = [
     '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
     '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se"], queries: [...] })` + `search_official_corpus({ query })`；**不要**按角色逐一重复查 `lookup_character` 或 `inspect_character_expressions`！',
     '- **第 2 步（直接起草）**：基于已获取的人设、表情/动作调色板与素材，直接起草完整高质量 StoryData 并调用 1 次 `save_story_draft`（复杂多幕可先 `plan_story_outline`）。**严禁**把整场几十句台词重发一遍给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`！`save_story_draft` 已自带全套规则体检与 `directorTelemetry`，**无需**再重复调用 `validate_story_draft` 或 `critique_story_draft`。',
-    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框原地淡入淡出切镜、独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
+    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光、总句数时长达标与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框原地淡入淡出切镜、独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
     '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
-    '1. **持续情绪与真伪笑脸分辨（严禁哭戏强颜欢笑/每句跳脸）**：泣不成声、哽咽、悲伤倾诉、冲突崩溃等情绪高潮段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句（可适度微调身体动作而不必每句硬换表情）；严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；只允许填写**该角色自身目录真实存在**的动作与表情名，切勿编造或跨角色套用不存在的动作（如没有 `w-normal-sad01` 的模型禁止强写）；真冬保持克制内敛。',
-    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**（切换单人思考模式先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入）；听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
-    '3. **声画与节奏**：开场用 `ChangeBgm` 起乐（不要与顶层 `bgm` 冲突，严禁重复连续播同一首），情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白；物理/情绪节拍（脚步、奔跑、开门、衣料、惊觉、回忆）务必配 `PlaySe`（不要整场 0 音效）；夜晚/黄昏配 `AmbientColor`；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵，不要瞬间黑屏。',
-    '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
+    '1. **持续情绪与真伪笑脸分辨（严禁哭戏强颜欢笑/每句跳脸/道具动作误用）**：泣不成声、哽咽、悲伤倾诉、冲突崩溃等情绪高潮段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句（可适度微调身体动作而不必每句硬换表情）；严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；当说话者强颜欢笑打岔时，先前处于「生气/伤心」的听者也严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝食物或犯困睡眠台词，平时严禁乱用；只允许填写**该角色自身目录真实存在**的动作与表情名，切勿编造或跨角色套用不存在的动作；真冬保持克制内敛。',
+    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**（切换单人思考模式先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入）；听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作，也不要在角色即将 `LayoutClear` 切镜退场前硬插多余独立 `Motion`。',
+    '3. **声画与节奏**：开场必须由 `ChangeBgm` 起乐（从清单选贴合氛围的曲目；若刻意做极短冷开场，最多 2~4 句后必须在第 5 句 Talk 前切入 `ChangeBgm`，严禁前段大段无声；不要与顶层 `bgm` 冲突，严禁重复连续播同一首），情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白；物理/情绪节拍（脚步、奔跑、开门、衣料、惊觉、回忆）务必配 `PlaySe`（不要整场 0 音效）；夜晚/黄昏配 `AmbientColor`；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵，不要瞬间黑屏。',
+    '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教或重复独白拖长；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''
   ]
     .filter(Boolean)
     .join('\n')
 
+  const targetTalkMin = Math.max(8, Math.round(targetMinutes * 9.5))
+  const targetTalkMax = Math.max(targetTalkMin + 4, Math.round(targetMinutes * 12))
   const exampleSnippet = buildActingExample(view)
   const userPrompt = [
     `场景要求：${scene}`,
-    `目标时长：约 ${targetMinutes} 分钟（每分钟约 14~18 句对白）`,
+    `目标时长：约 ${targetMinutes} 分钟（按 PJSK 配音与停顿约 7 秒/句换算，全片严格控制在 ${targetTalkMin}~${targetTalkMax} 句 Talk；凝练抓重点，严禁连排重复独白拉长）`,
     `可选角色摘要：${castSummary}`,
     `JSON 结构示例：\n\`\`\`json\n${exampleSnippet}\n\`\`\``,
     '请充分利用工具核实角色人设、表情与动作语义、背景/BGM/SE 资源和官方语料，通过规划→起草→逐句导演审校→局部修补完成高质量剧本。'

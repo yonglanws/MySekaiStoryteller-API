@@ -341,8 +341,13 @@ function pickCompatibleMotionFallback(
   ]
   const candidates = [...sortNormalFirst(rawPrompt), ...sortNormalFirst(rawAll)]
   const isTenseMood = mood === 'sad' || mood === 'angry' || mood === 'trouble'
-  const safeFilter = (m: string): boolean =>
-    !isTenseMood || !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)
+  const safeFilter = (m: string): boolean => {
+    if (facialSemanticsMod.inspectModelMotion(model.path, m).contextTag) return false
+    if (isTenseMood && /glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)) {
+      return false
+    }
+    return true
+  }
   const filteredCandidates = candidates.filter(safeFilter)
   const pool = filteredCandidates.length > 0 ? filteredCandidates : candidates
   if (pool.length === 0) {
@@ -385,7 +390,12 @@ function pickCompatibleMotionFallback(
   }
   const safeFinal =
     pool.find(
-      (m) => m !== avoidMotion && !/glad|happy|cheer|joy|angry|sad|cry|greeting|tilthead/i.test(m)
+      (m) =>
+        m !== avoidMotion &&
+        !facialSemanticsMod.inspectModelMotion(model.path, m).contextTag &&
+        !/glad|happy|cheer|joy|angry|sad|cry|greeting|tilthead|delicious|eat|drink|sleep|yawn|sing|mic/i.test(
+          m
+        )
     ) ?? pool[0]
   return safeFinal ? ensureRealCatalogAnimation(view, modelId, 'motion', safeFinal) : ''
 }
@@ -408,7 +418,13 @@ function pickCompatibleFacialFallback(
   ]
   const mood = inferValidationMood(content, emotion)
   const targetMood: facialSemanticsMod.TargetMood =
-    prevTense && mood === 'smile' && emotion !== '开心' ? 'neutral' : mood
+    options.isListener && prevTense
+      ? 'serious'
+      : prevTense &&
+          mood === 'smile' &&
+          !facialSemanticsMod.isGenuineHappyOrReconciliation(content)
+        ? 'wry_smile'
+        : mood
   const picked = facialSemanticsMod.pickMoodMatchedFacial(
     facials,
     targetMood,
@@ -465,7 +481,40 @@ function repairActingMismatches(
   warn: (message: string) => void
 ): void {
   const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
-  let prevTense = false
+  const tenseTracker: facialSemanticsMod.SceneTenseTracker = { tense: false, calmRun: 0 }
+  const actorState = new Map<number, facialSemanticsMod.ActorTenseState>()
+
+  const updateActorState = (
+    modelId: number,
+    modelPath: string | undefined,
+    facial: string,
+    emotion?: string,
+    content?: string
+  ): void => {
+    if (modelId === -1) return
+    const emo = (emotion ?? '').trim()
+    if (content !== undefined && facialSemanticsMod.isCalmReassureResolution(content, emo)) {
+      actorState.set(modelId, null)
+      return
+    }
+    if (emo === '生气') {
+      actorState.set(modelId, 'angry')
+      return
+    }
+    if (emo === '伤心' || emo === '害怕') {
+      const role = facial ? facialSemanticsMod.inspectModelFacial(modelPath, facial).role : 'other'
+      actorState.set(modelId, role === 'cry' || role === 'tearful_smile' ? 'cry' : 'sad')
+      return
+    }
+    if (!facial) return
+    const role = facialSemanticsMod.inspectModelFacial(modelPath, facial).role
+    const derived = facialSemanticsMod.facialRoleToTenseState(role)
+    if (derived) {
+      actorState.set(modelId, derived)
+    } else if (role === 'genuine_smile' || role === 'closed_smile' || role === 'playful') {
+      actorState.set(modelId, null)
+    }
+  }
 
   const findNextTalkForActor = (
     startIndex: number,
@@ -514,6 +563,18 @@ function repairActingMismatches(
     const kind = toStr(snippet.type)
     const data = snippet.data
 
+    if (
+      kind === 'BlackOut' ||
+      kind === 'SekaiOut' ||
+      (kind === 'SideFade' && toStr(data.mode, 'Out').toLowerCase() === 'out') ||
+      kind === 'ChangeBackgroundImage'
+    ) {
+      tenseTracker.tense = false
+      tenseTracker.calmRun = 0
+      actorState.clear()
+      continue
+    }
+
     if (kind === 'LayoutAppear' || kind === 'Move') {
       const modelId = toNumber(data.modelId, -1)
       const model = view.modelById(modelId)
@@ -522,7 +583,10 @@ function repairActingMismatches(
         kind === 'Move'
           ? findNearestSurroundingTalk(i, modelId)
           : (findNextTalkForActor(i, modelId) ?? findNearestSurroundingTalk(i, modelId))
-      if (!contextTalk) continue
+      if (!contextTalk) {
+        updateActorState(modelId, model.path, toStr(data.facial))
+        continue
+      }
       const restrained = isRestrainedActor(model.name, model.path)
       const facial = toStr(data.facial)
       if (
@@ -532,7 +596,7 @@ function repairActingMismatches(
           modelPath: model.path,
           emotion: contextTalk.emotion,
           content: contextTalk.content,
-          prevTense,
+          prevTense: tenseTracker.tense,
           isMonologue: isInnerMonologueText(contextTalk.content),
           restrainedRole: restrained
         })
@@ -542,7 +606,7 @@ function repairActingMismatches(
           modelId,
           contextTalk.content,
           contextTalk.emotion,
-          prevTense,
+          tenseTracker.tense,
           restrained,
           { isMonologue: isInnerMonologueText(contextTalk.content), avoidFacial: facial }
         )
@@ -561,7 +625,7 @@ function repairActingMismatches(
           modelPath: model.path,
           emotion: contextTalk.emotion,
           content: contextTalk.content,
-          prevTense,
+          prevTense: tenseTracker.tense,
           restrainedRole: restrained
         })
       ) {
@@ -572,6 +636,50 @@ function repairActingMismatches(
           `snippets[${i}] ${kind} motion '${motion}' 与周边剧情情绪冲突，已${data.motion ? `改为 ${toStr(data.motion)}` : '清除'}`
         )
       }
+      updateActorState(modelId, model.path, toStr(data.facial))
+      continue
+    }
+
+    if (kind === 'Motion') {
+      const mid = toNumber(data.modelId, -1)
+      const checkMotionTarget = (targetObj: JsonRecord, actorId: number): void => {
+        const actorModel = view.modelById(actorId)
+        if (!actorModel) return
+        const contextTalk = findNearestSurroundingTalk(i, actorId)
+        const restrained = isRestrainedActor(actorModel.name, actorModel.path)
+        const mot = toStr(targetObj.motion)
+        if (
+          mot &&
+          contextTalk &&
+          !isMotionMoodCompatible({
+            motion: mot,
+            modelPath: actorModel.path,
+            emotion: contextTalk.emotion,
+            content: contextTalk.content,
+            prevTense: tenseTracker.tense,
+            restrainedRole: restrained
+          })
+        ) {
+          const mood = inferValidationMood(contextTalk.content, contextTalk.emotion)
+          const replacement = pickCompatibleMotionFallback(view, actorId, mood, restrained, mot)
+          if (replacement && replacement !== mot) {
+            targetObj.motion = replacement
+          } else if (targetObj === data) {
+            targetObj.motion = ''
+          } else {
+            delete targetObj.motion
+          }
+          warn(`snippets[${i}] Motion '${mot}' 与周边语境不匹配，已修正`)
+        }
+        updateActorState(actorId, actorModel.path, toStr(targetObj.facial))
+      }
+      checkMotionTarget(data, mid)
+      if (Array.isArray(data.actions)) {
+        for (const act of data.actions) {
+          if (!isRecord(act)) continue
+          checkMotionTarget(act, toNumber(act.modelId, mid))
+        }
+      }
       continue
     }
 
@@ -581,8 +689,7 @@ function repairActingMismatches(
     const emotion = toStr(data.emotion)
     const monologue = isInnerMonologueText(content)
     if (speakerId === -1) {
-      prevTense =
-        ['生气', '伤心', '害怕'].includes(emotion) || /对不起|抱歉|糟糕|难过/.test(content)
+      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
       continue
     }
 
@@ -591,13 +698,54 @@ function repairActingMismatches(
       if (!actorModel) return
       const restrained = isRestrainedActor(actorModel.name, actorModel.path)
       const facial = toStr(targetObj.facial)
-      if (facial) {
+
+      if (isListener && facial) {
+        const lState = actorState.get(actorId) ?? null
+        const isLockedTense =
+          lState === 'angry' ||
+          lState === 'sad' ||
+          lState === 'cry' ||
+          lState === 'serious' ||
+          (lState === 'trouble' && tenseTracker.tense)
+        if (
+          isLockedTense &&
+          lState &&
+          (facialSemanticsMod.isPositiveOnlyFacial(facial, actorModel.path) ||
+            (lState === 'angry' && facialSemanticsMod.isSmileLikeFacial(facial, actorModel.path)))
+        ) {
+          const promptSet = new Set(view.promptFacials(actorModel))
+          const facialPool = [
+            ...view.promptFacials(actorModel),
+            ...(actorModel.facials ?? []).filter((f) => !promptSet.has(f))
+          ]
+          const picked = ensureRealCatalogAnimation(
+            view,
+            actorId,
+            'facial',
+            facialSemanticsMod.pickListenerFallbackFacial(
+              facialPool,
+              lState,
+              actorModel.path,
+              restrained
+            )
+          )
+          if (picked && picked !== facial) {
+            targetObj.facial = picked
+            warn(
+              `snippets[${i}] 听者前序处于 ${lState} 状态且未和好，facial '${facial}' 已改为 ${picked}`
+            )
+          }
+        }
+      }
+
+      const curFacial = toStr(targetObj.facial)
+      if (curFacial) {
         const ok = isFacialStrictlyCompatible({
-          facial,
+          facial: curFacial,
           modelPath: actorModel.path,
           emotion,
           content,
-          prevTense,
+          prevTense: tenseTracker.tense,
           isMonologue: !isListener && monologue,
           isListener,
           restrainedRole: restrained
@@ -608,14 +756,14 @@ function repairActingMismatches(
             actorId,
             content,
             emotion,
-            prevTense,
+            tenseTracker.tense,
             restrained,
-            { isMonologue: !isListener && monologue, isListener, avoidFacial: facial }
+            { isMonologue: !isListener && monologue, isListener, avoidFacial: curFacial }
           )
-          if (replacement && replacement !== facial) {
+          if (replacement && replacement !== curFacial) {
             targetObj.facial = replacement
             warn(
-              `snippets[${i}] ${isListener ? '听者' : '说话者'} facial '${facial}' 与当前台词情绪冲突，已改为 ${replacement}`
+              `snippets[${i}] ${isListener ? '听者' : '说话者'} facial '${curFacial}' 与当前台词情绪冲突，已改为 ${replacement}`
             )
           }
         }
@@ -628,7 +776,7 @@ function repairActingMismatches(
           modelPath: actorModel.path,
           emotion,
           content,
-          prevTense,
+          prevTense: tenseTracker.tense,
           isListener,
           restrainedRole: restrained
         })
@@ -658,9 +806,27 @@ function repairActingMismatches(
       }
     }
 
-    prevTense =
-      ['生气', '伤心', '害怕'].includes(emotion) ||
-      /对不起|抱歉|别再|少啰嗦|为什么|骗人|糟糕|难过|哭|窒息|再见/.test(content)
+    const speakerModel = view.modelById(speakerId)
+    let speakerFacial = toStr(data.facial)
+    if (Array.isArray(data.actions)) {
+      for (const act of data.actions) {
+        if (isRecord(act) && toNumber(act.modelId, speakerId) === speakerId && toStr(act.facial)) {
+          speakerFacial = toStr(act.facial)
+          break
+        }
+      }
+    }
+    updateActorState(speakerId, speakerModel?.path, speakerFacial, emotion, content)
+    if (Array.isArray(data.actions)) {
+      for (const act of data.actions) {
+        if (!isRecord(act)) continue
+        const aid = toNumber(act.modelId, speakerId)
+        if (aid !== speakerId && toStr(act.facial)) {
+          updateActorState(aid, view.modelById(aid)?.path, toStr(act.facial))
+        }
+      }
+    }
+    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
   }
 }
 
@@ -684,13 +850,24 @@ export function ensureListenerReactivity(
 
   let prevContent = ''
   let prevEmotion = ''
-  let prevTense = false
+  const tenseTracker: facialSemanticsMod.SceneTenseTracker = { tense: false, calmRun: 0 }
   let injectedCount = 0
 
   for (const snippet of snippets) {
     if (!isRecord(snippet) || !isRecord(snippet.data)) continue
     const kind = toStr(snippet.type)
     const data = snippet.data
+
+    if (
+      kind === 'BlackOut' ||
+      kind === 'SekaiOut' ||
+      (kind === 'SideFade' && toStr(data.mode, 'Out').toLowerCase() === 'out') ||
+      kind === 'ChangeBackgroundImage'
+    ) {
+      tenseTracker.tense = false
+      tenseTracker.calmRun = 0
+      continue
+    }
 
     if (kind === 'LayoutAppear') {
       const mid = toNumber(data.modelId, -1)
@@ -777,7 +954,7 @@ export function ensureListenerReactivity(
       const currentLFRole = currentLF
         ? facialSemanticsMod.inspectModelFacial(listenerModel.path, currentLF).role
         : 'other'
-      if ((emotion === '伤心' || prevTense) && currentLFRole === 'cry' && nextIdle < 6) {
+      if ((emotion === '伤心' || tenseTracker.tense) && currentLFRole === 'cry' && nextIdle < 6) {
         idleTalks.set(listenerId, nextIdle)
         continue
       }
@@ -800,7 +977,7 @@ export function ensureListenerReactivity(
           emotion,
           prevContent,
           prevEmotion,
-          prevTense,
+          prevTense: tenseTracker.tense,
           isListener: true,
           restrainedRole: restrained,
           prevFacial: lastListenerFacial.get(listenerId),
@@ -813,7 +990,7 @@ export function ensureListenerReactivity(
               modelPath: listenerModel.path,
               emotion,
               content,
-              prevTense,
+              prevTense: tenseTracker.tense,
               isListener: true,
               restrainedRole: restrained
             })
@@ -832,7 +1009,7 @@ export function ensureListenerReactivity(
           listenerId,
           content,
           listenerMood,
-          prevTense,
+          tenseTracker.tense,
           restrained,
           { isListener: true, avoidFacial: lastListenerFacial.get(listenerId) }
         )
@@ -860,9 +1037,7 @@ export function ensureListenerReactivity(
     justAppeared.clear()
     prevContent = content
     prevEmotion = emotion
-    prevTense =
-      ['生气', '伤心', '害怕'].includes(emotion) ||
-      /对不起|抱歉|别再|少啰嗦|为什么|骗人|糟糕|难过|哭|窒息|再见/.test(content)
+    facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion)
   }
 
   if (injectedCount > 0) {
