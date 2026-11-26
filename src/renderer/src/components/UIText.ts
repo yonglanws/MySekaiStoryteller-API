@@ -1,12 +1,14 @@
-import { AlphaFilter, Text, TextStyle } from 'pixi.js'
+import { AlphaFilter, Text, TextMetrics, TextStyle } from 'pixi.js'
 import AnimationManager from '../managers/AnimationManager'
 import {
   GAME_FONT_BODY_FAMILY,
   GAME_FONT_BODY_STACK,
   GAME_FONT_BODY_WEIGHT,
   SSE_UI_SPEC,
+  computePixiTextPosition,
   sseLineAdvance,
-  sseOutlineThickness
+  sseOutlineThickness,
+  type PixiFontMetricsLike
 } from '../utils/FontLoader'
 import { TALK_DISPLAY_MS_PER_CHAR, sliceVisibleText, visibleTextLength } from '../utils/TalkTiming'
 
@@ -26,6 +28,21 @@ function getMeasureContext(): CanvasRenderingContext2D | null {
     measureCtx = null
   }
   return measureCtx
+}
+
+function measureStyleFontMetrics(style: TextStyle): PixiFontMetricsLike | null {
+  if (
+    typeof document === 'undefined' ||
+    typeof TextMetrics?.measureFont !== 'function' ||
+    typeof style.toFontString !== 'function'
+  ) {
+    return null
+  }
+  try {
+    return TextMetrics.measureFont(style.toFontString())
+  } catch {
+    return null
+  }
 }
 
 function estimateCharWidthRef(char: string, fontSizeRef: number): number {
@@ -80,9 +97,13 @@ export function computeTalkBodyFontSizeRef(text: string): number {
  * - 字体：CN 6.4.0 内置 `Source Han Sans SC Medium`（`SekaiCN-Medium`, weight 500）
  * - 字号：`44 * k`（支持 `[22, 44]` 自动缩字），行距 `52.8 * k`（TMP `lineSpacing = -80`）
  * - 描边：`rgba(68, 68, 102, 0.6)` 圆角外扩（`SDF_Base_Scenario_Outline`）
+ * - 自动抵消 PixiJS v7 `strokeThickness/2` 与 `fontProperties.ascent` 偏移，使首行基线落在 `896.72 * k`
  */
 export default class UIText extends Text {
   private readonly k: number
+  private readonly frameX: number
+  private readonly frameY: number
+  private currentFontSizeRef: number = WORDS.fontSize
   private _data: string = ''
   private animGen = 0
 
@@ -107,8 +128,9 @@ export default class UIText extends Text {
     super('', style)
 
     this.k = k
-    this.x = WORDS.x * k
-    this.y = WORDS.y * k
+    this.frameX = WORDS.x * k
+    this.frameY = WORDS.y * k
+    this.syncPosition(WORDS.fontSize)
 
     const alpha_filter = new AlphaFilter(0)
     alpha_filter.resolution = 2
@@ -124,15 +146,32 @@ export default class UIText extends Text {
     this.applyAutoSize(value)
   }
 
+  private syncPosition(fontSizeRef: number): void {
+    const pos = computePixiTextPosition({
+      frameX: this.frameX,
+      frameY: this.frameY,
+      fontSizeRef,
+      k: this.k,
+      strokeThickness: Number(this.style.strokeThickness ?? 0),
+      lineHeight: Number(this.style.lineHeight ?? 0),
+      fontMetrics: measureStyleFontMetrics(this.style)
+    })
+    this.x = pos.x
+    this.y = pos.y
+  }
+
   private applyAutoSize(fullText: string): void {
     const sizeRef = computeTalkBodyFontSizeRef(fullText)
+    this.currentFontSizeRef = sizeRef
     this.style.fontSize = sizeRef * this.k
     this.style.lineHeight = sseLineAdvance(sizeRef, WORDS.lineSpacing) * this.k
     this.style.strokeThickness = sseOutlineThickness(sizeRef) * this.k
+    this.syncPosition(sizeRef)
   }
 
   public async show(time: number): Promise<void> {
     const gen = ++this.animGen
+    this.syncPosition(this.currentFontSizeRef)
     this.visible = true
     const alphaFilter = this.filters![0] as AlphaFilter
     alphaFilter.alpha = time <= 0 ? 1 : 0

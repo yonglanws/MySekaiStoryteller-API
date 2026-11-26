@@ -470,6 +470,8 @@ test('UIText auto-sizes between [22, 44] and all UI components scale identically
   const { default: UIFullScreenText } = load('components/UIFullScreenText.ts')
   const { default: UIChoiceDialog } = load('components/UIChoiceDialog.ts')
   const { default: UILayer } = load('layers/UILayer.ts')
+  const { computePixiTextPosition, sseOutlineThickness, sseLineAdvance } =
+    load('utils/FontLoader.ts')
 
   // 1-3 lines stay at 44pt; 4+ lines auto-size down within [22, 44]
   assert.equal(computeTalkBodyFontSizeRef('一二三四五六七八九十'), 44)
@@ -478,19 +480,43 @@ test('UIText auto-sizes between [22, 44] and all UI components scale identically
   assert.ok(fourLineSize < 44 && fourLineSize >= 22, `expected shrunk size, got ${fourLineSize}`)
 
   const k = 2 / 3
+  const halfStroke44 = (sseOutlineThickness(44) * k) / 2
   const uiText = new UIText(1280, 720)
-  assert.ok(Math.abs(uiText.x - 250 * k) < 1e-6)
-  assert.ok(Math.abs(uiText.y - 858 * k) < 1e-6)
+  assert.ok(Math.abs(uiText.x - (250 * k - halfStroke44)) < 1e-6)
+  assert.ok(Math.abs(uiText.y - (858 * k - halfStroke44)) < 1e-6)
   assert.ok(Math.abs(uiText.style.fontSize - 44 * k) < 1e-6)
   assert.ok(Math.abs(uiText.style.lineHeight - 52.8 * k) < 1e-6)
   uiText.data = '第一行\n第二行\n第三行\n第四行'
   assert.ok(Math.abs(uiText.style.fontSize - fourLineSize * k) < 1e-6)
+  const halfStrokeShrunk = (sseOutlineThickness(fourLineSize) * k) / 2
+  assert.ok(Math.abs(uiText.x - (250 * k - halfStrokeShrunk)) < 1e-6)
 
   const speaker = new UISpeakerText(1280, 720)
-  assert.ok(Math.abs(speaker.x - 230 * k) < 1e-6)
-  assert.ok(Math.abs(speaker.y - 790 * k) < 1e-6)
+  assert.ok(Math.abs(speaker.x - (230 * k - halfStroke44)) < 1e-6)
+  assert.ok(Math.abs(speaker.y - (790 * k - halfStroke44)) < 1e-6)
   assert.equal(speaker.style.fill, '#EBEBF2')
   assert.equal(speaker.style.fontWeight, '700')
+
+  // Verify PIXI v7 baseline compensation with realistic SourceHanSansSC-Bold metrics (ascent≈52, fontSize≈64 at 44px)
+  const stroke44 = sseOutlineThickness(44)
+  const lineH44 = sseLineAdvance(44, -80)
+  const compName = computePixiTextPosition({
+    frameX: 230,
+    frameY: 790,
+    fontSizeRef: 44,
+    k: 1,
+    strokeThickness: stroke44,
+    lineHeight: lineH44,
+    fontMetrics: { ascent: 52, fontSize: 64 }
+  })
+  const drawnNameX = compName.x + stroke44 / 2
+  const drawnNameBaselineY = compName.y + stroke44 / 2 + 52 + Math.max(0, (lineH44 - 64) / 2)
+  assert.ok(Math.abs(drawnNameX - 230) < 1e-6, `drawnNameX=${drawnNameX}`)
+  assert.ok(
+    Math.abs(drawnNameBaselineY - (790 + (30.8 * 44) / 35)) < 1e-6,
+    `drawnNameBaselineY=${drawnNameBaselineY} must land at exact TMP 828.72`
+  )
+  assert.ok(compName.y < 790 - 15, `expected ~18.6px upward compensation, got y=${compName.y}`)
 
   const place = new UIPlaceInfo(1280, 720)
   const placeLabel = place.children[place.children.length - 1]

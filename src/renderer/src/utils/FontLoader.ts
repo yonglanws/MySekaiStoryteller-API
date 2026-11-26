@@ -95,6 +95,62 @@ export function sseLineAdvance(fontSizeRef: number, lineSpacing: number): number
   return SSE_TMP_FACE_INFO.lineHeight * s + lineSpacing * fontSizeRef * 0.01
 }
 
+export interface PixiFontMetricsLike {
+  ascent: number
+  fontSize: number
+}
+
+export interface PixiTextPosition {
+  x: number
+  y: number
+  offsetX: number
+  offsetY: number
+}
+
+/**
+ * 抵消 PixiJS v7 `Text.updateText()` 顶左对齐时的描边半宽与字体 ascent 偏移：
+ * - `linePositionX = strokeThickness / 2`
+ * - `linePositionY = strokeThickness / 2 + fontProperties.ascent + max(0, (lineHeight - fontProperties.fontSize) / 2)`
+ *
+ * 将首行基线精确对齐至 `SekaiStoryExporter` (`sse-text/src/lib.rs`) 的
+ * `frameY + SSE_TMP_FACE_INFO.ascent * (fontSizeRef / pointSize) * k`
+ * （如 `Name` `[230, 790]` 基线 `828.72`，底部紧贴 `NameBackground` `[210, 824, 720, 16]` 上沿；
+ * `Words` `[250, 858]` 基线 `896.72`）。
+ */
+export function computePixiTextPosition(params: {
+  frameX: number
+  frameY: number
+  fontSizeRef: number
+  k: number
+  strokeThickness: number
+  lineHeight: number
+  fontMetrics?: PixiFontMetricsLike | null
+}): PixiTextPosition {
+  const { frameX, frameY, fontSizeRef, k, strokeThickness, lineHeight, fontMetrics } = params
+  const offsetX = strokeThickness / 2
+  const targetAscent = SSE_TMP_FACE_INFO.ascent * (fontSizeRef / SSE_TMP_FACE_INFO.pointSize) * k
+
+  if (!fontMetrics || fontMetrics.fontSize <= 0) {
+    return {
+      x: frameX - offsetX,
+      y: frameY - offsetX,
+      offsetX,
+      offsetY: offsetX
+    }
+  }
+
+  const linePositionYShift = Math.max(0, (lineHeight - fontMetrics.fontSize) / 2)
+  const pixiBaselineY = strokeThickness / 2 + fontMetrics.ascent + linePositionYShift
+  const offsetY = pixiBaselineY - targetAscent
+
+  return {
+    x: frameX - offsetX,
+    y: frameY - offsetY,
+    offsetX,
+    offsetY
+  }
+}
+
 /**
  * `SekaiStoryExporter` (`native_ui.rs` / `sse-render/src/lib.rs`) 参考分辨率 1920×1080 下的 UI 坐标与色彩。
  */
