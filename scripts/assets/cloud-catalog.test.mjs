@@ -346,6 +346,33 @@ test('parseAudioCuesLoop, motion set candidate matching, and ResourceCatalog sea
     assert.equal(rc.findSe('se00204_b_1')?.id, 'se00204_b_1')
     const search = rc.searchAssets({ kind: 'all', query: '泳装', limit: 5 })
     assert.equal(search.models?.length, 1)
+
+    // When a cloud model IS cached locally on disk, ResourceCatalog must report the real .model3.json motions
+    const cachedModelDir = path.join(resourcesDir, 'models', 'cloud', '05minori_swim', '05minori_swimsuit')
+    fs.mkdirSync(path.join(cachedModelDir, 'motions'), { recursive: true })
+    fs.writeFileSync(
+      path.join(cachedModelDir, 'motions', 'w-cached-only.motion3.json'),
+      JSON.stringify({ Version: 3, Curves: [] })
+    )
+    fs.writeFileSync(
+      path.join(cachedModelDir, '05minori_swimsuit.model3.json'),
+      JSON.stringify({
+        Version: 3,
+        FileReferences: {
+          Motions: {
+            'w-cached-only': [{ File: 'motions/w-cached-only.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }],
+            'w-missing-file': [{ File: 'motions/w-missing-file.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }]
+          }
+        }
+      })
+    )
+    rc.invalidate()
+    const cachedEntry = rc.findModel('05minori_swim')
+    assert.deepEqual(
+      cachedEntry?.motions,
+      ['w-cached-only'],
+      'ResourceCatalog must reflect real cached model3.json motions and skip missing files'
+    )
   } finally {
     fs.rmSync(resourcesDir, { recursive: true, force: true })
   }

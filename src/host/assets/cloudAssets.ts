@@ -28,7 +28,12 @@ import {
   transcodeAudioFile,
   writeAudioLoopSidecar
 } from './media'
-import { CANONICAL_ASSET_SITES, downloadModel, type MoesekaiIndexEntry } from './moesekai'
+import {
+  CANONICAL_ASSET_SITES,
+  downloadModel,
+  live2dMotionSetCandidateNames,
+  type MoesekaiIndexEntry
+} from './moesekai'
 
 const IMAGE_EXTENSIONS = ['.webp', '.png', '.jpg', '.jpeg']
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.flac']
@@ -605,22 +610,90 @@ export async function resolveGlobalBgm(
   }
 }
 
+const MOTION_BUNDLES_SIDECAR = '.motion-bundles.json'
+
+function expectedModelBundles(entry: CloudModelEntry): string[] {
+  const bundles = [...(entry.motionBundles ?? [])].filter(Boolean)
+  const seen = new Set(bundles)
+  if (entry.id.startsWith('v2_') || bundles.some((b) => b.startsWith('live2d/motion/v2_'))) {
+    for (const candidate of live2dMotionSetCandidateNames(entry.id)) {
+      if (candidate.startsWith('v2_')) continue
+      const bundle = `live2d/motion/${candidate}`
+      if (!seen.has(bundle)) {
+        seen.add(bundle)
+        bundles.push(bundle)
+      }
+    }
+  }
+  return bundles
+}
+
+function modelNeedsRepair(entry: CloudModelEntry, modelJsonPath: string): boolean {
+  if (!fs.existsSync(modelJsonPath)) return true
+  const modelDir = path.dirname(modelJsonPath)
+  try {
+    const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
+      FileReferences?: {
+        Moc?: string
+        Textures?: string[]
+        Motions?: Record<string, Array<{ File?: string }>>
+      }
+    }
+    const refs = model3?.FileReferences
+    if (!refs) return true
+    if (refs.Moc && !fs.existsSync(path.join(modelDir, ...refs.Moc.split('/')))) {
+      return true
+    }
+    for (const tex of refs.Textures ?? []) {
+      if (tex && !fs.existsSync(path.join(modelDir, ...tex.split('/')))) {
+        return true
+      }
+    }
+    const indexed = refs.Motions ?? {}
+    for (const motionName of entry.motions ?? []) {
+      const fileRel = Array.isArray(indexed[motionName]) ? indexed[motionName][0]?.File : undefined
+      if (!fileRel || !fs.existsSync(path.join(modelDir, ...fileRel.split('/')))) {
+        return true
+      }
+    }
+
+    const expectedRequired = (entry.motionBundles ?? []).filter(Boolean)
+    if (expectedRequired.length > 0 || entry.id.startsWith('v2_')) {
+      const sidecarPath = path.join(modelDir, MOTION_BUNDLES_SIDECAR)
+      if (!fs.existsSync(sidecarPath)) return true
+      const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8')) as { bundles?: string[] }
+      const recorded = new Set(Array.isArray(sidecar?.bundles) ? sidecar.bundles : [])
+      for (const bundle of expectedRequired) {
+        if (!recorded.has(bundle)) return true
+      }
+    }
+    return false
+  } catch {
+    return true
+  }
+}
+
 async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Promise<string> {
   const modelsDir = path.join(ctx.resourcesDir, 'models', 'cloud')
   const modelJson = path.join(ctx.resourcesDir, 'models', ...entry.path.split('/'))
-  if (fs.existsSync(modelJson)) return entry.path
+  if (!modelNeedsRepair(entry, modelJson)) return entry.path
 
   const lockKey = `${path.resolve(ctx.resourcesDir)}::${entry.id}`
   const existing = modelLocks.get(lockKey)
   if (existing) return existing
   const task = (async () => {
+    if (!modelNeedsRepair(entry, modelJson)) return entry.path
     if (!ctx.catalog) throw new Error('cloud catalog unavailable')
-    ctx.logger.info(`[Cloud] 下载 Live2D 模型 ${entry.id}（${entry.name}）…`)
+    const repairing = fs.existsSync(modelJson)
+    ctx.logger.info(
+      `[Cloud] ${repairing ? '校验并补全' : '下载'} Live2D 模型 ${entry.id}（${entry.name}）…`
+    )
+    const bundles = expectedModelBundles(entry)
     const indexEntry: MoesekaiIndexEntry = {
       id: entry.id,
       bundle: entry.bundle,
-      motion: entry.motionBundles[0] ?? null,
-      motions: entry.motionBundles,
+      motion: bundles[0] ?? null,
+      motions: entry.motionBundles?.length ? entry.motionBundles : bundles,
       characterId: entry.characterId
     }
     const result = await downloadModel(
@@ -676,19 +749,32 @@ export async function resolveStoryCloudAssets(
 
   for (const model of story.models) {
     const ref = model.model
-    if (localModelExists(ctx.resourcesDir, ref)) continue
-    const entry = ref.startsWith('cloud/')
+    const cloudEntry = ref.startsWith('cloud/')
       ? (ctx.catalog.models.find(
           (item) =>
             ref === item.path || ref === `cloud/${item.id}` || ref.startsWith(`cloud/${item.id}/`)
         ) ?? findCloudModel(ctx.catalog, ref))
       : findCloudModel(ctx.catalog, ref)
-    if (!entry) {
+    if (localModelExists(ctx.resourcesDir, ref)) {
+      if (ref.startsWith('cloud/') && cloudEntry) {
+        const localPath = path.join(ctx.resourcesDir, 'models', ...ref.split('/'))
+        if (modelNeedsRepair(cloudEntry, localPath)) {
+          try {
+            model.model = await ensureModel(cloudEntry, ctx)
+            result.models++
+          } catch (error) {
+            ctx.logger.warn(`[Cloud] 模型 ${ref} 动作补全失败，保留本地缓存：${String(error)}`)
+          }
+        }
+      }
+      continue
+    }
+    if (!cloudEntry) {
       result.missing.push(`model:${ref}`)
       continue
     }
     try {
-      model.model = await ensureModel(entry, ctx)
+      model.model = await ensureModel(cloudEntry, ctx)
       result.models++
     } catch (error) {
       ctx.logger.error(`[Cloud] 模型 ${ref} 物化失败：${String(error)}`)
@@ -757,9 +843,10 @@ export async function resolveStoryCloudAssets(
     if (snippet.type === 'CostumeChange') {
       const targetModel = modelById.get(snippet.data.modelId)
       const costumeRef = targetModel?.costumes?.[snippet.data.costume] ?? snippet.data.costume
-      if (costumeRef && !localModelExists(ctx.resourcesDir, costumeRef)) {
+      if (costumeRef) {
         const entry = findCloudModel(ctx.catalog, costumeRef)
-        if (entry) {
+        const isLocal = localModelExists(ctx.resourcesDir, costumeRef)
+        if (entry && (!isLocal || (costumeRef.startsWith('cloud/') && modelNeedsRepair(entry, path.join(ctx.resourcesDir, 'models', ...costumeRef.split('/')))))) {
           try {
             const resolved = await ensureModel(entry, ctx)
             if (targetModel) {

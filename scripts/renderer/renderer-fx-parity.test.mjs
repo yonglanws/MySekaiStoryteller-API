@@ -47,6 +47,18 @@ function createLoader(extraMocks = new Map()) {
   class Container {
     constructor() {
       this.children = []
+      this.visible = true
+      this.alpha = 1
+      this.x = 0
+      this.y = 0
+      this.scale = {
+        x: 1,
+        y: 1,
+        set(x, y = x) {
+          this.x = x
+          this.y = y
+        }
+      }
       this.position = {
         x: 0,
         y: 0,
@@ -57,10 +69,12 @@ function createLoader(extraMocks = new Map()) {
       }
       this.filters = null
     }
-    addChild(child) {
-      this.children.push(child)
-      child.parent = this
-      return child
+    addChild(...items) {
+      for (const child of items) {
+        this.children.push(child)
+        child.parent = this
+      }
+      return items[0]
     }
     removeChild(child) {
       const idx = this.children.indexOf(child)
@@ -69,16 +83,61 @@ function createLoader(extraMocks = new Map()) {
       return child
     }
   }
-  class Sprite extends Container {}
-  class Text extends Container {
+  class Sprite extends Container {
     constructor() {
       super()
-      this.text = ''
-      this.data = ''
+      this.anchor = {
+        x: 0,
+        y: 0,
+        set(x, y = x) {
+          this.x = x
+          this.y = y
+        }
+      }
+      this.width = 100
+      this.height = 100
     }
   }
-  class TextStyle {}
-  class Graphics extends Container {}
+  class Text extends Container {
+    constructor(text = '', style = {}) {
+      super()
+      this.style = style
+      this.text = text
+      this.anchor = {
+        x: 0,
+        y: 0,
+        set(x, y = x) {
+          this.x = x
+          this.y = y
+        }
+      }
+    }
+  }
+  class TextStyle {
+    constructor(opts = {}) {
+      Object.assign(this, opts)
+    }
+  }
+  class Graphics extends Container {
+    clear() {
+      return this
+    }
+    beginFill() {
+      return this
+    }
+    lineStyle() {
+      return this
+    }
+    drawRect() {
+      return this
+    }
+    drawRoundedRect() {
+      return this
+    }
+    endFill() {
+      return this
+    }
+  }
   class Live2DModel extends Container {
     destroy() {
       this.destroyed = true
@@ -484,7 +543,7 @@ test('VisualEffectManager detaches Ticker.shared listener on destroy and syncs f
   assert.equal(model.filters.map((f) => f.tag).join(','), 'alpha')
 })
 
-test('UILayer keeps UITalkShowed true during 200ms hideTextBackground fade and resets immediately for 0ms', async () => {
+test('UILayer sets UITalkShowed false immediately on hideTextBackground and lets showTextBackground reopen cleanly', async () => {
   const pendingHides = []
   const fadableMock = () => ({
     default: class {
@@ -527,12 +586,23 @@ test('UILayer keeps UITalkShowed true during 200ms hideTextBackground fade and r
   assert.equal(ui.UITalkShowed, true)
 
   const hiding = ui.hideTextBackground(200)
+  assert.equal(
+    ui.UITalkShowed,
+    false,
+    'UITalkShowed must reset immediately when hideTextBackground begins'
+  )
+
+  // Overlapping showTextBackground while hideTextBackground is still fading must keep UITalkShowed true
+  await ui.showTextBackground(200)
   assert.equal(ui.UITalkShowed, true)
   while (pendingHides.length > 0) pendingHides.shift()()
   await hiding
-  assert.equal(ui.UITalkShowed, false)
+  assert.equal(
+    ui.UITalkShowed,
+    true,
+    'stale hideTextBackground completion must not clobber active UITalkShowed'
+  )
 
-  await ui.showTextBackground(200)
   await ui.hideTextBackground(0)
   assert.equal(ui.UITalkShowed, false)
 })
@@ -566,4 +636,210 @@ test('GpuYuv420Converter dimension check and VideoExportManager lipScaleForSnipp
   ]
   assert.equal(mgr.lipScaleForSnippet(snippets, 0), 1.25)
   assert.equal(mgr.lipScaleForSnippet(snippets, 1), 1)
+})
+
+test('FadableSprite, UIText, UISpeakerText, and AdvancedModel eliminate steady-state AlphaFilter and cancel overlapping fades', async () => {
+  const loader = createLoader()
+  const { AlphaFilter, Filter } = loader
+
+  // Drive controllable linear steps so hide(200) and show(200) overlap mid-flight
+  const activeTweens = []
+  loader.animation.linear = (cb, durationMs) => {
+    if (durationMs <= 0) {
+      cb(1)
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      activeTweens.push({ cb, resolve })
+    })
+  }
+
+  const UILayer = loader.load('layers/UILayer.ts').default
+  const AdvancedModel = loader.load('model/AdvancedModel.ts').default
+
+  const ui = new UILayer({ screen: { width: 1920, height: 1080 }, stage: { addChild() {} } })
+  const bg = ui.textBackgroundSprite
+  const underline = ui.textUnderlineSprite
+  const words = ui.textSprite
+  const speaker = ui.textSpeakerSprite
+
+  // 1. Steady-state opaque (alpha >= 0.999): AlphaFilter MUST be detached (filters === null)
+  const open1 = ui.showTextBackground(200)
+  assert.ok(bg.filters?.[0] instanceof AlphaFilter, 'AlphaFilter attached during fade-in')
+  for (const t of activeTweens.splice(0)) {
+    t.cb(0.5)
+    t.cb(1)
+    t.resolve()
+  }
+  await open1
+  assert.equal(bg.visible, true)
+  assert.equal(bg.filters, null, 'opaque UITextBackground must clear filters')
+  assert.equal(underline.filters, null, 'opaque UITextUnderline must clear filters')
+  assert.equal(words.filters, null, 'opaque UIText must clear filters')
+  assert.equal(speaker.filters, null, 'opaque UISpeakerText must clear filters')
+
+  // 2. Overlapping hideTextBackground(200) interrupted mid-fade by showTextBackground(200)
+  const hideTask = ui.hideTextBackground(200)
+  assert.equal(ui.UITalkShowed, false)
+  const hideTweens = activeTweens.splice(0)
+  // Step hide halfway (alpha = 0.5)
+  for (const t of hideTweens) t.cb(0.5)
+  assert.ok(bg.filters?.[0] instanceof AlphaFilter)
+  assert.ok(Math.abs(bg.filters[0].alpha - 0.5) < 1e-6)
+
+  // Interrupt with next Talk's showTextBackground(200)
+  const reopenTask = ui.showTextBackground(200)
+  assert.equal(ui.UITalkShowed, true)
+  const showTweens = activeTweens.splice(0)
+
+  // Stale hide completes to 100% -> MUST NOT clobber alpha to 0 or set visible=false!
+  for (const t of hideTweens) {
+    t.cb(1)
+    t.resolve()
+  }
+  await hideTask
+  assert.equal(bg.visible, true, 'stale hide must not hide active FadableSprite')
+  assert.equal(words.visible, true, 'stale hide must not hide active UIText')
+  assert.equal(ui.UITalkShowed, true, 'stale hide must not reset UITalkShowed')
+
+  // Reopen starts smoothly from 0.5 -> 1.0 and detaches AlphaFilter at steady-state
+  for (const t of showTweens) t.cb(0)
+  assert.ok(Math.abs(bg.filters[0].alpha - 0.5) < 1e-6, 'show must resume from current alpha 0.5')
+  for (const t of showTweens) {
+    t.cb(1)
+    t.resolve()
+  }
+  await reopenTask
+  assert.equal(bg.visible, true)
+  assert.equal(bg.filters, null, 'reopened FadableSprite clears AlphaFilter at alpha=1')
+  assert.equal(words.filters, null, 'reopened UIText clears AlphaFilter at alpha=1')
+  assert.equal(speaker.filters, null, 'reopened UISpeakerText clears AlphaFilter at alpha=1')
+
+  // 3. AdvancedModel removes AlphaFilter at steady-state opaque/hidden while preserving non-alpha filters
+  const model = Object.create(AdvancedModel.prototype)
+  model.destroyed = false
+  model.visible = true
+  model.inHologram = false
+  model.alphaFilter = new AlphaFilter(0)
+  model.modelOpacity = 0
+  model.filters = [model.alphaFilter]
+  model.characterShaderFilter = new Filter()
+  model.ambientColorFilter = null
+  model.visualEffectManager = { getActiveFilters: () => [], applyEffect() {}, disableAll() {} }
+  model.blinkState = { nextBlinkAt: 0 }
+  model.cancelPendingActions = () => {}
+  model.isVisibilityCurrent = () => true
+  model.syncModelFilters()
+  assert.equal(model.filters.length, 2, 'initial alpha=0 with visible=true keeps AlphaFilter + shaderFilter')
+
+  const modelShow = model.show(200, false)
+  const modelShowTweens = activeTweens.splice(0)
+  for (const t of modelShowTweens) {
+    t.cb(0.5)
+    assert.equal(model.filters[0], model.alphaFilter, 'AlphaFilter active during fade')
+    t.cb(1)
+    t.resolve()
+  }
+  await modelShow
+  assert.equal(model.visible, true)
+  assert.equal(model.filters.length, 1)
+  assert.equal(
+    model.filters[0],
+    model.characterShaderFilter,
+    'opaque AdvancedModel detaches AlphaFilter while preserving characterShaderFilter'
+  )
+
+  model.setCharacterShaderFilter(null)
+  assert.equal(model.filters, null, 'opaque AdvancedModel with no other filters sets filters=null')
+
+  const modelHide = model.hide(200)
+  const modelHideTweens = activeTweens.splice(0)
+  for (const t of modelHideTweens) {
+    t.cb(0.5)
+    assert.equal(model.filters[0], model.alphaFilter, 'AlphaFilter re-attached during hide fade')
+    t.cb(1)
+    t.resolve()
+  }
+  await modelHide
+  assert.equal(model.visible, false)
+  assert.equal(model.filters, null, 'hidden AdvancedModel clears AlphaFilter')
+
+  // 4. TalkSnippet closeWindowOnFinish followed immediately by next Talk keeps window visible & opaque
+  const TalkSnippet = loader.load('snippets/TalkSnippet.ts').default
+  loader.animation.linear = async (cb, durationMs) => {
+    if (durationMs <= 0) {
+      cb(1)
+      return
+    }
+    return new Promise((resolve) => {
+      activeTweens.push({ cb, resolve })
+    })
+  }
+  const ui2 = new UILayer({ screen: { width: 1920, height: 1080 }, stage: { addChild() {} } })
+  const talkApp = {
+    isExporting: true,
+    lastSnippetActualDurationMs: 100,
+    currentTalkLipSync: null,
+    currentTalkStartedAtMs: 0,
+    ttsManager: { isTTSEnabled: () => false },
+    videoExportManager: { signal: new AbortController().signal },
+    layerUI: ui2,
+    layerModel: {
+      bringToFront: () => {},
+      isModelShown: () => true,
+      isModelVisible: () => true
+    },
+    getModelById: () => ({
+      metadata: { id: 1 },
+      destroyed: false,
+      actionSignal: new AbortController().signal,
+      internalModel: { on() {}, off() {} },
+      releaseMouth() {},
+      setMouthOpening() {},
+      applyCharacterAction: async () => {}
+    })
+  }
+  const flushUntil = async (promise) => {
+    let settled = false
+    void promise.finally(() => {
+      settled = true
+    })
+    for (let step = 0; step < 50 && !settled; step++) {
+      for (const t of activeTweens.splice(0)) {
+        t.cb(1)
+        t.resolve()
+      }
+      await new Promise((r) => setImmediate(r))
+    }
+    await promise
+  }
+  const t1 = new TalkSnippet(talkApp, {
+    type: 'Talk',
+    delay: 0,
+    data: { speaker: '瑞希', content: 'A', modelId: 1, voice: '', closeWindowOnFinish: true }
+  }).runSnippet()
+  await flushUntil(t1)
+  // Talk 1 fired un-awaited hideTextBackground(200); Talk 2 starts immediately before hide finishes
+  assert.equal(ui2.UITalkShowed, false)
+  const pendingCloseTweens = activeTweens.splice(0)
+  assert.ok(pendingCloseTweens.length > 0, 'hideTextBackground(200) should be in flight')
+  for (const t of pendingCloseTweens) t.cb(0.4)
+
+  const t2 = new TalkSnippet(talkApp, {
+    type: 'Talk',
+    delay: 0,
+    data: { speaker: '绘名', content: 'B', modelId: 1, voice: '' }
+  }).runSnippet()
+  await new Promise((r) => setImmediate(r))
+  // Stale close finishes now — must NOT hide Talk 2's window
+  for (const t of pendingCloseTweens) {
+    t.cb(1)
+    t.resolve()
+  }
+  await flushUntil(t2)
+  assert.equal(ui2.UITalkShowed, true)
+  assert.equal(ui2.textBackgroundSprite.visible, true)
+  assert.equal(ui2.textBackgroundSprite.filters, null)
+  assert.equal(ui2.textSprite.visible, true)
+  assert.equal(ui2.textSprite.filters, null)
 })

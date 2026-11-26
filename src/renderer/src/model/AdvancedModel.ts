@@ -293,7 +293,8 @@ export default class AdvancedModel extends Live2DModel {
     this.firstBodyCue = true
 
     const alpha_filter = new AlphaFilter(0)
-    alpha_filter.resolution = 2
+    this.alphaFilter = alpha_filter
+    this.modelOpacity = 0
 
     this.filters = [alpha_filter]
 
@@ -1545,7 +1546,7 @@ export default class AdvancedModel extends Live2DModel {
     if (!manager.isFinished() || manager.playing) return
     this.bodyChainArmed = false
     if (this.bodyChainGeneration !== this.channelGeneration[0]) return
-    const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
+    const alpha = this.getCurrentOpacity()
     if (alpha <= 0.01) return
     const gapMs = AdvancedModel.idleChainGapMs
     if (gapMs > 0) {
@@ -2279,8 +2280,9 @@ export default class AdvancedModel extends Live2DModel {
 
   /** 直接设置淡入淡出 alpha；用于新 Appear 取消后台退场的残留淡出。 */
   public setOpacity(alpha: number): void {
-    const alphaFilter = this.filters?.[0] as AlphaFilter | undefined
-    if (alphaFilter) alphaFilter.alpha = Math.max(0, Math.min(1, alpha))
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0))
+    this.visible = clamped > 0
+    this.applyOpacityStep(clamped)
   }
 
   public async show(
@@ -2301,40 +2303,45 @@ export default class AdvancedModel extends Live2DModel {
 
     // 官方 FadeOpacityCoroutine 从当前不透明度补间到目标值；退场被新的 Appear
     // 打断时从头算 0 会闪一帧全透明。
-    const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
+    const startAlpha = this.getCurrentOpacity()
+    this.visible = true
+    this.modelOpacity = startAlpha
+    this.syncModelFilters()
     // 官方 FadeOpacityCoroutine 按故事帧推进；绝对帧模式保证 act/act+frames 的边界
     // 不会因为累加步进多等一帧（Clear 766.667→783ms 的根因）。
     const fadeStartMs = startMs ?? (typeof performance !== 'undefined' ? performance.now() : 0)
     await AnimationManager.linear(
       (progress) => {
         if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
-        const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-        alpha_filter.alpha = startAlpha + (1 - startAlpha) * progress
+        this.applyOpacityStep(startAlpha + (1 - startAlpha) * progress, true)
       },
       time,
       false,
       { startMs: fadeStartMs, frames: msToFrameCount(time) }
     )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+    this.applyOpacityStep(1, false)
 
     this.lastChangeBlinkTime = performance.now()
   }
 
   public async hide(time: number, generation?: number, startMs?: number): Promise<void> {
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
-    const startAlpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 1
+    const startAlpha = this.getCurrentOpacity()
     const fadeStartMs = startMs ?? (typeof performance !== 'undefined' ? performance.now() : 0)
     await AnimationManager.linear(
       (progress) => {
         if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
-        const alpha_filter: AlphaFilter = this.filters![0] as AlphaFilter
-        alpha_filter.alpha = startAlpha * (1 - progress)
+        this.applyOpacityStep(startAlpha * (1 - progress), true)
       },
       time,
       false,
       { startMs: fadeStartMs, frames: msToFrameCount(time) }
     )
     if (generation !== undefined && !this.isVisibilityCurrent(generation)) return
+
+    this.visible = false
+    this.applyOpacityStep(0, false)
 
     if (this.inHologram) {
       this.inHologram = false
@@ -2463,6 +2470,7 @@ export default class AdvancedModel extends Live2DModel {
   }
 
   private alphaFilter: AlphaFilter | null = null
+  private modelOpacity: number | undefined = undefined
   private characterShaderFilter: Filter | null = null
   private ambientColorFilter: Filter | null = null
   private basePositionBeforeShake: { x: number; y: number } | null = null
@@ -2499,26 +2507,68 @@ export default class AdvancedModel extends Live2DModel {
     this.activeCostumeName = name
   }
 
+  private getActiveVfxFilters(): Filter[] {
+    const vfxFilters = (
+      this.visualEffectManager as unknown as { getActiveFilters?: () => Filter[] } | undefined
+    )?.getActiveFilters?.()
+    return Array.isArray(vfxFilters) ? vfxFilters : []
+  }
+
   private resolveAlphaFilter(): AlphaFilter | null {
     if (!this.alphaFilter) {
-      const existing = this.filters?.find((f): f is AlphaFilter => f instanceof AlphaFilter)
+      const vfxFilters = this.getActiveVfxFilters()
+      const existing = this.filters?.find(
+        (f): f is AlphaFilter =>
+          f instanceof AlphaFilter ||
+          (f !== this.characterShaderFilter &&
+            f !== this.ambientColorFilter &&
+            !vfxFilters.includes(f) &&
+            typeof (f as { alpha?: unknown })?.alpha === 'number')
+      )
       if (existing) this.alphaFilter = existing
     }
     return this.alphaFilter
   }
 
+  public getCurrentOpacity(): number {
+    const alphaFilter = this.resolveAlphaFilter()
+    if (alphaFilter && this.filters?.includes(alphaFilter)) {
+      return Math.max(0, Math.min(1, alphaFilter.alpha))
+    }
+    if (this.modelOpacity !== undefined) {
+      return this.modelOpacity
+    }
+    return this.visible ? 1 : 0
+  }
+
+  private shouldAttachAlphaFilter(alphaFilter: AlphaFilter): boolean {
+    const opacity = this.modelOpacity ?? alphaFilter.alpha
+    if (opacity >= 0.999) return false
+    if (opacity <= 0 && !this.visible) return false
+    return true
+  }
+
+  private applyOpacityStep(alpha: number, forceFilterWrite = false): void {
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0))
+    this.modelOpacity = clamped
+    let alphaFilter = this.resolveAlphaFilter()
+    if (!alphaFilter && clamped > 0 && clamped < 0.999) {
+      alphaFilter = new AlphaFilter(clamped)
+      this.alphaFilter = alphaFilter
+    }
+    if (alphaFilter && (forceFilterWrite || alphaFilter.alpha !== clamped)) {
+      alphaFilter.alpha = clamped
+    }
+    this.syncModelFilters()
+  }
+
   public syncModelFilters(): void {
     const alpha = this.resolveAlphaFilter()
-    const list: Filter[] = alpha ? [alpha] : []
+    const list: Filter[] = alpha && this.shouldAttachAlphaFilter(alpha) ? [alpha] : []
     if (this.characterShaderFilter) list.push(this.characterShaderFilter)
     if (this.ambientColorFilter) list.push(this.ambientColorFilter)
-    const vfxFilters = (
-      this.visualEffectManager as unknown as { getActiveFilters?: () => Filter[] } | undefined
-    )?.getActiveFilters?.()
-    if (Array.isArray(vfxFilters)) {
-      for (const effectFilter of vfxFilters) {
-        if (!list.includes(effectFilter)) list.push(effectFilter)
-      }
+    for (const effectFilter of this.getActiveVfxFilters()) {
+      if (!list.includes(effectFilter)) list.push(effectFilter)
     }
     this.filters = list.length > 0 ? list : null
   }

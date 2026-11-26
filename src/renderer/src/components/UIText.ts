@@ -106,6 +106,7 @@ export default class UIText extends Text {
   private currentFontSizeRef: number = WORDS.fontSize
   private _data: string = ''
   private animGen = 0
+  private readonly alphaFilter = new AlphaFilter(0)
 
   constructor(screen_width: number, screen_height: number) {
     const k = Math.min(screen_width / SSE_UI_SPEC.refWidth, screen_height / SSE_UI_SPEC.refHeight)
@@ -131,10 +132,7 @@ export default class UIText extends Text {
     this.frameX = WORDS.x * k
     this.frameY = WORDS.y * k
     this.syncPosition(WORDS.fontSize)
-
-    const alpha_filter = new AlphaFilter(0)
-    alpha_filter.resolution = 2
-    this.filters = [alpha_filter]
+    this.filters = null
   }
 
   public get data(): string {
@@ -169,37 +167,72 @@ export default class UIText extends Text {
     this.syncPosition(sizeRef)
   }
 
+  private getCurrentOpacity(): number {
+    if (!this.visible) return 0
+    if (this.filters?.includes(this.alphaFilter)) {
+      return Math.max(0, Math.min(1, this.alphaFilter.alpha))
+    }
+    return 1
+  }
+
+  private syncOpacity(alpha: number): void {
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(alpha) ? alpha : 0))
+    this.alphaFilter.alpha = clamped
+    if (clamped <= 0) {
+      this.visible = false
+      this.filters = null
+    } else if (clamped >= 0.999) {
+      this.visible = true
+      this.filters = null
+    } else {
+      this.visible = true
+      if (this.filters?.[0] !== this.alphaFilter) {
+        this.filters = [this.alphaFilter]
+      }
+    }
+  }
+
   public async show(time: number): Promise<void> {
     const gen = ++this.animGen
     this.syncPosition(this.currentFontSizeRef)
-    this.visible = true
-    const alphaFilter = this.filters![0] as AlphaFilter
-    alphaFilter.alpha = time <= 0 ? 1 : 0
-    if (time > 0) {
-      await AnimationManager.linear((progress) => {
-        if (gen !== this.animGen) return
-        alphaFilter.alpha = progress
-      }, time)
-      if (gen === this.animGen) alphaFilter.alpha = 1
+    if (time <= 0) {
+      this.syncOpacity(1)
+      return
     }
+    const startAlpha = this.getCurrentOpacity()
+    if (startAlpha < 0.999) {
+      this.alphaFilter.alpha = startAlpha
+      this.visible = true
+      if (this.filters?.[0] !== this.alphaFilter) {
+        this.filters = [this.alphaFilter]
+      }
+    } else {
+      this.syncOpacity(1)
+    }
+    await AnimationManager.linear((progress) => {
+      if (gen !== this.animGen) return
+      this.syncOpacity(startAlpha + (1 - startAlpha) * progress)
+    }, time)
+    if (gen === this.animGen) this.syncOpacity(1)
   }
 
   public async hide(time: number): Promise<void> {
     const gen = ++this.animGen
-    const alphaFilter = this.filters![0] as AlphaFilter
     if (time <= 0) {
-      alphaFilter.alpha = 0
-      this.visible = false
+      this.syncOpacity(0)
       return
     }
-    const from = alphaFilter.alpha
+    const from = this.getCurrentOpacity()
+    if (from <= 0) {
+      this.syncOpacity(0)
+      return
+    }
     await AnimationManager.linear((progress) => {
       if (gen !== this.animGen) return
-      alphaFilter.alpha = from * (1 - progress)
+      this.syncOpacity(from * (1 - progress))
     }, time)
     if (gen === this.animGen) {
-      alphaFilter.alpha = 0
-      this.visible = false
+      this.syncOpacity(0)
     }
   }
 
@@ -209,6 +242,7 @@ export default class UIText extends Text {
    */
   public async startDisplayContent(typingLength = visibleTextLength(this.data)): Promise<void> {
     const gen = ++this.animGen
+    this.syncOpacity(1)
     this.applyAutoSize(this.data)
     // 排版换行不计入官方 4 帧/字；长句被 sanitizeDisplayText 折行后仍保持原速。
     const contentLength = visibleTextLength(this.data)
