@@ -34,11 +34,23 @@ import {
 import { hasSpokenStageDirectionLeak, isStageDirectionParenthetical } from './dialogueLinter'
 import {
   evaluateActingLineMatch,
+  facialRoleToTenseState,
   inspectModelFacial,
+  inspectModelMotion,
+  isCalmReassureResolution,
   isFacialCompatibleWithLine,
+  isMotionCompatibleWithLine,
+  isPositiveOnlyFacial,
+  isSmileLikeFacial,
   isSpecialOrStandingMotion,
+  pickListenerFallbackFacial,
+  pickMoodMatchedFacial,
+  pickMoodMatchedMotion,
   recommendActingForLine,
-  type DramaticContextMood
+  updateSceneTenseAfterTalk,
+  type ActorTenseState,
+  type DramaticContextMood,
+  type SceneTenseTracker
 } from './facialSemantics'
 import { characterActingProfile } from './personas'
 import { hasZeroWidthChars, stripZeroWidthChars } from './ttsText'
@@ -640,6 +652,77 @@ function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): n
   }
 }
 
+function isFadeOutOrClearTransition(snippet: JsonRecord): boolean {
+  const kind = str(snippet.type)
+  const data = isRecord(snippet.data) ? snippet.data : {}
+  if (kind === 'BlackOut' || kind === 'SekaiOut') return true
+  if (kind === 'SideFade' && str(data.mode, 'out').toLowerCase() === 'out') return true
+  return false
+}
+
+/**
+ * 判断片段是否为退场/转场前将被 `<400ms` 打断的孤立短 `Motion`：
+ * - 非多拍/长时（`duration >= 0.6` 或 `actions.length >= 2`）独立动作表演片段；
+ * - 属于句后/栅栏后独立执行（非官方 `wait: false` 句中叠播）；
+ * - 之后在无任何 `Talk` 或 `Wait >= 600ms` 的情况下紧接同角色 `LayoutClear` 或 `BlackOut` / `SideFade Out` / `SekaiOut`。
+ */
+export function isTrailingInterruptedMotionSnippet(snippets: JsonRecord[], index: number): boolean {
+  const snippet = snippets[index]
+  if (!isRecord(snippet) || str(snippet.type) !== 'Motion') return false
+  const data = isRecord(snippet.data) ? snippet.data : {}
+  const actions = Array.isArray(data.actions) ? (data.actions as JsonRecord[]) : []
+  const durationSec = num(data.duration, 0)
+  if (actions.length >= 2 || durationSec >= 0.6) return false
+
+  const targetIds = new Set<number>()
+  const mainId = num(data.modelId, -1)
+  if (mainId !== -1) targetIds.add(mainId)
+  for (const act of actions) {
+    if (!isRecord(act)) continue
+    const aid = num(act.modelId, mainId)
+    if (aid !== -1) targetIds.add(aid)
+  }
+  if (targetIds.size === 0) return false
+
+  // 若是紧随未收窗 Talk 后的 wait:false 句中叠加动作（如官方 event_145_08 演出），不视作尾部短打断
+  const hasFence = snippetHasPreFence(
+    snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+  )
+  if (!hasFence) {
+    for (let k = index - 1; k >= 0; k--) {
+      const prev = snippets[k]
+      const pKind = str(prev?.type)
+      if (pKind === 'Motion' || pKind === 'PlaySe' || pKind === 'StopSe' || pKind === 'ChangeBgm' || pKind === 'BgmVolume') {
+        continue
+      }
+      if (pKind === 'Talk' && isRecord(prev.data) && prev.data.closeWindowOnFinish !== true) {
+        return false
+      }
+      break
+    }
+  }
+
+  let accumWaitMs = 0
+  for (let j = index + 1; j < snippets.length; j++) {
+    const next = snippets[j]
+    const nKind = str(next?.type)
+    const nData = isRecord(next?.data) ? next.data : {}
+    if (nKind === 'Talk') return false
+    if (nKind === 'Wait') {
+      accumWaitMs += Math.max(0, num(nData.duration, 0))
+      if (accumWaitMs >= 600) return false
+      continue
+    }
+    if (nKind === 'LayoutClear' && targetIds.has(num(nData.modelId, -1))) {
+      return true
+    }
+    if (isFadeOutOrClearTransition(next)) {
+      return true
+    }
+  }
+  return false
+}
+
 function isTransitionOrBreak(snippet: JsonRecord): boolean {
   const kind = str(snippet.type)
   const data = isRecord(snippet.data) ? snippet.data : {}
@@ -933,6 +1016,11 @@ export function lintOfficialStory(
           appearMotionClashCount += 1
         }
       }
+      if (isTrailingInterruptedMotionSnippet(snippets, i)) {
+        issues.push(
+          `snippets[${i}] 退场/转场前存在无后续台词的孤立短 Motion（${str(data.motion) || 'action'}），未播完即被清场/黑屏打断，应移除`
+        )
+      }
     } else if (kind === 'FlashbackIn') {
       flashbackOpen = true
     } else if (kind === 'FlashbackOut') {
@@ -1097,6 +1185,448 @@ export function lintOfficialStory(
   }
 }
 
+function resolveActorCatalogInfo(
+  story: JsonRecord,
+  modelId: number,
+  view?: CatalogView
+): { path?: string; facials: string[]; motions: string[]; restrained: boolean } {
+  const catalogModel = view?.modelById(modelId)
+  if (catalogModel) {
+    const promptF = view!.promptFacials(catalogModel)
+    const promptM = view!.promptMotions(catalogModel)
+    const facials = [...promptF, ...catalogModel.facials.filter((f) => !promptF.includes(f))]
+    const motions = [...promptM, ...catalogModel.motions.filter((m) => !promptM.includes(m))]
+    return {
+      path: catalogModel.path,
+      facials,
+      motions,
+      restrained: characterActingProfile(`${catalogModel.name} ${catalogModel.path}`).restrained
+    }
+  }
+  const models = Array.isArray(story.models) ? (story.models as JsonRecord[]) : []
+  const modelRec = models.find((m) => isRecord(m) && num(m.id, -1) === modelId)
+  const modelPath = modelRec ? str(modelRec.model) || undefined : undefined
+  const modelName = modelRec ? str(modelRec.name) : ''
+  return {
+    path: modelPath,
+    facials: [],
+    motions: [],
+    restrained: characterActingProfile(`${modelName} ${modelPath ?? ''}`).restrained
+  }
+}
+
+function updateActorStateOnTalkOrStage(
+  actorState: Map<number, ActorTenseState>,
+  modelId: number,
+  modelPath: string | undefined,
+  facial: string,
+  emotion?: string,
+  content?: string
+): void {
+  if (modelId === -1) return
+  const emo = (emotion ?? '').trim()
+  if (content !== undefined && isCalmReassureResolution(content, emo)) {
+    actorState.set(modelId, null)
+    return
+  }
+  if (emo === '生气') {
+    actorState.set(modelId, 'angry')
+    return
+  }
+  if (emo === '伤心' || emo === '害怕') {
+    const fRole = facial ? inspectModelFacial(modelPath, facial).role : 'other'
+    actorState.set(modelId, fRole === 'cry' || fRole === 'tearful_smile' ? 'cry' : 'sad')
+    return
+  }
+  if (!facial) return
+  const fRole = inspectModelFacial(modelPath, facial).role
+  const derived = facialRoleToTenseState(fRole)
+  if (derived) {
+    actorState.set(modelId, derived)
+  } else if (fRole === 'genuine_smile' || fRole === 'closed_smile' || fRole === 'playful') {
+    actorState.set(modelId, null)
+  }
+}
+
+function pickVerifiedReplacementMotion(
+  actorInfo: { path?: string; facials: string[]; motions: string[]; restrained: boolean },
+  params: {
+    modelId: number
+    content: string
+    emotion: string
+    prevTense: boolean
+    isListener: boolean
+    avoidMotion: string
+    fallbackMood: 'angry_frustration' | 'sad_regret' | 'awkward' | 'neutral'
+  },
+  view?: CatalogView
+): string {
+  const pool = actorInfo.motions.filter((m) => m !== params.avoidMotion && !isSpecialOrStandingMotion(m))
+  const rec = recommendActingForLine({
+    facials: actorInfo.facials,
+    motions: pool,
+    modelPath: actorInfo.path,
+    content: params.content,
+    emotion: params.emotion,
+    prevTense: params.prevTense,
+    isListener: params.isListener,
+    restrainedRole: actorInfo.restrained
+  })
+  const compat = rec.motions.find((m) =>
+    isMotionCompatibleWithLine({
+      motion: m,
+      modelPath: actorInfo.path,
+      emotion: params.emotion,
+      content: params.content,
+      prevTense: params.prevTense,
+      isListener: params.isListener,
+      restrainedRole: actorInfo.restrained
+    }).ok
+  )
+  const rawPick =
+    compat ||
+    pickMoodMatchedMotion(
+      pool,
+      params.fallbackMood,
+      actorInfo.path,
+      actorInfo.restrained,
+      [params.avoidMotion]
+    )
+  if (!rawPick) return ''
+  if (view && params.modelId !== -1) {
+    const choices = view.animationChoices(params.modelId, 'motion')
+    if (choices.size > 0) return view.canonicalAnimation(params.modelId, 'motion', rawPick) ?? ''
+  }
+  return rawPick
+}
+
+function repairActingHygieneInvariants(
+  story: JsonRecord,
+  view: CatalogView | undefined,
+  warn: (message: string) => void
+): void {
+  const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+
+  // A) 移除退场/黑屏前无后续台词的孤立短 Motion（避免 <400ms 被 LayoutClear/LayoutAppear 打断）
+  let removedTrailingMotions = 0
+  for (let i = snippets.length - 1; i >= 0; i--) {
+    if (isTrailingInterruptedMotionSnippet(snippets, i)) {
+      snippets.splice(i, 1)
+      removedTrailingMotions += 1
+    }
+  }
+  if (removedTrailingMotions > 0) {
+    warn(`[Linter] 已移除 ${removedTrailingMotions} 处退场/转场前将被打断的孤立短 Motion`)
+  }
+
+  // B) 语境限定动作校验、听者强制微笑防泄漏、以及紧张对峙强装欢快纠偏
+  const tenseTracker: SceneTenseTracker = { tense: false, calmRun: 0 }
+  const actorState = new Map<number, ActorTenseState>()
+  let repairedListenerSmiles = 0
+  let repairedMotions = 0
+  let repairedFacials = 0
+
+  for (let i = 0; i < snippets.length; i++) {
+    const snippet = snippets[i]
+    if (!isRecord(snippet) || !isRecord(snippet.data)) continue
+    const kind = str(snippet.type)
+    const data = snippet.data
+
+    if (isFadeOutOrClearTransition(snippet) || kind === 'ChangeBackgroundImage') {
+      tenseTracker.tense = false
+      tenseTracker.calmRun = 0
+      actorState.clear()
+      continue
+    }
+
+    if (kind === 'LayoutAppear' || kind === 'Move') {
+      const mid = num(data.modelId, -1)
+      const actorInfo = resolveActorCatalogInfo(story, mid, view)
+      const surrounding = findSurroundingTalkContext(snippets, i, mid, kind === 'LayoutAppear')
+      const mot = str(data.motion).trim()
+      if (mot) {
+        const mc = isMotionCompatibleWithLine({
+          motion: mot,
+          modelPath: actorInfo.path,
+          emotion: surrounding?.emotion ?? '',
+          content: surrounding?.content ?? '',
+          prevTense: tenseTracker.tense,
+          restrainedRole: actorInfo.restrained
+        })
+        if (!mc.ok) {
+          data.motion = pickVerifiedReplacementMotion(
+            actorInfo,
+            {
+              modelId: mid,
+              content: surrounding?.content ?? '',
+              emotion: surrounding?.emotion ?? '',
+              prevTense: tenseTracker.tense,
+              isListener: false,
+              avoidMotion: mot,
+              fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
+            },
+            view
+          )
+          repairedMotions += 1
+        }
+      }
+      updateActorStateOnTalkOrStage(actorState, mid, actorInfo.path, str(data.facial).trim())
+      continue
+    }
+
+    if (kind === 'Motion') {
+      const mid = num(data.modelId, -1)
+      const surrounding = findSurroundingTalkContext(snippets, i, mid, false)
+      const checkMotionTarget = (target: JsonRecord, targetId: number): void => {
+        const info = resolveActorCatalogInfo(story, targetId, view)
+        const mot = str(target.motion).trim()
+        if (mot) {
+          const mc = isMotionCompatibleWithLine({
+            motion: mot,
+            modelPath: info.path,
+            emotion: surrounding?.emotion ?? '',
+            content: surrounding?.content ?? '',
+            prevTense: tenseTracker.tense,
+            restrainedRole: info.restrained
+          })
+          if (!mc.ok) {
+            const rep = pickVerifiedReplacementMotion(
+              info,
+              {
+                modelId: targetId,
+                content: surrounding?.content ?? '',
+                emotion: surrounding?.emotion ?? '',
+                prevTense: tenseTracker.tense,
+                isListener: false,
+                avoidMotion: mot,
+                fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
+              },
+              view
+            )
+            if (rep) target.motion = rep
+            else delete target.motion
+            repairedMotions += 1
+          }
+        }
+        updateActorStateOnTalkOrStage(actorState, targetId, info.path, str(target.facial).trim())
+      }
+      checkMotionTarget(data, mid)
+      if (Array.isArray(data.actions)) {
+        for (const act of data.actions) {
+          if (!isRecord(act)) continue
+          checkMotionTarget(act, num(act.modelId, mid))
+        }
+      }
+      continue
+    }
+
+    if (kind !== 'Talk') continue
+
+    const speakerId = num(data.modelId, -1)
+    const content = str(data.content)
+    const emotion = str(data.emotion)
+    const isMonologue = isThinkingTalkSnippet(snippet)
+
+    const fixTarget = (target: JsonRecord, actorId: number, isListener: boolean): void => {
+      if (actorId === -1) return
+      const actorInfo = resolveActorCatalogInfo(story, actorId, view)
+      const facial = str(target.facial).trim()
+      const motion = str(target.motion).trim()
+
+      // 1) 听者情绪一致性：怒/悲/泣/严肃状态的听者在未和好前严禁瞬切 genuine_smile / closed_smile / playful / glad
+      if (isListener) {
+        const lState = actorState.get(actorId) ?? null
+        const isLockedTenseListener =
+          lState === 'angry' ||
+          lState === 'sad' ||
+          lState === 'cry' ||
+          lState === 'serious' ||
+          (lState === 'trouble' && tenseTracker.tense)
+        if (isLockedTenseListener && lState) {
+          const isListenerSmile =
+            facial &&
+            (isPositiveOnlyFacial(facial, actorInfo.path) ||
+              (lState === 'angry' && isSmileLikeFacial(facial, actorInfo.path)))
+          if (isListenerSmile) {
+            let repFacial =
+              actorInfo.facials.length > 0
+                ? pickListenerFallbackFacial(
+                    actorInfo.facials,
+                    lState,
+                    actorInfo.path,
+                    actorInfo.restrained
+                  )
+                : lState === 'sad' || lState === 'cry'
+                  ? 'face_sad_01'
+                  : lState === 'trouble'
+                    ? 'face_trouble_01'
+                    : 'face_serious_01'
+            if (view) {
+              const choices = view.animationChoices(actorId, 'facial')
+              if (choices.size > 0) {
+                repFacial = view.canonicalAnimation(actorId, 'facial', repFacial) ?? ''
+              }
+            }
+            if (repFacial && repFacial !== facial) {
+              target.facial = repFacial
+              repairedListenerSmiles += 1
+            }
+          }
+          if (motion) {
+            const mRole = inspectModelMotion(actorInfo.path, motion).role
+            if (mRole === 'glad' || mRole === 'playful' || mRole === 'greeting') {
+              const repMot = pickVerifiedReplacementMotion(
+                actorInfo,
+                {
+                  modelId: actorId,
+                  content,
+                  emotion,
+                  prevTense: true,
+                  isListener: true,
+                  avoidMotion: motion,
+                  fallbackMood:
+                    lState === 'angry' || lState === 'serious' ? 'angry_frustration' : 'sad_regret'
+                },
+                view
+              )
+              if (repMot) target.motion = repMot
+              else delete target.motion
+              repairedMotions += 1
+            }
+          }
+        }
+      }
+
+      // 2) 通用台词表情/动作兼容性（含 food/sleep/sing 上下文检查与对峙期强装欢快纠偏）
+      const curFacial = str(target.facial).trim()
+      if (
+        curFacial &&
+        !isFacialCompatibleWithLine({
+          facial: curFacial,
+          modelPath: actorInfo.path,
+          emotion,
+          content,
+          prevTense: tenseTracker.tense,
+          isMonologue: !isListener && isMonologue,
+          isListener,
+          restrainedRole: actorInfo.restrained
+        }).ok
+      ) {
+        const rec = recommendActingForLine({
+          facials: actorInfo.facials,
+          motions: actorInfo.motions,
+          modelPath: actorInfo.path,
+          content,
+          emotion,
+          prevTense: tenseTracker.tense,
+          isMonologue: !isListener && isMonologue,
+          isListener,
+          restrainedRole: actorInfo.restrained,
+          prevFacial: curFacial
+        })
+        let rep =
+          rec.facials.find((f) => f !== curFacial) ??
+          (actorInfo.facials.length > 0
+            ? pickMoodMatchedFacial(
+                actorInfo.facials,
+                tenseTracker.tense ? (emotion === '开心' && !isListener ? 'wry_smile' : 'serious') : 'neutral',
+                actorInfo.path,
+                actorInfo.restrained
+              )
+            : '')
+        if (rep && view) {
+          const choices = view.animationChoices(actorId, 'facial')
+          if (choices.size > 0) rep = view.canonicalAnimation(actorId, 'facial', rep) ?? ''
+        }
+        if (rep && rep !== curFacial) {
+          target.facial = rep
+          repairedFacials += 1
+        }
+      }
+
+      const curMotion = str(target.motion).trim()
+      if (
+        curMotion &&
+        !isMotionCompatibleWithLine({
+          motion: curMotion,
+          modelPath: actorInfo.path,
+          emotion,
+          content,
+          prevTense: tenseTracker.tense,
+          isListener,
+          restrainedRole: actorInfo.restrained
+        }).ok
+      ) {
+        const rep = pickVerifiedReplacementMotion(
+          actorInfo,
+          {
+            modelId: actorId,
+            content,
+            emotion,
+            prevTense: tenseTracker.tense,
+            isListener,
+            avoidMotion: curMotion,
+            fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
+          },
+          view
+        )
+        if (rep && rep !== curMotion) {
+          target.motion = rep
+        } else if (target === data) {
+          target.motion = ''
+        } else {
+          delete target.motion
+        }
+        repairedMotions += 1
+      }
+    }
+
+    fixTarget(data, speakerId, false)
+    if (Array.isArray(data.actions)) {
+      for (const act of data.actions) {
+        if (!isRecord(act)) continue
+        const aid = num(act.modelId, speakerId)
+        fixTarget(act, aid, aid !== speakerId)
+      }
+    }
+
+    // 更新说话者与有动作听者的状态
+    const effectiveSpeakerFacial = getSpeakerFacialFromTalk(data, speakerId)
+    const speakerInfo = resolveActorCatalogInfo(story, speakerId, view)
+    updateActorStateOnTalkOrStage(
+      actorState,
+      speakerId,
+      speakerInfo.path,
+      effectiveSpeakerFacial,
+      emotion,
+      content
+    )
+    if (Array.isArray(data.actions)) {
+      for (const act of data.actions) {
+        if (!isRecord(act)) continue
+        const aid = num(act.modelId, speakerId)
+        if (aid === speakerId || aid === -1) continue
+        const lf = str(act.facial).trim()
+        if (lf) {
+          const lInfo = resolveActorCatalogInfo(story, aid, view)
+          updateActorStateOnTalkOrStage(actorState, aid, lInfo.path, lf)
+        }
+      }
+    }
+    updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+  }
+
+  if (repairedListenerSmiles > 0) {
+    warn(`[Linter] 已拦截并修正 ${repairedListenerSmiles} 处怒/悲/严肃状态听者突兀切回笑脸`)
+  }
+  if (repairedMotions > 0) {
+    warn(`[Linter] 已替换 ${repairedMotions} 处语境不匹配或对峙期失真的身体动作`)
+  }
+  if (repairedFacials > 0) {
+    warn(`[Linter] 已替换 ${repairedFacials} 处语境不匹配的表情`)
+  }
+}
+
 /**
  * 在 validateAndFixStory 末段运行官方不变量修整：
  * 只修能安全确定修整的结构性问题（去机械 0.1s delay、去 <0.4s 入场动作连打、
@@ -1110,6 +1640,9 @@ export function enforceOfficialStoryInvariants(
 ): OfficialLintReport {
   const warn = typeof rawWarn === 'function' ? rawWarn : () => {}
   const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+
+  // 0) 清理退场/转场前将被打断的孤立短 Motion，并对齐语境限定动作与听者/对峙表情一致性
+  repairActingHygieneInvariants(story, view, warn)
 
   // 0.5) 统一规范进出场 LayoutClear / LayoutAppear 栅栏与思考/单人切镜顺序
   normalizeLayoutTransitionBarriers(snippets, warn)
@@ -1622,7 +2155,8 @@ export function auditStoryActingAndFidelity(
   let talkCount = 0
   let prevContent = ''
   let prevEmotion = ''
-  let prevTense = false
+  const tenseTracker: SceneTenseTracker = { tense: false, calmRun: 0 }
+  const actorState = new Map<number, ActorTenseState>()
   let repeatedFacialRunCount = 0
   let facialMismatchCount = 0
   let motionMismatchCount = 0
@@ -1659,6 +2193,13 @@ export function auditStoryActingAndFidelity(
     const snippet = snippets[i]
     const kind = str(snippet.type)
     const data = isRecord(snippet.data) ? snippet.data : {}
+
+    if (isFadeOutOrClearTransition(snippet) || kind === 'ChangeBackgroundImage') {
+      tenseTracker.tense = false
+      tenseTracker.calmRun = 0
+      actorState.clear()
+      continue
+    }
 
     if (kind === 'ChangeBgm') {
       if (data.stop === true) {
@@ -1754,7 +2295,7 @@ export function auditStoryActingAndFidelity(
             modelPath: meta?.path,
             emotion: surrounding.emotion,
             content: surrounding.content,
-            prevTense,
+            prevTense: tenseTracker.tense,
             isMonologue: false,
             isListener: false,
             restrainedRole: meta?.restrained
@@ -1766,7 +2307,7 @@ export function auditStoryActingAndFidelity(
               modelPath: meta?.path,
               content: surrounding.content,
               emotion: surrounding.emotion,
-              prevTense,
+              prevTense: tenseTracker.tense,
               restrainedRole: meta?.restrained,
               prevFacial: getTracker(mid).prevFacial
             })
@@ -1791,7 +2332,10 @@ export function auditStoryActingAndFidelity(
           }
         }
       }
-      if (facial) getTracker(mid).prevFacial = facial
+      if (facial) {
+        getTracker(mid).prevFacial = facial
+        updateActorStateOnTalkOrStage(actorState, mid, meta?.path, facial)
+      }
       if (motion) getTracker(mid).prevMotion = motion
       continue
     }
@@ -1805,6 +2349,9 @@ export function auditStoryActingAndFidelity(
       } else if (str(data.facial).trim() && mid !== -1) {
         resetListenerState(mid)
       }
+      if (str(data.facial).trim() && mid !== -1) {
+        updateActorStateOnTalkOrStage(actorState, mid, modelMeta.get(mid)?.path, str(data.facial).trim())
+      }
       for (const act of actions) {
         if (!isRecord(act)) continue
         const aid = num(act.modelId, mid)
@@ -1813,6 +2360,9 @@ export function auditStoryActingAndFidelity(
         }
         if ((str(act.motion).trim() || str(act.facial).trim()) && aid !== -1) {
           resetListenerState(aid)
+        }
+        if (str(act.facial).trim() && aid !== -1) {
+          updateActorStateOnTalkOrStage(actorState, aid, modelMeta.get(aid)?.path, str(act.facial).trim())
         }
       }
       continue
@@ -1993,7 +2543,7 @@ export function auditStoryActingAndFidelity(
         emotion,
         prevContent,
         prevEmotion,
-        prevTense,
+        prevTense: tenseTracker.tense,
         isListener,
         restrainedRole: meta?.restrained,
         prevFacial: tracker.prevFacial,
@@ -2002,7 +2552,50 @@ export function auditStoryActingAndFidelity(
         consecutiveSameMotionCount: nextSameMotion
       })
 
+      let flaggedListenerSmile = false
+      if (isListener && act.facial) {
+        const lState = actorState.get(act.modelId) ?? null
+        const isLockedTenseListener =
+          lState === 'angry' ||
+          lState === 'sad' ||
+          lState === 'cry' ||
+          lState === 'serious' ||
+          (lState === 'trouble' && tenseTracker.tense)
+        if (
+          isLockedTenseListener &&
+          lState &&
+          (isPositiveOnlyFacial(act.facial, meta?.path) ||
+            (lState === 'angry' && isSmileLikeFacial(act.facial, meta?.path)))
+        ) {
+          flaggedListenerSmile = true
+          facialMismatchCount += 1
+          const listenerFallbacks =
+            meta?.facials.length
+              ? [pickListenerFallbackFacial(meta.facials, lState, meta.path, meta.restrained)]
+              : []
+          diagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkCount,
+            modelId: act.modelId,
+            listenerModelId: act.modelId,
+            speaker: `${meta?.name ?? act.modelId}(听者)`,
+            content,
+            emotion,
+            facial: act.facial,
+            motion: act.motion,
+            inferredMood: lState === 'angry' || lState === 'serious' ? 'angry_frustration' : 'sad_regret',
+            field: 'facial',
+            code: 'listener_forced_smile',
+            severity: 'high',
+            message: `听者 ${meta?.name ?? act.modelId} 前序处于 ${lState} 状态且尚未和好，禁止突然切为笑脸 ${act.facial}`,
+            recommendedFacials: listenerFallbacks.filter(Boolean),
+            recommendedMotions: []
+          })
+        }
+      }
+
       for (const issue of evalRes.issues) {
+        if (flaggedListenerSmile && issue.field === 'facial') continue
         if (issue.field === 'facial') facialMismatchCount += 1
         else if (issue.field === 'motion') motionMismatchCount += 1
         else if (issue.field === 'repetition') repeatedFacialRunCount += 1
@@ -2082,7 +2675,7 @@ export function auditStoryActingAndFidelity(
           emotion,
           prevContent,
           prevEmotion,
-          prevTense,
+          prevTense: tenseTracker.tense,
           isListener: true,
           restrainedRole: lMeta?.restrained,
           prevFacial: lTracker.prevFacial,
@@ -2112,9 +2705,23 @@ export function auditStoryActingAndFidelity(
       }
     }
 
+    const effectiveSpeakerFacial = getSpeakerFacialFromTalk(data, speakerId)
+    updateActorStateOnTalkOrStage(
+      actorState,
+      speakerId,
+      modelMeta.get(speakerId)?.path,
+      effectiveSpeakerFacial,
+      emotion,
+      content
+    )
+    for (const act of actions) {
+      if (act.modelId !== -1 && act.modelId !== speakerId && act.facial) {
+        updateActorStateOnTalkOrStage(actorState, act.modelId, modelMeta.get(act.modelId)?.path, act.facial)
+      }
+    }
     prevContent = content
     prevEmotion = emotion
-    prevTense = emotion === '生气' || emotion === '伤心' || emotion === '害怕'
+    updateSceneTenseAfterTalk(tenseTracker, content, emotion)
   }
 
   const zeroMotionModelIds: number[] = []

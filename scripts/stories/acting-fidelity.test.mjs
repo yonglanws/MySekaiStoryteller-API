@@ -1376,3 +1376,358 @@ test('v4 fix #2/#3/#4/#5: sustained crying, real-motion safety, no slides, and c
   })
   assert.equal(patched.story.snippets[firstTalkIdx].data.ttsText, irodoriTts)
 })
+
+test('v6 acting hygiene: context-bound motions, tense listener forced-smile guard, deflection restraint, and trailing short Motion removal', () => {
+  // 1) Context-bound motion classification & compatibility (food / sleep / sing)
+  const delInfo = inspectModelMotion(undefined, 'w-adult-delicious01')
+  assert.equal(delInfo.contextTag, 'food')
+  assert.notEqual(delInfo.role, 'glad')
+  assert.notEqual(delInfo.role, 'playful')
+  assert.equal(inspectModelMotion(undefined, 'w-cute11-deliciousB').contextTag, 'food')
+  assert.equal(inspectModelMotion(undefined, 'w-adult15-sleepB').contextTag, 'sleep')
+  assert.equal(inspectModelMotion(undefined, 'w-normal-yawn01').contextTag, 'sleep')
+  assert.equal(inspectModelMotion(undefined, 'w-normal-sing01').contextTag, 'sing')
+  assert.equal(inspectModelMotion(undefined, 'w-cute-mic01').contextTag, 'sing')
+
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-adult-delicious01',
+      emotion: '开心',
+      content: '天台的风好大哦，头发都要吹乱啦♪晚上的庆祝会快开始了，我们下去吧？'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-adult-delicious01',
+      emotion: '开心',
+      content: '这家店的草莓松饼好好吃哦～♪'
+    }).ok,
+    true
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-adult15-sleepB',
+      emotion: '平静',
+      content: '走吧，我们去天台。'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-adult15-sleepB',
+      emotion: '平静',
+      content: '好困啊……昨天熬夜画稿没睡好。'
+    }).ok,
+    true
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-sing01',
+      emotion: '开心',
+      content: '今天天气真不错！'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-sing01',
+      emotion: '开心',
+      content: '大家一起在舞台上练习唱歌吧！'
+    }).ok,
+    true
+  )
+
+  // pickMoodMatchedMotion must never fall back to food/sleep/sing motions for generic cheerful beats
+  assert.equal(
+    pickMoodMatchedMotion(['w-adult-delicious01', 'w-normal-nod01'], 'cheerful_banter'),
+    'w-normal-nod01'
+  )
+
+  // 2) Listener forced-smile leak & tense confrontation deflection + 3) trailing <400ms Motion removal
+  const v6View = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal_3.0_t04/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-trouble01',
+          'w-normal-sad01',
+          'w-cool-sad01',
+          'w-normal-glad02',
+          'w-adult-delicious01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_smile_05',
+          'face_closeeye_01',
+          'face_closeeye_02',
+          'face_trouble_01',
+          'face_sad_01',
+          'face_serious_01',
+          'face_smug_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal_3.0_f_t06/19ena_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-angry01',
+          'w-normal-trouble01',
+          'w-normal-sad01',
+          'w-normal-glad01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_angry_01',
+          'face_serious_01',
+          'face_trouble_01',
+          'face_sad_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '神山高校·天台', description: '学校天台' }],
+    voices: [],
+    bgm: ['bgm00297.mp3'],
+    bgmDetails: [{ file: 'bgm00297.mp3', name: '对峙', description: '紧张对峙' }]
+  })
+
+  const badConfrontation = {
+    models: [
+      { id: 1, model: v6View.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: v6View.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-trouble01', facial: 'face_trouble_01' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-angry01', facial: 'face_serious_01' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '哈啊……哈啊……瑞希！',
+          emotion: '生气',
+          modelId: 2,
+          actions: [{ at: 0, modelId: 2, motion: 'w-normal-nod01', facial: 'face_serious_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '啊……绘、绘名？怎么跑得这么急呀，差点被你吓一跳呢～',
+          emotion: '开心',
+          modelId: 1,
+          actions: [
+            { at: 0, modelId: 1, motion: 'w-normal-glad02', facial: 'face_smile_01' },
+            { at: 0, modelId: 2, facial: 'face_smile_01' }
+          ]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '天台的风好大哦，头发都要吹乱啦♪晚上的庆祝会快开始了，我们下去吧？',
+          emotion: '开心',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, motion: 'w-adult-delicious01', facial: 'face_closeeye_02' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '别开玩笑了！',
+          emotion: '生气',
+          modelId: 2,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 2, motion: 'w-normal-angry01', facial: 'face_angry_01' }]
+        }
+      },
+      {
+        type: 'Motion',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0.25,
+        data: { modelId: 1, motion: 'w-cool-sad01', facial: 'face_sad_01', facialFirst: true }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } }
+      },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const preAudit = auditStoryActingAndFidelity(badConfrontation, v6View)
+  assert.equal(preAudit.passed, false)
+  assert.ok(preAudit.diagnostics.some((d) => d.code === 'listener_forced_smile'))
+  assert.ok(preAudit.diagnostics.some((d) => d.code === 'glad_motion_on_tense_deflection'))
+  assert.ok(preAudit.diagnostics.some((d) => d.code === 'food_motion_without_food_context'))
+  assert.ok(preAudit.officialReport.issues.some((iss) => iss.includes('孤立短 Motion')))
+
+  // Direct enforceOfficialStoryInvariants repairs all 3 issues standalone
+  const directCopy = structuredClone(badConfrontation)
+  const postLint = enforceOfficialStoryInvariants(directCopy, v6View, () => {})
+  assert.equal(postLint.passed, true, `unexpected lint issues: ${postLint.issues.join('; ')}`)
+  assert.equal(
+    directCopy.snippets.some((s) => s.type === 'Motion' && s.data?.motion === 'w-cool-sad01'),
+    false,
+    'trailing short Motion before LayoutClear must be removed'
+  )
+
+  // validateAndFixStory also repairs all 3 issues cleanly
+  const { story: fixed } = validateAndFixStory(badConfrontation, v6View, undefined, {
+    emotionLabels: ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  })
+  const deflect1 = fixed.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('吓一跳'))
+  const deflect2 = fixed.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('天台的风'))
+  const enaListenerAct = deflect1.data.actions.find((a) => a.modelId === 2)
+  assert.notEqual(enaListenerAct.facial, 'face_smile_01', 'angry listener must not snap to smile')
+  assert.ok(['face_serious_01', 'face_trouble_01', 'face_sad_01'].includes(enaListenerAct.facial))
+  const mizAct1 = deflect1.data.actions.find((a) => a.modelId === 1)
+  assert.notEqual(mizAct1.motion, 'w-normal-glad02')
+  assert.notEqual(mizAct1.facial, 'face_smile_01')
+  assert.notEqual(mizAct1.facial, 'face_smug_01')
+  const mizAct2 = deflect2.data.actions.find((a) => a.modelId === 1)
+  assert.notEqual(mizAct2.motion, 'w-adult-delicious01')
+  assert.equal(fixed.snippets.filter((s) => s.type === 'Motion').length, 0)
+  const postAudit = auditStoryActingAndFidelity(fixed, v6View)
+  assert.equal(postAudit.passed, true, `unexpected diagnostics: ${JSON.stringify(postAudit.diagnostics)}`)
+})
+
+const V6_PATH = 'D:/Users/桌面/mzkbot/MySekaiStoryteller/apifile/script-1795686273888-gkv7p0.json'
+test(
+  'regression: v6 apifile/script-1795686273888-gkv7p0.json issues (#34/#37/#66) are caught and repaired cleanly',
+  { skip: (!fs.existsSync(V6_PATH) || !hasLocalModels) && 'v6 fixture or local models not present' },
+  () => {
+    const rawV6 = JSON.parse(fs.readFileSync(V6_PATH, 'utf8'))
+    const preAudit = auditStoryActingAndFidelity(rawV6)
+    assert.equal(preAudit.passed, false)
+    assert.ok(preAudit.diagnostics.some((d) => d.snippetIndex === 34 && d.code === 'listener_forced_smile'))
+    assert.ok(
+      preAudit.diagnostics.some((d) => d.snippetIndex === 37 && d.code === 'food_motion_without_food_context')
+    )
+    assert.ok(preAudit.officialReport.issues.some((iss) => iss.includes('snippets[66]')))
+
+    // Build real catalog view from local models for repair
+    const loadClips = (rel) => {
+      const dir = `${LOCAL_MODELS_ROOT}/${rel.replace(/\/[^/]+$/, '')}/motions`
+      const files = fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.motion3.json'))
+        .map((f) => f.replace(/\.motion3\.json$/, ''))
+      return {
+        facials: files.filter((f) => f.startsWith('face_')),
+        motions: files.filter((f) => !f.startsWith('face_'))
+      }
+    }
+    const miz = loadClips(rawV6.models[0].model)
+    const ena = loadClips(rawV6.models[1].model)
+    const realView = new CatalogView({
+      models: [
+        {
+          id: 1,
+          name: '晓山瑞希',
+          shortName: '瑞希',
+          path: rawV6.models[0].model,
+          motions: miz.motions,
+          facials: miz.facials,
+          defaultMotion: 'w-normal-default01',
+          defaultFacial: 'face_normal_01'
+        },
+        {
+          id: 2,
+          name: '东云绘名',
+          shortName: '绘名',
+          path: rawV6.models[1].model,
+          motions: ena.motions,
+          facials: ena.facials,
+          defaultMotion: 'w-normal-default01',
+          defaultFacial: 'face_normal_01'
+        }
+      ],
+      images: rawV6.images.map((im) => im.image),
+      imageDetails: [],
+      voices: [],
+      bgm: ['bgm00297.mp3'],
+      bgmDetails: []
+    })
+
+    const { story: fixedV6, lint } = validateAndFixStory(rawV6, realView, undefined, {
+      emotionLabels: ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+    })
+    assert.equal(lint.passed, true, `unexpected lint issues: ${lint.issues.join('; ')}`)
+    const postAudit = auditStoryActingAndFidelity(fixedV6, realView)
+    assert.equal(postAudit.passed, true, `unexpected diagnostics: ${JSON.stringify(postAudit.diagnostics)}`)
+
+    const talk34 = fixedV6.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('吓一跳'))
+    assert.notEqual(talk34.data.actions.find((a) => a.modelId === 2).facial, 'face_smile_01')
+    const miz34Facial = talk34.data.actions.find((a) => a.modelId === 1).facial
+    assert.notEqual(miz34Facial, 'face_smile_01')
+    assert.equal(inspectModelFacial(rawV6.models[0].model, miz34Facial, LOCAL_MODELS_ROOT).role, 'wry_smile')
+    const talk37 = fixedV6.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('天台的风'))
+    assert.notEqual(talk37.data.actions.find((a) => a.modelId === 1).motion, 'w-adult-delicious01')
+    assert.equal(
+      fixedV6.snippets.some(
+        (s, idx) =>
+          s.type === 'Motion' &&
+          s.data?.motion === 'w-cool-sad01' &&
+          fixedV6.snippets[idx + 1]?.type === 'LayoutClear'
+      ),
+      false
+    )
+  }
+)
