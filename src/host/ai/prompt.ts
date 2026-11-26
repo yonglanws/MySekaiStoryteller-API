@@ -31,21 +31,21 @@ const FACIAL_PROMPT_LIMIT = 28
 const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['nod', 2],
   ['tilthead', 2],
+  ['sad', 2],
+  ['trouble', 2],
+  ['shakehead', 2],
+  ['sigh', 2],
+  ['forward', 2],
+  ['think', 2],
   ['glad', 1],
-  ['sad', 1],
-  ['trouble', 1],
-  ['shakehead', 1],
   ['surprise', 1],
   ['shy', 1],
   ['blushed', 1],
-  ['sigh', 1],
   ['relief', 1],
-  ['think', 1],
   ['lookaway', 1],
   ['lookdown', 1],
   ['lookup', 1],
   ['angry', 1],
-  ['forward', 1],
   ['fidget', 1],
   ['greeting', 1],
   ['smug', 1],
@@ -55,14 +55,14 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['guts', 1],
   ['pride', 1],
   ['disgust', 1],
-  ['posenod', 1],
-  ['posetilthead', 1],
   ['posesad', 1],
   ['posetrouble', 1],
+  ['posenod', 1],
+  ['posetilthead', 1],
   ['poseangry', 1],
-  ['wandahoi', 1],
   ['scared', 1],
   ['serious', 1],
+  ['wandahoi', 1],
   ['sleep', 1],
   ['delicious', 1],
   ['pose', 1],
@@ -72,18 +72,18 @@ const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
   ['face_normal', 1],
   ['face_smallmouth', 1],
   ['face_smile', 2],
-  ['face_closeeye', 1],
-  ['face_serious', 1],
+  ['face_closeeye', 2],
+  ['face_serious', 2],
+  ['face_trouble', 2],
+  ['face_sad', 2],
+  ['face_cry', 2],
+  ['face_worry', 1],
   ['face_purpose', 1],
-  ['face_trouble', 1],
-  ['face_sad', 1],
   ['face_regret', 1],
   ['face_angry', 1],
   ['face_lookaway', 1],
-  ['face_worry', 1],
   ['face_surprise', 1],
   ['face_shy', 1],
-  ['face_cry', 1],
   ['face_shock', 1],
   ['face_notice', 1],
   ['face_scared', 1],
@@ -179,7 +179,7 @@ function curateNames(
   for (const [kind, wanted] of priorities) {
     const candidates = (groups.get(kind) ?? []).slice().sort(comparePromptNames)
     if (candidates.length === 0) continue
-    // 同一语义的多个变体只在同一套动作风格里取，避免 normal 服装配 happy 套的动作
+    // 优先取主风格（w-normal-* 等），当同词根需要多变体且主风格不足时，允许自然补充贴合的跨风格变体（如 adult/cool/cute/common，对应官方 30% 跨风格切换）
     const style = motionStyle(candidates[0])
     let count = 0
     for (const name of candidates) {
@@ -188,6 +188,15 @@ function curateNames(
       if (!picked.includes(name)) {
         picked.push(name)
         count += 1
+      }
+    }
+    if (count < wanted) {
+      for (const name of candidates) {
+        if (count >= wanted) break
+        if (!picked.includes(name)) {
+          picked.push(name)
+          count += 1
+        }
       }
     }
   }
@@ -1407,8 +1416,8 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 ## 对话与表演规范
 
 - **每句台词最多 1 个身体动作（官方句首 at=0 节奏）**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。官方 PJSK 100% 的台词动作均在句首 \`at: 0\` 触发；禁止同句里让说话者和听者同时做身体动作，也**禁止在句中 \`at: 0.5..0.85\` 塞入听者错峰身体动作**。
-- **自然动作频率与听者回应**：约 75%~85% 的台词在句首配 1 个贴合情绪的身体动作，其余 15%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 保持姿态，不要为了防重复而每句硬切无关动作；当角色 A 连续说多句（>=4 句）或情绪大转折时，给在场听者 B 在句首 \`at: 0\` 补纯 \`facial\` 表情微调，或在两句之间插入独立 \`Motion\` 节拍（内心独白句听者听不见，不给听者加反应）。
-- **动作与表情双重对位剧情**：同一角色优先使用 \`w-normal-*\` 保持动作风格统一，避免在 \`w-normal-*\` 与 \`w-cool-*\`/\`w-happy-*\` 间突兀跳切；仔细核对动作与表情括号语义，禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug/greeting/relief/tilthead 动作或真笑表情；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`Move\` / \`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，且禁止连续多句卡死在同一表情或 default 站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
+- **自然动作频率与听者回应**：约 70%~80% 的台词在句首配 1 个贴合情绪的身体动作，其余约 20%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 或自然保持姿态，跨句延续同一表情很正常，不要为了防重复而每句硬切无关动作；长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 \`Motion\`（\`wait:false, delay:2.5~4.5\`）。听者反应优先通过单人 Center 反打切镜、句间原地 \`Move\` / 独立 \`Motion\` 静默拍或双人同框句首 \`at: 0\` 纯 \`facial\` 微调表现（内心独白句听者听不见，不给听者加反应）。
+- **动作与表情双重对位剧情（丰富自然不死板）**：善用角色多样的动作编号与贴合气氛的跨风格动作（近期官方跨风格切换约 30%），避免整场只循环 4~5 个动作；仔细核对动作与表情括号语义，禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug/greeting 动作或真笑表情；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`Move\` / \`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，避免默认站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
 - **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
 - **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。

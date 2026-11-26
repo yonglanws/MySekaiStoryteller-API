@@ -36,6 +36,7 @@ const VALID_SNIPPET_TYPES = new Set([
   'PlaceInfo',
   'FullScreenText',
   'SimpleSelectable',
+  'Wait',
   'BlackOut',
   'BlackIn',
   'ShakeScreen',
@@ -283,9 +284,18 @@ function isMotionMoodCompatible(params: {
   if (isTense && isJoyfulMotion) return false
   if (mood === 'smile' && !params.prevTense && isNegativeMotion) return false
   if (params.restrainedRole && /glad|happy|cheer|joy/.test(lower)) return false
-  // 悲伤/绝望/沉重独白句严禁切换为歪头/打招呼/松口气/惊讶/生气等与情绪脱节的动作
+  // 悲伤/绝望/沉重独白句严禁切换为打招呼/惊讶/生气等与情绪脱节的动作；
+  // 听者或非疑问的沉重悲伤句禁用卖萌歪头，但说话者轻声反问或温柔叹息（relief，非极端绝望）自然放行
+  const isQuestionLine = /[？?]|难道|为什么|怎么|吗/.test(text)
+  const isAcuteDespair = /(?:窒息|受不了|绝望|崩溃|再见|别走)/.test(text)
   if ((isSadOrDespair || monologue) && !isGenuineShock) {
-    if (/tilthead|tilt|greeting|wave|relief|surprise|shock|angry|disgust/.test(lower)) {
+    if (/greeting|wave|surprise|shock|angry|disgust/.test(lower)) {
+      return false
+    }
+    if (/relief/.test(lower) && isAcuteDespair) {
+      return false
+    }
+    if (/tilthead|tilt/.test(lower) && (params.isListener || !isQuestionLine || isAcuteDespair)) {
       return false
     }
   }
@@ -1280,7 +1290,38 @@ function compileStoryBgm(
   if (raw === undefined || raw === null) return
 
   const snippets = story.snippets as JsonRecord[]
-  if (snippets.some((snippet) => snippet.type === 'ChangeBgm')) {
+  const firstBgmIndex = snippets.findIndex((snippet) => snippet.type === 'ChangeBgm')
+  if (firstBgmIndex >= 0) {
+    // 若模型同时写了顶层 bgm 作为开场曲、又在剧情中段写了 ChangeBgm 切曲/停曲，
+    // 保留首支顶层 bgm 作为开场 BGM，避免前半段剧情意外全程静音。
+    const firstTalkIndex = snippets.findIndex((snippet) => snippet.type === 'Talk')
+    const hasOpeningBgm = firstTalkIndex < 0 || firstBgmIndex < firstTalkIndex
+    if (!hasOpeningBgm) {
+      const list = Array.isArray(raw) ? raw : [raw]
+      const firstItem = list[0]
+      const requested =
+        typeof firstItem === 'string'
+          ? firstItem
+          : isRecord(firstItem)
+            ? toStr(firstItem.file ?? firstItem.bgm ?? firstItem.name ?? firstItem.value, '')
+            : ''
+      const openingFile = requested ? (view.canonicalBgm(requested) ?? '') : ''
+      if (openingFile) {
+        const insertAt = Math.max(
+          0,
+          snippets.findIndex((s) => s.type === 'ChangeBackgroundImage') + 1
+        )
+        snippets.splice(insertAt, 0, {
+          type: 'ChangeBgm',
+          wait: false,
+          delay: 0,
+          data: { file: openingFile, stop: false, fadeMs: DEFAULT_BGM_FADE_MS }
+        })
+        warn(`剧本同时给了顶层 bgm 和中段 ChangeBgm，已将顶层首曲 '${openingFile}' 补为开场 BGM`)
+        delete story.bgm
+        return
+      }
+    }
     warn('剧本同时给了顶层 bgm 和 ChangeBgm 片段，保留片段写法')
     delete story.bgm
     return
@@ -1835,6 +1876,18 @@ export function validateAndFixStory(
       data.motion = fixAnimation(view, modelId, 'motion', data.motion) ?? ''
       data.facial = fixAnimation(view, modelId, 'facial', data.facial) ?? ''
       data.facialFirst = toBool(data.facialFirst, true)
+      snippet.data = data
+      continue
+    }
+
+    if (kind === 'Wait') {
+      const rawDuration = toNumber(data.duration, 600)
+      // 兼容模型偶尔误写秒（<=10 且非 0）与标准毫秒
+      const ms = rawDuration > 0 && rawDuration <= 10 ? Math.round(rawDuration * 1000) : rawDuration
+      data.duration = Math.min(30000, Math.max(0, ms))
+      if (snippet.progressBehavior === undefined) {
+        snippet.wait = true
+      }
       snippet.data = data
       continue
     }

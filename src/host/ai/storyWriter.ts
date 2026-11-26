@@ -7,6 +7,7 @@ import { loadPersonas, type PersonaEntry } from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
   applyDialoguePolish,
+  applyDirectorReviewPatches,
   applyVoiceDirectionPlan,
   buildCastPrompt,
   buildDialoguePrompt,
@@ -15,6 +16,7 @@ import {
   buildDialogueLengthPrompt,
   buildDirectionPrompt,
   buildDirectionRepairPrompt,
+  buildDirectorReviewPrompt,
   buildEmotionPrompt,
   buildEmotionRepairPrompt,
   buildQuickCastPrompt,
@@ -29,6 +31,7 @@ import {
   normalizeCastPlan,
   normalizeDialogue,
   normalizeDirection,
+  normalizeDirectorReviewResult,
   normalizeVoiceDirectionPlan,
   normalizeStaging,
   softenPunctuation,
@@ -44,7 +47,7 @@ import {
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
-import { runAgenticStoryGeneration } from './agentTools'
+import { runAgenticStoryGeneration, type DirectorReviewRecord } from './agentTools'
 import { ensureJapaneseTtsText, type TtsBatchTranslator, type TtsTranslationItem } from './ttsText'
 import { EmbeddingClient, resolveEmbeddingConfig } from '../rag/embeddingClient'
 import { RerankClient, resolveRerankConfig } from '../rag/rerankClient'
@@ -73,6 +76,8 @@ export interface GenerateStoryOptions {
   agentic?: boolean
   /** Agentic 模式最大工具调用/迭代轮次（默认沿用 llm.agentMaxSteps） */
   maxToolTurns?: number
+  /** 是否在 staged 流水线成稿后执行导演终审（缺省时仅在 polishDialogue=true 且台词>=12句时自动启用） */
+  directorReview?: boolean
   signal?: AbortSignal
 }
 
@@ -107,6 +112,8 @@ export interface GenerateStoryMeta {
   toolCalls?: string[]
   agentMode?: 'native' | 'react-json' | 'staged-fallback'
   agentSteps?: number
+  /** 导演终审评估与修补摘要（agent 或 staged 启用导演终审时产出） */
+  directorReview?: DirectorReviewRecord
 }
 
 export interface GenerateStoryResult {
@@ -575,7 +582,8 @@ export class StoryWriter {
           ),
           toolCalls: agentRes.toolCallsUsed,
           agentMode: agentRes.modeUsed,
-          agentSteps: agentRes.rounds
+          agentSteps: agentRes.rounds,
+          ...(agentRes.directorReview ? { directorReview: agentRes.directorReview } : {})
         }
       }
     } catch (error) {
@@ -1099,6 +1107,65 @@ export class StoryWriter {
       }
     }
 
+    // ---- 5.5 导演终审（可选/生产长篇默认开启；安全外科修补，绝不破坏既有 ttsText 与 Irodori Emoji） ----------
+    let stagedDirectorReview: DirectorReviewRecord | undefined
+    const shouldRunDirectorReview =
+      options.directorReview ??
+      (this.settings.polishDialogue === true && dialogue.lines.length >= 12)
+    if (shouldRunDirectorReview) {
+      try {
+        const reviewResult = await runStage(
+          'director-review',
+          buildDirectorReviewPrompt(
+            view,
+            plan,
+            validated.story as unknown as {
+              models: Array<{ id: number }>
+              snippets: Array<Record<string, unknown>>
+            },
+            promptOptions
+          ),
+          { temperature: 0.3 }
+        )
+        const parsedReview = normalizeDirectorReviewResult(parseStageJson(reviewResult))
+        if (parsedReview) {
+          let appliedCount = 0
+          if (parsedReview.operations.length > 0) {
+            const patched = applyDirectorReviewPatches(
+              validated.story as unknown as { snippets: Array<Record<string, unknown>> },
+              parsedReview
+            )
+            if (patched.appliedCount > 0) {
+              try {
+                const revalidated = validateAndFixStory(patched.story, view, this.logger, {
+                  emotionLabels: this.emotionLabels
+                })
+                validated = revalidated
+                appliedCount = patched.appliedCount
+                this.logger.info(`[AI] director-review 采纳 ${appliedCount} 项导演修补`)
+              } catch (patchErr) {
+                this.logger.warn(
+                  `[AI] director-review 修补未通过舞台校验，保留原成稿：${errorMessage(patchErr)}`
+                )
+              }
+            }
+          }
+          stagedDirectorReview = {
+            dramaticArc: parsedReview.dramaticArc,
+            emotionalContinuityAndVoice: parsedReview.emotionalContinuityAndVoice,
+            audioAndSeDesign: parsedReview.audioAndSeDesign,
+            stageRhythm: parsedReview.stageRhythm,
+            actingNaturalness: parsedReview.actingNaturalness,
+            concreteFixes: parsedReview.concreteFixes,
+            appliedOperationsCount: appliedCount
+          }
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        this.logger.warn(`[AI] director-review 失败，保留原成稿：${errorMessage(error)}`)
+      }
+    }
+
     if (translateForTts) {
       ttsTranslated += await this.translateTtsText(validated.story, options.signal)
     }
@@ -1118,7 +1185,8 @@ export class StoryWriter {
       'emotion-repair',
       'staging',
       'direction',
-      'direction-repair'
+      'direction-repair',
+      'director-review'
     ]
     const stageRank = (stage: string): number => {
       const index = stageOrder.indexOf(stage)
@@ -1141,6 +1209,7 @@ export class StoryWriter {
         ttsTranslated,
         cast,
         stages,
+        ...(stagedDirectorReview ? { directorReview: stagedDirectorReview } : {}),
         ...(this.summarizeRag(postCastRag) ? { rag: this.summarizeRag(postCastRag) } : {})
       }
     }

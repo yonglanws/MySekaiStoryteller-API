@@ -1109,3 +1109,90 @@ test('chof3y regression: repairs despair surprise/notice & regret angry, injects
   )
   assert.ok(longWarnings.some((w) => w.includes('听者')))
 })
+
+test('validateAndFixStory accepts Wait snippets and preserves top-level opening bgm when mid-story ChangeBgm exists', () => {
+  const view = makeView()
+  const raw = {
+    models: [{ id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json' }],
+    images: [{ id: 1, image: 'bg_classroom.jpg' }],
+    bgm: ['bgm00003.mp3'],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          motion: '',
+          facial: 'face_normal_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '今天也要加油呢。',
+          ttsText: '今日も頑張ろうね。😊',
+          modelId: 1
+        }
+      },
+      {
+        type: 'ChangeBgm',
+        wait: false,
+        delay: 0,
+        data: { file: 'bgm00006.mp3', stop: false, fadeMs: 600 }
+      },
+      {
+        type: 'Wait',
+        wait: true,
+        delay: 0,
+        data: { duration: 1.2 }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……安静下来了。',
+          ttsText: '……静かになったね。😮‍💨',
+          modelId: 1,
+          closeWindowOnFinish: true
+        }
+      },
+      {
+        type: 'Wait',
+        wait: true,
+        delay: 0,
+        data: { duration: 900 }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const { story } = validateAndFixStory(raw, view)
+  const bgms = story.snippets.filter((s) => s.type === 'ChangeBgm')
+  assert.deepEqual(
+    bgms.map((b) => b.data.file),
+    ['bgm00003.mp3', 'bgm00006.mp3'],
+    'top-level opening bgm must be preserved before first Talk when mid-story ChangeBgm is present'
+  )
+  const firstBgmIdx = story.snippets.findIndex((s) => s.type === 'ChangeBgm')
+  const firstTalkIdx = story.snippets.findIndex((s) => s.type === 'Talk')
+  assert.ok(firstBgmIdx < firstTalkIdx, 'opening BGM starts before first Talk')
+
+  const waits = story.snippets.filter((s) => s.type === 'Wait')
+  assert.equal(waits.length, 2)
+  assert.equal(waits[0].data.duration, 1200, 'Wait seconds (<=10) normalized to ms')
+  assert.equal(waits[1].data.duration, 900, 'Wait ms preserved verbatim')
+
+  const talks = story.snippets.filter((s) => s.type === 'Talk')
+  assert.ok(talks[1].data.ttsText.includes('😮‍💨'), 'Irodori ZWJ emoji remains intact')
+})
