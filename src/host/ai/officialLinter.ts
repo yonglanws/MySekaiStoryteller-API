@@ -27,10 +27,14 @@ import {
 } from '../../common/official/timing'
 import type { StoryData } from '../../common/types/Story'
 import type { CatalogView } from './prompt'
-import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
-import { hasSpokenStageDirectionLeak } from './dialogueLinter'
+import {
+  enforceIrodoriEmojiBudget,
+  sanitizeIrodoriCaption
+} from '../../common/tts/irodori'
+import { hasSpokenStageDirectionLeak, isStageDirectionParenthetical } from './dialogueLinter'
 import {
   evaluateActingLineMatch,
+  inspectModelFacial,
   isFacialCompatibleWithLine,
   isSpecialOrStandingMotion,
   recommendActingForLine,
@@ -76,6 +80,507 @@ export interface OfficialLintReport {
 
 function visibleChars(text: string): number {
   return Array.from(text.replace(/\s+/g, '')).length
+}
+
+const GENUINE_CALM_RESOLUTION_RE =
+  /～♪|♪|太好了|好耶|哈哈|嘻嘻|松了口气|雨过天晴|终于放心|よかった|和好吧/
+const SELF_BLAME_REGRET_TEXT_RE =
+  /(?:为什么我|没能说出口|没能|对不起|抱歉|后悔|搞砸|都是我的错|别走|言い返せば|言えなかった)/
+const STANDARD_CHINESE_EMOTIONS = new Set(['平静', '开心', '生气', '伤心', '害羞', '惊讶'])
+
+/** 判断文本是否为整句括号内心独白（已排除舞台动作括号如「（微笑）」「（叹气）」）。 */
+export function isInternalThoughtContent(content: string): boolean {
+  const trimmed = content.trim()
+  if (!trimmed || !/^[（(]/.test(trimmed) || !/[）)]$/.test(trimmed)) return false
+  let depth = 0
+  for (let idx = 0; idx < trimmed.length; idx++) {
+    const ch = trimmed[idx]
+    if (ch === '(' || ch === '（') depth += 1
+    else if (ch === ')' || ch === '）') depth -= 1
+    if (depth === 0 && idx < trimmed.length - 1) return false
+    if (depth < 0) return false
+  }
+  if (depth !== 0) return false
+  const inner = trimmed.slice(1, -1).trim()
+  if (!inner) return false
+  return !isStageDirectionParenthetical(inner)
+}
+
+/** 判断 Talk 片段是否显式标记了思考/内心独白模式（windowDisplayMode=Thinking 或 effect=Internal）。 */
+export function isExplicitThinkingTalkSnippet(snippet: JsonRecord): boolean {
+  if (str(snippet.type) !== 'Talk' || !isRecord(snippet.data)) return false
+  return (
+    str(snippet.data.windowDisplayMode) === 'Thinking' || str(snippet.data.effect) === 'Internal'
+  )
+}
+
+/** 判断 Talk 片段是否为思考/内心独白（显式标记或过滤舞台动作括号后的整句括号心理描写）。 */
+export function isThinkingTalkSnippet(snippet: JsonRecord): boolean {
+  if (str(snippet.type) !== 'Talk' || !isRecord(snippet.data)) return false
+  return (
+    isExplicitThinkingTalkSnippet(snippet) || isInternalThoughtContent(str(snippet.data.content))
+  )
+}
+
+export function isGenuineCalmResolution(content: string): boolean {
+  return GENUINE_CALM_RESOLUTION_RE.test(content)
+}
+
+function setSnippetPreFence(snippet: JsonRecord, preFence: boolean): boolean {
+  const prevWait = snippet.wait
+  const prevPb = snippet.progressBehavior
+  snippet.wait = preFence
+  snippet.progressBehavior = preFence ? 'WaitFinished' : 'Now'
+  return prevWait !== snippet.wait || prevPb !== snippet.progressBehavior
+}
+
+function prevNonInstantShaderIndex(snippets: JsonRecord[], idx: number): number {
+  for (let j = idx - 1; j >= 0; j--) {
+    const cur = snippets[j]
+    if (str(cur?.type) === 'AttachCharacterShader' && !snippetHasPreFence(cur as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' })) {
+      continue
+    }
+    return j
+  }
+  return -1
+}
+
+function isSplitClearInterveningCue(snippet: JsonRecord): boolean {
+  const kind = str(snippet?.type)
+  return (
+    kind === 'PlaySe' ||
+    kind === 'StopSe' ||
+    kind === 'Wait' ||
+    kind === 'ChangeBgm' ||
+    kind === 'BgmVolume' ||
+    kind === 'ShakeScreen' ||
+    kind === 'StopShakeScreen' ||
+    kind === 'ShakeWindow' ||
+    kind === 'StopShakeWindow' ||
+    kind === 'CameraZoom' ||
+    kind === 'CameraMove' ||
+    kind === 'AttachCharacterShader' ||
+    kind === 'AmbientColor'
+  )
+}
+
+function findSplitDuoClearRun(
+  snippets: JsonRecord[],
+  clearIdx: number
+): { clearEnd: number; nextClearStart: number; nextClearEnd: number } | null {
+  if (str(snippets[clearIdx]?.type) !== 'LayoutClear') return null
+  let clearEnd = clearIdx
+  while (clearEnd + 1 < snippets.length && str(snippets[clearEnd + 1]?.type) === 'LayoutClear') {
+    clearEnd += 1
+  }
+  let scan = clearEnd + 1
+  let sawNonShaderPauseOrSe = false
+  while (scan < snippets.length && isSplitClearInterveningCue(snippets[scan])) {
+    const k = str(snippets[scan]?.type)
+    if (k === 'Wait' || k === 'PlaySe') sawNonShaderPauseOrSe = true
+    scan += 1
+  }
+  if (!sawNonShaderPauseOrSe || scan >= snippets.length || str(snippets[scan]?.type) !== 'LayoutClear') {
+    return null
+  }
+  const nextClearStart = scan
+  let nextClearEnd = nextClearStart
+  while (
+    nextClearEnd + 1 < snippets.length &&
+    str(snippets[nextClearEnd + 1]?.type) === 'LayoutClear'
+  ) {
+    nextClearEnd += 1
+  }
+  // 确认后面是切单人 Center（或黑屏收尾），且中间没有任何 Talk / Motion
+  let after = nextClearEnd + 1
+  while (
+    after < snippets.length &&
+    (isSplitClearInterveningCue(snippets[after]) ||
+      str(snippets[after]?.type) === 'ChangeLayoutMode' ||
+      str(snippets[after]?.type) === 'ChangeBackgroundImage')
+  ) {
+    after += 1
+  }
+  const afterSnippet = snippets[after]
+  const nextType = str(afterSnippet?.type)
+  const afterData = afterSnippet && isRecord(afterSnippet.data) ? afterSnippet.data : null
+  const nextSide =
+    nextType === 'LayoutAppear' && afterData && isRecord(afterData.to)
+      ? str(afterData.to.side)
+      : ''
+  if ((nextType === 'LayoutAppear' && nextSide === 'Center') || nextType === 'BlackOut') {
+    return { clearEnd, nextClearStart, nextClearEnd }
+  }
+  return null
+}
+
+/**
+ * 统一规范舞台进出场（LayoutClear / LayoutAppear）时间栅栏与切镜顺序：
+ * 1. 合并 Duo -> Solo Center 中间被 Wait/PlaySe 拆散的两次 LayoutClear（先双人一起淡出，再 Wait/PlaySe -> Center 淡入）；
+ * 2. 若首句内心独白仍留在双人同框，而紧跟其后的第二句独白前才切单人 Center，则将整段切镜前置到第一句独白前；
+ * 3. 首条 LayoutClear 强制 wait=true / progressBehavior='WaitFinished'（等前句 Talk 播完），后续成对 LayoutClear 强制 Now（同时淡出）；
+ * 4. 首条 LayoutAppear 强制 wait=true / progressBehavior='WaitFinished'（等前序 LayoutClear 全部完成再淡入），后续成对 LayoutAppear 强制 Now。
+ */
+export function normalizeLayoutTransitionBarriers(
+  snippets: JsonRecord[],
+  warn?: (message: string) => void
+): void {
+  // 1) 合并被 Wait/PlaySe 拆散的 Duo -> Solo LayoutClear
+  let coalescedCount = 0
+  for (let i = 0; i < snippets.length; i++) {
+    if (str(snippets[i]?.type) !== 'LayoutClear') continue
+    const split = findSplitDuoClearRun(snippets, i)
+    if (!split) continue
+    const moved = snippets.splice(split.nextClearStart, split.nextClearEnd - split.nextClearStart + 1)
+    snippets.splice(split.clearEnd + 1, 0, ...moved)
+    coalescedCount += moved.length
+    i = split.clearEnd + moved.length
+  }
+  if (coalescedCount > 0) {
+    warn?.(`[Linter] 已合并 ${coalescedCount} 处 Duo->Center 中间被 Wait/PlaySe 拆散的 LayoutClear，确保双人同时先淡出`)
+  }
+
+  // 2) 将延迟到第二句才切 Center 的内心独白切镜前置到第一句独白之前
+  let hoistedThinkingCuts = 0
+  const visible = new Set<number>()
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    const kind = str(s?.type)
+    const d = isRecord(s?.data) ? s.data : {}
+    if (kind === 'LayoutAppear') {
+      const mid = num(d.modelId, -1)
+      if (mid !== -1) visible.add(mid)
+      continue
+    }
+    if (kind === 'LayoutClear') {
+      const mid = num(d.modelId, -1)
+      if (mid !== -1) visible.delete(mid)
+      continue
+    }
+    if (kind === 'Talk' && isThinkingTalkSnippet(s) && visible.size >= 2) {
+      const speakerId = num(d.modelId, -1)
+      let scan = i + 1
+      while (
+        scan < snippets.length &&
+        (str(snippets[scan]?.type) === 'PlaySe' ||
+          str(snippets[scan]?.type) === 'Wait' ||
+          str(snippets[scan]?.type) === 'ChangeBgm')
+      ) {
+        scan += 1
+      }
+      if (scan < snippets.length && str(snippets[scan]?.type) === 'LayoutClear') {
+        const transStart = scan
+        while (scan < snippets.length && str(snippets[scan]?.type) === 'LayoutClear') scan += 1
+        while (
+          scan < snippets.length &&
+          (isSplitClearInterveningCue(snippets[scan]) ||
+            str(snippets[scan]?.type) === 'ChangeLayoutMode')
+        ) {
+          scan += 1
+        }
+        const appear = snippets[scan]
+        const appearData = appear && isRecord(appear.data) ? appear.data : {}
+        const appearTo = isRecord(appearData.to) ? appearData.to : {}
+        if (
+          str(appear?.type) === 'LayoutAppear' &&
+          num(appearData.modelId, -1) === speakerId &&
+          str(appearTo.side) === 'Center'
+        ) {
+          let nextTalkIdx = scan + 1
+          while (nextTalkIdx < snippets.length && isSplitClearInterveningCue(snippets[nextTalkIdx])) {
+            nextTalkIdx += 1
+          }
+          const nextTalk = snippets[nextTalkIdx]
+          if (
+            nextTalk &&
+            str(nextTalk.type) === 'Talk' &&
+            isThinkingTalkSnippet(nextTalk) &&
+            isRecord(nextTalk.data) &&
+            num(nextTalk.data.modelId, -1) === speakerId
+          ) {
+            const cutBlock = snippets.splice(transStart, scan - transStart + 1)
+            snippets.splice(i, 0, ...cutBlock)
+            // 清除已退场听者在这第一句独白上的反应动作
+            if (Array.isArray(d.actions)) {
+              const speakerOnly = d.actions.filter(
+                (act) => isRecord(act) && num(act.modelId, speakerId) === speakerId
+              )
+              if (speakerOnly.length > 0) d.actions = speakerOnly
+              else delete d.actions
+            }
+            hoistedThinkingCuts += 1
+            // 回退索引以更新 visible 集合
+            i -= 1
+            continue
+          }
+        }
+      }
+    }
+  }
+  if (hoistedThinkingCuts > 0) {
+    warn?.(`[Linter] 已将 ${hoistedThinkingCuts} 处延迟切单人 Center 的思考模式切镜前置到第一句独白之前`)
+  }
+
+  // 3) 强制 LayoutClear / LayoutAppear 的 WaitFinished / Now 栅栏语义
+  let fixedBarriers = 0
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    const kind = str(s?.type)
+    if (kind !== 'LayoutClear' && kind !== 'LayoutAppear') continue
+    const prevIdx = prevNonInstantShaderIndex(snippets, i)
+    const isFirstInRun = prevIdx < 0 || str(snippets[prevIdx]?.type) !== kind
+    if (setSnippetPreFence(s, isFirstInRun)) {
+      fixedBarriers += 1
+    }
+  }
+  if (fixedBarriers > 0) {
+    warn?.(`[Linter] 已修正 ${fixedBarriers} 处 LayoutClear/LayoutAppear 栅栏（首条 WaitFinished、成对次条 Now）`)
+  }
+}
+
+interface TalkEmotionRecord {
+  snippetIndex: number
+  speakerId: number
+  speakerPath?: string
+  speakerFacial: string
+  partnerFacials: Array<{ modelId: number; path?: string; facial: string }>
+  content: string
+  emotion: string
+  sceneId: number
+}
+
+function getSpeakerFacialFromTalk(data: JsonRecord, speakerId: number): string {
+  if (Array.isArray(data.actions)) {
+    for (const act of data.actions) {
+      if (!isRecord(act)) continue
+      if (num(act.modelId, speakerId) === speakerId && str(act.facial).trim()) {
+        return str(act.facial).trim()
+      }
+    }
+  }
+  return str(data.facial).trim()
+}
+
+function inferPromotedEmotionForTalk(
+  rec: TalkEmotionRecord,
+  talks: TalkEmotionRecord[],
+  talkPos: number,
+  canUse: (label: string) => boolean
+): string | null {
+  const emo = rec.emotion
+  if (emo !== '平静' && emo !== '') return null
+  if (emo === '' && talks.length < 3) return null
+  if (isGenuineCalmResolution(rec.content)) return null
+
+  const speakerRole = rec.speakerFacial
+    ? inspectModelFacial(rec.speakerPath, rec.speakerFacial).role
+    : 'other'
+  if (emo === '' && speakerRole !== 'cry' && speakerRole !== 'sad') return null
+
+  const hasPartnerCryOrSad = rec.partnerFacials.some((pf) => {
+    const r = inspectModelFacial(pf.path, pf.facial).role
+    return r === 'cry' || r === 'sad'
+  })
+
+  let hasSadBefore = false
+  let sameSpeakerSadBefore = false
+  for (let b = talkPos - 1; b >= Math.max(0, talkPos - 5); b--) {
+    const prev = talks[b]
+    if (prev.sceneId !== rec.sceneId || prev.emotion === '开心' || prev.emotion === '生气') break
+    const pRole = prev.speakerFacial ? inspectModelFacial(prev.speakerPath, prev.speakerFacial).role : 'other'
+    const isSadBeat = prev.emotion === '伤心' || pRole === 'cry' || pRole === 'sad'
+    if (isSadBeat) {
+      hasSadBefore = true
+      if (prev.speakerId === rec.speakerId) sameSpeakerSadBefore = true
+      break
+    }
+  }
+
+  let hasSadAfter = false
+  let sameSpeakerSadAfter = false
+  for (let f = talkPos + 1; f <= Math.min(talks.length - 1, talkPos + 5); f++) {
+    const nxt = talks[f]
+    if (nxt.sceneId !== rec.sceneId || nxt.emotion === '开心' || nxt.emotion === '生气') break
+    const nRole = nxt.speakerFacial ? inspectModelFacial(nxt.speakerPath, nxt.speakerFacial).role : 'other'
+    const isSadBeat = nxt.emotion === '伤心' || nRole === 'cry' || nRole === 'sad'
+    if (isSadBeat) {
+      hasSadAfter = true
+      if (nxt.speakerId === rec.speakerId) sameSpeakerSadAfter = true
+      break
+    }
+  }
+
+  const inSadArc = hasSadBefore && hasSadAfter
+  const hasSadTextCue =
+    SELF_BLAME_REGRET_TEXT_RE.test(rec.content) ||
+    /(?:哭|泪|呜|窒息|受不了|害怕|难过|伤心|痛苦|逃避|现实|再见|安心|笑出来|温柔|顾虑)/.test(
+      rec.content
+    )
+
+  if (speakerRole === 'cry' || speakerRole === 'tearful_smile') {
+    return canUse('伤心') ? '伤心' : null
+  }
+  if (
+    speakerRole === 'sad' ||
+    speakerRole === 'cold_hollow' ||
+    speakerRole === 'closed_troubled'
+  ) {
+    if (hasSadBefore || hasSadAfter || hasPartnerCryOrSad || hasSadTextCue) {
+      return canUse('伤心') ? '伤心' : null
+    }
+    return null
+  }
+  if (speakerRole === 'angry') {
+    if (SELF_BLAME_REGRET_TEXT_RE.test(rec.content) || inSadArc) {
+      return canUse('伤心') ? '伤心' : null
+    }
+    return canUse('生气') ? '生气' : null
+  }
+  if (
+    speakerRole === 'surprise' &&
+    /[！!？?]/.test(rec.content) &&
+    !inSadArc &&
+    !hasPartnerCryOrSad
+  ) {
+    return canUse('惊讶') ? '惊讶' : null
+  }
+  if (
+    (speakerRole === 'trouble' || speakerRole === 'closed_neutral' || speakerRole === 'other') &&
+    inSadArc
+  ) {
+    return canUse('伤心') ? '伤心' : null
+  }
+  if (sameSpeakerSadBefore && (sameSpeakerSadAfter || hasPartnerCryOrSad)) {
+    return canUse('伤心') ? '伤心' : null
+  }
+  if (
+    hasPartnerCryOrSad &&
+    /(?:对不起|抱歉|没办法|受不了|安心|笑出来|别走|求你|好想|顾虑|温柔)/.test(rec.content)
+  ) {
+    return canUse('伤心') ? '伤心' : null
+  }
+  return null
+}
+
+function collectTalkEmotionRecords(
+  snippets: JsonRecord[],
+  models?: JsonRecord[],
+  view?: CatalogView
+): TalkEmotionRecord[] {
+  const pathById = new Map<number, string>()
+  if (Array.isArray(models)) {
+    for (const m of models) {
+      if (!isRecord(m)) continue
+      const id = num(m.id, -1)
+      if (id !== -1 && str(m.model)) pathById.set(id, str(m.model))
+    }
+  }
+  const getPath = (id: number): string | undefined =>
+    pathById.get(id) ?? view?.modelById(id)?.path
+
+  const onStageFacial = new Map<number, string>()
+  const records: TalkEmotionRecord[] = []
+  let sceneId = 0
+
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    const kind = str(s?.type)
+    const d = isRecord(s?.data) ? s.data : {}
+    if (
+      kind === 'BlackOut' ||
+      kind === 'SekaiOut' ||
+      (kind === 'SideFade' && str(d.mode).toLowerCase() === 'out') ||
+      kind === 'ChangeBackgroundImage'
+    ) {
+      sceneId += 1
+    } else if (kind === 'LayoutAppear') {
+      const mid = num(d.modelId, -1)
+      if (mid !== -1) onStageFacial.set(mid, str(d.facial).trim())
+    } else if (kind === 'LayoutClear') {
+      const mid = num(d.modelId, -1)
+      if (mid !== -1) onStageFacial.delete(mid)
+    } else if (kind === 'Move' || kind === 'Motion') {
+      const mid = num(d.modelId, -1)
+      if (mid !== -1 && str(d.facial).trim()) onStageFacial.set(mid, str(d.facial).trim())
+    } else if (kind === 'Talk') {
+      const speakerId = num(d.modelId, -1)
+      const explicitSpeakerFacial = getSpeakerFacialFromTalk(d, speakerId)
+      const speakerFacial = explicitSpeakerFacial || onStageFacial.get(speakerId) || ''
+      if (speakerId !== -1 && explicitSpeakerFacial) {
+        onStageFacial.set(speakerId, explicitSpeakerFacial)
+      }
+      if (Array.isArray(d.actions)) {
+        for (const act of d.actions) {
+          if (!isRecord(act)) continue
+          const aid = num(act.modelId, speakerId)
+          const af = str(act.facial).trim()
+          if (aid !== -1 && af) onStageFacial.set(aid, af)
+        }
+      }
+      const partnerFacials: Array<{ modelId: number; path?: string; facial: string }> = []
+      for (const [aid, af] of onStageFacial.entries()) {
+        if (aid !== speakerId && af) {
+          partnerFacials.push({ modelId: aid, path: getPath(aid), facial: af })
+        }
+      }
+      records.push({
+        snippetIndex: i,
+        speakerId,
+        speakerPath: getPath(speakerId),
+        speakerFacial,
+        partnerFacials,
+        content: str(d.content),
+        emotion: str(d.emotion).trim(),
+        sceneId
+      })
+    }
+  }
+  return records
+}
+
+/**
+ * 防止哭戏/悲伤对峙途中情绪标签掉回「平静」，并将 Talk.data.emotion 与角色持续表情/语境对齐。
+ */
+export function syncTalkEmotionContinuity(
+  snippets: JsonRecord[],
+  options: {
+    models?: JsonRecord[]
+    view?: CatalogView
+    allowedLabels?: string[]
+    warn?: (message: string) => void
+  } = {}
+): number {
+  const talks = collectTalkEmotionRecords(snippets, options.models, options.view)
+  if (talks.length === 0) return 0
+
+  const explicitLabels = (options.allowedLabels ?? []).map((l) => l.trim()).filter(Boolean)
+  const usedEmotions = new Set(talks.map((t) => t.emotion).filter(Boolean))
+  if (explicitLabels.length === 0 && usedEmotions.size === 0) return 0
+
+  const canUse = (label: string): boolean => {
+    if (explicitLabels.length > 0) return explicitLabels.includes(label)
+    if (usedEmotions.has(label)) return true
+    return [...usedEmotions].some((e) => STANDARD_CHINESE_EMOTIONS.has(e)) && STANDARD_CHINESE_EMOTIONS.has(label)
+  }
+
+  let fixed = 0
+  for (let pos = 0; pos < talks.length; pos++) {
+    const rec = talks[pos]
+    const promoted = inferPromotedEmotionForTalk(rec, talks, pos, canUse)
+    if (!promoted || promoted === rec.emotion) continue
+    const snippet = snippets[rec.snippetIndex]
+    if (isRecord(snippet) && isRecord(snippet.data)) {
+      snippet.data.emotion = promoted
+      rec.emotion = promoted
+      fixed += 1
+    }
+  }
+  if (fixed > 0) {
+    options.warn?.(
+      `[Linter] 已同步修复 ${fixed} 处哭戏/悲伤段落中掉回「平静」的 emotion 标签，保持配音情绪连贯`
+    )
+  }
+  return fixed
 }
 
 function estimateTalkDurationSec(data: JsonRecord, windowOpen: boolean): number {
@@ -224,6 +729,7 @@ export function lintOfficialStory(
   let runningEndSec = 0
   let windowOpen = false
   let lastTalkIndex = -1
+  let layoutMode: 'Normal' | 'Three' = 'Normal'
   const lastAppearMotion = new Map<number, { timeSec: number; motion: string; facial: string }>()
 
   for (let i = 0; i < snippets.length; i++) {
@@ -233,6 +739,28 @@ export function lintOfficialStory(
 
     if (isSlow100Slide(snippet)) {
       slow100SlideCount += 1
+    }
+
+    if (kind === 'LayoutClear' || kind === 'LayoutAppear') {
+      const prevIdx = prevNonInstantShaderIndex(snippets, i)
+      const isFirstInRun = prevIdx < 0 || str(snippets[prevIdx]?.type) !== kind
+      const hasFence = snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+      if (isFirstInRun && !hasFence) {
+        issues.push(
+          `snippets[${i}] 首条 ${kind} 必须设 wait: true / progressBehavior: "WaitFinished"，避免在上一句未结束时提前执行或与前序切镜叠影`
+        )
+      } else if (!isFirstInRun && hasFence) {
+        issues.push(
+          `snippets[${i}] 连续成对的后续 ${kind} 应设 wait: false / progressBehavior: "Now"，确保角色同时淡入/淡出`
+        )
+      }
+      if (kind === 'LayoutClear' && findSplitDuoClearRun(snippets, i)) {
+        issues.push(
+          `snippets[${i}] 双人切单人 Center 退场中间夹杂 Wait/PlaySe，应先同时 LayoutClear 双人后再执行停顿与 Center 淡入`
+        )
+      }
     }
 
     if (
@@ -260,6 +788,7 @@ export function lintOfficialStory(
     }
 
     if (kind === 'ChangeLayoutMode') {
+      layoutMode = data.mode === 'Three' ? 'Three' : 'Normal'
       if (data.mode === 'Three') {
         stageViolationCount += 1
         issues.push(`snippets[${i}] 禁止使用 ThreeMode（官方剧集全为 Normal <=2 人模式）`)
@@ -325,6 +854,45 @@ export function lintOfficialStory(
       const speakerId = num(data.modelId, -1)
       if (speakerId !== -1 && !visible.has(speakerId)) {
         stageViolationCount += 1
+      }
+      if (layoutMode === 'Normal' && visible.size >= 2) {
+        if (isExplicitThinkingTalkSnippet(snippet)) {
+          issues.push(
+            `snippets[${i}] 思考模式台词仍在双人同台状态下播放，应先双人同时 LayoutClear 再 LayoutAppear(Center)`
+          )
+        } else if (isThinkingTalkSnippet(snippet)) {
+          let scan = i + 1
+          while (
+            scan < snippets.length &&
+            (str(snippets[scan]?.type) === 'PlaySe' ||
+              str(snippets[scan]?.type) === 'Wait' ||
+              str(snippets[scan]?.type) === 'ChangeBgm')
+          ) {
+            scan += 1
+          }
+          if (scan < snippets.length && str(snippets[scan]?.type) === 'LayoutClear') {
+            while (scan < snippets.length && str(snippets[scan]?.type) === 'LayoutClear') scan += 1
+            while (
+              scan < snippets.length &&
+              (isSplitClearInterveningCue(snippets[scan]) ||
+                str(snippets[scan]?.type) === 'ChangeLayoutMode')
+            ) {
+              scan += 1
+            }
+            const app = snippets[scan]
+            const appData = app && isRecord(app.data) ? app.data : {}
+            const appTo = isRecord(appData.to) ? appData.to : {}
+            if (
+              str(app?.type) === 'LayoutAppear' &&
+              num(appData.modelId, -1) === speakerId &&
+              str(appTo.side) === 'Center'
+            ) {
+              issues.push(
+                `snippets[${i}] 首句内心独白仍停留在双人槽位、直到后续才切 Center，应在第一句独白前先双人淡出再切 Center`
+              )
+            }
+          }
+        }
       }
       const checkActionTime = (modelId: number, motionName: string, atFrac: number): void => {
         if (!motionName) return
@@ -482,6 +1050,30 @@ export function lintOfficialStory(
     )
   }
 
+  // 检查哭戏/悲伤段落中 emotion 意外掉回「平静」
+  const talkRecords = collectTalkEmotionRecords(
+    snippets,
+    Array.isArray(story.models) ? (story.models as JsonRecord[]) : undefined,
+    view
+  )
+  const usedEmotions = new Set(talkRecords.map((t) => t.emotion).filter(Boolean))
+  if (usedEmotions.size > 0) {
+    const canUseStd = (label: string): boolean =>
+      usedEmotions.has(label) ||
+      ([...usedEmotions].some((e) => STANDARD_CHINESE_EMOTIONS.has(e)) &&
+        STANDARD_CHINESE_EMOTIONS.has(label))
+    for (let pos = 0; pos < talkRecords.length; pos++) {
+      const rec = talkRecords[pos]
+      if (rec.emotion !== '平静') continue
+      const promoted = inferPromotedEmotionForTalk(rec, talkRecords, pos, canUseStd)
+      if (promoted === '伤心') {
+        issues.push(
+          `snippets[${rec.snippetIndex}] 处于哭泣/悲伤语境（facial=${rec.speakerFacial || '无'}）却掉回 emotion="平静"，应保持为「伤心」`
+        )
+      }
+    }
+  }
+
   return {
     passed: issues.length === 0,
     issues,
@@ -513,10 +1105,14 @@ export function lintOfficialStory(
 export function enforceOfficialStoryInvariants(
   story: JsonRecord,
   view: CatalogView,
-  rawWarn?: (message: string) => void
+  rawWarn?: (message: string) => void,
+  options: { emotionLabels?: string[] } = {}
 ): OfficialLintReport {
   const warn = typeof rawWarn === 'function' ? rawWarn : () => {}
   const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+
+  // 0.5) 统一规范进出场 LayoutClear / LayoutAppear 栅栏与思考/单人切镜顺序
+  normalizeLayoutTransitionBarriers(snippets, warn)
 
   // 1) Talk.delay == 0 >= 85%：去掉 0 < delay <= 0.25 的机械小停顿；若仍低于 85%，按从小到大裁剪多余停顿以保留真正重停顿
   const talks = snippets.filter((s) => s.type === 'Talk')
@@ -659,10 +1255,11 @@ export function enforceOfficialStoryInvariants(
       const mid = num(data.modelId, -1)
       lastAppearMotion.delete(mid)
       if (activeShaders.has(mid)) {
+        const isFirstClear = i === 0 || str(snippets[i - 1]?.type) !== 'LayoutClear'
         snippets.splice(i, 0, {
           type: 'AttachCharacterShader',
-          wait: false,
-          progressBehavior: 'Now',
+          wait: isFirstClear,
+          progressBehavior: isFirstClear ? 'WaitFinished' : 'Now',
           delay: 0,
           data: { modelId: mid, shader: 'none' }
         })
@@ -834,6 +1431,14 @@ export function enforceOfficialStoryInvariants(
     snippets.splice(lastBlackOutIndex, 0, ...closers)
     warn(`[Linter] 已在片尾自动补全 ${closers.length} 条未闭合特效/镜头复位指令`)
   }
+
+  // 3.5) 同步哭戏/悲伤对峙段落的 emotion 标签，防止掉回「平静」
+  syncTalkEmotionContinuity(snippets, {
+    models: Array.isArray(story.models) ? (story.models as JsonRecord[]) : undefined,
+    view,
+    allowedLabels: options.emotionLabels,
+    warn
+  })
 
   // 后置清洗 Irodori 逐句语音导演字段（caption 去身份词、语速钳制、emoji 预算、specialScene <= 15%）
   {

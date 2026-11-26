@@ -1542,7 +1542,7 @@ ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear
 **舞台与替换规则**：
 - ChangeLayoutMode.data.mode 写 "Normal"。单人用 Center，两人用 Left / Right，不能同侧，也不能 Center 与另一槽混用。
 - 始终维护在场名单：models 是整场演员表，不是在场名单。任意时刻最多两人；只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位。
-- **入出场与双人/独白切换一律原地渐变淡入淡出（from == to, offset=0，moveSpeed Normal）**：禁止 LeftOver/RightOver/Under 画外滑入滑出，禁止 ±100px 偏移滑行与跨槽 Move 横移；切换为单人思考时先 LayoutClear 原地淡出再 LayoutAppear(Center) 原地淡入。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
+- **入出场与双人/独白切换一律原地渐变淡入淡出（from == to, offset=0，moveSpeed Normal）**：禁止 LeftOver/RightOver/Under 画外滑入滑出，禁止 ±100px 偏移滑行与跨槽 Move 横移；切换为单人思考时必须在第一句独白前先让双人同时 \`LayoutClear\` 原地淡出（首条 \`WaitFinished\`、次条 \`Now\`），等待淡出完成后再 \`LayoutAppear(Center, WaitFinished)\` 原地淡入，严禁在 \`LayoutClear\` 尚未完成时让 \`LayoutAppear\` 设 \`Now\` 叠影淡入。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
 - **持续哭戏与表情一致性**：撕心裂肺哭诉/哽咽/失控等高潮段应自然维持 face_cry_* / face_sad_* 连续 4~8+ 句，禁止每句乱跳表情或用 ParamMouthForm >= 0.2 的强颜欢笑（如 face_trouble_02）。
 - **closeWindowOnFinish 节制使用**：仅在真实停顿（Wait >= 300ms）或转场/淡出（BlackOut/SideFade/Telop/LayoutClear）前设为 true；紧接瞬时 Motion/PlaySe/ChangeBgm 后立刻下句 Talk 时严禁设 true。
 - Talk 和 actions 只指向已入场角色；旁白可用 modelId=-1，但不能给 -1 配动作。
@@ -1590,7 +1590,7 @@ function emotionInstruction(labels: string[] | undefined): string {
   const fallback = values.includes('平静') ? '平静' : values[0]
   return `\n\n## 情绪标签（供 TTS 切换音色）
 每条 Talk 的 data 增加 "emotion" 字段，只能从以下标签中选一个：${values.join('、')}。
-日常陈述、没有明显情绪起伏时选「${fallback}」；只有台词明确表现出该情绪时才换其他标签。
+日常陈述、没有明显情绪起伏时选「${fallback}」；一旦进入哭泣/悲伤/愧疚/崩溃或严肃质问等连续情绪段（含配着 face_cry_*/face_sad_* 表情安慰或克制解释的台词），全段保持「伤心」或对应情绪，**严禁在哭戏或悲伤段落中途掉回「${fallback}」**（除非剧情真正出现明确释怀与欢快转折）。
 这个字段只影响配音音色，不要因为写标签而改变台词内容。`
 }
 

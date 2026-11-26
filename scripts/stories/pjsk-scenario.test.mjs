@@ -446,3 +446,435 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
     assert.equal(blurShader.data.level, 2.5)
   })
 })
+
+test('layout transition barriers, split Duo->Center clear coalescing, thinking cut hoisting, and emotion continuity in crying scenes', async () => {
+  const { CatalogView } = await import('../../out-host/host/ai/prompt.js')
+  const { validateAndFixStory } = await import('../../out-host/host/ai/validate.js')
+  const { enforceOfficialStoryInvariants, lintOfficialStory } = await import(
+    '../../out-host/host/ai/officialLinter.js'
+  )
+  const { composeStory, normalizeDirection, normalizeStaging, stabilizeEmotions } = await import(
+    '../../out-host/host/ai/staged.js'
+  )
+
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-sad01', 'w-normal-sigh01', 'w-normal-trouble01'],
+        facials: [
+          'face_normal_01',
+          'face_sad_01',
+          'face_sad_06',
+          'face_cry_02',
+          'face_closeeye_01',
+          'face_surprise_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-sad01', 'w-normal-trouble01', 'w-normal-shakehead01'],
+        facials: [
+          'face_normal_01',
+          'face_sad_04',
+          'face_cry_02',
+          'face_cry_03',
+          'face_shock_01',
+          'face_surprise_01'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_corridor.jpg'],
+    imageDetails: [{ file: 'bg_corridor.jpg', name: '连廊', description: '学校连廊' }],
+    voices: [],
+    bgm: ['bgm00016.mp3'],
+    bgmDetails: [{ file: 'bgm00016.mp3', name: '悲伤', description: '悲伤配乐' }]
+  })
+
+  // 1) BUG A1 & A2 & BUG B on v5-style malformed story
+  const badV5Like = {
+    models: [
+      { id: 1, model: view.models[0].path },
+      { id: 2, model: view.models[1].path }
+    ],
+    images: [{ id: 1, image: 'bg_corridor.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_sad_01' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_sad_04' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……对不起，绘名。',
+          emotion: '伤心',
+          modelId: 1,
+          actions: [
+            { at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_cry_02' },
+            { at: 0, modelId: 2, facial: 'face_cry_02' }
+          ]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '为什么是你在道歉啊——',
+          emotion: '惊讶',
+          modelId: 2,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 2, facial: 'face_sad_04' }]
+        }
+      },
+      // Reversed barriers: first LayoutClear is Now (premature fade at Talk start!), second is WaitFinished
+      {
+        type: 'LayoutClear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Fast' }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Fast' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-sigh01', facial: 'face_closeeye_01' }
+      },
+      // BUG B: emotion dropped back to 平静 in crying/sad sequence
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '没关系的。我都知道。',
+          emotion: '平静',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, facial: 'face_closeeye_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '可窗户纸一旦破了，我就再也没办法安心笑出来了。',
+          emotion: '平静',
+          modelId: 1,
+          actions: [{ at: 0, modelId: 1, facial: 'face_sad_06' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……真的，很抱歉。',
+          emotion: '伤心',
+          modelId: 1,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 1, facial: 'face_sad_01' }]
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_sad_06' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_cry_03' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '……再见了，绘名。',
+          emotion: '伤心',
+          modelId: 1,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 1, facial: 'face_closeeye_01' }]
+        }
+      },
+      // Split Duo -> Center clear with PlaySe + Wait 700ms wedged between the two clears
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Fast' }
+      },
+      { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se_run_men_002_1.mp3', volume: 1 } },
+      { type: 'Wait', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 700 } },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Fast' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-trouble01', facial: 'face_shock_01' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          content: '……瑞希？',
+          emotion: '惊讶',
+          modelId: 2,
+          closeWindowOnFinish: true,
+          actions: [{ at: 0, modelId: 2, facial: 'face_shock_01' }]
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } }
+      },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const preLint = lintOfficialStory(badV5Like, view)
+  assert.equal(preLint.passed, false)
+  assert.ok(preLint.issues.some((x) => x.includes('首条 LayoutClear')))
+  assert.ok(preLint.issues.some((x) => x.includes('首条 LayoutAppear')))
+  assert.ok(preLint.issues.some((x) => x.includes('中间夹杂 Wait/PlaySe')))
+  assert.ok(preLint.issues.some((x) => x.includes('emotion="平静"')))
+
+  const { story: fixed, lint } = validateAndFixStory(badV5Like, view, undefined, {
+    emotionLabels: ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  })
+  assert.equal(lint.passed, true, `unexpected post-fix lint issues: ${lint.issues.join('; ')}`)
+
+  // First Duo->Center clears: #1 WaitFinished, #2 Now, then Center LayoutAppear WaitFinished
+  const firstClearIdx = fixed.snippets.findIndex((s) => s.type === 'LayoutClear')
+  assert.equal(fixed.snippets[firstClearIdx].wait, true)
+  assert.equal(fixed.snippets[firstClearIdx].progressBehavior, 'WaitFinished')
+  assert.equal(fixed.snippets[firstClearIdx + 1].type, 'LayoutClear')
+  assert.equal(fixed.snippets[firstClearIdx + 1].wait, false)
+  assert.equal(fixed.snippets[firstClearIdx + 1].progressBehavior, 'Now')
+  assert.equal(fixed.snippets[firstClearIdx + 2].type, 'LayoutAppear')
+  assert.equal(fixed.snippets[firstClearIdx + 2].wait, true)
+  assert.equal(fixed.snippets[firstClearIdx + 2].progressBehavior, 'WaitFinished')
+
+  // Split Duo->Center clears around PlaySe + Wait(700) coalesced: both LayoutClears together BEFORE PlaySe & Wait
+  const seIdx = fixed.snippets.findIndex((s) => s.type === 'PlaySe')
+  assert.equal(fixed.snippets[seIdx - 2].type, 'LayoutClear')
+  assert.equal(fixed.snippets[seIdx - 2].progressBehavior, 'WaitFinished')
+  assert.equal(fixed.snippets[seIdx - 1].type, 'LayoutClear')
+  assert.equal(fixed.snippets[seIdx - 1].progressBehavior, 'Now')
+  assert.equal(fixed.snippets[seIdx + 1].type, 'Wait')
+  assert.equal(fixed.snippets[seIdx + 2].type, 'LayoutAppear')
+  assert.equal(fixed.snippets[seIdx + 2].data.to.side, 'Center')
+  assert.equal(fixed.snippets[seIdx + 2].progressBehavior, 'WaitFinished')
+
+  // Emotion continuity: neither mid-sad line dropped to 平静
+  const fixedTalks = fixed.snippets.filter((s) => s.type === 'Talk')
+  const comfortTalk = fixedTalks.find((t) => t.data.content.includes('没关系的'))
+  const paperTalk = fixedTalks.find((t) => t.data.content.includes('窗户纸'))
+  assert.equal(comfortTalk.data.emotion, '伤心')
+  assert.equal(paperTalk.data.emotion, '伤心')
+
+  // 2) Thinking mode cut in Duo (windowDisplayMode='Thinking' & staged delayed thinking stageGroup)
+  const thinkingRaw = {
+    models: [
+      { id: 1, model: view.models[0].path },
+      { id: 2, model: view.models[1].path }
+    ],
+    images: [{ id: 1, image: 'bg_corridor.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, facial: 'face_normal_01' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        delay: 0,
+        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, facial: 'face_normal_01' }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: { speaker: '绘名', content: '瑞希，你听我说。', modelId: 2, closeWindowOnFinish: true }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          content: '（……难道被看穿了吗）',
+          modelId: 1,
+          windowDisplayMode: 'Thinking',
+          actions: [{ at: 0, modelId: 2, facial: 'face_sad_04' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: { speaker: '绘名', content: '别逃避了。', modelId: 2, closeWindowOnFinish: true }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+  const { story: thinkingFixed } = validateAndFixStory(thinkingRaw, view)
+  const thinkingIdx = thinkingFixed.snippets.findIndex(
+    (s) => s.type === 'Talk' && s.data.content.includes('看穿')
+  )
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 3].type, 'LayoutClear')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 3].progressBehavior, 'WaitFinished')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 2].type, 'LayoutClear')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 2].progressBehavior, 'Now')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 1].type, 'LayoutAppear')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 1].data.to.side, 'Center')
+  assert.equal(thinkingFixed.snippets[thinkingIdx - 1].progressBehavior, 'WaitFinished')
+
+  // 3) Staged pipeline: composeStory never overlaps LayoutAppear(Center) with LayoutClear, hoists delayed thinking cut, and stabilizes calm islands
+  const plan = {
+    title: '测试',
+    event: '天台哭戏',
+    logline: '',
+    outline: [],
+    cast: [
+      { modelId: 1, name: '瑞希', fullName: '晓山瑞希', path: view.models[0].path, role: '' },
+      { modelId: 2, name: '绘名', fullName: '东云绘名', path: view.models[1].path, role: '' }
+    ],
+    background: 'bg_corridor.jpg'
+  }
+  const dialogue = {
+    title: '测试',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '对不起……', emotion: '伤心' },
+      { id: 'l2', speaker: '瑞希', content: '（……其实我好害怕。）', emotion: '伤心' },
+      { id: 'l3', speaker: '瑞希', content: '（……我真没用。）', emotion: '伤心' },
+      { id: 'l4', speaker: '瑞希', content: '没关系的，我都懂。', emotion: '平静' },
+      { id: 'l5', speaker: '瑞希', content: '因为大家太温柔了。', emotion: '平静' },
+      { id: 'l6', speaker: '绘名', content: '别这样说啊！', emotion: '伤心' }
+    ]
+  }
+  const stableEmo = stabilizeEmotions(
+    dialogue,
+    new Map(dialogue.lines.map((l) => [l.id, l.emotion])),
+    ['平静', '伤心']
+  )
+  assert.equal(stableEmo.get('l4'), '伤心')
+  assert.equal(stableEmo.get('l5'), '伤心')
+
+  // Delayed stageGroup on l3 instead of l2 must be hoisted to l2 (line 1 of thinking run)
+  const staging = normalizeStaging(
+    {
+      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_corridor.jpg', activeCast: ['瑞希', '绘名'] }],
+      events: [{ lineId: 'l3', stageGroup: { activeCast: ['瑞希'] } }]
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const direction = normalizeDirection(
+    {
+      background: 'bg_corridor.jpg',
+      lines: dialogue.lines.map((l) => ({ id: l.id, facial: 'face_sad_01' }))
+    },
+    view,
+    plan,
+    dialogue
+  )
+  const composed = composeStory(view, plan, dialogue, direction, staging)
+  const l2Idx = composed.snippets.findIndex(
+    (s) => s.type === 'Talk' && s.data.content.includes('好害怕')
+  )
+  assert.equal(composed.snippets[l2Idx - 3].type, 'LayoutClear')
+  assert.equal(composed.snippets[l2Idx - 3].progressBehavior, 'WaitFinished')
+  assert.equal(composed.snippets[l2Idx - 2].type, 'LayoutClear')
+  assert.equal(composed.snippets[l2Idx - 2].progressBehavior, 'Now')
+  assert.equal(composed.snippets[l2Idx - 1].type, 'LayoutAppear')
+  assert.equal(composed.snippets[l2Idx - 1].data.to.side, 'Center')
+  assert.equal(composed.snippets[l2Idx - 1].progressBehavior, 'WaitFinished')
+  // Duo restored before spoken l4
+  const l4Idx = composed.snippets.findIndex(
+    (s) => s.type === 'Talk' && s.data.content.includes('没关系的')
+  )
+  assert.equal(composed.snippets[l4Idx - 3].type, 'LayoutClear')
+  assert.equal(composed.snippets[l4Idx - 2].type, 'LayoutAppear')
+  assert.equal(composed.snippets[l4Idx - 2].progressBehavior, 'WaitFinished')
+  assert.equal(composed.snippets[l4Idx - 1].type, 'LayoutAppear')
+  assert.equal(composed.snippets[l4Idx - 1].progressBehavior, 'Now')
+
+  const compLint = enforceOfficialStoryInvariants(composed, view)
+  assert.equal(compLint.passed, true, `unexpected issues: ${compLint.issues.join('; ')}`)
+})
