@@ -9,6 +9,7 @@ import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 import type { VideoSettings } from '../config'
 import { writeExportDiagnosticsAsync } from '../exportDiagnostics'
 import { checkEncodeSize, detectAvailableGpuEncoder } from '../../shared/ffmpeg'
+import { getRustExporterInfoSync } from '../export/rustExporter'
 
 export interface ApiExportRequest {
   story: StoryData
@@ -43,6 +44,9 @@ export interface VideoConfig {
   watermarkText?: string
   exportMode: 'record' | 'fast'
   exportBitrate: number
+  maxOutputMbps?: number
+  useRustExporter?: boolean
+  exportJobs?: number
   exportFastEncoder: 'auto' | 'webcodecs' | 'frames'
   fastFps: number
   /** 表演续演间隔（秒）；0 = 关闭续演，动作播完回落默认待机 */
@@ -657,11 +661,16 @@ export class VideoApiServer {
           watermark: this.video.watermark,
           watermarkText: this.video.watermarkText,
           exportMode: this.video.exportMode,
+          exportBitrate: this.video.exportBitrate,
+          maxOutputMbps: this.video.maxOutputMbps ?? 3.5,
+          useRustExporter: this.video.useRustExporter !== false,
+          exportJobs: this.video.exportJobs ?? 1,
           fastFps: this.video.fastFps,
           exportFastEncoder: this.video.exportFastEncoder,
           idleChainGapSec: this.video.idleChainGapSec,
           ttsMode: this.video.ttsMode
         },
+        rustExporter: getRustExporterInfoSync(this.video.useRustExporter !== false),
         ...(this.extraHealthProvider ? this.extraHealthProvider(authed) : {})
       })
     })
@@ -894,6 +903,9 @@ export class VideoApiServer {
       watermarkText: this.video.watermarkText,
       exportMode: this.video.exportMode,
       exportBitrate: this.video.exportBitrate,
+      maxOutputMbps: this.video.maxOutputMbps ?? 3.5,
+      useRustExporter: this.video.useRustExporter !== false,
+      exportJobs: this.video.exportJobs ?? 1,
       exportFastEncoder: this.video.exportFastEncoder,
       fastFps: this.video.fastFps,
       idleChainGapSec: this.video.idleChainGapSec,

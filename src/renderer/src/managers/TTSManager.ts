@@ -51,7 +51,7 @@ interface SynthesizeResult {
   index: number
 }
 
-const DEFAULT_CONCURRENCY = 3
+const DEFAULT_CONCURRENCY = 4
 const PREFETCH_CACHE_SIZE = 100
 
 /**
@@ -80,6 +80,7 @@ export class TTSManager {
   private bgmConfig: BGMConfig
   private characterConfigs: Map<string, CharacterVoiceConfig> = new Map()
   private audioTracks: AudioTrackData[] = []
+  private audioTrackBySnippetIndex: Map<number, AudioTrackData> = new Map()
   private currentTimeMs: number = 0
   private preSynthesizedTimeline: SnippetTimelineEntry[] = []
   private preSynthesizedTtsDurations: Map<number, number> = new Map()
@@ -162,7 +163,7 @@ export class TTSManager {
   }
 
   setConcurrency(concurrency: number): void {
-    this.concurrency = Math.max(1, Math.min(concurrency, 5))
+    this.concurrency = Math.max(1, Math.min(concurrency, 8))
     this.logger.info(`TTS concurrency set to ${this.concurrency}`)
   }
 
@@ -193,6 +194,7 @@ export class TTSManager {
 
   clearAudioTracks(): void {
     this.audioTracks = []
+    this.audioTrackBySnippetIndex.clear()
     this.currentTimeMs = 0
     this.preSynthesizedTimeline = []
     this.preSynthesizedTtsDurations.clear()
@@ -402,6 +404,7 @@ export class TTSManager {
 
   private upsertAudioTrack(audioTrack: AudioTrackData): void {
     if (audioTrack.snippetIndex !== undefined) {
+      this.audioTrackBySnippetIndex.set(audioTrack.snippetIndex, audioTrack)
       const existingIdx = this.audioTracks.findIndex(
         (t) => t.snippetIndex === audioTrack.snippetIndex
       )
@@ -739,13 +742,14 @@ export class TTSManager {
   }
 
   getAudioBufferForSnippet(snippetIndex: number): ArrayBuffer | null {
+    const indexed = this.audioTrackBySnippetIndex.get(snippetIndex)
+    if (indexed) return indexed.audioBuffer
     const byIndex = this.audioTracks.find((t) => t.snippetIndex === snippetIndex)
     if (byIndex) return byIndex.audioBuffer
-    const track = this.audioTracks.find(
-      (t) =>
-        t.startTime >= 0 && this.audioTracks.indexOf(t) === this.getTalkTrackIndex(snippetIndex)
-    )
-    return track?.audioBuffer ?? null
+    const talkIdx = this.getTalkTrackIndex(snippetIndex)
+    const track =
+      talkIdx >= 0 && talkIdx < this.audioTracks.length ? this.audioTracks[talkIdx] : undefined
+    return track && track.startTime >= 0 ? track.audioBuffer : null
   }
 
   private getTalkTrackIndex(snippetIndex: number): number {

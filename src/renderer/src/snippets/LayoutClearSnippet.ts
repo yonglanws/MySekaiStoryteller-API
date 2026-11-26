@@ -3,7 +3,12 @@ import StageUtils from '../utils/StageUtils'
 import BaseSnippet from './BaseSnippet'
 import AnimationManager from '../managers/AnimationManager'
 import { HIDE_DELAY_IN_PLACE_MS, resolveCharacterFadeMs } from '../../../common/official/timing'
-import { nowMs, recordLayoutRunningEnd, recordMotionSettledAt } from './stageTiming'
+import {
+  type ExtendedModelLayer,
+  nowMs,
+  recordLayoutRunningEnd,
+  recordMotionSettledAt
+} from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutClearSnippet extends BaseSnippet {
@@ -47,11 +52,12 @@ export default class LayoutClearSnippet extends BaseSnippet {
     recordLayoutRunningEnd(this.app, clearStartMs + totalClearMs)
 
     // 退场动作先加载并启动；淡出只在最后 0.1s 发生，角色边演边走边隐。
+    // 官方 `LayoutOp::Hide`（`sse-bake/src/lib.rs:2290-2296`）表情走正常 0.25s 交叉淡化，不强制 0s 硬切。
     const exit_motion = this.data.data.motion
     const exit_facial = this.data.data.facial
     if (exit_motion || exit_facial) {
       await model.startMotions(exit_motion || undefined, exit_facial || undefined, true, {
-        facialForce: true,
+        facialForce: false,
         traceSnippetIndex: this.snippetIndex
       })
       if (exit_motion && !model.isMotionLooping?.(exit_motion)) {
@@ -62,8 +68,12 @@ export default class LayoutClearSnippet extends BaseSnippet {
       }
     }
 
-    // SetTransformData(SideFrom) 先把角色放回起点，再 CharacterMoveTo(SideTo)。
+    // SetTransformData(SideFrom) 先把角色放回起点；有位移时 `SetCharacterDepth(Front)`（不锁层级），再 CharacterMoveTo(SideTo)。
     model.setPositionRel(this.app.stage_size, is_moved ? from : to)
+    if (is_moved) {
+      const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
+      modelLayer.bringToFront?.(this.data.data.modelId)
+    }
 
     const move_task = is_moved
       ? model.move(this.app.stage_size, from, to, move_duration_ms, clearStartMs)

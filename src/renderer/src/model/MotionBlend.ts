@@ -69,3 +69,134 @@ export function facialBlendSeconds(force = false, clipFadeIn?: number): number {
     ? clipFadeIn
     : FACIAL_FADE_SECONDS
 }
+
+/**
+ * 官方 `CP.PlayableAnimator` / `PlayableBlender` 单层混合状态
+ * （移植自 `SekaiStoryExporter/crates/sse-live2d/src/motion.rs:80-258`）。
+ *
+ * 与 Cubism SDK `CubismMotionQueueManager` 的差异：
+ * 1. 权重严格按线性 `t = clamp01(blendElapsed / blendTime)` 过渡，而不是 `getEasingSine`；
+ * 2. 所有活跃输入权重之和恒为 1.0，且旧 clip 中有而新 clip 中没有的参数向默认值线性归位，
+ *    不再产生交叉淡化中点向默认姿态下陷 25% 或旧参数永久残留的问题。
+ */
+export interface PlayableBlendInput<T> {
+  key: T
+  from: number
+  to: number
+  weight: number
+}
+
+export interface PlayableBlendLayer<T> {
+  inputs: PlayableBlendInput<T>[]
+  blendElapsed: number
+  blendTime: number
+}
+
+export function createPlayableBlendLayer<T>(): PlayableBlendLayer<T> {
+  return {
+    inputs: [],
+    blendElapsed: 0,
+    blendTime: 0
+  }
+}
+
+export function clearPlayableBlendLayer<T>(layer: PlayableBlendLayer<T>): void {
+  layer.inputs.length = 0
+  layer.blendElapsed = 0
+  layer.blendTime = 0
+}
+
+/**
+ * `PlayableAnimator.ChangeAnimation(layer, clip, blend, rewind: true)` 的权重规划：
+ * - `blend <= 0` 或层内无旧输入时清空旧输入，新输入直接权重 1；
+ * - 否则将所有已有输入的 `from = weight, to = 0`，追加新输入 `from = 0, to = 1`。
+ */
+export function changePlayableBlendLayer<T>(
+  layer: PlayableBlendLayer<T>,
+  key: T,
+  blendSeconds: number
+): T[] {
+  const blend = Number.isFinite(blendSeconds) && blendSeconds > 0 ? blendSeconds : 0
+  if (blend <= 0 || layer.inputs.length === 0) {
+    const removed = layer.inputs.map((input) => input.key)
+    layer.inputs = [{ key, from: 1, to: 1, weight: 1 }]
+    layer.blendTime = 0
+    layer.blendElapsed = 0
+    return removed
+  }
+  for (const input of layer.inputs) {
+    input.from = input.weight
+    input.to = 0
+  }
+  layer.inputs.push({ key, from: 0, to: 1, weight: 0 })
+  layer.blendTime = blend
+  layer.blendElapsed = 0
+  return []
+}
+
+/**
+ * 按 `deltaSeconds` 推进线性混合权重，返回权重归零并被移除的旧输入 key。
+ */
+export function advancePlayableBlendLayer<T>(
+  layer: PlayableBlendLayer<T>,
+  deltaSeconds: number
+): T[] {
+  if (layer.blendTime <= 0 || layer.inputs.length === 0) return []
+  const dt = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0
+  layer.blendElapsed += dt
+  const rawT = Math.max(0, Math.min(1, layer.blendElapsed / layer.blendTime))
+  // 30 * (1/60) 在 IEEE-754 f64 下为 0.49999999999999994，按 1e-6 容差归 1 避免多留 1 帧残影。
+  const done = rawT >= 1 - 1e-6
+  const t = done ? 1 : rawT
+  for (const input of layer.inputs) {
+    input.weight = input.from + (input.to - input.from) * t
+  }
+  if (done) {
+    const removed: T[] = []
+    const kept: PlayableBlendInput<T>[] = []
+    for (const input of layer.inputs) {
+      if (input.to > 0) kept.push(input)
+      else removed.push(input.key)
+    }
+    layer.inputs = kept
+    layer.blendTime = 0
+    layer.blendElapsed = 0
+    return removed
+  }
+  return []
+}
+
+export interface EvaluatedBlendInput {
+  weight: number
+  values: ReadonlyMap<number, number>
+}
+
+/**
+ * `Animator::evaluate` 的单层求值：
+ * 对所有被层内任意输入动画化的参数 `p`，计算归一化线性加权和；
+ * 某输入未覆盖 `p` 时贡献 `defaultValueAt(p)`。
+ */
+export function evaluateBlendedLayerValues(
+  inputs: readonly EvaluatedBlendInput[],
+  defaultValueAt: (paramIndex: number) => number
+): Map<number, number> {
+  const result = new Map<number, number>()
+  if (inputs.length === 0) return result
+  const animated = new Set<number>()
+  for (const input of inputs) {
+    for (const paramIndex of input.values.keys()) {
+      animated.add(paramIndex)
+    }
+  }
+  if (animated.size === 0) return result
+  for (const paramIndex of animated) {
+    let acc = 0
+    const fallback = defaultValueAt(paramIndex)
+    for (const input of inputs) {
+      const value = input.values.get(paramIndex)
+      acc += input.weight * (value !== undefined ? value : fallback)
+    }
+    result.set(paramIndex, acc)
+  }
+  return result
+}

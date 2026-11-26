@@ -980,3 +980,106 @@ test(
     )
   }
 )
+
+test('recency-weighted non-rigid acting: emotional facial hold up to 4 lines, soft relief/questioning tilthead allowed, diverse curated variants', () => {
+  // 1) Sustained sad facial hold (4 consecutive lines) is natural per 61.7% official corpus hold rate; >=5 gently flagged
+  const hold4 = evaluateActingLineMatch({
+    facial: 'face_sad_01',
+    motion: 'w-normal-sigh01',
+    facials: ['face_sad_01', 'face_trouble_01', 'face_closeeye_01'],
+    motions: ['w-normal-sigh01', 'w-normal-trouble01'],
+    content: '……真的对不起，我还是没办法面对。',
+    emotion: '伤心',
+    consecutiveSameFacialCount: 4
+  })
+  assert.equal(
+    hold4.issues.some((i) => i.code === 'consecutive_same_facial'),
+    false,
+    'holding sad facial for 4 lines must not be rigidly flagged'
+  )
+  const hold5 = evaluateActingLineMatch({
+    facial: 'face_sad_01',
+    motion: 'w-normal-sigh01',
+    facials: ['face_sad_01', 'face_trouble_01', 'face_closeeye_01'],
+    motions: ['w-normal-sigh01', 'w-normal-trouble01'],
+    content: '……真的对不起，我还是没办法面对。',
+    emotion: '伤心',
+    consecutiveSameFacialCount: 5
+  })
+  assert.equal(
+    hold5.issues.some((i) => i.code === 'consecutive_same_facial'),
+    true,
+    'holding same facial for >=5 lines still surfaces a gentle reminder'
+  )
+
+  // 2) Non-despair resigned sad line allows w-normal-relief01 & questioning speaker allows tilthead, while despair still blocks
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-relief01',
+      emotion: '伤心',
+      content: '……嗯，能把这些说出来，稍微好受一点了。'
+    }).ok,
+    true
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-relief01',
+      emotion: '伤心',
+      content: '我就觉得快要窒息了……！'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-tilthead01',
+      emotion: '伤心',
+      content: '……为什么会变成这样呢？'
+    }).ok,
+    true
+  )
+
+  // 3) Curated promptMotions/promptFacials include multiple emotional variants + cross-style fallback while staying compact
+  const richView = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-sad01',
+          'w-adult-sad02',
+          'w-normal-trouble01',
+          'w-cool-trouble02',
+          'w-normal-sigh01',
+          'w-normal-sigh02',
+          'w-normal-nod01',
+          'w-normal-default01'
+        ],
+        facials: [
+          'face_normal_01',
+          'face_sad_01',
+          'face_sad_02',
+          'face_cry_01',
+          'face_cry_02',
+          'face_closeeye_01',
+          'face_closeeye_02'
+        ],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: [],
+    imageDetails: [],
+    voices: [],
+    bgm: [],
+    bgmDetails: []
+  })
+  const m = richView.modelById(1)
+  const motions = richView.promptMotions(m)
+  const facials = richView.promptFacials(m)
+  assert.ok(motions.includes('w-normal-sad01') && motions.includes('w-adult-sad02'))
+  assert.ok(motions.includes('w-normal-trouble01') && motions.includes('w-cool-trouble02'))
+  assert.ok(facials.includes('face_cry_01') && facials.includes('face_cry_02'))
+  assert.ok(facials.includes('face_sad_01') && facials.includes('face_sad_02'))
+})

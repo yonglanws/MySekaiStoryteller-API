@@ -1507,3 +1507,78 @@ test('buildDirectionPrompt annotates motions and composeStory repairs/diversifie
     '2 consecutive same-mood sad lines should hold posture naturally instead of hyperactive swapping'
   )
 })
+
+test('staged pipeline directorReview stage patches PlaySe/Wait/acting while preserving Irodori TTS emojis', async (t) => {
+  const mock = await startMockLlm(({ system }) => {
+    if (system.includes('总导演')) {
+      return {
+        dramaticArc: '起承转合清晰，结尾补短 Wait 留白。',
+        emotionalContinuityAndVoice: '角色语气自然。',
+        audioAndSeDesign: '开场补脚步 PlaySe 音效。',
+        stageRhythm: '片尾黑屏前加入呼吸停顿。',
+        actingNaturalness: '动作与表情贴合语境。',
+        concreteFixes: ['补 PlaySe', '片尾加 Wait'],
+        operations: [
+          {
+            op: 'insert_before',
+            index: 5,
+            snippet: {
+              type: 'PlaySe',
+              wait: false,
+              delay: 0,
+              data: { file: 'se_walk_women_001_1.mp3', volume: 0.9 }
+            }
+          },
+          {
+            op: 'insert_before',
+            index: 9,
+            snippet: {
+              type: 'Wait',
+              wait: true,
+              delay: 0,
+              data: { duration: 700 }
+            }
+          }
+        ]
+      }
+    }
+    switch (stageOf(system)) {
+      case 'cast':
+        return castReply
+      case 'dialogue':
+        return dialogueReply
+      case 'staging':
+        return stagingReply
+      case 'direction':
+        return directionReply
+      case 'translate':
+        return [
+          '今日も一緒に練習しよう。😊',
+          'うん……😮‍💨\nどの曲から始める？',
+          '……🌬️どれでもいいよ。'
+        ]
+      default:
+        throw new Error(`unexpected request: ${system.slice(0, 40)}`)
+    }
+  })
+  t.after(() => mock.close())
+  process.env.MSS_TEST_LLM_KEY = 'test-key'
+
+  const { writer } = makeWriter(mock.baseUrl)
+  const result = await writer.generate({
+    prompt: '放学后瑞希和绘名聊下次练习',
+    targetMinutes: 0.3,
+    directorReview: true
+  })
+
+  assert.ok(result.meta.stages.some((s) => s.stage === 'director-review' && s.ok))
+  assert.ok(result.meta.directorReview)
+  assert.equal(result.meta.directorReview.appliedOperationsCount, 2)
+  assert.equal(result.story.snippets.filter((s) => s.type === 'PlaySe').length, 1)
+  assert.equal(result.story.snippets.filter((s) => s.type === 'Wait').length, 1)
+  // Hard constraint: Irodori TTS emotion emojis (\u200D ZWJ + \uFE0F) remain 100% intact!
+  const talks = result.story.snippets.filter((s) => s.type === 'Talk')
+  assert.ok(talks[0].data.ttsText.includes('😊'))
+  assert.ok(talks[1].data.ttsText.includes('😮‍💨'), 'ZWJ emoji 😮‍💨 must remain intact')
+  assert.ok(talks[2].data.ttsText.includes('🌬️'), 'VS16 emoji 🌬️ must remain intact')
+})

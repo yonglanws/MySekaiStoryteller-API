@@ -1,4 +1,5 @@
 import { Text, TextStyle } from 'pixi.js'
+import { GAME_FONT_BODY_STACK, GAME_FONT_BODY_WEIGHT } from '../utils/FontLoader'
 
 const WATERMARK_LINE_1 = '本视频由 MySekaiStoryteller-API 生成'
 const WATERMARK_LINE_2 = 'Designed by GuangChen2333 & 慵懒午睡'
@@ -11,11 +12,13 @@ export default class UIWatermark extends Text {
     const style = new TextStyle({
       align: 'right',
       fill: '#FFFFFFE0',
-      fontFamily: "'MiSans Medium', sans-serif",
+      fontFamily: GAME_FONT_BODY_STACK,
+      fontWeight: GAME_FONT_BODY_WEIGHT,
       fontSize,
       lineHeight: fontSize * 1.3,
-      stroke: '#4A4968CC',
+      stroke: 'rgba(68, 68, 102, 0.75)',
       strokeThickness: Math.max(1.5, screen_height / 200),
+      lineJoin: 'round',
       wordWrap: false
     })
     super(`${WATERMARK_LINE_1}\n${WATERMARK_LINE_2}`, style)

@@ -275,11 +275,48 @@ export interface StoryAgentToolkitDeps {
   logger: Logger<ILogObj>
 }
 
+export interface DirectorReviewRecord {
+  dramaticArc: string
+  emotionalContinuityAndVoice: string
+  audioAndSeDesign: string
+  stageRhythm: string
+  actingNaturalness: string
+  concreteFixes: string[]
+  appliedOperationsCount: number
+}
+
+export interface DirectorStageTelemetry {
+  snippetCount: number
+  talkCount: number
+  avgTalkChars: number
+  longLineShare: number
+  soloTalkShare: number
+  playSeCount: number
+  bgmCueCount: number
+  hasOpeningBgm: boolean
+  hasBgmSilenceCut: boolean
+  standaloneMotionCount: number
+  moveCount: number
+  waitCount: number
+  ambientColorCount: number
+  cameraOrShakeCount: number
+  talkWithMotionShare: number
+  talkFacialOnlyShare: number
+  talkStillShare: number
+  distinctMotionsUsed: number
+  distinctFacialsUsed: number
+  maxSameMotionRun: number
+  dominantEmotion?: string
+  dominantEmotionShare?: number
+  reviewFocusPoints: string[]
+}
+
 export interface StoryAgentToolkit {
   definitions: LlmToolDefinition[]
   execute: (name: string, rawArgs: unknown, signal?: AbortSignal) => Promise<string>
   getSavedDraft: () => Record<string, unknown> | null
   getSavedPlan: () => SavedStoryPlan | null
+  getDirectorReview: () => DirectorReviewRecord | null
   isFinalized: () => boolean
 }
 
@@ -1170,13 +1207,207 @@ function isStoryObjectCandidate(val: unknown): boolean {
   return Array.isArray(rec.snippets)
 }
 
+function buildDirectorStageTelemetry(story: Record<string, unknown>): DirectorStageTelemetry {
+  const snippets = Array.isArray(story.snippets)
+    ? (story.snippets as Array<Record<string, unknown>>)
+    : []
+  let talkCount = 0
+  let playSeCount = 0
+  let bgmCueCount = 0
+  let firstTalkIdx = -1
+  let firstBgmIdx = -1
+  let hasBgmSilenceCut = false
+  let standaloneMotionCount = 0
+  let moveCount = 0
+  let waitCount = 0
+  let ambientColorCount = 0
+  let cameraOrShakeCount = 0
+  let talkWithMotion = 0
+  let talkFacialOnly = 0
+  let talkStill = 0
+  let totalTalkChars = 0
+  let longTalkCount = 0
+  let soloTalkCount = 0
+  const onStage = new Set<number>()
+  const emotionCounts = new Map<string, number>()
+  const distinctMotions = new Set<string>()
+  const distinctFacials = new Set<string>()
+  const motionRunByModel = new Map<number, { motion: string; run: number }>()
+  let maxSameMotionRun = 0
+
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    if (!s || typeof s !== 'object') continue
+    const kind = String(s.type ?? '')
+    const d = (s.data && typeof s.data === 'object' ? s.data : {}) as Record<string, unknown>
+    if (kind === 'LayoutAppear') {
+      if (typeof d.modelId === 'number') onStage.add(d.modelId)
+    } else if (kind === 'LayoutClear') {
+      if (typeof d.modelId === 'number') onStage.delete(d.modelId)
+    } else if (kind === 'PlaySe') {
+      playSeCount += 1
+    } else if (kind === 'ChangeBgm') {
+      bgmCueCount += 1
+      if (firstBgmIdx === -1) firstBgmIdx = i
+      if (d.stop === true) hasBgmSilenceCut = true
+    } else if (kind === 'Motion') {
+      standaloneMotionCount += 1
+    } else if (kind === 'Move') {
+      moveCount += 1
+    } else if (kind === 'Wait') {
+      waitCount += 1
+    } else if (kind === 'AmbientColor') {
+      ambientColorCount += 1
+    } else if (
+      kind === 'CameraZoom' ||
+      kind === 'CameraMove' ||
+      kind === 'DollyZoom' ||
+      kind === 'ShakeScreen' ||
+      kind === 'ShakeWindow' ||
+      kind === 'CharacterShake'
+    ) {
+      cameraOrShakeCount += 1
+    } else if (kind === 'Talk') {
+      talkCount += 1
+      if (firstTalkIdx === -1) firstTalkIdx = i
+      if (onStage.size === 1) soloTalkCount += 1
+      const contentStr = typeof d.content === 'string' ? d.content.replace(/\s+/g, '') : ''
+      const chars = Array.from(contentStr).length
+      totalTalkChars += chars
+      if (chars >= 24) longTalkCount += 1
+      const emoStr = typeof d.emotion === 'string' ? d.emotion.trim() : ''
+      if (emoStr) emotionCounts.set(emoStr, (emotionCounts.get(emoStr) ?? 0) + 1)
+      const mid = typeof d.modelId === 'number' ? d.modelId : -1
+      const acts = Array.isArray(d.actions) ? (d.actions as Array<Record<string, unknown>>) : []
+      const speakerActs = acts.filter((a) => a && (a.modelId === mid || a.modelId === undefined))
+      const speakerMotion =
+        speakerActs.find((a) => typeof a.motion === 'string' && a.motion.trim())?.motion ??
+        (typeof d.motion === 'string' && d.motion.trim() ? d.motion : '')
+      const speakerFacial =
+        speakerActs.find((a) => typeof a.facial === 'string' && a.facial.trim())?.facial ??
+        (typeof d.facial === 'string' && d.facial.trim() ? d.facial : '')
+      const mStr = typeof speakerMotion === 'string' ? speakerMotion.trim() : ''
+      const fStr = typeof speakerFacial === 'string' ? speakerFacial.trim() : ''
+      if (mStr) {
+        talkWithMotion += 1
+        distinctMotions.add(mStr)
+        if (mid !== -1) {
+          const prev = motionRunByModel.get(mid)
+          const run = prev && prev.motion === mStr ? prev.run + 1 : 1
+          motionRunByModel.set(mid, { motion: mStr, run })
+          if (run > maxSameMotionRun) maxSameMotionRun = run
+        }
+      } else if (fStr) {
+        talkFacialOnly += 1
+      } else {
+        talkStill += 1
+      }
+      if (fStr) distinctFacials.add(fStr)
+      for (const a of acts) {
+        if (typeof a?.motion === 'string' && a.motion.trim()) distinctMotions.add(a.motion.trim())
+        if (typeof a?.facial === 'string' && a.facial.trim()) distinctFacials.add(a.facial.trim())
+      }
+    }
+  }
+
+  const hasTopLevelBgm = Array.isArray(story.bgm)
+    ? story.bgm.length > 0
+    : typeof story.bgm === 'string' && story.bgm.trim().length > 0
+  const hasOpeningBgm =
+    hasTopLevelBgm || (firstBgmIdx !== -1 && (firstTalkIdx === -1 || firstBgmIdx < firstTalkIdx))
+  const talkWithMotionShare = talkCount > 0 ? Number((talkWithMotion / talkCount).toFixed(2)) : 0
+  const talkFacialOnlyShare = talkCount > 0 ? Number((talkFacialOnly / talkCount).toFixed(2)) : 0
+  const talkStillShare = talkCount > 0 ? Number((talkStill / talkCount).toFixed(2)) : 0
+  const avgTalkChars = talkCount > 0 ? Number((totalTalkChars / talkCount).toFixed(1)) : 0
+  const longLineShare = talkCount > 0 ? Number((longTalkCount / talkCount).toFixed(2)) : 0
+  const soloTalkShare = talkCount > 0 ? Number((soloTalkCount / talkCount).toFixed(2)) : 0
+  let dominantEmotion: string | undefined
+  let dominantEmotionCount = 0
+  for (const [emo, cnt] of emotionCounts) {
+    if (cnt > dominantEmotionCount) {
+      dominantEmotion = emo
+      dominantEmotionCount = cnt
+    }
+  }
+  const dominantEmotionShare =
+    talkCount > 0 && dominantEmotionCount > 0
+      ? Number((dominantEmotionCount / talkCount).toFixed(2))
+      : undefined
+
+  const reviewFocusPoints: string[] = []
+  if (talkCount >= 10 && playSeCount === 0) {
+    reviewFocusPoints.push(
+      '全片 0 个 PlaySe 音效（官方近期剧集 96% 含音效）：请在脚步、奔跑、开关门、衣料/翻纸、惊觉或转场处点缀 2~5 处 PlaySe'
+    )
+  }
+  if (talkCount >= 8 && !hasOpeningBgm) {
+    reviewFocusPoints.push(
+      '开场未设置 BGM（前半段静音）：请确认是否为刻意冷开场，否则在首句 Talk 前补充 ChangeBgm'
+    )
+  }
+  if (talkCount >= 18 && !hasBgmSilenceCut && bgmCueCount <= 1) {
+    reviewFocusPoints.push(
+      '长场次 BGM 全程单一未切停：可在情绪转折或爆发前用 ChangeBgm({stop:true}) 制造留白或切曲'
+    )
+  }
+  if (talkCount >= 14 && standaloneMotionCount === 0 && waitCount === 0 && moveCount === 0) {
+    reviewFocusPoints.push(
+      '舞台节奏偏平（0 独立 Motion、0 Wait、0 Move）：可在情绪重拍插入 1~3 处原地 Move 静默反应拍、独立 Motion（或长句后半拍 wait:false, delay:2.5~4.5 的说话者换姿）或短 Wait'
+    )
+  }
+  if (talkCount >= 16 && distinctMotions.size <= 6) {
+    reviewFocusPoints.push(
+      `全片仅使用了 ${distinctMotions.size} 种不同身体动作，容易陷入机械循环（近期官方主演单集约 12~18 种）：可从角色调色板中补充更多自然变体（含不同编号及贴合气氛的跨风格动作）`
+    )
+  }
+  if (talkCount >= 14 && avgTalkChars >= 19 && longLineShare >= 0.35) {
+    reviewFocusPoints.push(
+      `台词均长 ${avgTalkChars} 字且长句占比 ${(longLineShare * 100).toFixed(0)}%，容易像书面说明（官方近期多为短反应与中等句交错）：可将部分解释句拆短，留出停顿与潜台词`
+    )
+  }
+  if (talkCount >= 16 && dominantEmotion && (dominantEmotionShare ?? 0) >= 0.8) {
+    reviewFocusPoints.push(
+      `情绪标签有 ${((dominantEmotionShare ?? 0) * 100).toFixed(0)}% 锁死在「${dominantEmotion}」：可按情绪铺垫、试探、动摇、收尾的层次微调 emotion，避免语音全程单调`
+    )
+  }
+  if (talkCount >= 12 && talkWithMotionShare > 0.9) {
+    reviewFocusPoints.push(
+      `说话带动作占比 ${(talkWithMotionShare * 100).toFixed(0)}% 偏满：可让约 15%~25% 的承接/情绪延续句省略 motion（自然保持姿态或只微调 facial），避免逐句乱动`
+    )
+  }
+
+  return {
+    snippetCount: snippets.length,
+    talkCount,
+    avgTalkChars,
+    longLineShare,
+    soloTalkShare,
+    playSeCount,
+    bgmCueCount,
+    hasOpeningBgm,
+    hasBgmSilenceCut,
+    standaloneMotionCount,
+    moveCount,
+    waitCount,
+    ambientColorCount,
+    cameraOrShakeCount,
+    talkWithMotionShare,
+    talkFacialOnlyShare,
+    talkStillShare,
+    distinctMotionsUsed: distinctMotions.size,
+    distinctFacialsUsed: distinctFacials.size,
+    maxSameMotionRun,
+    ...(dominantEmotion ? { dominantEmotion, dominantEmotionShare } : {}),
+    reviewFocusPoints
+  }
+}
+
 /**
  * 构建供 Agentic Loop 使用的完整自主导演工具集：
- * - 角色与服装查询（lookup_character）
- * - 表情 + 身体动作双语义检索与逐句推荐（inspect_character_expressions, recommend_acting_for_lines）
- * - 官方资源/特效/场景 Cue 检索（search_assets）
+ * - 角色、服装与表情/动作一体化批量查询（lookup_character, inspect_character_expressions, recommend_acting_for_lines）
+ * - 官方资源/特效/场景 Cue 批量检索（search_assets）
  * - 官方语料与演技规范检索（search_official_corpus）
- * - 状态化大纲与草稿管理（plan_story_outline, save_story_draft, inspect_story_draft, patch_story_draft, finalize_story_draft）
+ * - 状态化大纲、草稿管理与导演终审（plan_story_outline, save_story_draft, inspect_story_draft, patch_story_draft, submit_director_review, finalize_story_draft）
  * - 对白、舞台、剧情表情动作逐句质检（validate_dialogue_draft, critique_story_draft, validate_story_draft）
  */
 export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgentToolkit {
@@ -1184,6 +1415,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
 
   let savedPlan: SavedStoryPlan | null = null
   let savedDraft: Record<string, unknown> | null = null
+  let directorReview: DirectorReviewRecord | null = null
   let finalized = false
 
   const definitions: LlmToolDefinition[] = [
@@ -1192,15 +1424,35 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'lookup_character',
         description:
-          '查询角色的 modelId、模型路径、可用服装变体、性格人设、表演气质（如真冬克制内敛）与说话口吻。写台词和分镜前先核实。',
+          '一次批量查询全部出场角色的 modelId、模型路径、可用服装、人设口吻、表演气质；设 includeExpressions: true 时同步返回按情绪分组的丰富表情与多风格动作调色板（1 次调用即可替代多轮 lookup + inspect_character_expressions！）。',
         parameters: {
           type: 'object',
           properties: {
             character: {
               type: 'string',
-              description: '角色全名、简称或关键字（留空则返回当前可选全员摘要）'
+              description: '单个角色全名、简称或关键字（多角色请优先用 characters 数组）'
             },
-            modelId: { type: 'number', description: '可选角色 modelId' }
+            characters: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '推荐：一次批量查询多个出场角色（如 ["瑞希","绘名"]），节省步数'
+            },
+            modelId: { type: 'number', description: '可选单个角色 modelId' },
+            modelIds: {
+              type: 'array',
+              items: { type: 'number' },
+              description: '可选：一次批量查询多个 modelId'
+            },
+            includeExpressions: {
+              type: 'boolean',
+              description:
+                '推荐设为 true：同步返回每个角色按情绪分组的多样化表情（含 cry/sad 变体）与跨风格动作调色板，省去额外的 inspect_character_expressions 轮次'
+            },
+            moods: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '配合 includeExpressions 使用的情绪清单（留空则返回核心 7 类情绪总览）'
+            }
           }
         }
       }
@@ -1210,12 +1462,22 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'inspect_character_expressions',
         description:
-          '按情绪/剧情台词语义查询指定角色的可用身体动作（motion）和带 motion3 语义注释的表情（facial）。支持传 moods 数组一次查询多情绪，或留空 mood 直接返回按情绪分组的紧凑总览（每个角色只需 1 次调用！）。',
+          '按情绪/剧情台词语义查询指定角色（支持 modelIds/characters 一次查多角色、moods 一次查多情绪）的可用身体动作（motion）和带 motion3 语义注释的表情（facial）。若 lookup_character 已设 includeExpressions: true，通常无需再重复调用。',
         parameters: {
           type: 'object',
           properties: {
-            modelId: { type: 'number', description: '角色 modelId' },
-            character: { type: 'string', description: '角色名或简称（未传 modelId 时使用）' },
+            modelId: { type: 'number', description: '单个角色 modelId' },
+            modelIds: {
+              type: 'array',
+              items: { type: 'number' },
+              description: '批量查询多个角色 modelId'
+            },
+            character: { type: 'string', description: '单个角色名或简称（未传 modelId 时使用）' },
+            characters: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '批量查询多个角色名或简称'
+            },
             mood: {
               type: 'string',
               description:
@@ -1250,14 +1512,32 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'recommend_acting_for_lines',
         description:
-          '批量为多句台词匹配最贴合剧情情绪、上下文转折与角色性格的 facial 和 motion 候选；若提供 listenerModelId 或 listenerSpeaker，同时返回官方节奏的听者句首(at: 0)纯表情反应建议。',
+          '按需为指定台词匹配贴合剧情情绪的表情与动作候选。注意：常规创作无需把整场几十句台词重发一遍给此工具！直接基于 lookup_character(includeExpressions:true) 的调色板起草进 save_story_draft；仅在审校阶段对少数疑难句调用（支持 useCurrentDraft: true + onlyIssues: true 或 snippetIndices 免重发台词）。',
         parameters: {
           type: 'object',
           properties: {
+            useCurrentDraft: {
+              type: 'boolean',
+              description:
+                '直接从已保存草稿读取台词（无需重复传 lines），推荐配合 onlyIssues 或 snippetIndices 使用'
+            },
+            onlyIssues: {
+              type: 'boolean',
+              description: '配合 useCurrentDraft 使用：仅针对审校标出的问题台词返回替代建议'
+            },
+            snippetIndices: {
+              type: 'array',
+              items: { type: 'number' },
+              description: '配合 useCurrentDraft 使用：仅查询指定 snippet 下标的台词'
+            },
+            limit: {
+              type: 'number',
+              description: '每句返回的候选上限（默认小批量 4、大批量 2，保持上下文紧凑）'
+            },
             lines: {
               type: 'array',
               description:
-                '台词列表 [{ id?, modelId?, speaker?, content, emotion?, isListener?, isMonologue?, listenerModelId?, listenerSpeaker? }]',
+                '可选：手动传入少量待查台词 [{ id?, modelId?, speaker?, content, emotion?, isListener?, isMonologue?, listenerModelId?, listenerSpeaker? }]',
               items: {
                 type: 'object',
                 properties: {
@@ -1280,8 +1560,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 required: ['content']
               }
             }
-          },
-          required: ['lines']
+          }
         }
       }
     },
@@ -1602,8 +1881,96 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     {
       type: 'function',
       function: {
+        name: 'submit_director_review',
+        description:
+          '对已保存剧本执行真正的【5 维导演终审】，审视：戏剧弧光与收尾、情绪连贯与人物口吻、BGM/PlaySe 音效设计、舞台节奏（Wait/独立 Motion 静默拍/Move/单双人切镜/淡入淡出）与表情动作自然度；可同步提交 operations 一次性完成所有外科修补，并设 finalizeIfReady: true 一步定稿！',
+        parameters: {
+          type: 'object',
+          properties: {
+            dramaticArc: {
+              type: 'string',
+              description:
+                '评估开场抓手、中段情绪转折、句长节奏（是否有短促反应与潜台词）与结尾余韵'
+            },
+            emotionalContinuityAndVoice: {
+              type: 'string',
+              description: '评估角色口吻真实度、情绪过渡自然度（避免整场锁死单一情绪标签）与潜台词'
+            },
+            audioAndSeDesign: {
+              type: 'string',
+              description: '评估开场与切停 BGM（如高潮静音留白）及 PlaySe 物理/情绪音效是否到位'
+            },
+            stageRhythm: {
+              type: 'string',
+              description:
+                '评估单人 Center 特写与双人同框切镜、Wait/独立 Motion 静默拍、Move 反应拍与镜头/震动点缀'
+            },
+            actingNaturalness: {
+              type: 'string',
+              description:
+                '评估表情/动作多样性与自然度（避免 4 动作死循环，也避免机械每句乱动；情绪延续自然保持姿态或微调表情）'
+            },
+            concreteFixes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '本轮审校发现并准备修补的具体清单（若无须修改可为空数组）'
+            },
+            operations: {
+              type: 'array',
+              description:
+                '可选：与 patch_story_draft 完全相同格式的局部修补操作列表，将在审校同时落地',
+              items: {
+                type: 'object',
+                properties: {
+                  op: {
+                    type: 'string',
+                    enum: [
+                      'replace',
+                      'update_talk',
+                      'update_acting',
+                      'upsert_listener_action',
+                      'insert_before',
+                      'insert_after',
+                      'delete'
+                    ]
+                  },
+                  index: { type: 'number' },
+                  snippet: { type: 'object' },
+                  snippets: { type: 'array', items: { type: 'object' } },
+                  content: { type: 'string' },
+                  emotion: { type: 'string' },
+                  delay: { type: 'number' },
+                  closeWindowOnFinish: { type: 'boolean' },
+                  motion: { type: 'string' },
+                  facial: { type: 'string' },
+                  listenerAction: { type: 'object' },
+                  actions: { type: 'array', items: { type: 'object' } }
+                },
+                required: ['op', 'index']
+              }
+            },
+            finalizeIfReady: {
+              type: 'boolean',
+              description:
+                '若修补后全部校验通过则直接定稿提交（推荐 true，省去额外一轮 finalize_story_draft）'
+            }
+          },
+          required: [
+            'dramaticArc',
+            'emotionalContinuityAndVoice',
+            'audioAndSeDesign',
+            'stageRhythm',
+            'actingNaturalness'
+          ]
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'finalize_story_draft',
-        description: '确认已保存并修复的草稿通过所有校验后直接定稿提交，无需再次输出长 JSON。',
+        description:
+          '确认已保存并通过导演终审的草稿无误后直接定稿提交，无需再次输出长 JSON（长篇草稿 >=8 句须先经过 submit_director_review）。',
         parameters: {
           type: 'object',
           properties: {
@@ -1716,12 +2083,15 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
   const runCompactAudit = (candidate: Record<string, unknown>): Record<string, unknown> => {
     try {
       const audited = auditDraftCandidate(candidate)
+      const directorTelemetry = buildDirectorStageTelemetry(candidate)
       return {
         schemaValid: true,
         officialPassed: audited.officialPassed,
         actingPassed: audited.actingReport.passed,
         actingScore: audited.actingReport.score,
         readyToFinalize: audited.readyToFinalize,
+        directorReviewed: Boolean(directorReview),
+        directorTelemetry,
         warnings: audited.warnings.slice(0, 12),
         officialIssues: audited.postOfficialReport.issues,
         zeroMotionModelIds: audited.actingReport.zeroMotionModelIds,
@@ -1753,12 +2123,195 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     }
   }
 
+  const buildModelExpressionOverview = (
+    model: CatalogModel,
+    options: {
+      mood?: string
+      moods?: string[]
+      dialogueLine?: string
+      emotion?: string
+      kind?: string
+      compact?: boolean
+    } = {}
+  ): Record<string, unknown> => {
+    const mood = (options.mood ?? '').trim()
+    const moodsArg = (options.moods ?? []).map((m) => m.trim()).filter(Boolean)
+    const dialogueLine = (options.dialogueLine ?? '').trim()
+    const emotion = (options.emotion ?? '').trim()
+    const kind = options.kind ?? 'all'
+    const compact = Boolean(options.compact)
+    const profile = getActingProfile(`${model.name} ${model.path}`)
+
+    // 结合全量模型动作与表情库（不局限于 34/28 提示词截断集），让 Agent 能调用到 face_cry_*、face_sad_02+、跨风格动作变体
+    const curatedMotions = view.promptMotions(model)
+    const fullMotions =
+      model.motions && model.motions.length > curatedMotions.length
+        ? [
+            ...curatedMotions,
+            ...model.motions.filter(
+              (m) => !curatedMotions.includes(m) && !facialSemanticsMod.isSpecialOrStandingMotion(m)
+            )
+          ]
+        : curatedMotions
+    const curatedFacials = view.promptFacials(model)
+    const fullFacials =
+      model.facials && model.facials.length > curatedFacials.length
+        ? [...curatedFacials, ...model.facials.filter((f) => !curatedFacials.includes(f))]
+        : curatedFacials
+
+    const filterBySemanticsForTokens = (
+      items: string[],
+      tokens: string[],
+      labelFn: (item: string) => string,
+      maxPerStem = 2
+    ): string[] => {
+      const scored =
+        tokens.length === 0
+          ? items
+          : items
+              .map((item, idx) => {
+                const hay = `${item} ${labelFn(item)}`.toLowerCase()
+                const hits = tokens.filter((tok) => hay.includes(tok)).length
+                const normalBonus = /^w-normal/i.test(item) ? 0.25 : 0
+                return { item, score: hits + normalBonus, hits, idx }
+              })
+              .filter((entry) => entry.hits > 0)
+              .sort((a, b) => b.score - a.score || a.idx - b.idx)
+              .map((entry) => entry.item)
+      const base = scored.length > 0 ? scored : items
+      // 同一 stem 最多取 maxPerStem 个变体，避免某一个词根占满整组（如全是 nod01..06）
+      const stemCounts = new Map<string, number>()
+      const diverse: string[] = []
+      for (const item of base) {
+        const stem = item
+          .toLowerCase()
+          .replace(/^w-[a-z]+-/, '')
+          .replace(/^face_/, '')
+          .replace(/[_-]?\d+[a-z]?$/i, '')
+        const cnt = stemCounts.get(stem) ?? 0
+        if (cnt >= maxPerStem) continue
+        stemCounts.set(stem, cnt + 1)
+        diverse.push(item)
+      }
+      return diverse.length > 0 ? diverse : base
+    }
+
+    const facialLabelFn = (f: string): string =>
+      `${facialSemanticsMod.inspectModelFacial(model.path, f).role} ${facialSemanticsMod.inspectModelFacial(model.path, f).label}`
+    const motionLabelFn = (m: string): string => inspectMotion(model.path, m).label
+
+    const targetMoods =
+      moodsArg.length > 0
+        ? moodsArg.slice(0, 8)
+        : !mood && !dialogueLine && !emotion
+          ? ['平静', '开心', '伤心', '困扰', '生气', '惊讶', '害羞']
+          : []
+
+    const perMoodFacialLimit = compact ? 4 : 5
+    const perMoodMotionLimit = compact ? 4 : 6
+    const nonStandingMotions = fullMotions.filter((m) => !isStandingMotion(m))
+    const byMood: Record<string, { facials?: string[]; motions?: string[] }> = {}
+    if (targetMoods.length > 0) {
+      for (const mKey of targetMoods) {
+        const mTokens = expandMoodTokens(mKey)
+        const entry: { facials?: string[]; motions?: string[] } = {}
+        if (kind !== 'motion') {
+          entry.facials = filterBySemanticsForTokens(fullFacials, mTokens, facialLabelFn, 2)
+            .slice(0, perMoodFacialLimit)
+            .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
+        }
+        if (kind !== 'facial') {
+          entry.motions = filterBySemanticsForTokens(nonStandingMotions, mTokens, motionLabelFn, 2)
+            .slice(0, perMoodMotionLimit)
+            .map((m) => annotateMotion(model.path, m))
+        }
+        byMood[mKey] = entry
+      }
+    }
+
+    const tokens = mood ? expandMoodTokens(mood) : []
+    const motions =
+      kind === 'facial' || compact
+        ? []
+        : filterBySemanticsForTokens(fullMotions, tokens, motionLabelFn, 2)
+            .slice(0, targetMoods.length > 0 ? 14 : 24)
+            .map((m) => annotateMotion(model.path, m))
+
+    const facials =
+      kind === 'motion' || compact
+        ? []
+        : filterBySemanticsForTokens(fullFacials, tokens, facialLabelFn, 2)
+            .slice(0, targetMoods.length > 0 ? 14 : 24)
+            .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
+
+    const recommended =
+      dialogueLine || emotion || mood
+        ? recommendForLine(view, model, {
+            content: dialogueLine || mood,
+            emotion,
+            restrainedRole: profile.restrained,
+            limit: 4
+          })
+        : null
+
+    return {
+      modelId: model.id,
+      name: view.shortName(model),
+      restrained: profile.restrained,
+      actingNote: profile.actingNote,
+      ...(Object.keys(byMood).length > 0 ? { byMood } : {}),
+      ...(recommended
+        ? {
+            recommended: {
+              mood: recommended.mood,
+              facials: recommended.facials.map((f) =>
+                facialSemanticsMod.annotateFacialName(model.path, f)
+              ),
+              motions: recommended.motions.map((m) => annotateMotion(model.path, m))
+            }
+          }
+        : {}),
+      ...(motions.length > 0 ? { motions } : {}),
+      ...(facials.length > 0 ? { facials } : {})
+    }
+  }
+
+  const resolveBatchModels = (args: Record<string, unknown>): CatalogModel[] => {
+    const picked: CatalogModel[] = []
+    const seen = new Set<number>()
+    const addIfFound = (m: CatalogModel | null): void => {
+      if (m && !seen.has(m.id)) {
+        seen.add(m.id)
+        picked.push(m)
+      }
+    }
+    if (Array.isArray(args.modelIds)) {
+      for (const id of args.modelIds) addIfFound(findModel(view, id, undefined))
+    }
+    if (Array.isArray(args.characters)) {
+      for (const c of args.characters) addIfFound(findModel(view, undefined, c))
+    }
+    if (args.modelId !== undefined || args.character !== undefined) {
+      addIfFound(findModel(view, args.modelId, args.character))
+    }
+    return picked
+  }
+
   const execute = async (name: string, rawArgs: unknown, signal?: AbortSignal): Promise<string> => {
     const args = parseToolArgs(rawArgs)
 
     if (name === 'lookup_character') {
-      const target = findModel(view, args.modelId, args.character)
-      const list = target ? [target] : view.primaryModels()
+      const requestedBatch = resolveBatchModels(args)
+      const hasExplicitFilter =
+        Array.isArray(args.characters) ||
+        Array.isArray(args.modelIds) ||
+        args.character !== undefined ||
+        args.modelId !== undefined
+      const list = hasExplicitFilter ? requestedBatch : view.primaryModels()
+      const includeExpressions = Boolean(args.includeExpressions)
+      const moodsArg = Array.isArray(args.moods)
+        ? args.moods.map((m) => String(m ?? '').trim()).filter(Boolean)
+        : undefined
       return JSON.stringify({
         characters: list.map((m) => {
           const persona = personasMod.personaFor(personas, m)
@@ -1771,6 +2324,9 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
               modelId: o.id,
               label: o.outfitLabel || o.outfitCategory || o.cloudId || '默认'
             }))
+          const exprBlock = includeExpressions
+            ? buildModelExpressionOverview(m, { moods: moodsArg, compact: true })
+            : null
           return {
             modelId: m.id,
             name: m.name,
@@ -1782,20 +2338,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             actingProfile: profile,
             persona: persona
               ? personasMod.dialoguePersonaPrompt(persona)
-              : '（按该角色官方设定演绎）'
+              : '（按该角色官方设定演绎）',
+            ...(exprBlock?.byMood ? { expressionsByMood: exprBlock.byMood } : {})
           }
         })
       })
     }
 
     if (name === 'inspect_character_expressions') {
-      const model = findModel(view, args.modelId, args.character)
-      if (!model) {
-        return JSON.stringify({
-          error: '未找到指定角色',
-          available: view.models.map((m) => ({ modelId: m.id, name: view.shortName(m) }))
-        })
-      }
       const mood = typeof args.mood === 'string' ? args.mood.trim() : ''
       const moodsArg = Array.isArray(args.moods)
         ? args.moods.map((m) => String(m ?? '').trim()).filter(Boolean)
@@ -1803,123 +2353,116 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       const dialogueLine = typeof args.dialogueLine === 'string' ? args.dialogueLine.trim() : ''
       const emotion = typeof args.emotion === 'string' ? args.emotion.trim() : ''
       const kind = typeof args.kind === 'string' ? args.kind : 'all'
-      const profile = getActingProfile(`${model.name} ${model.path}`)
 
-      const allMotions = view.promptMotions(model)
-      const allFacials = view.promptFacials(model)
-      const filterBySemanticsForTokens = (
-        items: string[],
-        tokens: string[],
-        labelFn: (item: string) => string
-      ): string[] => {
-        if (tokens.length === 0) return items
-        const scored = items
-          .map((item) => {
-            const hay = `${item} ${labelFn(item)}`.toLowerCase()
-            const hits = tokens.filter((tok) => hay.includes(tok)).length
-            return { item, hits }
+      const isBatch = Array.isArray(args.modelIds) || Array.isArray(args.characters)
+      if (isBatch) {
+        const models = resolveBatchModels(args)
+        if (models.length === 0) {
+          return JSON.stringify({
+            error: '未找到指定角色',
+            available: view.models.map((m) => ({ modelId: m.id, name: view.shortName(m) }))
           })
-          .filter((entry) => entry.hits > 0)
-          .sort((a, b) => b.hits - a.hits)
-          .map((entry) => entry.item)
-        return scored.length > 0 ? scored : items
-      }
-
-      const facialLabelFn = (f: string): string =>
-        `${facialSemanticsMod.inspectModelFacial(model.path, f).role} ${facialSemanticsMod.inspectModelFacial(model.path, f).label}`
-      const motionLabelFn = (m: string): string => inspectMotion(model.path, m).label
-
-      // 批量多情绪模式或无过滤默认总览：1 次调用即返回该角色各核心情绪的表情+动作分组
-      const targetMoods =
-        moodsArg.length > 0
-          ? moodsArg.slice(0, 8)
-          : !mood && !dialogueLine && !emotion
-            ? ['平静', '开心', '伤心', '困扰', '生气', '惊讶', '害羞']
-            : []
-
-      const byMood: Record<string, { facials?: string[]; motions?: string[] }> = {}
-      if (targetMoods.length > 0) {
-        for (const mKey of targetMoods) {
-          const mTokens = expandMoodTokens(mKey)
-          const entry: { facials?: string[]; motions?: string[] } = {}
-          if (kind !== 'motion') {
-            entry.facials = filterBySemanticsForTokens(allFacials, mTokens, facialLabelFn)
-              .slice(0, 4)
-              .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
-          }
-          if (kind !== 'facial') {
-            entry.motions = filterBySemanticsForTokens(
-              allMotions.filter((m) => !isStandingMotion(m)),
-              mTokens,
-              motionLabelFn
-            )
-              .slice(0, 4)
-              .map((m) => annotateMotion(model.path, m))
-          }
-          byMood[mKey] = entry
         }
+        return JSON.stringify({
+          characters: models.map((m) =>
+            buildModelExpressionOverview(m, {
+              mood,
+              moods: moodsArg,
+              dialogueLine,
+              emotion,
+              kind,
+              compact: models.length >= 2
+            })
+          )
+        })
       }
 
-      const tokens = mood ? expandMoodTokens(mood) : []
-      const motions =
-        kind === 'facial'
-          ? []
-          : filterBySemanticsForTokens(allMotions, tokens, motionLabelFn)
-              .slice(0, targetMoods.length > 0 ? 12 : 22)
-              .map((m) => annotateMotion(model.path, m))
-
-      const facials =
-        kind === 'motion'
-          ? []
-          : filterBySemanticsForTokens(allFacials, tokens, facialLabelFn)
-              .slice(0, targetMoods.length > 0 ? 14 : 24)
-              .map((f) => facialSemanticsMod.annotateFacialName(model.path, f))
-
-      const recommended =
-        dialogueLine || emotion || mood
-          ? recommendForLine(view, model, {
-              content: dialogueLine || mood,
-              emotion,
-              restrainedRole: profile.restrained,
-              limit: 4
-            })
-          : null
-
-      return JSON.stringify({
-        modelId: model.id,
-        name: view.shortName(model),
-        restrained: profile.restrained,
-        actingNote: profile.actingNote,
-        ...(Object.keys(byMood).length > 0 ? { byMood } : {}),
-        ...(recommended
-          ? {
-              recommended: {
-                mood: recommended.mood,
-                facials: recommended.facials.map((f) =>
-                  facialSemanticsMod.annotateFacialName(model.path, f)
-                ),
-                motions: recommended.motions.map((m) => annotateMotion(model.path, m))
-              }
-            }
-          : {}),
-        ...(motions.length > 0 ? { motions } : {}),
-        ...(facials.length > 0 ? { facials } : {})
-      })
+      const model = findModel(view, args.modelId, args.character)
+      if (!model) {
+        return JSON.stringify({
+          error: '未找到指定角色',
+          available: view.models.map((m) => ({ modelId: m.id, name: view.shortName(m) }))
+        })
+      }
+      return JSON.stringify(
+        buildModelExpressionOverview(model, {
+          mood,
+          moods: moodsArg,
+          dialogueLine,
+          emotion,
+          kind
+        })
+      )
     }
 
     if (name === 'recommend_acting_for_lines') {
-      const rawLines = Array.isArray(args.lines) ? args.lines : []
+      let rawLines: Array<Record<string, unknown>> = Array.isArray(args.lines)
+        ? (args.lines as Array<Record<string, unknown>>)
+        : []
+      if ((rawLines.length === 0 || args.useCurrentDraft === true) && savedDraft) {
+        const snippets = Array.isArray(savedDraft.snippets)
+          ? (savedDraft.snippets as Array<Record<string, unknown>>)
+          : []
+        const filterIdxSet = Array.isArray(args.snippetIndices)
+          ? new Set(
+              args.snippetIndices
+                .filter((n): n is number => typeof n === 'number' && Number.isFinite(n))
+                .map((n) => Math.floor(n))
+            )
+          : null
+        let issueIdxSet: Set<number> | null = null
+        if (args.onlyIssues === true) {
+          try {
+            const report = auditDraftCandidate(savedDraft).actingReport
+            issueIdxSet = new Set(report.diagnostics.map((d) => d.snippetIndex))
+          } catch {
+            issueIdxSet = null
+          }
+        }
+        const onStage = new Set<number>()
+        const extracted: Array<Record<string, unknown>> = []
+        for (let idx = 0; idx < snippets.length; idx++) {
+          const s = snippets[idx]
+          if (!s || typeof s !== 'object') continue
+          const d = (s.data && typeof s.data === 'object' ? s.data : {}) as Record<string, unknown>
+          if (s.type === 'LayoutAppear' && typeof d.modelId === 'number') onStage.add(d.modelId)
+          else if (s.type === 'LayoutClear' && typeof d.modelId === 'number')
+            onStage.delete(d.modelId)
+          if (s.type !== 'Talk') continue
+          if (filterIdxSet && !filterIdxSet.has(idx)) continue
+          if (issueIdxSet && !issueIdxSet.has(idx)) continue
+          const speakerId = typeof d.modelId === 'number' ? d.modelId : -1
+          const listenerId = [...onStage].find((id) => id !== speakerId)
+          extracted.push({
+            id: `snippets[${idx}]`,
+            snippetIndex: idx,
+            modelId: speakerId,
+            speaker: typeof d.speaker === 'string' ? d.speaker : '',
+            content: typeof d.content === 'string' ? d.content : '',
+            emotion: typeof d.emotion === 'string' ? d.emotion : '',
+            ...(listenerId !== undefined ? { listenerModelId: listenerId } : {})
+          })
+        }
+        rawLines = extracted
+      }
+
+      const defaultPerLineLimit = rawLines.length > 8 ? 2 : 4
+      const perLineLimit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit)
+          ? Math.max(1, Math.min(4, Math.round(args.limit)))
+          : defaultPerLineLimit
       const recommendations: Array<Record<string, unknown>> = []
       const lastFacial = new Map<number, string>()
       const lastMotion = new Map<number, string>()
       let prevContent = ''
       let prevEmotion = ''
       let prevTense = false
+      let hasAnyListener = false
 
       for (let i = 0; i < rawLines.length; i++) {
         const raw = rawLines[i]
         if (!raw || typeof raw !== 'object') continue
-        const rec = raw as Record<string, unknown>
+        const rec = raw
         const content = typeof rec.content === 'string' ? rec.content : ''
         const emotion = typeof rec.emotion === 'string' ? rec.emotion : ''
         const isListener = Boolean(rec.isListener)
@@ -1944,7 +2487,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           restrainedRole: profile.restrained,
           prevFacial: lastFacial.get(model.id),
           prevMotion: lastMotion.get(model.id),
-          limit: 4
+          limit: perLineLimit
         })
         if (advised.facials[0]) lastFacial.set(model.id, advised.facials[0])
         if (advised.motions[0]) lastMotion.set(model.id, advised.motions[0])
@@ -1955,6 +2498,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             ? findModel(view, rec.listenerModelId, rec.listenerSpeaker)
             : null
         if (listenerModel && listenerModel.id !== model.id) {
+          hasAnyListener = true
           const lProfile = getActingProfile(`${listenerModel.name} ${listenerModel.path}`)
           const lAdvised = recommendForLine(view, listenerModel, {
             content,
@@ -1966,7 +2510,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             restrainedRole: lProfile.restrained,
             prevFacial: lastFacial.get(listenerModel.id),
             prevMotion: lastMotion.get(listenerModel.id),
-            limit: 3
+            limit: Math.min(2, perLineLimit)
           })
           if (lAdvised.facials[0]) lastFacial.set(listenerModel.id, lAdvised.facials[0])
           if (lAdvised.motions[0]) lastMotion.set(listenerModel.id, lAdvised.motions[0])
@@ -1975,7 +2519,6 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             speaker: view.shortName(listenerModel),
             suggestedAt: 0,
             preferFacialOnly: true,
-            note: '官方 PJSK 节奏：优先在 at: 0 仅切听者微表情(facial-only)；仅在情绪转折点于句间插独立 Motion 片段，勿在句中 at: 0.5..0.85 塞入听者身体动作',
             inferredMood: lAdvised.mood,
             recommendedFacials: lAdvised.facials.map((f) => ({
               name: f,
@@ -2002,6 +2545,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
 
         recommendations.push({
           id: typeof rec.id === 'string' ? rec.id : `l${i + 1}`,
+          ...(typeof rec.snippetIndex === 'number' ? { snippetIndex: rec.snippetIndex } : {}),
           modelId: model.id,
           speaker: view.shortName(model),
           restrained: profile.restrained,
@@ -2017,7 +2561,15 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           ...(listenerReaction ? { listenerReaction } : {})
         })
       }
-      return JSON.stringify({ recommendations })
+      return JSON.stringify({
+        ...(hasAnyListener
+          ? {
+              listenerNote:
+                '官方 PJSK 节奏：听者反应优先通过切镜/原地 Move/短停顿，或句首 at: 0 纯切 facial 表达，避免在句中 at: 0.5..0.85 塞入听者身体动作'
+            }
+          : {}),
+        recommendations
+      })
     }
 
     if (name === 'search_assets') {
@@ -2349,11 +2901,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
       }
       savedDraft = structuredClone(candidate)
+      directorReview = null
       finalized = false
       const audit = runCompactAudit(savedDraft)
       return JSON.stringify({
         draftSaved: true,
         snippetCount: Array.isArray(savedDraft.snippets) ? savedDraft.snippets.length : 0,
+        nextStepHint:
+          '已返回完整规则体检与 directorTelemetry，无需再重复调用 validate_story_draft / critique_story_draft；请直接调用 submit_director_review 完成 5 维导演终审并同步附带 operations 修补、设 finalizeIfReady: true 一步定稿。',
         ...audit
       })
     }
@@ -2442,19 +2997,18 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       })
     }
 
-    if (name === 'patch_story_draft') {
+    const applyDraftPatchOperations = (
+      patchArgs: Record<string, unknown>
+    ): { applied: string[]; snippetCount: number } | { error: string } => {
       if (!savedDraft || !Array.isArray(savedDraft.snippets)) {
-        return JSON.stringify({
-          patched: false,
-          error: '当前工作区尚无已保存草稿，请先调用 save_story_draft'
-        })
+        return { error: '当前工作区尚无已保存草稿，请先调用 save_story_draft' }
       }
       const draft = structuredClone(savedDraft)
-      if (Array.isArray(args.models)) draft.models = args.models
-      if (Array.isArray(args.images)) draft.images = args.images
+      if (Array.isArray(patchArgs.models)) draft.models = patchArgs.models
+      if (Array.isArray(patchArgs.images)) draft.images = patchArgs.images
       const snippets = [...(draft.snippets as Array<Record<string, unknown>>)]
       const originalLength = snippets.length
-      const ops = Array.isArray(args.operations) ? args.operations : []
+      const ops = Array.isArray(patchArgs.operations) ? patchArgs.operations : []
       const appliedNotes: string[] = []
       const deletedOriginalIndices = new Set<number>()
 
@@ -2573,7 +3127,6 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 if (hasFacialArg) delete d.facial
               }
 
-              // 显式新增/更新/移除听者错峰反应（自动确保与说话者间隔 >=0.3，落在 0.45..0.85）
               const rawListener =
                 opObj.listenerAction && typeof opObj.listenerAction === 'object'
                   ? (opObj.listenerAction as Record<string, unknown>)
@@ -2614,7 +3167,6 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                     lMotion &&
                     speakerBodyAts.some((sat) => Math.abs(sat - desiredAt) < 0.25 - 1e-6)
                   ) {
-                    // 说话者已在同拍播放身体动作：保留听者纯表情，不把听者身体动作硬推到句中错峰
                     lMotion = ''
                     appliedNotes.push(
                       `listener@${idx}:保留at:${desiredAt}纯表情(如需听者身体动作请插独立Motion片段)`
@@ -2656,11 +3208,86 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       draft.snippets = snippets
       savedDraft = draft
       finalized = false
-      const audit = runCompactAudit(savedDraft)
+      return { applied: appliedNotes, snippetCount: snippets.length }
+    }
+
+    if (name === 'patch_story_draft') {
+      const res = applyDraftPatchOperations(args)
+      if ('error' in res) {
+        return JSON.stringify({ patched: false, error: res.error })
+      }
+      const audit = runCompactAudit(savedDraft!)
       return JSON.stringify({
         patched: true,
-        applied: appliedNotes,
-        snippetCount: snippets.length,
+        applied: res.applied,
+        snippetCount: res.snippetCount,
+        ...audit
+      })
+    }
+
+    if (name === 'submit_director_review') {
+      if (!savedDraft || !Array.isArray(savedDraft.snippets)) {
+        return JSON.stringify({
+          reviewed: false,
+          error: '当前工作区尚无已保存草稿，请先调用 save_story_draft'
+        })
+      }
+      const dramaticArc = typeof args.dramaticArc === 'string' ? args.dramaticArc.trim() : ''
+      const emotionalContinuityAndVoice =
+        typeof args.emotionalContinuityAndVoice === 'string'
+          ? args.emotionalContinuityAndVoice.trim()
+          : ''
+      const audioAndSeDesign =
+        typeof args.audioAndSeDesign === 'string' ? args.audioAndSeDesign.trim() : ''
+      const stageRhythm = typeof args.stageRhythm === 'string' ? args.stageRhythm.trim() : ''
+      const actingNaturalness =
+        typeof args.actingNaturalness === 'string' ? args.actingNaturalness.trim() : ''
+      const concreteFixes = Array.isArray(args.concreteFixes)
+        ? args.concreteFixes.map((x) => String(x ?? '').trim()).filter(Boolean)
+        : []
+
+      let applied: string[] = []
+      let snippetCount = (savedDraft.snippets as unknown[]).length
+      if (
+        (Array.isArray(args.operations) && args.operations.length > 0) ||
+        Array.isArray(args.models) ||
+        Array.isArray(args.images)
+      ) {
+        const patchRes = applyDraftPatchOperations(args)
+        if ('error' in patchRes) {
+          return JSON.stringify({ reviewed: false, error: patchRes.error })
+        }
+        applied = patchRes.applied
+        snippetCount = patchRes.snippetCount
+      }
+
+      directorReview = {
+        dramaticArc,
+        emotionalContinuityAndVoice,
+        audioAndSeDesign,
+        stageRhythm,
+        actingNaturalness,
+        concreteFixes,
+        appliedOperationsCount: applied.length
+      }
+
+      const audit = runCompactAudit(savedDraft)
+      const wantsFinalize = args.finalizeIfReady === true
+      if (wantsFinalize && audit.schemaValid && audit.officialPassed && audit.readyToFinalize) {
+        finalized = true
+        return JSON.stringify({
+          reviewed: true,
+          finalized: true,
+          applied,
+          snippetCount,
+          ...audit
+        })
+      }
+      return JSON.stringify({
+        reviewed: true,
+        finalized: false,
+        applied,
+        snippetCount,
         ...audit
       })
     }
@@ -2679,9 +3306,12 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           : 15
       try {
         const audited = auditDraftCandidate(candidate)
+        const directorTelemetry = buildDirectorStageTelemetry(candidate)
         return JSON.stringify({
           schemaValid: true,
           readyToFinalize: audited.readyToFinalize,
+          directorReviewed: Boolean(directorReview),
+          directorTelemetry,
           actingPassed: audited.actingReport.passed,
           actingScore: audited.actingReport.score,
           officialPassed: audited.officialPassed,
@@ -2777,6 +3407,21 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
       }
       const audit = runCompactAudit(savedDraft)
+      const telemetry = audit.directorTelemetry as DirectorStageTelemetry | undefined
+      if (
+        audit.schemaValid &&
+        audit.officialPassed &&
+        (telemetry?.talkCount ?? 0) >= 8 &&
+        !directorReview
+      ) {
+        return JSON.stringify({
+          finalized: false,
+          needsDirectorReview: true,
+          message:
+            '长篇草稿（>=8 句）定稿前请先调用 submit_director_review 完成 5 维导演终审（评估戏剧弧光、情绪连贯与口吻、BGM/PlaySe 音效、舞台节奏、表情动作自然度）；可在同一次调用中附带 operations 落地修补并设 finalizeIfReady: true 一步定稿。',
+          ...audit
+        })
+      }
       if (audit.schemaValid && audit.officialPassed) {
         finalized = true
         return JSON.stringify({
@@ -2798,6 +3443,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     execute,
     getSavedDraft: () => savedDraft,
     getSavedPlan: () => savedPlan,
+    getDirectorReview: () => directorReview,
     isFinalized: () => finalized
   }
 }
@@ -2826,6 +3472,65 @@ export interface AgenticGenerationResult {
   usage: ChatUsage | null
   toolCallsUsed: string[]
   modeUsed: 'native' | 'react-json'
+  directorReview?: DirectorReviewRecord
+}
+
+/**
+ * 压缩已被更新草稿取代的历史大体积工具调用载荷，防止多轮反复重传 20~30KB 完整草稿或全量推荐导致上下文膨胀。
+ * 保持 OpenAI tool_calls / tool 消息配对结构 100% 合法，仅替换较早回合的冗余大块 JSON。
+ */
+function compactSupersededAgentMessages(messages: ChatMessage[]): void {
+  const COMPACT_THRESHOLD = 3200
+  const COMPACTABLE_TOOLS = new Set([
+    'save_story_draft',
+    'validate_dialogue_draft',
+    'recommend_acting_for_lines'
+  ])
+  // 找到最近一次 save_story_draft 所在的 assistant 消息下标；只压缩严格早于它的历史大载荷
+  let latestSaveAssistantIdx = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (
+      m.role === 'assistant' &&
+      m.tool_calls?.some((tc) => tc.function.name === 'save_story_draft')
+    ) {
+      latestSaveAssistantIdx = i
+      break
+    }
+  }
+  if (latestSaveAssistantIdx <= 1) return
+
+  const compactedCallIds = new Set<string>()
+  for (let i = 0; i < latestSaveAssistantIdx; i++) {
+    const m = messages[i]
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if (
+          COMPACTABLE_TOOLS.has(tc.function.name) &&
+          tc.function.arguments.length > COMPACT_THRESHOLD
+        ) {
+          tc.function.arguments = JSON.stringify({
+            _compacted: true,
+            tool: tc.function.name,
+            note: 'superseded by newer workspace draft'
+          })
+          compactedCallIds.add(tc.id)
+        }
+      }
+    } else if (
+      m.role === 'tool' &&
+      m.tool_call_id &&
+      compactedCallIds.has(m.tool_call_id) &&
+      typeof m.content === 'string' &&
+      m.content.length > COMPACT_THRESHOLD
+    ) {
+      m.content = JSON.stringify({
+        _compacted: true,
+        tool: m.name ?? '',
+        note: 'superseded by newer workspace draft'
+      })
+    }
+  }
 }
 
 /**
@@ -2868,16 +3573,15 @@ export async function runAgenticStoryGeneration(
       : ''
 
   const sharedRules = [
-    '你是 Project SEKAI 风格视觉小说导演 Agent。请高效利用批量工具，把素材探索控制在 2~4 步内，留出充足步数走完：批量查素材/表情 → plan_story_outline → save_story_draft → critique_story_draft → patch_story_draft → finalize_story_draft：',
-    '- 用 search_assets({ kinds: ["background","bgm","se"], queries: [...] }) 一次查完背景/BGM/音效，不要拆成多次单查！',
-    '- 用 inspect_character_expressions({ modelId, moods: ["伤心","生气","惊讶","平静","困扰"] })（或留空 mood 取按情绪分组总览）每个角色只查 1 次！',
-    '创作硬规范（务必遵守）：',
-    '1. 表情与动作贴合实际剧情（稳态克制，严禁乱切动作）：悲伤/绝望/沉重独白句严禁挂 face_surprise_01 / face_notice_01 / face_shock_01（除非台词本身是真正的突发惊愕），纯自责/含泪悔恨的 [伤心] 句严禁挂 face_angry_01，也严禁为了防重复而把伤心/沉重句切去 tilthead/greeting/relief/forward 等脱节动作；同情绪连续 2~3 句保持稳定站姿或只微调表情是 PJSK 原版常态，优先使用同一套 w-normal-* 动作风格；Move 与 LayoutAppear 的 motion/facial 也要贴合周边剧情气氛；朝比奈真冬保持克制内敛。',
-    '2. 听者反应对齐官方 PJSK（禁止句中错峰刷屏）：严禁在台词中途（at: 0.45..0.85）频繁塞入听者错峰动作！A 连续说话（非内心独白）>=3~4 句且气氛变化时，优先在 Talk.data.actions 中给听者 B 放 at: 0 的**纯表情切换**（仅 facial，不带 motion，与说话者动作自然共存不冲突）；仅在真正情绪转折点才于句间插入 1 条独立 Motion 片段表现听者身体反应。',
-    '3. 不强制分幕且不重复切 BGM：同一时间地点连续对话保持 1 幕即可；严禁连续两次 ChangeBgm 播放同一首曲子；有奔跑/脚步/推门等动作时配合 PlaySe 音效。',
-    '4. 原地渐变进出场（对齐 PJSK 原版 event_145_08）：所有 LayoutAppear / LayoutClear 默认使用**原地渐变淡入淡出**（from.side === to.side, offset: 0，如 Left->Left、Right->Right、Center->Center）；仅在剧情明确描写“奔跑冲入/推门走入/转身跑离”时才使用 LeftOver/RightOver 滑入滑出（配合脚步 SE）！日常对话 Left/Right 同框，内心独白或沉思切单人 Center 特写时优先直接原地渐变 LayoutClear + LayoutAppear(Center->Center)，避免无意义的 LayoutClear -> Move Center -> Move Left -> LayoutAppear 反复横移；>=3 人时始终 Normal 模式（<=2 人同台）交叠渐变轮换。',
-    '5. 禁止括号动作提示与 AI 套话：台词中只写说出口的话或心理独白（如「（……怎么办才好）」），严禁夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号，禁止心理咨询式说教结尾。',
-    '6. 排版与交卷：每条 Talk 最多 3 行（每行<=30字宽），不写 ttsText；约 90% Talk delay=0，仅重大停顿用 1.0/1.5；转场与静默 Motion 前最后一句 Talk 设 closeWindowOnFinish=true；务必先 save_story_draft + critique_story_draft + patch_story_draft 打磨，再 finalize_story_draft 交卷。',
+    '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
+    '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se"], queries: [...] })` + `search_official_corpus({ query })`；**不要**按角色逐一重复查 `lookup_character` 或 `inspect_character_expressions`！',
+    '- **第 2 步（直接起草）**：基于已获取的人设、表情/动作调色板与素材，直接起草完整高质量 StoryData 并调用 1 次 `save_story_draft`（复杂多幕可先 `plan_story_outline`）。**严禁**把整场几十句台词重发一遍给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`！`save_story_draft` 已自带全套规则体检与 `directorTelemetry`，**无需**再重复调用 `validate_story_draft` 或 `critique_story_draft`。',
+    '- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框切镜、原地 `Move` / 独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！',
+    '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
+    '1. **自然灵活、有呼吸感的表演（破除 4 动作循环，也拒绝机械乱动）**：从角色调色板中灵活选用丰富的表情（含 `face_sad_02+`/`face_cry_*`/`face_closeeye_*` 等层次）与动作变体（支持贴合气氛的跨风格动作如 `w-normal-*`/`w-adult-*`/`w-cool-*`/`w-cute-*`）；约 70%~80% 台词在句首 `at: 0` 配贴合语气的身体动作 + 表情，其余约 20%~25% 可省略 `motion` 自然保持姿态；跨句延续同一表情很自然（不必每句强行换脸），长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 `Motion`（`wait:false, delay:2.5~4.5`）演完句中神态变化。悲伤/绝望/独白禁误挂 `face_surprise_01`/`face_notice_01`/`face_shock_01`（真正惊愕除外），含泪自责禁误挂 `face_angry_01`，真冬保持克制内敛。',
+    '2. **电影感切镜、听者反应与原地淡入淡出**：近期官方 PJSK 剧集大量穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear`/`LayoutClear` 默认使用原地淡入淡出（`from.side === to.side, offset: 0`），避免全程僵在固定双人广角或滥用 `LeftOver`/`RightOver` 滑入滑出；听者反应优先用切镜、句间原地 `Move` / 独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
+    '3. **声画与节奏**：开场用 `ChangeBgm` 起乐（不要与顶层 `bgm` 冲突，严禁重复连续播同一首），情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白；物理/情绪节拍（脚步、奔跑、开门、衣料、惊觉、回忆）务必配 `PlaySe`（不要整场 0 音效）；夜晚/黄昏配 `AmbientColor`；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵，不要瞬间黑屏。',
+    '4. **凝练对白与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；转场与静默 `Motion` 前设 `closeWindowOnFinish: true`。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''
   ]
@@ -3073,9 +3777,11 @@ export async function runAgenticStoryGeneration(
             content: output
           })
         }
+        compactSupersededAgentMessages(nativeMessages)
         if (toolkit.isFinalized()) {
           const recovered = recoverSavedDraftIfValid()
           if (recovered) {
+            const review = toolkit.getDirectorReview()
             return {
               story: recovered.story,
               ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
@@ -3085,7 +3791,8 @@ export async function runAgenticStoryGeneration(
               model: lastModel,
               usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
               toolCallsUsed,
-              modeUsed: 'native'
+              modeUsed: 'native',
+              ...(review ? { directorReview: review } : {})
             }
           }
         }

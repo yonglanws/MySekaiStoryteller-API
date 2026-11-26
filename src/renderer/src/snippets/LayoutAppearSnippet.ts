@@ -10,7 +10,12 @@ import {
   framesForSeconds,
   resolveCharacterFadeMs
 } from '../../../common/official/timing'
-import { nowMs, recordLayoutRunningEnd, recordMotionSettledAt } from './stageTiming'
+import {
+  type ExtendedModelLayer,
+  nowMs,
+  recordLayoutRunningEnd,
+  recordMotionSettledAt
+} from './stageTiming'
 
 // noinspection DuplicatedCode
 export default class LayoutAppearSnippet extends BaseSnippet {
@@ -59,6 +64,9 @@ export default class LayoutAppearSnippet extends BaseSnippet {
     }
 
     // 先把动作真正启动（此时模型 alpha=0，观众看不到），再开始淡入/滑入。
+    // 官方 `AppearCharacter`（`sse-bake/src/lib.rs:1498,1514`）：
+    // - 未在场角色（含 LayoutClear 后再次入场）：`force_body = true`（直接切入新姿态，不拖尾旧场次动作），`force_face = true`；
+    // - 已在场角色：`force_body = false`（正常 0.5s/0.125s 交叉淡化），`force_face = true`。
     const entryMotion =
       this.data.data.motion && model.hasMotion(this.data.data.motion) ? this.data.data.motion : ''
     if (entryMotion || this.data.data.facial) {
@@ -67,6 +75,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
         this.data.data.facial,
         this.data.data.facialFirst ?? true,
         {
+          bodyForce: !wasShown,
           facialForce: true,
           traceSnippetIndex: this.snippetIndex
         }
@@ -78,8 +87,17 @@ export default class LayoutAppearSnippet extends BaseSnippet {
         }
       }
     }
-    if (!entryMotion) {
+    if (!entryMotion && !wasShown) {
       await model.startEntryMotion(!this.data.data.facial, this.snippetIndex)
+    }
+
+    // 官方 `LayoutOp::Appear` 的可选 depth（Front / Back 锁定层级；其余不动 sibling order）
+    const appearDepth = (this.data.data as { depth?: string }).depth
+    if (appearDepth === 'Front' || appearDepth === 'Back') {
+      ;(this.app.layerModel as unknown as ExtendedModelLayer).setLayoutDepth?.(
+        this.data.data.modelId,
+        appearDepth
+      )
     }
 
     if (wasShown) {
@@ -89,16 +107,27 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       model.setOpacity?.(1)
       const moveToCurrent = (
         model as unknown as {
-          moveToCurrent?: (stage: [number, number], to: PositionRel, ms: number) => Promise<boolean>
+          moveToCurrent?: (
+            stage: [number, number],
+            to: PositionRel,
+            ms: number,
+            startMs?: number
+          ) => Promise<boolean>
         }
       ).moveToCurrent
       if (typeof moveToCurrent === 'function') {
-        const moved = await moveToCurrent.call(model, this.app.stage_size, to, APPEAR_SHOWN_MOVE_MS)
+        const moved = await moveToCurrent.call(
+          model,
+          this.app.stage_size,
+          to,
+          APPEAR_SHOWN_MOVE_MS,
+          appearStartMs
+        )
         if (!moved) await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
       } else {
         model.setPositionRel(this.app.stage_size, from)
         if (is_moved) {
-          await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS)
+          await model.move(this.app.stage_size, from, to, APPEAR_SHOWN_MOVE_MS, appearStartMs)
         } else {
           await AnimationManager.delay(APPEAR_SHOWN_MOVE_MS)
         }
@@ -127,8 +156,11 @@ export default class LayoutAppearSnippet extends BaseSnippet {
 
     // FadeOpacityCoroutine：WaitForSeconds(0) 至少 1 帧，alpha 保持 0；然后淡入 100ms。
     const fadeTimelineBaseMs = nowMs()
+    const branchStartMs = fadeTimelineBaseMs + branchDelayMs
     if (branchDelayMs > 0) await AnimationManager.delay(branchDelayMs)
-    const moveTask = is_moved ? model.move(this.app.stage_size, from, to, moveMs) : null
+    const moveTask = is_moved
+      ? model.move(this.app.stage_size, from, to, moveMs, branchStartMs)
+      : null
     if (moveTask) {
       // 官方交互与导出都只等淡入 7 帧，滑入继续在后台推进。
       void moveTask.catch((error) => this.logger.warn('LayoutAppear move failed', error))
@@ -139,7 +171,7 @@ export default class LayoutAppearSnippet extends BaseSnippet {
       fadeMs,
       this.data.data.hologram,
       visibilityToken,
-      fadeTimelineBaseMs + branchDelayMs + holdFrames * FRAME_MS
+      branchStartMs + holdFrames * FRAME_MS
     )
 
     // 入场动作继续播放；body 通道交给 idle 续演逻辑，台词间隙不站桩。

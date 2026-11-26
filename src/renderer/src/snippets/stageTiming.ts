@@ -191,7 +191,9 @@ export interface ExtendedModelLayer {
   layoutMode: LayoutModes
   isModelShown?: (modelId: number) => boolean
   updateLayoutMode?: (mode: 'Normal' | 'Three') => void
+  bringToFront?: (modelId: number) => void
   setLayoutDepth?: (modelId: number, depth: 'Front' | 'Back' | 'Reset') => void
+  getUnisonSpeakerModels?: () => unknown[]
   shakeCharacter?: (modelId: number, axis: 'X' | 'Y') => Promise<void>
   setCharacterShader?: (
     modelId: number,

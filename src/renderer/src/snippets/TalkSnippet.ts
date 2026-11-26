@@ -51,6 +51,8 @@ interface TalkData {
   }
 }
 
+const ALL_TALK_CHARACTERS = 900_000
+
 /**
  * `ParamMouthForm` 完全不写、由表情/动作拥有：对应 ournotes fallback 路径
  * （lipsync.js hasForm:false，policy 仅在 hasForm&&hasBase 时介入）。
@@ -97,46 +99,66 @@ export default class TalkSnippet extends BaseSnippet {
   }
 
   private startMouthAnimation(
-    model: AdvancedModel,
+    models: AdvancedModel | readonly AdvancedModel[],
     contentLength: number,
     envelope: LipSyncEnvelope | null,
-    typingStartMs = 0
+    typingStartMs = 0,
+    unison = false
   ): void {
     this.stopMouthAnimation()
-    if (model.destroyed || model.actionSignal?.aborted) return
+    const targets = (Array.isArray(models) ? models : [models]).filter(
+      (model) => Boolean(model) && !model.destroyed && !model.actionSignal?.aborted
+    )
+    if (targets.length === 0) return
     const hasVoice =
       Boolean(envelope?.values.length) &&
       Number.isFinite(envelope?.durationMs) &&
       (envelope?.durationMs ?? 0) > 0
     // 无语音时官方用 LipLevels 文本口型：每半字推进一次 LipLevels，收尾提前一个整字。
-    // 本句只有一个说话人模型，slot = 0 of 1（first = slot + 1）。
-    const textLip = hasVoice ? null : textLipSequence(contentLength * 2, { index: 0, total: 1 })
-    let startTime = this.app.currentTalkStartedAtMs
-    const update = (): void => {
-      if (!this.app.layerModel.isModelVisible(model.metadata.id)) return
-      const current = nowMs()
-      if (current < startTime) startTime = current
-      const elapsed = Math.max(0, current - startTime)
-      const open = this.speakerOpening(elapsed, hasVoice ? envelope : null, textLip, typingStartMs)
-      // 只有本次 talk 的 speaker 挂口型；同台听者不写 0，嘴由他们自己的动作/表情决定。
-      if (open === null) model.releaseMouth()
-      else model.setMouthOpening(open)
+    // 全员齐声（900000）使用 `slot = null`（step=1, first=0）；单人使用 `slot = 0 of 1`（first=1）。
+    const textLip = hasVoice
+      ? null
+      : textLipSequence(contentLength * 2, unison ? null : { index: 0, total: 1 })
+    const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
+    const isTargetActive = (id: number): boolean =>
+      modelLayer.isModelShown?.(id) ?? this.app.layerModel.isModelVisible(id)
+    const cleanups: Array<() => void> = []
+    for (const model of targets) {
+      let startTime = this.app.currentTalkStartedAtMs
+      const update = (): void => {
+        if (!isTargetActive(model.metadata.id)) return
+        const current = nowMs()
+        if (current < startTime) startTime = current
+        const elapsed = Math.max(0, current - startTime)
+        const open = this.speakerOpening(
+          elapsed,
+          hasVoice ? envelope : null,
+          textLip,
+          typingStartMs
+        )
+        // 只有本次 talk 的 speaker 挂口型；同台听者不写 0，嘴由他们自己的动作/表情决定。
+        if (open === null) model.releaseMouth()
+        else model.setMouthOpening(open)
+      }
+      // The dependency emits this event after physics but omits it from its declaration.
+      const events = model.internalModel as unknown as {
+        on(event: 'beforeModelUpdate', listener: () => void): void
+        off(event: 'beforeModelUpdate', listener: () => void): void
+      }
+      events.on('beforeModelUpdate', update)
+      update()
+      const onDestroyed = (): void => this.stopMouthAnimation()
+      model.actionSignal?.addEventListener('abort', onDestroyed, { once: true })
+      cleanups.push(() => {
+        events.off('beforeModelUpdate', update)
+        model.actionSignal?.removeEventListener('abort', onDestroyed)
+        // Talk 结束：官方 `Lip::None`，参数回到动作/表情/默认值。
+        if (!model.destroyed) model.releaseMouth()
+      })
     }
-    // The dependency emits this event after physics but omits it from its declaration.
-    const events = model.internalModel as unknown as {
-      on(event: 'beforeModelUpdate', listener: () => void): void
-      off(event: 'beforeModelUpdate', listener: () => void): void
-    }
-    events.on('beforeModelUpdate', update)
-    update()
-    const onDestroyed = (): void => this.stopMouthAnimation()
     this.mouthCleanup = () => {
-      events.off('beforeModelUpdate', update)
-      model.actionSignal?.removeEventListener('abort', onDestroyed)
-      // Talk 结束：官方 `Lip::None`，参数回到动作/表情/默认值。
-      if (!model.destroyed) model.releaseMouth()
+      for (const cleanup of cleanups) cleanup()
     }
-    model.actionSignal?.addEventListener('abort', onDestroyed, { once: true })
   }
 
   private stopMouthAnimation(): void {
@@ -181,9 +203,17 @@ export default class TalkSnippet extends BaseSnippet {
     const ui = this.app.layerUI as unknown as ExtendedUILayer
     const modelLayer = this.app.layerModel as unknown as ExtendedModelLayer
     const modelId = talkData.data.modelId
-    const hasModel = typeof modelId === 'number' && Number.isFinite(modelId) && modelId >= 0
+    const isUnison = modelId === ALL_TALK_CHARACTERS
+    const hasModel =
+      !isUnison && typeof modelId === 'number' && Number.isFinite(modelId) && modelId >= 0
     if (hasModel) {
-      modelLayer.setLayoutDepth?.(talkData.data.modelId, 'Front')
+      // 官方 `Talk`（`sse-bake/src/lib.rs:2205`）只置顶不锁定层级；
+      // 误调 `setLayoutDepth('Front')` 会锁死首个发言人导致后续发言人被挡在后面。
+      if (typeof modelLayer.bringToFront === 'function') {
+        modelLayer.bringToFront(talkData.data.modelId)
+      } else {
+        modelLayer.setLayoutDepth?.(talkData.data.modelId, 'Front')
+      }
     }
 
     const windowOpenMs = !ui.UITalkShowed ? TALK_WINDOW_OPEN_CLOSE_MS : 0
@@ -257,17 +287,29 @@ export default class TalkSnippet extends BaseSnippet {
     try {
       ui.resetTalkData?.()
       ui.setTalkData?.(talkData.data.speaker, talkData.data.content)
-      if (hasModel) {
+      if (hasModel || isUnison) {
         const mouthChars =
           this.capturedLipSync || hasSpeakableSpeechText(talkData.data.content)
             ? visibleTextLength(talkData.data.typingText || talkData.data.content)
             : 0
-        this.startMouthAnimation(
-          this.app.getModelById(talkData.data.modelId),
-          mouthChars,
-          this.capturedLipSync,
-          windowOpenMs
-        )
+        if (isUnison) {
+          const unisonModels = (modelLayer.getUnisonSpeakerModels?.() ?? []) as AdvancedModel[]
+          this.startMouthAnimation(
+            unisonModels,
+            mouthChars,
+            this.capturedLipSync,
+            windowOpenMs,
+            true
+          )
+        } else {
+          this.startMouthAnimation(
+            this.app.getModelById(talkData.data.modelId),
+            mouthChars,
+            this.capturedLipSync,
+            windowOpenMs,
+            false
+          )
+        }
       }
       if (!ui.UITalkShowed) await ui.showTextBackground?.()
       await ui.startDisplayContent?.(

@@ -1,7 +1,13 @@
 import { Application, ColorMatrixFilter, Container, Filter, Ticker } from 'pixi.js'
 import { Cubism2InternalModel } from 'pixi-live2d-display-advanced'
 import { LayoutModes, ModelData } from '../../../common/types/Story'
-import { MODEL_COLOR_EVENING, MODEL_COLOR_NIGHT } from '../../../common/official/timing'
+import { MODEL_COLOR_EVENING, MODEL_COLOR_NIGHT, STORY_FPS } from '../../../common/official/timing'
+import {
+  LIVE2D_ORTHO_SIZE,
+  LIVE2D_RT_SIZE,
+  LIVE2D_SCALE_REFERENCE_HEIGHT,
+  LIVE2D_STAND_SCALE
+} from '../../../common/official/live2dStage'
 import { evaluateEase } from '../effects/Ease'
 import { loadInappTexture } from '../effects/InappTextures'
 import { Live2DBlurFilter, Live2DHologramShaderFilter } from '../effects/OfficialFilters'
@@ -10,6 +16,18 @@ import AdvancedModel from '../model/AdvancedModel'
 import StageUtils from '../utils/StageUtils'
 import { resourceUrl } from '../utils/ResourceUrl'
 import BaseLayer from './BaseLayer'
+
+/**
+ * 官方 `Live2DRenderStudio` 1 Cubism 单位对应的屏幕高度比例（参考 `sse-render/src/gpu.rs:1146`
+ * + `sse-render/src/lib.rs:713-715`）：
+ * `standScale(2.8) × (rtHeight(1536) / (2 × orthoSize(1.5))) / scaleRefHeight(1024) = 1.4`。
+ * 对 PJSK 标准 3000×4500 / PPU=3000 模型，`(1.4 / 3000) × (charScale / 2.1) === charScale / 4500`；
+ * 对不同画布高度或 PPU 的模型也严格保持官方投影比例。
+ */
+const DEFAULT_MODEL_NORMAL_SCALE = 2.1
+export const LIVE2D_CUBISM_UNIT_TO_SCREEN_HEIGHT =
+  (LIVE2D_STAND_SCALE * (LIVE2D_RT_SIZE[1] / (LIVE2D_ORTHO_SIZE * 2))) /
+  LIVE2D_SCALE_REFERENCE_HEIGHT
 
 interface CharacterShaderEntry {
   kind: 'hologram' | 'monitor' | 'blur'
@@ -73,16 +91,35 @@ export default class ModelLayer extends BaseLayer {
   }
 
   private applyModelScale(model: AdvancedModel): void {
+    const modeFactor = StageUtils.modeScale(this.layoutMode)
+    const charScale = model.metadata?.normal_scale ?? DEFAULT_MODEL_NORMAL_SCALE
+    const pixelsPerUnit = (model.internalModel as unknown as { pixelsPerUnit?: number } | undefined)
+      ?.pixelsPerUnit
+    if (typeof pixelsPerUnit === 'number' && Number.isFinite(pixelsPerUnit) && pixelsPerUnit > 0) {
+      const unitScale =
+        (this.app.screen.height * LIVE2D_CUBISM_UNIT_TO_SCREEN_HEIGHT * modeFactor) / pixelsPerUnit
+      model.scale.set(unitScale * (charScale / DEFAULT_MODEL_NORMAL_SCALE))
+      return
+    }
     const originalHeight = Math.max(1, model.internalModel?.originalHeight ?? 1024)
     const baseScale = this.app.screen.height / originalHeight
-    const modeFactor = StageUtils.modeScale(this.layoutMode)
-    const charScale = model.metadata?.normal_scale ?? 2.1
     model.scale.set(baseScale * charScale * modeFactor)
+  }
+
+  private syncModelFilterResolution(model: AdvancedModel): void {
+    const res = this.app?.renderer?.resolution
+    if (typeof res !== 'number' || !Number.isFinite(res) || res <= 0) return
+    const alphaFilter = model.filters?.[0] as { resolution?: number } | undefined
+    if (alphaFilter && typeof alphaFilter.resolution === 'number') {
+      alphaFilter.resolution = res
+    }
   }
 
   public updateLayoutMode(mode: 'Normal' | 'Three' | LayoutModes): void {
     this.layoutMode =
-      mode === LayoutModes.Three || String(mode) === 'Three' ? LayoutModes.Three : LayoutModes.Normal
+      mode === LayoutModes.Three || String(mode) === 'Three'
+        ? LayoutModes.Three
+        : LayoutModes.Normal
     for (const child of this.layerContainer.children) {
       const model = child as AdvancedModel
       if (model.internalModel && !model.destroyed) {
@@ -92,6 +129,7 @@ export default class ModelLayer extends BaseLayer {
   }
 
   public addModelToLayer(model: AdvancedModel): void {
+    this.syncModelFilterResolution(model)
     if (this.layerContainer.children.includes(model)) return
     this.applyModelScale(model)
     this.layerContainer.addChild(model)
@@ -217,16 +255,18 @@ export default class ModelLayer extends BaseLayer {
 
     const existing = this.characterShaders.get(modelId)
     if (shader === 'blur') {
+      // 官方 `Live2DBlurController.SetBlurIntensity` 钳制在 [1, 3]（`sse-bake/src/lib.rs:3128`）
+      const clampedLevel = Math.max(1, Math.min(3, Number.isFinite(level) ? level : 1))
       if (
         existing?.kind === 'blur' &&
         existing.filter instanceof Live2DBlurFilter &&
         model.getCharacterShaderFilter() === existing.filter
       ) {
-        existing.filter.level = level
+        existing.filter.level = clampedLevel
         return
       }
       this.clearShaderEntry(modelId)
-      const blurFilter = new Live2DBlurFilter(level)
+      const blurFilter = new Live2DBlurFilter(clampedLevel)
       this.characterShaders.set(modelId, { kind: 'blur', filter: blurFilter })
       model.setCharacterShaderFilter(blurFilter)
       return
@@ -244,7 +284,11 @@ export default class ModelLayer extends BaseLayer {
         this.clearShaderEntry(modelId)
         return
       }
-      holoFilter.step(Math.max(0, Ticker.shared.elapsedMS) / 1000)
+      // 导出模式按官方 1/60 故事步推进全息扫描线与重抽，避免墙钟抖动破坏确定性
+      const dtSec = AnimationManager.isExporting?.()
+        ? 1 / STORY_FPS
+        : Math.max(0, Ticker.shared.elapsedMS) / 1000
+      holoFilter.step(dtSec)
     }
     Ticker.shared.add(tickerFn)
     this.characterShaders.set(modelId, { kind: shader, filter: holoFilter, tickerFn })
@@ -358,7 +402,10 @@ export default class ModelLayer extends BaseLayer {
     this.motionSettledAt.clear()
   }
 
-  public async tweenAmbientColor(mode: 'normal' | 'evening' | 'night', durationMs = 0): Promise<void> {
+  public async tweenAmbientColor(
+    mode: 'normal' | 'evening' | 'night',
+    durationMs = 0
+  ): Promise<void> {
     if (durationMs <= 0) {
       this.setAmbientColor(mode)
       return
@@ -366,7 +413,9 @@ export default class ModelLayer extends BaseLayer {
     const gen = ++this.ambientGen
     const [r, g, b] =
       mode === 'normal' ? [1, 1, 1] : mode === 'evening' ? MODEL_COLOR_EVENING : MODEL_COLOR_NIGHT
-    const prev = this.ambientFilter?.matrix ?? [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]
+    const prev = this.ambientFilter?.matrix ?? [
+      1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0
+    ]
     const fr = prev[0]
     const fg = prev[6]
     const fb = prev[12]

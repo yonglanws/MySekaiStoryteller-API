@@ -21,6 +21,11 @@ import {
   type VideoCodec,
   VideoEncoderChoice
 } from '../../shared/ffmpeg'
+import {
+  RustFramesPipeSession,
+  isRustExporterAvailable,
+  runRustRemux
+} from '../export/rustExporter'
 
 export interface BridgeController {
   bindWorkerTask(workerId: string, taskId: string): void
@@ -844,7 +849,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
     let session: FramesPipeSession
     try {
-      session = await createPipe({
+      const pipeOpts = {
         fps,
         width,
         height,
@@ -857,7 +862,13 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         fromFrame: payload.fromFrame,
         toFrame: payload.toFrame,
         outputPath: videoPath
-      })
+      }
+      if (!deps.createFramesPipe && isRustExporterAvailable(config.video.useRustExporter !== false)) {
+        session = RustFramesPipeSession.create(pipeOpts) as unknown as FramesPipeSession
+        logger.info(`[Bridge] Started native Rust pipe-encode session (id=${id}, format=${frameFormat})`)
+      } else {
+        session = await createPipe(pipeOpts)
+      }
     } catch (error) {
       await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
       throw error
@@ -1173,67 +1184,126 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           const pipeFrameInfo = pipeFrameInfoFor(safeVideoPath)
           const frameCount = payload.frameCount ?? pipeFrameInfo?.frameCount
           const fps = payload.fps ?? pipeFrameInfo?.fps ?? config.video.fps
-          const transcode = payload.transcode === true
-          await writeOutputAtomically(
-            safeOutputPath,
-            async (partialPath) => {
-              if (transcode) {
-                // WebCodecs 输出通常是 full-range + sRGB TRC，`-c:v copy` 会把
-                // 错误元数据和全范围像素一起带进成片。这里按参考实现的统一
-                // BT.709/tv 滤镜链重编码，音频与视频一次合成。
-                const encoder = config.video.encoder as VideoEncoderChoice
-                const codec = normalizeVideoCodec(payload.codec ?? config.video.codec)
-                const inputWidth = payload.inputWidth ?? config.video.width
-                const inputHeight = payload.inputHeight ?? config.video.height
-                const recordedBitrate = payload.recordedBitrate ?? 8_000_000
-                const crf = payload.crf ?? config.video.crf
-                if (hasAudio) {
-                  await apiMergeVideoAudioWithCompression(
+          const maxOutputMbps = config.video.maxOutputMbps ?? 3.5
+          let transcode = payload.transcode === true
+          // 体积护栏：即使 WebCodecs 报告无需色彩转换，若码率明显超过视觉小说合理上限
+          // （例如旧 config.yaml 配了 12 Mbps），也启用快速 CRF 重编码，避免 5 分钟视频膨胀到 200+ MB。
+          if (!transcode && maxOutputMbps > 0 && frameCount && frameCount > 0 && fps > 0) {
+            const durationSec = frameCount / fps
+            if (durationSec >= 2) {
+              const inputSize = (await fs.promises.stat(safeVideoPath)).size
+              const actualMbps = (inputSize * 8) / (durationSec * 1_000_000)
+              if (actualMbps > maxOutputMbps) {
+                logger.info(
+                  `[Bridge] API remux: input bitrate ${actualMbps.toFixed(2)} Mbps > cap ${maxOutputMbps} Mbps; enabling CRF compression`
+                )
+                transcode = true
+              }
+            }
+          }
+
+          let handledByRust = false
+          if (isRustExporterAvailable(config.video.useRustExporter !== false)) {
+            try {
+              const rustRes = await runRustRemux({
+                videoPath: safeVideoPath,
+                audioPath: hasAudio ? safeAudioPath : undefined,
+                outputPath: safeOutputPath,
+                audioBitrate: payload.audioBitrate,
+                frameCount,
+                fps,
+                startFrame: payload.startFrame,
+                transcode,
+                codec: normalizeVideoCodec(payload.codec ?? config.video.codec),
+                encoder: config.video.encoder as VideoEncoderChoice,
+                crf: payload.crf ?? config.video.crf,
+                width: config.video.width,
+                height: config.video.height,
+                inputWidth: payload.inputWidth ?? config.video.width,
+                inputHeight: payload.inputHeight ?? config.video.height,
+                gop: Math.max(1, Math.round(fps * 4)),
+                maxOutputMbps
+              })
+              if (taskId && isTaskCancelled(taskId)) {
+                await fs.promises.rm(safeOutputPath, { force: true }).catch(() => {})
+                throw new Error('Export task was cancelled')
+              }
+              handledByRust = true
+              logger.info(
+                `[Bridge] API remux via mss-export-rs (${rustRes.encoder}, transcoded=${rustRes.transcoded}): ` +
+                  `${(rustRes.fileSize / 1024 / 1024).toFixed(2)} MB in ${rustRes.elapsedMs}ms`
+              )
+            } catch (rustErr) {
+              if (taskId && isTaskCancelled(taskId)) throw rustErr
+              logger.warn(
+                '[Bridge] mss-export-rs remux failed, falling back to Node FFmpeg pipeline:',
+                rustErr
+              )
+            }
+          }
+
+          if (!handledByRust) {
+            await writeOutputAtomically(
+              safeOutputPath,
+              async (partialPath) => {
+                if (transcode) {
+                  // WebCodecs 输出通常是 full-range + sRGB TRC，`-c:v copy` 会把
+                  // 错误元数据和全范围像素一起带进成片。这里按参考实现的统一
+                  // BT.709/tv 滤镜链重编码，音频与视频一次合成。
+                  const encoder = config.video.encoder as VideoEncoderChoice
+                  const codec = normalizeVideoCodec(payload.codec ?? config.video.codec)
+                  const inputWidth = payload.inputWidth ?? config.video.width
+                  const inputHeight = payload.inputHeight ?? config.video.height
+                  const recordedBitrate = payload.recordedBitrate ?? 8_000_000
+                  const crf = payload.crf ?? config.video.crf
+                  if (hasAudio) {
+                    await apiMergeVideoAudioWithCompression(
+                      safeVideoPath,
+                      safeAudioPath!,
+                      partialPath,
+                      crf,
+                      payload.audioBitrate,
+                      fps,
+                      encoder,
+                      config.video.width,
+                      config.video.height,
+                      inputWidth,
+                      inputHeight,
+                      recordedBitrate,
+                      codec,
+                      frameCount
+                    )
+                  } else {
+                    await apiConvertVideoWithCompression(
+                      safeVideoPath,
+                      partialPath,
+                      crf,
+                      fps,
+                      encoder,
+                      config.video.width,
+                      config.video.height,
+                      inputWidth,
+                      inputHeight,
+                      recordedBitrate,
+                      codec,
+                      frameCount
+                    )
+                  }
+                } else if (hasAudio) {
+                  await apiMuxVideoAudioCopy(
                     safeVideoPath,
                     safeAudioPath!,
                     partialPath,
-                    crf,
                     payload.audioBitrate,
-                    fps,
-                    encoder,
-                    config.video.width,
-                    config.video.height,
-                    inputWidth,
-                    inputHeight,
-                    recordedBitrate,
-                    codec,
-                    frameCount
+                    { frameCount, fps, startFrame: payload.startFrame }
                   )
                 } else {
-                  await apiConvertVideoWithCompression(
-                    safeVideoPath,
-                    partialPath,
-                    crf,
-                    fps,
-                    encoder,
-                    config.video.width,
-                    config.video.height,
-                    inputWidth,
-                    inputHeight,
-                    recordedBitrate,
-                    codec,
-                    frameCount
-                  )
+                  await apiCopyVideo(safeVideoPath, partialPath, frameCount, fps)
                 }
-              } else if (hasAudio) {
-                await apiMuxVideoAudioCopy(
-                  safeVideoPath,
-                  safeAudioPath!,
-                  partialPath,
-                  payload.audioBitrate,
-                  { frameCount, fps, startFrame: payload.startFrame }
-                )
-              } else {
-                await apiCopyVideo(safeVideoPath, partialPath, frameCount, fps)
-              }
-            },
-            () => Boolean(taskId && isTaskCancelled(taskId))
-          )
+              },
+              () => Boolean(taskId && isTaskCancelled(taskId))
+            )
+          }
 
           if (!fs.existsSync(safeOutputPath)) {
             logger.error(`[Bridge] API remux: Output file NOT found at: ${safeOutputPath}`)

@@ -1,0 +1,13 @@
+[package]
+name = "mss-export-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0"
+description = "Native Rust video export, frame pipe, segment concat, and parallel WAV mixer for MySekaiStoryteller (modeled on SekaiStoryExporter sse-export)"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -2,6 +2,12 @@ import { Container, Graphics, Text, TextStyle } from 'pixi.js'
 import { evaluateEase } from '../effects/Ease'
 import AnimationManager from '../managers/AnimationManager'
 import {
+  GAME_FONT_BODY_STACK,
+  GAME_FONT_BODY_WEIGHT,
+  SSE_UI_SPEC,
+  sseLineAdvance
+} from '../utils/FontLoader'
+import {
   FRAME_MS,
   FST_BARS_FRAMES,
   FST_FADE_FRAMES,
@@ -11,13 +17,15 @@ import {
   fullScreenTextSlots
 } from '../../../common/official/timing'
 
-const FST_BASE_ALPHA = 0.5
-const FST_CINEMASCOPE_HEIGHT = 240
+const FST = SSE_UI_SPEC.fullScreenText
+const FST_BASE_ALPHA = FST.baseAlpha
+const FST_CINEMASCOPE_HEIGHT = FST.cinemascopeHeight
 
 /**
  * 官方 `ScenarioFullScreenTextDialog`（`EffectType 24`）：
- * 上下 `240px` 黑边（OutQuad 61 帧），`0.5` 半透底幕，居中叙事文字逐槽
- * 0.125s（8 帧）显示；槽数取 `max(8, UTF-32 长度)`，跨行只增不减。
+ * 上下 `240px` 黑边（OutQuad 61 帧），`0.5` 半透底幕，居中叙事文字（`56 * k` `SekaiCN-Medium`，
+ * 行距 `94.08 * k`，纯黑下移 underlay 投影 `SDF_Base_Scenario_Full`）逐槽 0.125s（8 帧）显示；
+ * 槽数取 `max(8, UTF-32 长度)`，跨行只增不减。
  */
 export default class UIFullScreenText extends Container {
   private readonly k: number
@@ -36,7 +44,7 @@ export default class UIFullScreenText extends Container {
     super()
     this.widthPx = screen_width
     this.heightPx = screen_height
-    this.k = Math.min(screen_width / 1920, screen_height / 1080)
+    this.k = Math.min(screen_width / SSE_UI_SPEC.refWidth, screen_height / SSE_UI_SPEC.refHeight)
     this.visible = false
 
     this.backdrop = new Graphics()
@@ -49,19 +57,28 @@ export default class UIFullScreenText extends Container {
     this.bottomBar = new Graphics()
     this.drawBars(0)
 
+    const fontSize = FST.fontSize * this.k
     const style = new TextStyle({
       align: 'left',
-      fill: '#FFFFFF',
-      fontFamily: "'MiSans Medium', sans-serif",
-      fontSize: 52 * this.k,
-      lineHeight: 76 * this.k,
+      fill: FST.fill,
+      fontFamily: GAME_FONT_BODY_STACK,
+      fontWeight: GAME_FONT_BODY_WEIGHT,
+      fontSize,
+      lineHeight: sseLineAdvance(FST.fontSize, FST.lineSpacing) * this.k,
+      strokeThickness: 0,
+      dropShadow: true,
+      dropShadowColor: FST.underlayColor,
+      dropShadowAlpha: 1,
+      dropShadowBlur: 0,
+      dropShadowAngle: Math.PI / 2,
+      dropShadowDistance: FST.underlayOffsetEm * fontSize,
       wordWrap: true,
-      wordWrapWidth: Math.max(200, screen_width - 560 * this.k),
+      wordWrapWidth: Math.max(200, screen_width - (FST.textX + FST.textRightInset) * this.k),
       breakWords: true
     })
     this.label = new Text('', style)
     this.label.anchor.set(0, 0.5)
-    this.label.x = 280 * this.k
+    this.label.x = FST.textX * this.k
     this.label.y = screen_height / 2
     this.label.alpha = 0
 

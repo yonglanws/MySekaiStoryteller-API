@@ -20,7 +20,19 @@ export function createStaticRouter(config: HostConfig): Router {
 
   router.use('/resources', express.static(config.paths.resources))
   router.use('/apifile', express.static(config.paths.output, { index: false }))
-  router.use(express.static(config.paths.webRenderer, { index: 'index.html' }))
+  router.use(
+    express.static(config.paths.webRenderer, {
+      index: 'index.html',
+      setHeaders: (res, filePath) => {
+        if (/\.(otf|ttf|woff2?)$/i.test(filePath)) {
+          if (/\.otf$/i.test(filePath)) {
+            res.setHeader('Content-Type', 'font/otf')
+          }
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+        }
+      }
+    })
+  )
 
   return router
 }

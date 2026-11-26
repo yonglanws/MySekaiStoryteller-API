@@ -173,15 +173,15 @@ export function getOfficialActingGuidelines(
   options: { castCount?: number; isSekai?: boolean; isFlashback?: boolean } = {}
 ): string {
   const parts: string[] = [
-    '1. 结构自然：同一时间地点保持 1 幕连贯推进，不硬凑多幕；只有真正换地点、跳时间、回忆（WhiteOut -> FlashbackIn -> WhiteIn）或出入 SEKAI（SekaiOut / SekaiIn）时才做转场。',
-    '2. 台词与心里话：spoken 台词不写（微笑）/（叹气）等动作括号；纯内心独白用完整括号行「（……原来如此）」，并可配 Center 单人镜头留白后切回 Left/Right。',
-    '3. 动作密度与官方听者节奏：官方 PJSK（如 event_145_08）100% 的 Talk 动作都在句首 at=0 触发；约 75%~85% 台词在句首配 1 个贴合语气的身体动作，其余 15%~25% 保持姿态仅换表情或留空。听者反应以句首 at=0 纯切 facial 或情绪转折处的独立 Motion 节拍为主，严禁在说话者句中大量塞入 at: 0.5..0.85 的错峰弹动作。',
-    '4. 动作与表情对位剧情：同一角色尽量保持 w-normal-* 动作风格一致，切忌为了避免重复而把悲伤/道歉句强行换成 tilthead/nod/greeting 或跨风格跳切到 w-cool-*；道歉、犹豫、克制人物（如真冬）禁用真笑/wink，表面强颜欢笑用 wry_smile（苦笑）或阴郁表情，悲伤独白禁用 surprise/notice，含泪自责禁用 angry。',
-    '5. 官方渐变进出场与声画氛围：PJSK 原版（如 event_145_08 全片 41/41 入场、42/42 退场）默认使用槽位原地淡入淡出（from.side === to.side, offset: 0），即使奔跑追逐戏也以原地淡入淡出配脚步 SE 为主；严禁滥用 LeftOver/RightOver 滑入滑出或无故 LayoutClear -> Move Center -> Move Left -> LayoutAppear 反复挪位。情绪转折前可用 ChangeBgm stop 留白一拍。'
+    '1. 电影感切镜与自然结构：同一时间地点保持 1 幕连贯推进，不硬凑多幕；近期官方 PJSK 剧集（2024~2026）大量穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（近期单人占比超半数），全片采用原地淡入淡出（from.side === to.side, offset: 0）自然切镜，避免全场僵在固定双人广角或无故使用 LeftOver/RightOver 滑进滑出。',
+    '2. 台词凝练与潜台词：多用 4~14 字短促反应、停顿与中等句交错，避免连续多句 24+ 字书面说教墙；spoken 台词禁写（微笑）/（叹气）等动作括号，内心独白用完整括号行「（……原来如此）」。',
+    '3. 自然不死板的动作与表情节奏（5,138 集近期加权规律，仅供参考切忌机械套指标）：约 70%~80% 台词在句首 at=0 触发 1 个贴合语气的身体动作 + 表情，其余约 20%~25% 可省略动作自然保持姿态（或仅微调表情）；跨句延续同一表情很常见（约 6 成连句保持同一神情），不必每句硬换脸；同时善用角色丰富的动作与表情变体（含不同编号及贴合气氛的跨风格动作），避免整场只循环 4~5 个动作。长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 Motion（wait:false, delay:2.5~4.5）演完句中神态变化。',
+    '4. 听者反应与静默节拍：严禁在说话者台词中途塞入听者错峰身体动作（at: 0.5..0.85）；官方更常通过单人反打切镜、句间原地 Move / 独立 Motion 静默反应拍或短促「……」回应呈现听者情绪，双人同框长段说话时也可在句首 at=0 轻切听者纯 facial。道歉/悲伤/独白语境禁用真笑，强颜欢笑用 wry_smile（苦笑）或阴郁表情，禁误挂 surprise/notice，含泪自责禁用 angry，真冬保持克制内敛。',
+    '5. 声音与收尾余韵：96% 以上的官方剧集使用 PlaySe 音效（脚步、开门、衣料、翻纸、惊觉、环境音）；善用 ChangeBgm 的入曲、切曲与高潮前静音留白（stop: true），高潮或惊愕处可点缀 ShakeScreen / CameraZoom；片尾用 HideTalk / 短 Wait 留白再缓慢淡出，不要说完最后一句瞬间黑屏。'
   ]
   if ((options.castCount ?? 2) >= 3) {
     parts.push(
-      '6. 群像轮换：全片保持 Normal 模式（最多 2 人同台），通过 LayoutClear(Now) + LayoutAppear 平滑交叠切换在场组合。'
+      '6. 群像轮换：全片保持 Normal 模式（最多 2 人同台），通过 LayoutClear(Now) + LayoutAppear 原地淡出淡入平滑轮换在场组合。'
     )
   }
   if (options.isSekai) {
@@ -191,7 +191,7 @@ export function getOfficialActingGuidelines(
   }
   if (options.isFlashback) {
     parts.push(
-      '8. 回忆片段：进入前配 WhiteOut + se00053_b + FlashbackIn + WhiteIn，结束前务必 FlashbackOut 闭合。'
+      '8. 回忆片段：进入前配 BlackOut(white) + se00053_b + FlashbackIn + BlackIn(white)，结束前务必 FlashbackOut 闭合。'
     )
   }
   return parts.join('\n')

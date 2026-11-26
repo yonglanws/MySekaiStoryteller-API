@@ -1117,3 +1117,350 @@ test('agentic harness: batched inspect_character_expressions, search_assets, lis
     'clashing listener body motion is stripped so facial-only cleanly coexists at=0'
   )
 })
+
+test('agentic harness: batched lookup_character with expressions, draft-aware recommend, Director Review gate & 1-step patch+finalize', async (t) => {
+  const view = makeView()
+  const logger = new Logger({ type: 'hidden' })
+  const toolkit = createStoryAgentToolkit({
+    view,
+    personas: [],
+    emotionLabels: ['平静', '开心', '伤心', '生气', '惊讶'],
+    logger
+  })
+
+  // 1) Batched lookup_character({ characters, includeExpressions: true }) replaces 4 calls
+  const batchLookup = JSON.parse(
+    await toolkit.execute('lookup_character', {
+      characters: ['瑞希', '绘名'],
+      includeExpressions: true,
+      moods: ['平静', '伤心']
+    })
+  )
+  assert.equal(batchLookup.characters.length, 2)
+  assert.ok(batchLookup.characters[0].expressionsByMood?.['伤心']?.facials?.length > 0)
+  assert.ok(batchLookup.characters[1].expressionsByMood?.['伤心']?.motions?.length > 0)
+
+  // 2) Batched inspect_character_expressions({ modelIds })
+  const batchInspect = JSON.parse(
+    await toolkit.execute('inspect_character_expressions', {
+      modelIds: [1, 2],
+      moods: ['伤心']
+    })
+  )
+  assert.equal(batchInspect.characters.length, 2)
+
+  // 3) Build a 10-talk draft with 0 PlaySe & 0 Wait/Motion -> save_story_draft returns directorTelemetry
+  const longDraft = {
+    models: [
+      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: view.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_sad_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_trouble_01',
+          moveSpeed: 'Normal'
+        }
+      },
+      ...Array.from({ length: 10 }, (_, idx) => ({
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: idx % 2 === 0 ? '瑞希' : '绘名',
+          content:
+            idx % 2 === 0
+              ? `对不起，第 ${idx + 1} 句我还是没能说出口……`
+              : `……别急，第 ${idx + 1} 句我听着呢。`,
+          emotion: idx % 2 === 0 ? '伤心' : '平静',
+          modelId: idx % 2 === 0 ? 1 : 2,
+          ...(idx === 9 ? { closeWindowOnFinish: true } : {}),
+          actions: [
+            {
+              at: 0,
+              modelId: idx % 2 === 0 ? 1 : 2,
+              motion: idx % 2 === 0 ? 'w-normal-sigh01' : 'w-normal-nod01',
+              facial: idx % 2 === 0 ? 'face_sad_01' : 'face_serious_01'
+            }
+          ]
+        }
+      })),
+      {
+        type: 'LayoutClear',
+        wait: true,
+        delay: 0,
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          moveSpeed: 'Normal'
+        }
+      },
+      {
+        type: 'LayoutClear',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          moveSpeed: 'Normal'
+        }
+      },
+      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
+    ]
+  }
+  const saved = JSON.parse(await toolkit.execute('save_story_draft', { story: longDraft }))
+  assert.equal(saved.draftSaved, true)
+  assert.equal(saved.directorTelemetry.talkCount, 10)
+  assert.equal(saved.directorTelemetry.playSeCount, 0)
+  assert.ok(
+    saved.directorTelemetry.reviewFocusPoints.some((p) => p.includes('PlaySe')),
+    'telemetry highlights missing PlaySe'
+  )
+
+  // 4) Draft-aware recommend_acting_for_lines avoids re-transmitting full lines
+  const draftRec = JSON.parse(
+    await toolkit.execute('recommend_acting_for_lines', {
+      useCurrentDraft: true,
+      snippetIndices: [4, 5]
+    })
+  )
+  assert.equal(draftRec.recommendations.length, 2)
+  assert.equal(draftRec.recommendations[0].snippetIndex, 4)
+  assert.ok(typeof draftRec.listenerNote === 'string')
+
+  // 5) finalize_story_draft enforces Director Review on >=8-talk stories
+  const blockedFinalize = JSON.parse(await toolkit.execute('finalize_story_draft', {}))
+  assert.equal(blockedFinalize.finalized, false)
+  assert.equal(blockedFinalize.needsDirectorReview, true)
+
+  // 6) submit_director_review reviews, patches PlaySe + Wait, and finalizes in ONE step
+  const reviewed = JSON.parse(
+    await toolkit.execute('submit_director_review', {
+      dramaticArc: '中段推进自然，结尾补短 Wait 留白增强余韵。',
+      emotionalContinuityAndVoice: '瑞希与绘名口吻贴合。',
+      audioAndSeDesign: '开场补脚步 PlaySe 与 BGM。',
+      stageRhythm: '结尾黑屏前补 800ms Wait 呼吸停顿。',
+      actingNaturalness: '动作和表情保持连贯不跳脱。',
+      concreteFixes: ['补开场 PlaySe', '结尾前加 Wait'],
+      operations: [
+        {
+          op: 'insert_before',
+          index: 4,
+          snippet: {
+            type: 'PlaySe',
+            wait: false,
+            delay: 0,
+            data: { file: 'se_walk_women_001_1.mp3', volume: 0.9 }
+          }
+        },
+        {
+          op: 'insert_before',
+          index: 16,
+          snippet: {
+            type: 'Wait',
+            wait: true,
+            delay: 0,
+            data: { duration: 800 }
+          }
+        }
+      ],
+      finalizeIfReady: true
+    })
+  )
+  assert.equal(reviewed.reviewed, true)
+  assert.equal(reviewed.finalized, true)
+  assert.equal(reviewed.directorTelemetry.playSeCount, 1)
+  assert.equal(reviewed.directorTelemetry.waitCount, 1)
+  assert.equal(toolkit.isFinalized(), true)
+  assert.equal(toolkit.getDirectorReview()?.appliedOperationsCount, 2)
+
+  // 7) End-to-end 3-turn native agent loop + superseded save_story_draft compaction check
+  let callNum = 0
+  const capturedBodies = []
+  const leanServer = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const c of req) raw += c
+    capturedBodies.push(JSON.parse(raw))
+    callNum += 1
+    res.setHeader('content-type', 'application/json')
+    if (callNum === 1) {
+      res.end(
+        JSON.stringify({
+          model: 'mock-lean',
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'c1',
+                    type: 'function',
+                    function: {
+                      name: 'lookup_character',
+                      arguments: JSON.stringify({
+                        characters: ['瑞希', '绘名'],
+                        includeExpressions: true
+                      })
+                    }
+                  },
+                  {
+                    id: 'c2',
+                    type: 'function',
+                    function: {
+                      name: 'search_assets',
+                      arguments: JSON.stringify({
+                        kinds: ['background', 'bgm', 'se'],
+                        queries: ['天台', '脚步']
+                      })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      )
+      return
+    }
+    if (callNum === 2) {
+      res.end(
+        JSON.stringify({
+          model: 'mock-lean',
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'c3',
+                    type: 'function',
+                    function: {
+                      name: 'save_story_draft',
+                      arguments: JSON.stringify({ story: longDraft })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        })
+      )
+      return
+    }
+    res.end(
+      JSON.stringify({
+        model: 'mock-lean',
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: 'c4',
+                  type: 'function',
+                  function: {
+                    name: 'submit_director_review',
+                    arguments: JSON.stringify({
+                      dramaticArc: '起承转合清晰',
+                      emotionalContinuityAndVoice: '角色语气自然',
+                      audioAndSeDesign: '补充脚步 PlaySe',
+                      stageRhythm: '补结尾留白',
+                      actingNaturalness: '表情动作连贯',
+                      concreteFixes: ['补 PlaySe'],
+                      operations: [
+                        {
+                          op: 'insert_before',
+                          index: 4,
+                          snippet: {
+                            type: 'PlaySe',
+                            wait: false,
+                            delay: 0,
+                            data: { file: 'se_walk_women_001_1.mp3', volume: 0.9 }
+                          }
+                        }
+                      ],
+                      finalizeIfReady: true
+                    })
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      })
+    )
+  })
+  leanServer.listen(0, '127.0.0.1')
+  await once(leanServer, 'listening')
+  t.after(() => leanServer.close())
+
+  const leanClient = new LlmClient(
+    {
+      enabled: true,
+      baseUrl: `http://127.0.0.1:${leanServer.address().port}/v1`,
+      apiKeyEnv: 'UNSET',
+      model: 'mock-lean',
+      temperature: 0.4,
+      maxTokens: 4000,
+      timeoutMs: 5000,
+      retries: 0,
+      jsonMode: 'off',
+      extraBody: {},
+      systemPrompt: '',
+      targetMinutes: 1,
+      repairRounds: 1,
+      pipeline: 'agent',
+      agentMaxSteps: 12,
+      polishDialogue: false,
+      translateForTts: false,
+      personas: [],
+      personaDirs: [],
+      rag: { enabled: false }
+    },
+    logger
+  )
+  const leanOut = await runAgenticStoryGeneration({
+    llm: leanClient,
+    view,
+    personas: [],
+    scene: '天台对话',
+    targetMinutes: 1,
+    logger
+  })
+  assert.equal(leanOut.rounds, 3, 'complete workflow with Director Review finishes in 3 turns')
+  assert.ok(leanOut.directorReview, 'directorReview metadata is returned')
+  assert.equal(leanOut.directorReview.appliedOperationsCount, 1)
+  assert.equal(leanOut.story.snippets.filter((s) => s.type === 'PlaySe').length, 1)
+})

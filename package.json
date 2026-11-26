@@ -15,6 +15,8 @@
     "typecheck": "npm run typecheck:host && npm run typecheck:web",
     "build:web": "vite build",
     "build:host": "tsc -p tsconfig.node.json",
+    "build:rust": "node scripts/export/build-rust-exporter.mjs",
+    "test:rust": "node scripts/export/build-rust-exporter.mjs --test",
     "build": "npm run typecheck && npm run build:web && npm run build:host",
     "start": "node out-host/host/main.js",
     "fetch:models": "npm run build:host && node out-host/host/tools/fetchAssets.js",

@@ -1,9 +1,49 @@
 @import 'base.css';
 
-/* 中文主字体：覆盖全简体（28967 字形），所有 UI 文本统一用它 */
+/*
+ * Project SEKAI CN 6.4.0 内置游戏字体（对齐 SekaiStoryExporter ADR-0011）：
+ * - SekaiCN-Medium (weight 500): Source Han Sans SC Medium (`fot-rodinntlgpro-db@Font.otf`)
+ * - SekaiCN-Bold   (weight 700): Source Han Sans SC Bold   (`fot-rodinntlgpro-eb@Font.otf`)
+ */
+@font-face {
+  font-family: 'SekaiCN-Medium';
+  src: url('/fonts/SourceHanSansSC-Medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'SekaiCN-Bold';
+  src: url('/fonts/SourceHanSansSC-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Source Han Sans SC';
+  src: url('/fonts/SourceHanSansSC-Medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Source Han Sans SC';
+  src: url('/fonts/SourceHanSansSC-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+/* 兼容旧 FontFaceObserver('MiSans Medium') 调用（指向同一 CN 游戏字体，无额外体积） */
 @font-face {
   font-family: 'MiSans Medium';
-  src: url('fonts/MiSans-Medium.ttf') format('truetype');
+  src: url('/fonts/SourceHanSansSC-Medium.otf') format('opentype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: block;
 }
 
 /* ========== CSS Variables (macOS System Colors) ========== */
@@ -40,7 +80,8 @@
 
 body {
   font-family:
-    'MiSans Medium',
+    'SekaiCN-Medium',
+    'Source Han Sans SC',
     -apple-system,
     BlinkMacSystemFont,
     'SF Pro Display',

@@ -974,10 +974,11 @@ export function isMotionCompatibleWithLine(params: {
   const isDespair = DESPAIR_TEXT_RE.test(text)
   const isGenuineShock = emo === '惊讶' || GENUINE_SURPRISE_TEXT_RE.test(text)
 
-  // 5) 悲伤/绝望/愤怒语境禁止配打招呼/松口气等轻松社交动作
+  // 5) 悲伤/绝望/愤怒语境禁止打招呼等轻松社交动作；relief(松口气) 仅在愤怒或极端绝望崩溃句禁用（官方悲伤/叹息语境常自然用 relief 表现轻叹释放）
   if (
     (ctx.mood === 'sad_regret' || ctx.mood === 'angry_frustration' || isDespair) &&
-    (info.role === 'greeting' || info.role === 'relief')
+    (info.role === 'greeting' ||
+      (info.role === 'relief' && (ctx.mood === 'angry_frustration' || isDespair)))
   ) {
     return { ok: false, reason: 'casual_motion_on_tense_or_sad_line' }
   }
@@ -1148,15 +1149,15 @@ export function pickMoodMatchedFacial(
 
 const MOTION_ROLES_BY_DRAMATIC_MOOD: Record<DramaticContextMood, MotionSemanticRole[]> = {
   surprise: ['surprise', 'forward', 'shakehead', 'tilthead'],
-  awkward: ['trouble', 'shy', 'think', 'nod'],
+  awkward: ['trouble', 'shy', 'think', 'nod', 'relief', 'tilthead'],
   gentle_reassure: ['nod', 'relief', 'forward', 'tilthead'],
-  inner_resolve: ['forward', 'nod', 'relief'],
-  shy_hesitation: ['shy', 'trouble', 'think'],
+  inner_resolve: ['forward', 'nod', 'relief', 'think'],
+  shy_hesitation: ['shy', 'trouble', 'think', 'tilthead'],
   angry_frustration: ['angry', 'shakehead', 'forward', 'trouble'],
-  sad_regret: ['sad', 'trouble', 'shakehead', 'think'],
+  sad_regret: ['sad', 'trouble', 'shakehead', 'think', 'nod', 'relief', 'forward'],
   cheerful_banter: ['glad', 'playful', 'nod', 'tilthead', 'greeting', 'relief'],
-  attentive_listen: ['nod', 'think', 'tilthead', 'relief'],
-  thinking_monologue: ['think', 'trouble', 'sad', 'nod'],
+  attentive_listen: ['nod', 'think', 'tilthead', 'relief', 'trouble'],
+  thinking_monologue: ['think', 'trouble', 'sad', 'nod', 'relief'],
   entry_exit: ['nod', 'tilthead', 'greeting', 'relief', 'forward'],
   neutral: ['nod', 'tilthead', 'relief', 'forward', 'think']
 }
@@ -1522,12 +1523,25 @@ export function evaluateActingLineMatch(params: {
   }
 
   const sameFacialCount = params.consecutiveSameFacialCount ?? 0
-  if (facial && sameFacialCount >= 3) {
+  // 官方近期剧集约 61.7% 跨句延续同一表情（8.8% 连续 >=3 句）：
+  // 情绪表情（sad/trouble/serious/closeeye/cry/angry 等）允许自然延续 3~4 句，连续 >=5 句才温和提示；
+  // 中性或纯笑脸在连续 >=3 句时提示微调，避免僵笑或全程 face_normal_01。
+  const facialRole = facial
+    ? inspectModelFacial(params.modelPath, facial, params.modelsRoot).role
+    : 'other'
+  const facialHoldLimit =
+    facialRole === 'neutral' ||
+    facialRole === 'genuine_smile' ||
+    facialRole === 'closed_smile' ||
+    facialRole === 'playful'
+      ? 3
+      : 5
+  if (facial && sameFacialCount >= facialHoldLimit) {
     issues.push({
       field: 'repetition',
       code: 'consecutive_same_facial',
       severity: 'medium',
-      message: `表情 ${facial} 已连续 ${sameFacialCount} 句未变化，建议随台词语气切换`
+      message: `表情 ${facial} 已连续 ${sameFacialCount} 句未变化，建议随台词语气微调`
     })
   } else if (
     facial &&

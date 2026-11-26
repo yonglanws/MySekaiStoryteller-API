@@ -12,7 +12,17 @@ import { AlphaFilter, Filter } from 'pixi.js'
 import { ILogObj, Logger } from 'tslog'
 import getSubLogger from '../utils/Logger'
 import { motionTrace } from '../managers/video-export/MotionTraceCollector'
-import { bodyBlendSeconds, facialBlendSeconds } from './MotionBlend'
+import {
+  advancePlayableBlendLayer,
+  bodyBlendSeconds,
+  changePlayableBlendLayer,
+  clearPlayableBlendLayer,
+  createPlayableBlendLayer,
+  evaluateBlendedLayerValues,
+  facialBlendSeconds,
+  type EvaluatedBlendInput,
+  type PlayableBlendLayer
+} from './MotionBlend'
 import {
   advanceBreathDegree,
   bodyMotionChangedBlink,
@@ -180,6 +190,17 @@ export default class AdvancedModel extends Live2DModel {
     new WeakSet<object>()
   ]
   private readonly channelEntryCounts = [0, 0]
+  private playableLayers: [PlayableBlendLayer<object>, PlayableBlendLayer<object>] = [
+    createPlayableBlendLayer<object>(),
+    createPlayableBlendLayer<object>()
+  ]
+  private playableLayerLastTime: [number | null, number | null] = [null, null]
+  private channelAnimatedParamIndices: [Set<number>, Set<number>] = [
+    new Set<number>(),
+    new Set<number>()
+  ]
+  private lastBodyEvaluatedIndices = new Set<number>()
+  private blinkUserDataHookedQueues = new WeakSet<object>()
   private bodyIgnoredParamIds: string[] = []
   private restoreBodyUpdate: (() => void) | null = null
   private restoreFacialUpdate: (() => void) | null = null
@@ -240,9 +261,14 @@ export default class AdvancedModel extends Live2DModel {
     this.internalModel.parallelMotionManager[0].stopAllMotions()
     this.internalModel.parallelMotionManager[1].stopAllMotions()
 
-    // 官方模型先用别的方式驱动眨眼；这里关掉依赖自带的 eyeBlink，改由 NaturalMotion 控制。
-    const internalWithBlink = this.internalModel as unknown as { eyeBlink?: unknown }
-    internalWithBlink.eyeBlink = undefined
+    // 官方模型先用别的方式驱动眨眼与呼吸；这里关掉依赖自带的 eyeBlink 与 3.2345s breath
+    // （Cubism4InternalModel.init 里 ParamBreath 不受 breathDepth:0 影响），统一改由 NaturalMotion 控制。
+    const internalWithNatural = this.internalModel as unknown as {
+      eyeBlink?: unknown
+      breath?: unknown
+    }
+    internalWithNatural.eyeBlink = undefined
+    internalWithNatural.breath = undefined
 
     const seed = naturalMotionSeed(metadata.id)
     this.blinkState = createBlinkState(seed)
@@ -391,6 +417,11 @@ export default class AdvancedModel extends Live2DModel {
             oldEntry?.setFadeOut?.(fade)
           }
         }
+        const newestEntry =
+          Array.isArray(entries) && entries.length > 0 ? entries[entries.length - 1] : null
+        if (newestEntry) {
+          changePlayableBlendLayer(this.getPlayableLayer(channel), newestEntry, fade)
+        }
         return handle
       } catch (error) {
         this.logger.warn('Crossfade start failed, falling back to queue stop', error)
@@ -440,21 +471,25 @@ export default class AdvancedModel extends Live2DModel {
         ? 1 / STORY_FPS
         : Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
       this.lastNaturalUpdateMs = now
-      const alpha = (this.filters?.[0] as AlphaFilter | undefined)?.alpha ?? 0
-      if (!this.visible || alpha <= 0.01 || this.destroyed) return
+      if (this.destroyed) return
+      // 官方 `ModelRuntime::update` 的 active 对应模型是否在台显示（含 Appear 淡入与 Clear 淡出期间），
+      // 不按 alpha<=0.01 冻结，避免淡入首帧/低 alpha 帧出现呼吸跳变。
+      const active = Boolean(this.visible) && this.parent !== null
       if (this.autoBlink !== false && eyeIds.length > 0) {
-        const bases = eyeIds.map(
-          (id) => core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
-        )
-        const opening = stepBlink(this.blinkState, dt)
-        for (let idx = 0; idx < eyeIds.length; idx++) {
-          const id = eyeIds[idx]
-          const next = bases[idx] * opening
-          if (core.setParameterValueById) core.setParameterValueById(id, next)
-          else core.setParamFloat?.(id, next)
+        const opening = stepBlink(this.blinkState, dt, active)
+        if (active) {
+          const bases = eyeIds.map(
+            (id) => core.getParameterValueById?.(id) ?? core.getParamFloat?.(id) ?? 1
+          )
+          for (let idx = 0; idx < eyeIds.length; idx++) {
+            const id = eyeIds[idx]
+            const next = bases[idx] * opening
+            if (core.setParameterValueById) core.setParameterValueById(id, next)
+            else core.setParamFloat?.(id, next)
+          }
         }
       }
-      if (this.breathParamId) {
+      if (this.breathParamId && active) {
         this.breathDegree = advanceBreathDegree(this.breathDegree, dt)
         const value = breathParameterValue(this.breathDegree)
         if (core.setParameterValueById) core.setParameterValueById(this.breathParamId, value)
@@ -466,31 +501,37 @@ export default class AdvancedModel extends Live2DModel {
 
   /**
    * 动作的 `UserData`（`OnLive2DInvokeUserData`，例如 `eyeblink,0.2,0.24,0.24`）
-   * 由 pixi 的 `MotionQueueManager` 读到后以 `motion:<value>` 事件发出；这里在同一个
-   * 回调里把 eyeblink 交给眨眼控制器（Command 模式）。
+   * 由 pixi 的 `MotionQueueManager` 读到后以回调发出；身体/表情实际跑在
+   * `parallelMotionManager[0/1]` 上，必须同时挂钩两个并行队列与主 `motionManager`。
    */
   private installBlinkUserData(): void {
-    const manager = (
-      this.internalModel as unknown as {
-        motionManager?: {
-          queueManager?: {
-            setEventCallback?: (
-              callback: (caller: unknown, value: string, data: unknown) => void,
-              customData?: unknown
-            ) => void
-            _eventCallBack?: (caller: unknown, value: string, data: unknown) => void
-            _eventCustomData?: unknown
-          }
-        }
-      }
-    )?.motionManager
-    const queue = manager?.queueManager
-    if (!queue || typeof queue.setEventCallback !== 'function') return
-    const original = queue._eventCallBack
-    queue.setEventCallback((caller, value, data) => {
-      original?.(caller, value, data)
-      if (typeof value === 'string') invokeBlinkUserData(this.blinkState, value)
-    }, queue._eventCustomData)
+    type QueueWithCallback = {
+      setEventCallback?: (
+        callback: (caller: unknown, value: string, data: unknown) => void,
+        customData?: unknown
+      ) => void
+      _eventCallBack?: (caller: unknown, value: string, data: unknown) => void
+      _eventCustomData?: unknown
+    }
+    const internal = this.internalModel as unknown as {
+      motionManager?: { queueManager?: QueueWithCallback }
+      parallelMotionManager?: Array<{ queueManager?: QueueWithCallback }>
+    }
+    const hooked = (this.blinkUserDataHookedQueues ??= new WeakSet<object>())
+    const queues: Array<QueueWithCallback | undefined> = [
+      internal?.motionManager?.queueManager,
+      internal?.parallelMotionManager?.[0]?.queueManager,
+      internal?.parallelMotionManager?.[1]?.queueManager
+    ]
+    for (const queue of queues) {
+      if (!queue || typeof queue.setEventCallback !== 'function' || hooked.has(queue)) continue
+      hooked.add(queue)
+      const original = queue._eventCallBack
+      queue.setEventCallback((caller, value, data) => {
+        original?.(caller, value, data)
+        if (typeof value === 'string') invokeBlinkUserData(this.blinkState, value)
+      }, queue._eventCustomData)
+    }
   }
 
   private resolveCoreParameterIds(): Set<string> | null {
@@ -831,7 +872,8 @@ export default class AdvancedModel extends Live2DModel {
           }
         }
       }
-      const result = origDoUpdate(model, userTimeSeconds)
+      const playableResult = this.tryUpdatePlayableBlend(channel, queue, model, userTimeSeconds)
+      const result = playableResult !== null ? playableResult : origDoUpdate(model, userTimeSeconds)
       if (Array.isArray(queue._motions)) {
         for (const entry of queue._motions) {
           if (
@@ -867,6 +909,8 @@ export default class AdvancedModel extends Live2DModel {
         this.channelHeldEntries[channel] = new WeakSet<object>()
         this.channelFinishFiredEntries[channel] = new WeakSet<object>()
         this.channelEntryCounts[channel] = 0
+        clearPlayableBlendLayer(this.getPlayableLayer(channel))
+        this.getPlayableLayerLastTime()[channel] = null
         origStopAll()
       }
     }
@@ -881,6 +925,284 @@ export default class AdvancedModel extends Live2DModel {
         return entries.every((entry) => !entry || entry.isFinished?.() || currentHeld.has(entry))
       }
     }
+  }
+
+  private getPlayableLayer(channel: 0 | 1): PlayableBlendLayer<object> {
+    if (!this.playableLayers) {
+      this.playableLayers = [createPlayableBlendLayer<object>(), createPlayableBlendLayer<object>()]
+    }
+    return this.playableLayers[channel]
+  }
+
+  private getPlayableLayerLastTime(): [number | null, number | null] {
+    if (!this.playableLayerLastTime) {
+      this.playableLayerLastTime = [null, null]
+    }
+    return this.playableLayerLastTime
+  }
+
+  private getChannelAnimatedParamSet(channel: 0 | 1): Set<number> {
+    if (!this.channelAnimatedParamIndices) {
+      this.channelAnimatedParamIndices = [new Set<number>(), new Set<number>()]
+    }
+    return this.channelAnimatedParamIndices[channel]
+  }
+
+  /**
+   * 官方 `PlayableAnimator` / `PlayableBlender` 逐帧线性归一化混合
+   * （移植自 `SekaiStoryExporter/crates/sse-live2d/src/motion.rs:162-258`）。
+   *
+   * 仅在真实 Cubism4 `coreModel` + `CubismMotion` 上激活；测试替身或 Cubism2 自动返回 null 回退原路径。
+   */
+  private tryUpdatePlayableBlend(
+    channel: 0 | 1,
+    queue: {
+      _motions?: Array<object | null>
+      _eventCallBack?: (caller: unknown, value: string, data: unknown) => void
+      _eventCustomData?: unknown
+    },
+    rawModel: unknown,
+    userTimeSeconds: number
+  ): boolean | null {
+    const core = rawModel as {
+      getParameterCount?: () => number
+      getParameterIndex?: (id: string) => number
+      getParameterValueByIndex?: (index: number) => number
+      setParameterValueByIndex?: (index: number, value: number, weight?: number) => void
+      getParameterDefaultValue?: (index: number) => number
+      getParameterValueById?: (id: string) => number
+      setParameterValueById?: (id: string, value: number, weight?: number) => void
+      addParameterValueById?: (id: string, value: number, weight?: number) => void
+      multiplyParameterValueById?: (id: string, value: number, weight?: number) => void
+      setPartOpacityById?: (id: string, value: number) => void
+      setPartOpacityByIndex?: (index: number, value: number) => void
+      getPartIndex?: (id: string) => number
+      setModelOapcity?: (value: number) => void
+    } | null
+    if (
+      !core ||
+      typeof core.getParameterCount !== 'function' ||
+      typeof core.getParameterIndex !== 'function' ||
+      typeof core.getParameterValueByIndex !== 'function' ||
+      typeof core.setParameterValueByIndex !== 'function' ||
+      typeof core.getParameterDefaultValue !== 'function'
+    ) {
+      return null
+    }
+    const entries = queue._motions
+    if (!Array.isArray(entries) || entries.length === 0) return null
+
+    const layer = this.getPlayableLayer(channel)
+    // 剔除已不在 queue._motions 中的陈旧输入
+    const liveSet = new Set(entries.filter((e): e is object => Boolean(e)))
+    layer.inputs = layer.inputs.filter((input) => liveSet.has(input.key))
+    if (layer.inputs.length === 0) return null
+
+    type MotionEntryLike = {
+      _motion?: {
+        _fadeInSeconds?: number
+        _fadeOutSeconds?: number
+        _offsetSeconds?: number
+        getDuration?: () => number
+        doUpdateParameters?: (
+          model: unknown,
+          userTimeSeconds: number,
+          fadeWeight: number,
+          entry: unknown
+        ) => void
+        getFiredEvent?: (before: number, after: number) => string[]
+      }
+      isAvailable?: () => boolean
+      isStarted?: () => boolean
+      setIsStarted?: (started: boolean) => void
+      isFinished?: () => boolean
+      getStartTime?: () => number
+      setStartTime?: (t: number) => void
+      setFadeInStartTime?: (t: number) => void
+      getEndTime?: () => number
+      setEndTime?: (t: number) => void
+      getLastCheckEventSeconds?: () => number
+      setLastCheckEventSeconds?: (t: number) => void
+      setState?: (t: number, weight: number) => void
+      release?: () => void
+    }
+
+    for (const input of layer.inputs) {
+      const entry = input.key as MotionEntryLike
+      if (typeof entry._motion?.doUpdateParameters !== 'function') return null
+    }
+
+    const lastTimes = this.getPlayableLayerLastTime()
+    const prevTime = lastTimes[channel]
+    const dt = AnimationManager.isExporting()
+      ? 1 / STORY_FPS
+      : prevTime !== null && userTimeSeconds >= prevTime
+        ? Math.min(0.25, userTimeSeconds - prevTime)
+        : 0
+    lastTimes[channel] = userTimeSeconds
+
+    const pruned = advancePlayableBlendLayer(layer, dt)
+    if (pruned.length > 0) {
+      const prunedSet = new Set(pruned)
+      const held = this.channelHeldEntries?.[channel]
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const candidate = entries[i]
+        if (candidate && prunedSet.has(candidate)) {
+          held?.delete(candidate)
+          ;(candidate as MotionEntryLike).release?.()
+          entries.splice(i, 1)
+        }
+      }
+    }
+
+    const paramCount = core.getParameterCount()
+    const defaultAt = (index: number): number => {
+      if (index < 0 || index >= paramCount) return 0
+      const def = core.getParameterDefaultValue!(index)
+      return typeof def === 'number' && Number.isFinite(def) ? def : 0
+    }
+
+    const animatedSet = this.getChannelAnimatedParamSet(channel)
+    const evaluatedInputs: EvaluatedBlendInput[] = []
+    const partOpacityInputs: Array<{ weight: number; parts: Map<string, number> }> = []
+    const newestInput = layer.inputs[layer.inputs.length - 1]
+
+    for (const input of layer.inputs) {
+      const entry = input.key as MotionEntryLike
+      const motion = entry._motion!
+      if (!entry.isStarted?.()) {
+        entry.setIsStarted?.(true)
+        const offset =
+          typeof motion._offsetSeconds === 'number' && Number.isFinite(motion._offsetSeconds)
+            ? motion._offsetSeconds
+            : 0
+        entry.setStartTime?.(userTimeSeconds - offset)
+        entry.setFadeInStartTime?.(userTimeSeconds)
+        entry.setLastCheckEventSeconds?.(userTimeSeconds)
+        entry.setEndTime?.(-1)
+      }
+      entry.setState?.(userTimeSeconds, input.weight)
+
+      const captured = new Map<number, number>()
+      const capturedParts = new Map<string, number>()
+      const proxy = {
+        getParameterCount: () => paramCount,
+        getParameterIndex: (id: string) => core.getParameterIndex!(id),
+        getParameterDefaultValue: (index: number) => defaultAt(index),
+        getParameterValueByIndex: (index: number) => captured.get(index) ?? defaultAt(index),
+        getParameterValueById: (id: string) => {
+          const idx = core.getParameterIndex!(id)
+          return idx >= 0 ? (captured.get(idx) ?? defaultAt(idx)) : 0
+        },
+        setParameterValueByIndex: (index: number, value: number, weight = 1) => {
+          if (index < 0 || index >= paramCount) return
+          const prev = captured.get(index) ?? defaultAt(index)
+          captured.set(index, prev + (value - prev) * weight)
+        },
+        setParameterValueById: (id: string, value: number, weight = 1) => {
+          const idx = core.getParameterIndex!(id)
+          if (idx < 0 || idx >= paramCount) return
+          const prev = captured.get(idx) ?? defaultAt(idx)
+          captured.set(idx, prev + (value - prev) * weight)
+        },
+        addParameterValueById: (id: string, value: number, weight = 1) => {
+          const idx = core.getParameterIndex!(id)
+          if (idx < 0 || idx >= paramCount) return
+          const prev = captured.get(idx) ?? defaultAt(idx)
+          captured.set(idx, prev + value * weight)
+        },
+        multiplyParameterValueById: (id: string, value: number, weight = 1) => {
+          const idx = core.getParameterIndex!(id)
+          if (idx < 0 || idx >= paramCount) return
+          const prev = captured.get(idx) ?? defaultAt(idx)
+          captured.set(idx, prev * (1 + (value - 1) * weight))
+        },
+        setPartOpacityById: (id: string, value: number) => {
+          capturedParts.set(id, value)
+        },
+        setPartOpacityByIndex: (index: number, value: number) => {
+          core.setPartOpacityByIndex?.(index, value)
+        },
+        getPartIndex: (id: string) => core.getPartIndex?.(id) ?? -1,
+        setModelOapcity: (value: number) => {
+          core.setModelOapcity?.(value)
+        }
+      }
+
+      const prevFadeIn = motion._fadeInSeconds
+      const prevFadeOut = motion._fadeOutSeconds
+      const prevEnd = entry.getEndTime?.()
+      try {
+        motion._fadeInSeconds = 0
+        motion._fadeOutSeconds = 0
+        entry.setEndTime?.(-1)
+        motion.doUpdateParameters!(proxy, userTimeSeconds, 1, entry)
+      } finally {
+        if (prevFadeIn !== undefined) motion._fadeInSeconds = prevFadeIn
+        if (prevFadeOut !== undefined) motion._fadeOutSeconds = prevFadeOut
+        if (prevEnd !== undefined) entry.setEndTime?.(prevEnd)
+      }
+
+      for (const idx of captured.keys()) {
+        animatedSet.add(idx)
+      }
+      evaluatedInputs.push({ weight: input.weight, values: captured })
+      if (capturedParts.size > 0) {
+        partOpacityInputs.push({ weight: input.weight, parts: capturedParts })
+      }
+
+      // 官方 `Animator::advance`：只在最新输入上派发 `UserData` 事件（如 eyeblink）
+      if (input === newestInput && typeof motion.getFiredEvent === 'function') {
+        const startTime = entry.getStartTime?.() ?? userTimeSeconds
+        const lastCheck = entry.getLastCheckEventSeconds?.() ?? userTimeSeconds
+        const fired = motion.getFiredEvent(lastCheck - startTime, userTimeSeconds - startTime)
+        if (Array.isArray(fired) && typeof queue._eventCallBack === 'function') {
+          for (const eventValue of fired) {
+            queue._eventCallBack(queue, eventValue, queue._eventCustomData)
+          }
+        }
+        entry.setLastCheckEventSeconds?.(userTimeSeconds)
+      }
+    }
+
+    const blended = evaluateBlendedLayerValues(evaluatedInputs, defaultAt)
+    if (channel === 0) {
+      // 身体层本帧不再覆盖的旧参数回归默认值（避免切动作后残留旧手臂/躯干值）
+      for (const idx of animatedSet) {
+        if (!blended.has(idx)) {
+          core.setParameterValueByIndex(idx, defaultAt(idx), 1)
+        }
+      }
+      this.lastBodyEvaluatedIndices = new Set(blended.keys())
+    } else {
+      // 表情层不再覆盖的旧表情参数回归默认值（若身体层本帧未驱动该参数）
+      const bodySet = this.lastBodyEvaluatedIndices
+      for (const idx of animatedSet) {
+        if (!blended.has(idx) && !bodySet?.has(idx)) {
+          core.setParameterValueByIndex(idx, defaultAt(idx), 1)
+        }
+      }
+    }
+
+    for (const [idx, value] of blended.entries()) {
+      core.setParameterValueByIndex(idx, value, 1)
+    }
+
+    if (partOpacityInputs.length > 0 && typeof core.setPartOpacityById === 'function') {
+      const partIds = new Set<string>()
+      for (const item of partOpacityInputs) {
+        for (const id of item.parts.keys()) partIds.add(id)
+      }
+      for (const id of partIds) {
+        let acc = 0
+        for (const item of partOpacityInputs) {
+          acc += item.weight * (item.parts.get(id) ?? 1)
+        }
+        core.setPartOpacityById(id, acc)
+      }
+    }
+
+    return true
   }
 
   /**
@@ -904,10 +1226,13 @@ export default class AdvancedModel extends Live2DModel {
     this.lastNaturalUpdateMs = now
     this.currentBodyStartedAt = now
     this.deltaTime = 0
-    // 同一 worker 连续导出时，眨眼/呼吸相位必须回到固定起点，否则两次导出
-    // 的逐帧结果不同（确定性要求）。固定 1/60 步进下从这里开始演进。
-    this.blinkState = createBlinkState(1)
-    this.breathDegree = 0
+    // 同一 worker 连续导出时，眨眼/呼吸相位必须回到按模型 id 派生的确定性起点：
+    // 同一 id 每次导出一致，不同角色彼此独立，不再全体同步眨眼/呼吸。
+    const seed = naturalMotionSeed(this._metadata?.id ?? 1)
+    this.blinkState = createBlinkState(seed)
+    this.breathDegree = createBreathDegree(seed)
+    this.getPlayableLayerLastTime()[0] = null
+    this.getPlayableLayerLastTime()[1] = null
     if (this.lastChangeBlinkTime !== null) {
       this.lastChangeBlinkTime = now
     }
@@ -1550,7 +1875,7 @@ export default class AdvancedModel extends Live2DModel {
     canApply?: () => boolean,
     chainAfter = false,
     traceSnippetIndex?: number,
-    channelOptions?: { facialForce?: boolean }
+    channelOptions?: { bodyForce?: boolean; facialForce?: boolean }
   ): Promise<void> {
     const generation = ++this.channelGeneration[channel]
     if (channel === 0) {
@@ -1690,16 +2015,32 @@ export default class AdvancedModel extends Live2DModel {
     // body force&&first → 0、same_category → 0.125、force → 0、否则 clip FadeInTime/0.5；
     // facial force → 0、否则 clip FadeInTime（缺省 0.25）。
     const clipFadeIn = this.clipFadeInSeconds(name)
+    const bodyForce = channelOptions?.bodyForce ?? this.firstBodyCue
     const facialForce = channelOptions?.facialForce ?? this.facialForceNext
     const fadeSeconds =
       channel === 0
         ? bodyBlendSeconds(this.currentBodyMotion, name, {
-            force: this.firstBodyCue,
+            force: bodyForce,
             first: this.firstBodyCue || !this.currentBodyMotion,
             clipFadeIn
           })
         : facialBlendSeconds(facialForce, clipFadeIn)
     this.channelFadeSeconds[channel] = fadeSeconds
+    // 官方 `PlayableAnimator.ChangeAnimation(..., rewind: true)` 对已播完定格的同名身体动作
+    // 仍会以 0.125s 重播；pixi `MotionState.reserve` 会因 currentGroup === name 拒绝，
+    // 这里在已通过活跃去重检查后清空 currentGroup/Index，让同名身体动作可以重播。
+    if (channel === 0) {
+      const motionState = manager.state as unknown as {
+        currentGroup?: string
+        currentIndex?: number
+        currentPriority?: number
+      }
+      if (motionState && motionState.currentGroup === name && motionState.currentIndex === 0) {
+        motionState.currentGroup = undefined
+        motionState.currentIndex = undefined
+        motionState.currentPriority = 0
+      }
+    }
     const invalidateReservation = (): void => {
       if (generation === this.channelGeneration[channel] && !this.destroyed) {
         manager.state.setReserved(undefined, undefined, 0)
@@ -1784,7 +2125,8 @@ export default class AdvancedModel extends Live2DModel {
     motion: string,
     ignoreParams: boolean = false,
     extraIgnoreParamIds: string[] = [],
-    traceSnippetIndex?: number
+    traceSnippetIndex?: number,
+    options?: { bodyForce?: boolean }
   ): Promise<void> {
     const ignored = [
       ...new Set([...(ignoreParams ? this.eyeParameterIds() : []), ...extraIgnoreParamIds])
@@ -1796,7 +2138,8 @@ export default class AdvancedModel extends Live2DModel {
       undefined,
       undefined,
       false,
-      traceSnippetIndex
+      traceSnippetIndex,
+      options?.bodyForce !== undefined ? { bodyForce: options.bodyForce } : undefined
     )
   }
 
@@ -2013,6 +2356,7 @@ export default class AdvancedModel extends Live2DModel {
     facial?: string,
     facialFirst?: boolean,
     options: {
+      bodyForce?: boolean
       facialForce?: boolean
       traceSnippetIndex?: number
       preserveActiveShortBodyMotion?: boolean
@@ -2049,7 +2393,13 @@ export default class AdvancedModel extends Live2DModel {
     }
     if (effectiveMotion) {
       waits.push(
-        this.applyMotion(effectiveMotion, isolateEyes, extraIgnored, options.traceSnippetIndex)
+        this.applyMotion(
+          effectiveMotion,
+          isolateEyes,
+          extraIgnored,
+          options.traceSnippetIndex,
+          options.bodyForce !== undefined ? { bodyForce: options.bodyForce } : undefined
+        )
       )
     }
 

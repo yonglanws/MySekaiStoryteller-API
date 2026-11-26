@@ -124,6 +124,8 @@ function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): n
       return TELOP_TOTAL_MS / 1000
     case 'HideTalk':
       return TALK_WINDOW_OPEN_CLOSE_MS / 1000
+    case 'Wait':
+      return Math.max(0, num(data.duration, 500)) / 1000
     case 'Motion':
       return Array.isArray(data.actions) ? Math.max(0.1, num(data.duration, 2)) : 0
     case 'Talk':
