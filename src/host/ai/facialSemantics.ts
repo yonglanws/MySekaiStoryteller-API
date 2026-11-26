@@ -807,6 +807,7 @@ export function inferDramaticContext(params: {
   isEntryExit?: boolean
   restrainedRole?: boolean
   ttsCaption?: string
+  cheerfulScene?: boolean
 }): DramaticContextSummary {
   const text = (params.content ?? '').trim()
   const emo = (params.emotion ?? '').trim()
@@ -822,14 +823,16 @@ export function inferDramaticContext(params: {
   const hasPosCue = POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text)
   const questionOrDoubt = /[？?]/.test(text) || /(?:难道|为什么|怎么|是不是)/.test(text)
   const resolve = RESOLVE_TEXT_RE.test(text) && !hasNegCue
+  const suppressMockPrevAngry =
+    Boolean(params.cheerfulScene) && emo !== '伤心' && emo !== '害怕' && !apologyOrRegret && !isDespair
   const tense =
     emo === '生气' ||
     emo === '伤心' ||
     emo === '害怕' ||
-    prevEmo === '生气' ||
+    (!suppressMockPrevAngry && prevEmo === '生气') ||
     prevEmo === '伤心' ||
     ANGRY_TEXT_RE.test(text) ||
-    ANGRY_TEXT_RE.test(prevText)
+    (!suppressMockPrevAngry && ANGRY_TEXT_RE.test(prevText))
 
   if (params.isEntryExit) {
     return {
@@ -934,6 +937,7 @@ export function isFacialCompatibleWithLine(params: {
   isMonologue?: boolean
   isListener?: boolean
   restrainedRole?: boolean
+  cheerfulScene?: boolean
   modelsRoot?: string
 }): FacialCompatibilityResult {
   const {
@@ -945,6 +949,7 @@ export function isFacialCompatibleWithLine(params: {
     isMonologue,
     isListener,
     restrainedRole,
+    cheerfulScene,
     modelsRoot
   } = params
   if (!facial.trim()) return { ok: true }
@@ -960,7 +965,8 @@ export function isFacialCompatibleWithLine(params: {
     emotion: emo,
     isMonologue,
     isListener,
-    restrainedRole
+    restrainedRole,
+    cheerfulScene
   })
   const hasNegCue =
     (NEGATIVE_TEXT_CUE_RE.test(text) || NEGATED_JOY_RE.test(text)) && ctx.mood !== 'gentle_reassure'
@@ -1117,6 +1123,7 @@ export function isMotionCompatibleWithLine(params: {
   prevTense?: boolean
   isListener?: boolean
   restrainedRole?: boolean
+  cheerfulScene?: boolean
   modelsRoot?: string
 }): MotionCompatibilityResult {
   const clean = params.motion.trim()
@@ -1137,7 +1144,8 @@ export function isMotionCompatibleWithLine(params: {
     prevContent: params.prevContent,
     prevEmotion: params.prevEmotion,
     isListener: params.isListener,
-    restrainedRole: params.restrainedRole
+    restrainedRole: params.restrainedRole,
+    cheerfulScene: params.cheerfulScene
   })
   const tense = ctx.tense || Boolean(params.prevTense)
   const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text)
@@ -1400,24 +1408,94 @@ export interface SceneTenseTracker {
   calmRun: number
 }
 
+const SERIOUS_CRY_OR_HURT_RE = /[哭泣泪呜咽嗚咽]/
+
+/**
+ * 判断当前台词周边是否处于明显欢快喜剧主导的段落（`开心` 占多数，且无伤心/害怕或哭泣/绝望/道歉等沉重线索），
+ * 用于防止喜剧斗嘴中的玩笑「生气」把后续「Wonderhoy」等欢快演出锁死成紧张对峙。
+ */
+export function isCheerfulComedyContext(
+  lines: ReadonlyArray<{ content?: string; emotion?: string; sceneId?: string }>,
+  index: number
+): boolean {
+  if (index < 0 || index >= lines.length) return false
+  const currentSceneId = lines[index]?.sceneId
+  let winStart = index
+  while (winStart > Math.max(0, index - 10)) {
+    const prev = lines[winStart - 1]
+    if (currentSceneId && prev?.sceneId && prev.sceneId !== currentSceneId) break
+    winStart -= 1
+  }
+  let winEnd = index
+  while (winEnd < Math.min(lines.length - 1, index + 6)) {
+    const next = lines[winEnd + 1]
+    if (currentSceneId && next?.sceneId && next.sceneId !== currentSceneId) break
+    winEnd += 1
+  }
+
+  let total = 0
+  let happyCount = 0
+  let angryCount = 0
+  for (let i = winStart; i <= winEnd; i++) {
+    const line = lines[i]
+    if (!line) continue
+    total += 1
+    const emo = (line.emotion ?? '').trim()
+    const text = (line.content ?? '').trim()
+    if (emo === '伤心' || emo === '害怕') return false
+    if (
+      SERIOUS_CRY_OR_HURT_RE.test(text) ||
+      DESPAIR_TEXT_RE.test(text) ||
+      APOLOGY_REGRET_RE.test(text) ||
+      SELF_BLAME_REGRET_RE.test(text)
+    ) {
+      return false
+    }
+    if (emo === '生气') {
+      angryCount += 1
+    } else if (
+      emo === '开心' ||
+      (emo === '' && POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text))
+    ) {
+      happyCount += 1
+    }
+  }
+  return happyCount >= 3 && happyCount > total * 0.5 && happyCount >= angryCount * 2
+}
+
 export function updateSceneTenseAfterTalk(
   tracker: SceneTenseTracker,
   content: string,
-  emotion: string
+  emotion: string,
+  options: { cheerfulScene?: boolean } = {}
 ): void {
   const emo = emotion.trim()
   const text = content.trim()
-  const isExplicitTense =
-    emo === '生气' ||
+  const hasSeriousSadOrRegret =
     emo === '伤心' ||
     emo === '害怕' ||
-    ANGRY_TEXT_RE.test(text) ||
     APOLOGY_REGRET_RE.test(text) ||
     SELF_BLAME_REGRET_RE.test(text) ||
     DESPAIR_TEXT_RE.test(text) ||
     /(?:骗人|糟糕|难过|哭|呜)/.test(text)
-  if (isExplicitTense) {
+  if (hasSeriousSadOrRegret) {
     tracker.tense = true
+    tracker.calmRun = 0
+    return
+  }
+  const isAngryBeat = emo === '生气' || ANGRY_TEXT_RE.test(text)
+  if (isAngryBeat) {
+    if (options.cheerfulScene) {
+      tracker.tense = false
+      tracker.calmRun = 0
+      return
+    }
+    tracker.tense = true
+    tracker.calmRun = 0
+    return
+  }
+  if (options.cheerfulScene && emo === '开心') {
+    tracker.tense = false
     tracker.calmRun = 0
     return
   }

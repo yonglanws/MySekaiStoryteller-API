@@ -10,6 +10,7 @@ import {
   type SoundtrackIndex
 } from '../assets/soundtracks'
 import type { CloudCatalogData } from '../assets/cloudCatalog'
+import { CURATED_SCENARIO_SES, resolveScenarioSe } from '../ai/scenarioCues'
 
 export interface CatalogModel {
   id: number
@@ -142,6 +143,183 @@ function pickPreferred(names: string[], preferences: string[]): string {
 /** bg_a000301.webp → bg_a000301；用于把云端名字贴到本地同名资源上。 */
 function fileStem(file: string): string {
   return path.basename(file).replace(/\.[^.]+$/, '')
+}
+
+function inferLocalSeMetadata(relFile: string, stem: string): CatalogSeItem {
+  const lowerStem = stem.toLowerCase()
+  const curated = CURATED_SCENARIO_SES.find((c) => c.id.toLowerCase() === lowerStem)
+  if (curated) {
+    return {
+      file: relFile,
+      id: curated.id,
+      name: curated.id,
+      category: curated.category,
+      description: curated.description,
+      tags: [...curated.tags]
+    }
+  }
+  if (/^se_run_/i.test(lowerStem)) {
+    return {
+      file: relFile,
+      id: stem,
+      name: stem,
+      category: 'running',
+      description: '匆忙奔跑脚步声',
+      tags: ['run', 'footsteps', stem]
+    }
+  }
+  if (/^se_walk_/i.test(lowerStem)) {
+    return {
+      file: relFile,
+      id: stem,
+      name: stem,
+      category: 'footsteps',
+      description: '走动脚步声',
+      tags: ['walk', 'footsteps', stem]
+    }
+  }
+  if (/thorns|mood|ambient|env/i.test(lowerStem)) {
+    return {
+      file: relFile,
+      id: stem,
+      name: stem,
+      category: 'mood',
+      description: '剧情氛围环境音效',
+      tags: ['mood', 'ambient', stem]
+    }
+  }
+  return {
+    file: relFile,
+    id: stem,
+    name: stem,
+    category: 'se',
+    description: `本地音效（${stem}）`,
+    tags: [stem]
+  }
+}
+
+export interface SeCatalogViewLike {
+  readonly seDetails: ReadonlyArray<{
+    file: string
+    id?: string
+    category?: string
+    tags?: string[]
+  }>
+  canonicalSe?: (value: unknown) => string | null
+}
+
+function findRegisteredSeByStem(
+  registered: SeCatalogViewLike['seDetails'],
+  stemPriority: string[]
+): string | null {
+  for (const wanted of stemPriority) {
+    const wLower = wanted.toLowerCase()
+    const hit = registered.find(
+      (entry) =>
+        (entry.id ?? '').toLowerCase() === wLower ||
+        fileStem(entry.file).toLowerCase() === wLower
+    )
+    if (hit) return hit.file
+  }
+  return null
+}
+
+/**
+ * 把任意 SE 引用（文件名 / cue id / 描述词）解析并落盘到当前目录真实已登记的 SE 路径；
+ * 当 `cloudCatalog: false`（`seDetails` 仅含本地实存 SE）且目标 SE 缺席时，按语义类别确定性
+ * 重映射到同类的实存本地 SE，避免导出阶段报 missing file / 静音。
+ */
+export function resolveRegisteredSeFile(
+  view: SeCatalogViewLike,
+  rawValue: unknown
+): { file: string; remapped: boolean } | null {
+  const raw = String(rawValue ?? '')
+    .replace(/\\/g, '/')
+    .replace(/^resources\//i, '')
+    .replace(/^audio\/se\//i, '')
+    .trim()
+  if (!raw) return null
+
+  const canonical = view.canonicalSe?.(raw) ?? resolveScenarioSe(raw)?.file ?? raw
+  const registered = view.seDetails ?? []
+  if (registered.length === 0) {
+    return canonical ? { file: canonical, remapped: false } : null
+  }
+
+  const candidates = [canonical, raw].filter(Boolean)
+  for (const cand of candidates) {
+    const lower = cand.toLowerCase()
+    const stem = fileStem(lower).toLowerCase()
+    const exact = registered.find(
+      (entry) =>
+        entry.file.toLowerCase() === lower ||
+        (entry.id ?? '').toLowerCase() === lower ||
+        (entry.id ?? '').toLowerCase() === stem ||
+        fileStem(entry.file).toLowerCase() === stem
+    )
+    if (exact) {
+      return { file: exact.file, remapped: false }
+    }
+  }
+
+  const cue = resolveScenarioSe(raw) ?? (canonical ? resolveScenarioSe(canonical) : null)
+  const hint = `${raw} ${canonical ?? ''} ${cue?.category ?? ''} ${(cue?.tags ?? []).join(' ')} ${cue?.description ?? ''}`.toLowerCase()
+
+  let priority: string[]
+  if (/running|\brun\b|se_run_|奔跑|急跑|冲进|hurry|rush/.test(hint)) {
+    priority = /men|男/.test(hint)
+      ? [
+          'se_run_men_001_1',
+          'se_run_men_001_2',
+          'se_run_men_002_1',
+          'se_run_women_001_1',
+          'se_run_women_002_1',
+          'se_walk_women_001_1'
+        ]
+      : [
+          'se_run_women_001_1',
+          'se_run_women_002_1',
+          'se_run_women_002_2',
+          'se_walk_women_001_1',
+          'se_run_men_001_1'
+        ]
+  } else if (/footsteps|\bwalk\b|se_walk_|脚步|走近|走远/.test(hint)) {
+    priority = /men|男/.test(hint)
+      ? [
+          'se_run_men_001_1',
+          'se_walk_women_001_1',
+          'se_walk_women_002_1',
+          'se_run_women_001_1',
+          'se_run_women_002_1'
+        ]
+      : [
+          'se_walk_women_001_1',
+          'se_walk_women_002_1',
+          'se_run_women_001_1',
+          'se_run_women_002_1'
+        ]
+  } else if (/\bdoor\b|门|敲门|推门/.test(hint)) {
+    priority = ['se00055_b', 'se_walk_women_001_1', 'se00097', 'se00053_b']
+  } else if (
+    /shock|startle|surprise|reaction|flashback|transition|sekai|\bhit\b|gasp|crowd|stage|se00053|se00028|se00092|se00034|se00019/.test(
+      hint
+    )
+  ) {
+    priority = ['se00053_b', 'se00028_b', 'se00092_b', 'se00097', 'se00055_b']
+  } else if (/paper|pc|keyboard|music_edit|instrument|se00122|se00007|se00320|se00027/.test(hint)) {
+    priority = ['se00122_b', 'se00007_b', 'se00055_b', 'se00097']
+  } else if (
+    /bell|chime|phone|camera|cloth|drink|weather|rain|wind|pause|mood|se00037|se00097|se00055|se00004|se00249|se00075|se00005|se00084|se00098|se00183/.test(
+      hint
+    )
+  ) {
+    priority = ['se00097', 'se00055_b', 'se00028_b', 'se00053_b']
+  } else {
+    priority = ['se00097', 'se00055_b', 'se00028_b', 'se00053_b']
+  }
+
+  const matched = findRegisteredSeByStem(registered, priority) ?? registered[0]?.file ?? null
+  return matched ? { file: matched, remapped: true } : null
 }
 
 /**
@@ -433,14 +611,41 @@ export class ResourceCatalog {
     const imageDetails = this.loadImageDetails(resourcesDir, imageFiles)
     const bgmFiles = listFiles('audio/bgm', AUDIO_EXTENSIONS)
     const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
+    const localSeFiles = this.listSeFiles(resourcesDir)
 
     const cloud = this.cloud?.() ?? null
     const seDetails: CatalogSeItem[] = []
+    const seByStem = new Map<string, CatalogSeItem>()
+    const seFilesSeen = new Set<string>()
+    for (const relFile of localSeFiles) {
+      const stem = fileStem(relFile)
+      const item = inferLocalSeMetadata(relFile, stem)
+      seDetails.push(item)
+      seByStem.set(stem.toLowerCase(), item)
+      seFilesSeen.add(relFile.toLowerCase())
+    }
     if (cloud) {
       this.mergeCloudModels(models, cloud)
       this.mergeCloudBackgrounds(imageFiles, imageDetails, cloud)
       this.mergeCloudBgm(bgmFiles, bgmDetails, cloud)
       for (const entry of cloud.se ?? []) {
+        const stemKey = (entry.id || fileStem(entry.file)).toLowerCase()
+        const localItem = seByStem.get(stemKey)
+        if (localItem) {
+          if (entry.description && (!localItem.description || localItem.description.startsWith('本地音效（'))) {
+            localItem.description = entry.description
+          }
+          if (entry.category && (!localItem.category || localItem.category === 'se')) {
+            localItem.category = entry.category
+          }
+          if (entry.tags?.length && (!localItem.tags || localItem.tags.length <= 1)) {
+            localItem.tags = entry.tags
+          }
+          continue
+        }
+        const fileKey = entry.file.toLowerCase()
+        if (seFilesSeen.has(fileKey)) continue
+        seFilesSeen.add(fileKey)
         seDetails.push({
           file: entry.file,
           id: entry.id,
@@ -683,6 +888,43 @@ export class ResourceCatalog {
       bgmDetails.push(created)
       detailsByFile.set(entry.file.toLowerCase(), created)
     }
+  }
+
+  /** 扫描本地 `audio/se/` 与 `audio/se/cloud/`，同名 stem 优先根目录文件。 */
+  private listSeFiles(resourcesDir: string): string[] {
+    const seDir = path.join(resourcesDir, 'audio', 'se')
+    if (!fs.existsSync(seDir)) {
+      return []
+    }
+    const scanDir = (dir: string, prefix: string): string[] => {
+      if (!fs.existsSync(dir)) return []
+      return fs
+        .readdirSync(dir)
+        .filter((f) => {
+          try {
+            return (
+              fs.statSync(path.join(dir, f)).isFile() &&
+              AUDIO_EXTENSIONS.has(path.extname(f).toLowerCase())
+            )
+          } catch {
+            return false
+          }
+        })
+        .sort()
+        .map((f) => (prefix ? `${prefix}/${f}` : f))
+    }
+
+    const rootFiles = scanDir(seDir, '')
+    const cloudFiles = scanDir(path.join(seDir, 'cloud'), 'cloud')
+    const out: string[] = []
+    const seenStems = new Set<string>()
+    for (const rel of [...rootFiles, ...cloudFiles]) {
+      const stem = fileStem(rel).toLowerCase()
+      if (seenStems.has(stem)) continue
+      seenStems.add(stem)
+      out.push(rel)
+    }
+    return out
   }
 
   /**

@@ -904,10 +904,10 @@ test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to
   assert.ok(!/明るい|笑顔/.test(talks[0].ttsCaption))
   assert.equal(talks[0].ttsCaption, '今にも泣き出しそうな脆い響きで頼み込む。')
 
-  // Mid-clause 😭 gets frame-0 🥺 before 大丈夫 while preserving <= 2 emojis, and non-shout speed capped to 0.95
+  // Mid-clause 😭 gets frame-0 🥺 before 大丈夫 while preserving <= 2 emojis, and non-shout speed capped to 0.94
   assert.ok(talks[1].ttsText.startsWith('🥺 '))
   assert.ok(talks[1].ttsText.includes('😭'))
-  assert.equal(talks[1].ttsSpeed, 0.95)
+  assert.equal(talks[1].ttsSpeed, 0.94)
 
   // バカ before mid-clause 🥺 gets frame-0 🥺
   assert.ok(talks[2].ttsText.startsWith('🥺 '))
@@ -916,4 +916,69 @@ test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to
   assert.ok(talks[3].ttsText.includes('😆') && talks[3].ttsText.includes('😊'))
   assert.ok(talks[3].ttsCaption.includes('明るく楽しそうな笑顔'))
   assert.equal(talks[3].ttsSpeed, 1.04)
+})
+
+test('alignStoryTtsEmotionsAndCaptions strips fast-pace ⏩ and caps tricky-sad ttsSpeed <= 0.94 (Scenario 1 #56 regression)', () => {
+  const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  const story = {
+    models: [{ id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    snippets: [
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '只要我装作什么都没发生，\n只要我还能像平时那样开着玩笑——',
+          emotion: '伤心',
+          ttsText: '🥺⏩何事もなかったフリをして、いつものように冗談を言っていられれば——',
+          ttsCaption: '悲しみを堪えながら、少し潤んだ控えめな口調で話す。',
+          ttsSpeed: 0.96,
+          actions: [{ at: 0, modelId: 1, facial: 'face_sad_03' }]
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '我真的快撑不住了……',
+          emotion: '伤心',
+          ttsText: '🥺 もう耐えられないよ……',
+          ttsCaption: '涙を堪えて小さく震えながら話す。',
+          ttsSpeed: 0.99
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '快逃啊！！救命！！',
+          emotion: '伤心',
+          ttsText: '😭⏩早く逃げて！！助けて！！',
+          ttsCaption: '涙声で必死に叫ぶ。',
+          ttsSpeed: 1.06,
+          ttsSpecialScene: true
+        }
+      }
+    ]
+  }
+
+  alignStoryTtsEmotionsAndCaptions(story, { emotionLabels: labels })
+  const talks = story.snippets.map((s) => s.data)
+
+  assert.ok(!talks[0].ttsText.includes('⏩'), 'tricky-sad line must strip ⏩')
+  assert.ok(talks[0].ttsText.startsWith('🥺'))
+  assert.equal(talks[0].ttsSpeed, 0.94, 'non-shouting tricky-sad speed capped to 0.94')
+
+  assert.equal(talks[1].ttsSpeed, 0.95, 'general non-special 伤心 speed capped to 0.95')
+
+  assert.ok(talks[2].ttsText.includes('⏩'), 'explicit specialScene frantic scream may keep ⏩')
 })

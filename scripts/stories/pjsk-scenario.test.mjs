@@ -1073,3 +1073,73 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
   const serialized = JSON.stringify(story.snippets)
   assert.equal(serialized.includes('w-adult-delicious01'), false, 'non-food line must never emit delicious motion')
 })
+
+test('ResourceCatalog scans local audio/se + audio/se/cloud when cloudCatalog=false and remaps missing SEs by category', async () => {
+  const { ResourceCatalog } = await import('../../out-host/host/resources/resourceCatalog.js')
+  const { CatalogView } = await import('../../out-host/host/ai/prompt.js')
+  const { validateAndFixStory } = await import('../../out-host/host/ai/validate.js')
+  const tmpRes = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-local-se-'))
+  try {
+    fs.mkdirSync(path.join(tmpRes, 'audio', 'se', 'cloud'), { recursive: true })
+    for (const f of ['se00053_b.mp3', 'se_run_women_002_1.mp3']) {
+      fs.writeFileSync(path.join(tmpRes, 'audio', 'se', f), '')
+    }
+    for (const f of ['se_run_women_001_1.mp3', 'se00028_b.mp3', 'se00097.mp3', 'se00055_b.mp3', 'se_walk_women_001_1.mp3']) {
+      fs.writeFileSync(path.join(tmpRes, 'audio', 'se', 'cloud', f), '')
+    }
+    const noop = { info: () => undefined, warn: () => undefined, error: () => undefined }
+    const rc = new ResourceCatalog(noop, { paths: { resources: tmpRes } }, null)
+    const data = rc.get()
+    const view = new CatalogView({
+      ...data,
+      models: [
+        {
+          id: 1,
+          name: '晓山瑞希',
+          shortName: '瑞希',
+          path: '20mizuki_normal/20mizuki_normal.model3.json',
+          motions: ['w-normal-default01', 'w-normal-nod01'],
+          facials: ['face_normal_01'],
+          defaultMotion: 'w-normal-default01',
+          defaultFacial: 'face_normal_01'
+        }
+      ],
+      images: ['bg_room.jpg'],
+      imageDetails: [{ file: 'bg_room.jpg', name: '教室', description: '教室' }]
+    })
+    assert.equal(view.canonicalSe('se_run_women_001_1.mp3'), 'cloud/se_run_women_001_1.mp3')
+    assert.equal(view.canonicalSe('se00028_b.mp3'), 'cloud/se00028_b.mp3')
+    assert.equal(view.canonicalSe('se00097.mp3'), 'cloud/se00097.mp3')
+    assert.equal(view.canonicalSe('se00055_b.mp3'), 'cloud/se00055_b.mp3')
+    assert.equal(view.canonicalSe('se00053_b.mp3'), 'se00053_b.mp3')
+
+    const seTestStory = {
+      models: [{ id: 1, model: view.models[0].path }],
+      images: [{ id: 1, image: 'bg_room.jpg' }],
+      snippets: [
+        { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+        { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se_run_women_001_1.mp3', volume: 0.9 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00037.mp3', volume: 0.9 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00028_b.mp3', volume: 0.9 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00097.mp3', volume: 0.9 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00055_b.mp3', volume: 0.9 } },
+        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00004_b.mp3', volume: 0.9 } },
+        { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, facial: 'face_normal_01' } },
+        { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '瑞希', content: '大家好。', emotion: '平静', modelId: 1, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 1, facial: 'face_normal_01' }] } },
+        { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } } },
+        { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+      ]
+    }
+    const { story: fixedSe } = validateAndFixStory(seTestStory, view)
+    const seFiles = fixedSe.snippets.filter((s) => s.type === 'PlaySe').map((s) => s.data.file)
+    const allowedLocalFiles = new Set(view.seDetails.map((d) => d.file))
+    assert.equal(seFiles[0], 'cloud/se_run_women_001_1.mp3')
+    assert.equal(seFiles[2], 'cloud/se00028_b.mp3')
+    assert.equal(seFiles[3], 'cloud/se00097.mp3')
+    assert.equal(seFiles[4], 'cloud/se00055_b.mp3')
+    assert.ok(seFiles.every((f) => allowedLocalFiles.has(f)), `every emitted SE must exist locally, got ${JSON.stringify(seFiles)}`)
+  } finally {
+    fs.rmSync(tmpRes, { recursive: true, force: true })
+  }
+})

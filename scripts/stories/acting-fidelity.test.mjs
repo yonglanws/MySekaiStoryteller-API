@@ -1731,3 +1731,84 @@ test(
     )
   }
 )
+
+test('comedy over-guard regression: mock-angry banter in happy-dominated comedy preserves w-happy-wandahoi01', () => {
+  const comedyView = new CatalogView({
+    models: [
+      {
+        id: 18,
+        name: '天马司',
+        shortName: '司',
+        path: '18tsukasa_normal/18tsukasa_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-glad01', 'm-tsukasa-wandahoi01'],
+        facials: ['face_normal_01', 'face_smile_01', 'face_angry_01', 'face_surprise_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      },
+      {
+        id: 19,
+        name: '凤笑梦',
+        shortName: '笑梦',
+        path: '19emu_normal/19emu_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-glad02', 'w-happy-wandahoi01'],
+        facials: ['face_normal_01', 'face_smile_01', 'face_sparkling_01', 'face_closeeye_02'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_smile_01'
+      }
+    ],
+    images: ['bg_cafe.jpg'],
+    imageDetails: [{ file: 'bg_cafe.jpg', name: '甜品店', description: '甜品店' }],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: 'Slapstick!!', description: '日常喜剧' }]
+  })
+
+  const comedyStory = {
+    models: [
+      { id: 18, model: comedyView.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 19, model: comedyView.models[1].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_cafe.jpg' }],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      {
+        type: 'LayoutAppear',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: 18, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-glad01', facial: 'face_smile_01' }
+      },
+      {
+        type: 'LayoutAppear',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 19, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-glad02', facial: 'face_sparkling_01' }
+      },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', emotion: '开心', content: '限定特大彩虹圣代太棒了！', modelId: 18, actions: [{ at: 0, modelId: 18, motion: 'w-normal-glad01', facial: 'face_smile_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '笑梦', emotion: '开心', content: '我们来即兴排练吧♪', modelId: 19, actions: [{ at: 0, modelId: 19, motion: 'w-normal-glad02', facial: 'face_sparkling_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', emotion: '开心', content: '哼哈哈哈，绝不让步！', modelId: 18, actions: [{ at: 0, modelId: 18, motion: 'w-normal-nod01', facial: 'face_smile_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '笑梦', emotion: '开心', content: '好冰好甜好好吃～♪', modelId: 19, actions: [{ at: 0, modelId: 19, motion: 'w-normal-nod01', facial: 'face_closeeye_02' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', emotion: '生气', content: '喂！！你刚刚是不是顺手挖走了三分之一的奶油啊？！', modelId: 18, actions: [{ at: 0, modelId: 18, facial: 'face_angry_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', emotion: '生气', content: '这根本不在剧本里！！看我守住顶上那颗大草莓！！', modelId: 18, actions: [{ at: 0, modelId: 18, facial: 'face_angry_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '笑梦', emotion: '开心', content: '才不是抢吃，这是即兴演出呀司君！', modelId: 19, actions: [{ at: 0, modelId: 19, motion: 'w-normal-nod01', facial: 'face_closeeye_02' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '笑梦', emotion: '开心', content: '那就用最终合体技分胜负吧！司君，一、二——Wonderhoy！！', modelId: 19, actions: [{ at: 0, modelId: 19, motion: 'w-happy-wandahoi01', facial: 'face_sparkling_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '司', emotion: '开心', content: '哈哈，太棒了！以后继续加油！', modelId: 18, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 18, motion: 'm-tsukasa-wandahoi01', facial: 'face_smile_01' }] } },
+      { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 18, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 19, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const { story: fixed } = validateAndFixStory(comedyStory, comedyView, undefined, {
+    emotionLabels: ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  })
+  const wonderhoyTalk = fixed.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('Wonderhoy'))
+  const emuAct = wonderhoyTalk.data.actions.find((a) => a.modelId === 19)
+  assert.equal(
+    emuAct.motion,
+    'w-happy-wandahoi01',
+    'mock-angry banter in happy-dominated comedy must not replace w-happy-wandahoi01 with w-normal-glad02'
+  )
+})

@@ -617,6 +617,13 @@ export function alignStoryTtsEmotionsAndCaptions(
         }
       }
 
+      const allowFastPaceOnSad =
+        p.data.ttsSpecialScene === true &&
+        /!{2,}|！{2,}|助けて|待って/.test(`${p.content}\n${nextTts}`)
+      if (isSadOrCrying && nextTts.includes('⏩') && !allowFastPaceOnSad) {
+        nextTts = nextTts.replace(/⏩/gu, '').replace(/[ \t]{2,}/g, ' ').trim()
+      }
+
       const tokens = extractIrodoriEmojis(nextTts)
       if (isSadOrCrying) {
         const isDesperateCry =
@@ -665,7 +672,7 @@ export function alignStoryTtsEmotionsAndCaptions(
       }
     }
 
-    // 2c. 补齐合理语速微调（不覆盖模型已有合法值；非喊叫的伤心+正面词句防止过快飘亮）
+    // 2c. 补齐合理语速微调（不覆盖模型已有合法值；非喊叫的伤心+正面词句收紧至 <= 0.94，普通非高潮伤心 <= 0.95）
     if (hasTranslationContent(p.content)) {
       if (typeof p.data.ttsSpeed !== 'number' || !Number.isFinite(p.data.ttsSpeed)) {
         if (emo === '伤心') {
@@ -675,13 +682,12 @@ export function alignStoryTtsEmotionsAndCaptions(
         } else if (emo === '惊讶') {
           p.data.ttsSpeed = 1.04
         }
-      } else if (
-        emo === '伤心' &&
-        !p.isShouting &&
-        p.hasPositiveSurfaceWords &&
-        p.data.ttsSpeed > 0.96
-      ) {
-        p.data.ttsSpeed = 0.95
+      } else if (emo === '伤心') {
+        if (!p.isShouting && p.hasPositiveSurfaceWords && p.data.ttsSpeed > 0.94) {
+          p.data.ttsSpeed = 0.94
+        } else if (p.data.ttsSpecialScene !== true && p.data.ttsSpeed > 0.95) {
+          p.data.ttsSpeed = 0.95
+        }
       }
     }
   }
