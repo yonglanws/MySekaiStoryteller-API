@@ -216,18 +216,74 @@ const IDENTITY_CONFLICT_PATTERN = new RegExp(
 )
 
 /**
+ * 悲伤/哭泣语境中必须剥离的积极/笑颜词根（即便出现「笑顔ではなく」等否定句式，
+ * 也会把扩散注意力拉向笑意，导致悲伤声线发亮或笑场）。
+ */
+const SAD_POSITIVE_TOKEN_PATTERN =
+  /(?:明るい|明るく|明るさ|笑顔|楽しい|楽しく|楽しそう|楽しげ|楽しみ|嬉しい|嬉しく|嬉しそう|嬉しげ|笑い|笑う|笑って|笑わ|笑み|微笑|愉快|陽気|ウキウキ|軽やか|弾むよう|はしゃ)/u
+
+const SAD_POSITIVE_INLINE_PHRASE_PATTERN = new RegExp(
+  '(?:無理に|強いて|わざと|いつものように|少し)?[^、。]*?' +
+    '(?:明るい|明るく|明るさ|笑顔|楽しい|楽しく|楽しそう|楽しげ|楽しみ|嬉しい|嬉しく|嬉しそう|嬉しげ|笑い|笑う|笑って|笑わ|笑み|微笑|愉快|陽気|ウキウキ|軽やか|弾むよう|はしゃ)' +
+    '(?:[^、。]*?(?:ではなくて?|じゃなくて?|ずに|ないで|とは裏腹に|を装って?|を装い|を隠して?|を作ろうとして?|を作ろうとし|を作って?|を浮かべようとして?|を浮かべようとし|を浮かべて?|を浮かべ|ながらも?|ながら|つつも?|つつ|ように)|(?:な|に|く|で|を|が|と|の))?',
+  'gu'
+)
+
+function stripSadPositiveCaptionClauses(caption: string): string {
+  const sentences = caption.split(/(?<=。)/u).filter((s) => s.trim().length > 0)
+  const keptSentences: string[] = []
+  for (const sentence of sentences) {
+    const endsWithPeriod = sentence.trim().endsWith('。')
+    const body = endsWithPeriod ? sentence.trim().slice(0, -1) : sentence.trim()
+    const clauses = body.split(/、/u).map((c) => c.trim()).filter(Boolean)
+    const keptClauses: string[] = []
+    for (const clause of clauses) {
+      if (!SAD_POSITIVE_TOKEN_PATTERN.test(clause)) {
+        keptClauses.push(clause)
+        continue
+      }
+      // 单句无逗号分割时，剥离含积极词根的否定/对比短语，保留后半句真实悲伤描述
+      if (clauses.length === 1) {
+        const strippedSingle = clause
+          .replace(SAD_POSITIVE_INLINE_PHRASE_PATTERN, '')
+          .replace(/^(?:ではなくて?|じゃなくて?|ずに|ないで)[、,\s]*/u, '')
+          .trim()
+        if (
+          strippedSingle &&
+          !SAD_POSITIVE_TOKEN_PATTERN.test(strippedSingle) &&
+          !/^(?:話す|話している|言う|呟く|答える|返す)$/u.test(strippedSingle)
+        ) {
+          keptClauses.push(strippedSingle)
+        }
+      }
+    }
+    if (keptClauses.length > 0) {
+      keptSentences.push(keptClauses.join('、') + (endsWithPeriod ? '。' : ''))
+    }
+  }
+  return keptSentences.join(' ')
+}
+
+/**
  * 清洗 Irodori 表演描述（caption）：
  * 1. 剥离年龄/性别/基础音色等与参考音频/LoRA 冲突的身份词；
- * 2. 折叠多余空白与残余标点；
- * 3. 控制长度在 120 字符以内，优先在句末标点截断。
+ * 2. 当 emotion 为「伤心」时，剥离积极/笑颜词根（含否定形式如「笑顔ではなく」）；
+ * 3. 折叠多余空白与残余标点；
+ * 4. 控制长度在 120 字符以内，优先在句末标点截断。
  */
-export function sanitizeIrodoriCaption(caption: string): string {
+export function sanitizeIrodoriCaption(caption: string, emotion?: string): string {
   const raw = text(caption)
   if (!raw) return ''
 
   let cleaned = raw
     .replace(/[\r\n\t]+/g, ' ')
     .replace(IDENTITY_CONFLICT_PATTERN, '')
+
+  if (text(emotion) === '伤心') {
+    cleaned = stripSadPositiveCaptionClauses(cleaned)
+  }
+
+  cleaned = cleaned
     .replace(/\s+/g, ' ')
     .replace(/[、,，]{2,}/g, '、')
     .replace(/[。.]{2,}/g, '。')
@@ -348,7 +404,7 @@ export function normalizeIrodoriSpeechText(
   caption?: string,
   emotion?: string
 ): NormalizedIrodoriSpeech {
-  const sanitizedCaption = sanitizeIrodoriCaption(caption ?? '')
+  const sanitizedCaption = sanitizeIrodoriCaption(caption ?? '', emotion)
   const emotionLabel = text(emotion)
   const emotionFiltered =
     emotionLabel === '伤心' || emotionLabel === '生气'
@@ -446,12 +502,12 @@ export function resolveIrodoriVoice(
     if (typeof hit.numSteps === 'number' && hit.numSteps > 0) merged.numSteps = hit.numSteps
   }
 
-  // 逐句 caption 覆盖（清洗身份冲突词）
-  const lineCaption = sanitizeIrodoriCaption(lineOverride?.ttsCaption ?? '')
+  // 逐句 caption 覆盖（清洗身份冲突词与伤心句中的积极笑颜词根）
+  const lineCaption = sanitizeIrodoriCaption(lineOverride?.ttsCaption ?? '', label)
   if (lineCaption) {
     merged.caption = lineCaption
   } else if (merged.caption !== undefined) {
-    merged.caption = sanitizeIrodoriCaption(merged.caption)
+    merged.caption = sanitizeIrodoriCaption(merged.caption, label)
   }
 
   // 逐句语速覆盖 + 音色锁钳制
@@ -484,10 +540,15 @@ export function buildIrodoriSpeechRequest(
   lineOverride?: IrodoriLineOverride
 ): Record<string, unknown> {
   const isSpecialScene = Boolean(lineOverride?.ttsSpecialScene)
-  const rawCaption = lineOverride?.ttsCaption?.trim() ? lineOverride.ttsCaption : voice.caption
-  const normalized = normalizeIrodoriSpeechText(input, rawCaption, lineOverride?.emotion)
+  const overrideEmotion = lineOverride?.emotion
+  const cleanedLineCaption = lineOverride?.ttsCaption?.trim()
+    ? sanitizeIrodoriCaption(lineOverride.ttsCaption, overrideEmotion)
+    : ''
+  const rawCaption = cleanedLineCaption || voice.caption
+  const normalized = normalizeIrodoriSpeechText(input, rawCaption, overrideEmotion)
   const finalInput = normalized.skip ? '' : normalized.text
-  const finalCaption = normalized.caption ?? sanitizeIrodoriCaption(rawCaption ?? '')
+  const finalCaption =
+    normalized.caption ?? sanitizeIrodoriCaption(rawCaption ?? '', overrideEmotion)
 
   const payload: Record<string, unknown> = {
     model: text(defaults.model) || 'irodori-tts',

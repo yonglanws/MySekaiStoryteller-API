@@ -308,3 +308,43 @@ test('buildIrodoriSpeechRequest with timbreLockMode=off selects sad.wav and appl
   assert.ok(!climaxPayload.input.includes('😊'), 'joyful emoji must be stripped on sad line')
   assert.ok(climaxPayload.input.includes('😭'))
 })
+
+test('sanitizeIrodoriCaption strips positive/laugh root tokens on sad lines (including negated forms) while keeping happy lines bright', () => {
+  const negatedClause = sanitizeIrodoriCaption(
+    '明るい笑顔ではなく、涙をこらえて静かに謝る。',
+    '伤心'
+  )
+  assert.equal(negatedClause, '涙をこらえて静かに謝る。')
+
+  const negatedInline = sanitizeIrodoriCaption('笑顔ではなく悲しそうに話す。', '伤心')
+  assert.equal(negatedInline, '悲しそうに話す。')
+
+  const forcedSmile = sanitizeIrodoriCaption(
+    '無理に笑顔を作ろうとしながらも、声を震わせて呟く。',
+    '伤心'
+  )
+  assert.equal(forcedSmile, '声を震わせて呟く。')
+
+  const onlyPositive = sanitizeIrodoriCaption('明るい笑顔で楽しそうに話す。', '伤心')
+  assert.equal(onlyPositive, '')
+
+  // Happy lines must keep bright/smiling captions intact
+  const happyCaption = sanitizeIrodoriCaption('明るい笑顔で楽しそうに話している。', '开心')
+  assert.equal(happyCaption, '明るい笑顔で楽しそうに話している。')
+
+  // buildIrodoriSpeechRequest falls back to voice.caption if sad line ttsCaption stripped to empty
+  const req = buildIrodoriSpeechRequest(
+    '🥺 大丈夫だよ。',
+    {
+      refAudioPath: '/models/mizuki/emotion_refs/sad.wav',
+      caption: '悲しげで、今にも泣きそうな声で話している。'
+    },
+    defaults,
+    1.0,
+    {
+      emotion: '伤心',
+      ttsCaption: '明るい笑顔ではなく。'
+    }
+  )
+  assert.equal(req.irodori.caption, '悲しげで、今にも泣きそうな声で話している。')
+})

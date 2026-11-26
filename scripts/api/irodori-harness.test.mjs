@@ -827,3 +827,93 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
   assert.ok(talks[6].data.ttsText.includes('😭'))
   assert.ok(talks.every((tk) => typeof tk.data.ttsCaption === 'string' && tk.data.ttsCaption.length > 0))
 })
+
+test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to frame 0, strips sad-caption positive tokens, and keeps happy lines lively', () => {
+  const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  const story = {
+    models: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    snippets: [
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '我过几天再联系你，好不好？',
+          emotion: '伤心',
+          ttsText: 'また何日かしたら、ちゃんと連絡するから……ね？🥺',
+          ttsCaption: '明るい笑顔ではなく、今にも泣き出しそうな脆い響きで頼み込む。',
+          ttsSpeed: 0.94
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '嘴上说着没关系，知道以后还是会变得小心翼翼吧？连开玩笑都会顾忌……',
+          emotion: '伤心',
+          ttsText: '口では大丈夫って言ってても、知ったら気を遣うようになるんでしょ？😭 冗談も言いづらくなって……',
+          ttsCaption: '涙で声を詰まらせ、追い詰められたように訴える。',
+          ttsSpeed: 1.02
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '绘名',
+          modelId: 2,
+          content: '我也很笨啊……',
+          emotion: '伤心',
+          ttsText: '私だってバカだよ。🥺 瑞希があんなに苦しそうなのに……',
+          ttsCaption: '涙の余韻を残したまま、しんみりと打ち明ける。',
+          ttsSpeed: 0.94
+        }
+      },
+      {
+        type: 'Talk',
+        wait: true,
+        delay: 0,
+        data: {
+          speaker: '瑞希',
+          modelId: 1,
+          content: '太好啦，今天一起去吃甜品吧！',
+          emotion: '开心',
+          ttsText: 'わぁ、本当！？😆 今日のご褒美スイーツ、楽しみだね～😊',
+          ttsCaption: '明るく楽しそうな笑顔が浮かぶような、軽やかな口調で話す。',
+          ttsSpeed: 1.04
+        }
+      }
+    ]
+  }
+
+  alignStoryTtsEmotionsAndCaptions(story, { emotionLabels: labels })
+  const talks = story.snippets.map((s) => s.data)
+
+  // Trailing 🥺 moved to frame 0; negated positive clause stripped from sad ttsCaption
+  assert.equal(talks[0].ttsText, '🥺 また何日かしたら、ちゃんと連絡するから……ね？')
+  assert.ok(!/明るい|笑顔/.test(talks[0].ttsCaption))
+  assert.equal(talks[0].ttsCaption, '今にも泣き出しそうな脆い響きで頼み込む。')
+
+  // Mid-clause 😭 gets frame-0 🥺 before 大丈夫 while preserving <= 2 emojis, and non-shout speed capped to 0.95
+  assert.ok(talks[1].ttsText.startsWith('🥺 '))
+  assert.ok(talks[1].ttsText.includes('😭'))
+  assert.equal(talks[1].ttsSpeed, 0.95)
+
+  // バカ before mid-clause 🥺 gets frame-0 🥺
+  assert.ok(talks[2].ttsText.startsWith('🥺 '))
+
+  // Genuine happy line retains 😊/😆 emojis and bright caption untouched
+  assert.ok(talks[3].ttsText.includes('😆') && talks[3].ttsText.includes('😊'))
+  assert.ok(talks[3].ttsCaption.includes('明るく楽しそうな笑顔'))
+  assert.equal(talks[3].ttsSpeed, 1.04)
+})
