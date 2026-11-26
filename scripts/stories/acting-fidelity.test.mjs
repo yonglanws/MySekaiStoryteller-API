@@ -24,6 +24,13 @@ import { characterActingProfile } from '../../out-host/host/ai/personas.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { recommendScenarioCues } from '../../out-host/host/ai/scenarioCues.js'
 import {
+  applyDirectorReviewPatches,
+  composeStory,
+  normalizeDirection,
+  normalizeStaging
+} from '../../out-host/host/ai/staged.js'
+import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
+import {
   getOfficialActingGuidelines,
   selectUnitFewShotExcerpts
 } from '../../out-host/host/ai/corpusExamples.js'
@@ -982,34 +989,48 @@ test(
 )
 
 test('recency-weighted non-rigid acting: emotional facial hold up to 4 lines, soft relief/questioning tilthead allowed, diverse curated variants', () => {
-  // 1) Sustained sad facial hold (4 consecutive lines) is natural per 61.7% official corpus hold rate; >=5 gently flagged
-  const hold4 = evaluateActingLineMatch({
+  // 1) Sustained sad/cry facial hold (4..8 consecutive lines) is natural during emotional climax; >=9 gently flagged; trouble >=5 flagged
+  const hold8 = evaluateActingLineMatch({
     facial: 'face_sad_01',
     motion: 'w-normal-sigh01',
     facials: ['face_sad_01', 'face_trouble_01', 'face_closeeye_01'],
     motions: ['w-normal-sigh01', 'w-normal-trouble01'],
     content: '……真的对不起，我还是没办法面对。',
     emotion: '伤心',
-    consecutiveSameFacialCount: 4
+    consecutiveSameFacialCount: 8
   })
   assert.equal(
-    hold4.issues.some((i) => i.code === 'consecutive_same_facial'),
+    hold8.issues.some((i) => i.code === 'consecutive_same_facial'),
     false,
-    'holding sad facial for 4 lines must not be rigidly flagged'
+    'holding sad/cry facial up to 8 lines must not be rigidly flagged'
   )
-  const hold5 = evaluateActingLineMatch({
+  const hold9 = evaluateActingLineMatch({
     facial: 'face_sad_01',
     motion: 'w-normal-sigh01',
     facials: ['face_sad_01', 'face_trouble_01', 'face_closeeye_01'],
     motions: ['w-normal-sigh01', 'w-normal-trouble01'],
     content: '……真的对不起，我还是没办法面对。',
     emotion: '伤心',
+    consecutiveSameFacialCount: 9
+  })
+  assert.equal(
+    hold9.issues.some((i) => i.code === 'consecutive_same_facial'),
+    true,
+    'holding sad/cry facial for >=9 lines still surfaces a gentle reminder'
+  )
+  const trouble5 = evaluateActingLineMatch({
+    facial: 'face_trouble_01',
+    motion: 'w-normal-sigh01',
+    facials: ['face_sad_01', 'face_trouble_01', 'face_closeeye_01'],
+    motions: ['w-normal-sigh01', 'w-normal-trouble01'],
+    content: '……这下可有点难办了呢。',
+    emotion: '困扰',
     consecutiveSameFacialCount: 5
   })
   assert.equal(
-    hold5.issues.some((i) => i.code === 'consecutive_same_facial'),
+    trouble5.issues.some((i) => i.code === 'consecutive_same_facial'),
     true,
-    'holding same facial for >=5 lines still surfaces a gentle reminder'
+    'holding trouble facial for >=5 lines still surfaces a gentle reminder'
   )
 
   // 2) Non-despair resigned sad line allows w-normal-relief01 & questioning speaker allows tilthead, while despair still blocks
@@ -1082,4 +1103,276 @@ test('recency-weighted non-rigid acting: emotional facial hold up to 4 lines, so
   assert.ok(motions.includes('w-normal-trouble01') && motions.includes('w-cool-trouble02'))
   assert.ok(facials.includes('face_cry_01') && facials.includes('face_cry_02'))
   assert.ok(facials.includes('face_sad_01') && facials.includes('face_sad_02'))
+})
+
+test('v4 fix #1: face_trouble_02 (ParamMouthForm >= 0.2) is wry_smile and blocked on sad/crying lines', (t) => {
+  if (!hasLocalModels) {
+    t.skip('local model motion3.json directory unavailable')
+    return
+  }
+  const enaPath = 'cloud/v2_19ena_casual/19ena_clathes2_4_t06/19ena_clathes2_4_t06.model3.json'
+  const info = inspectModelFacial(enaPath, 'face_trouble_02')
+  assert.equal(info.role, 'wry_smile')
+  assert.ok((info.mouthForm ?? 0) >= 0.2, `expected mouthForm >= 0.2, got ${info.mouthForm}`)
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_trouble_02',
+      modelPath: enaPath,
+      emotion: '伤心',
+      content: '嗯……？'
+    }).ok,
+    false,
+    'face_trouble_02 grin must be blocked on sad confrontation lines'
+  )
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_trouble_02',
+      modelPath: enaPath,
+      emotion: '伤心',
+      content: '不行啊……！'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isFacialCompatibleWithLine({
+      facial: 'face_trouble_02',
+      modelPath: enaPath,
+      emotion: '平静',
+      content: '没关系，我笑着面对就好。'
+    }).ok,
+    true,
+    'explicit wry/reassuring smile line should still allow wry_smile'
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-glad01',
+      emotion: '伤心',
+      content: '我好害怕……'
+    }).ok,
+    false
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-normal-greeting01',
+      emotion: '伤心',
+      content: '对不起……',
+      prevTense: true
+    }).ok,
+    false
+  )
+})
+
+test('v4 fix #2/#3/#4/#5: sustained crying, real-motion safety, no slides, and clean closeWindowOnFinish', () => {
+  const mizukiNoNormalSadView = new CatalogView({
+    models: [
+      {
+        id: 2294,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: 'v2_20mizuki_uniform/20mizuki_uniform2_4_t11/20mizuki_uniform2_4_t11.model3.json',
+        motions: [
+          'w-normal07-sad',
+          'w-normal08-sad',
+          'w-adult02-trouble',
+          'w-normal-nod01',
+          'w-normal-glad01',
+          'w-normal-default01'
+        ],
+        facials: ['face_normal_01', 'face_cry_01', 'face_cry_02', 'face_sad_01', 'face_closeeye_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2295,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: 'v2_19ena_casual/19ena_clathes2_4_t06/19ena_clathes2_4_t06.model3.json',
+        motions: ['w-normal-sad01', 'w-normal-trouble01', 'w-normal-sigh01', 'w-normal-default01'],
+        facials: ['face_normal_01', 'face_sad_01', 'face_cry_01', 'face_serious_01', 'face_closeeye_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [],
+    voices: [],
+    bgm: ['bgm00028.mp3'],
+    bgmDetails: []
+  })
+
+  const plan = {
+    title: '暴雨与泪水',
+    event: '两人在屋顶泪流不止地摊牌',
+    background: 'bg_rooftop.jpg',
+    bgm: 'bgm00028.mp3',
+    cast: [
+      {
+        modelId: 2294,
+        name: '瑞希',
+        fullName: '晓山瑞希',
+        path: 'v2_20mizuki_uniform/20mizuki_uniform2_4_t11/20mizuki_uniform2_4_t11.model3.json',
+        role: '哭着崩溃'
+      },
+      {
+        modelId: 2295,
+        name: '绘名',
+        fullName: '东云绘名',
+        path: 'v2_19ena_casual/19ena_clathes2_4_t06/19ena_clathes2_4_t06.model3.json',
+        role: '认真回应'
+      }
+    ]
+  }
+  const dialogue = {
+    lines: [
+      { id: 'l1', speaker: '瑞希', emotion: '伤心', content: '对不起……一直都瞒着你……' },
+      { id: 'l2', speaker: '瑞希', emotion: '伤心', content: '可是我真的好害怕……' },
+      { id: 'l3', speaker: '瑞希', emotion: '伤心', content: '我不敢让你看到这样的自己！' },
+      { id: 'l4', speaker: '瑞希', emotion: '伤心', content: '真的好痛苦……！' },
+      { id: 'l5', speaker: '绘名', emotion: '伤心', content: '瑞希……我怎么可能会讨厌你。' },
+      { id: 'l6', speaker: '瑞希', emotion: '伤心', content: '（……难道真的还能像以前那样吗？）' },
+      { id: 'l7', speaker: '绘名', emotion: '伤心', content: '不要一个人哭着扛啊。' }
+    ]
+  }
+  const direction = normalizeDirection(
+    {
+      lines: [
+        { lineId: 'l1', motion: 'w-normal-sad01', facial: 'face_cry_01' },
+        { lineId: 'l2', motion: 'w-normal-glad01', facial: 'face_cry_01' },
+        { lineId: 'l3', motion: 'w-normal07-sad', facial: 'face_cry_01' },
+        { lineId: 'l4', motion: 'w-normal08-sad', facial: 'face_cry_01' },
+        { lineId: 'l5', motion: 'w-normal-sad01', facial: 'face_sad_01' },
+        { lineId: 'l6', motion: 'w-adult02-trouble', facial: 'face_cry_01' },
+        { lineId: 'l7', motion: 'w-normal-sigh01', facial: 'face_sad_01' }
+      ]
+    },
+    mizukiNoNormalSadView,
+    plan,
+    dialogue
+  )
+  const staging = normalizeStaging(
+    {
+      scenes: [
+        {
+          id: 's1',
+          fromLineId: 'l1',
+          background: 'bg_rooftop.jpg',
+          activeCast: ['瑞希', '绘名'],
+          walkInCast: ['瑞希']
+        }
+      ],
+      events: [
+        {
+          lineId: 'l3',
+          move: { modelId: 2294, kind: 'stepCloser', offset: 90 }
+        },
+        {
+          lineId: 'l6',
+          stageGroup: { activeCast: ['瑞希'] }
+        },
+        {
+          lineId: 'l7',
+          stageGroup: { activeCast: ['瑞希', '绘名'] }
+        }
+      ]
+    },
+    mizukiNoNormalSadView,
+    plan,
+    dialogue
+  )
+
+  const composed = composeStory(mizukiNoNormalSadView, plan, dialogue, direction, staging)
+  const { story: fixed } = validateAndFixStory(composed, mizukiNoNormalSadView)
+
+  // #4: Zero slides (no Move snippets, no LeftOver/RightOver/offset!=0 on LayoutAppear/LayoutClear)
+  assert.equal(
+    fixed.snippets.filter((s) => s.type === 'Move').length,
+    0,
+    'must never emit Move slide snippets'
+  )
+  for (const s of fixed.snippets) {
+    if (s.type === 'LayoutAppear' || s.type === 'LayoutClear') {
+      assert.equal(s.data.from.side, s.data.to.side, `${s.type} must stay in-place`)
+      assert.equal(s.data.from.offset ?? 0, 0)
+      assert.equal(s.data.to.offset ?? 0, 0)
+    }
+  }
+
+  // #2 & #3: Sustained crying held (no face_closeeye spam, no w-normal-sad01 on model 2294, no w-normal-glad01)
+  const mizukiTalks = fixed.snippets.filter((s) => s.type === 'Talk' && s.data.modelId === 2294)
+  const mizukiCryCount = mizukiTalks.filter((s) =>
+    (s.data.actions ?? []).some((a) => a.modelId === 2294 && a.facial === 'face_cry_01')
+  ).length
+  assert.ok(mizukiCryCount >= 4, `expected >= 4 sustained face_cry_01 lines, got ${mizukiCryCount}`)
+  for (const s of fixed.snippets) {
+    if (s.type === 'Talk') {
+      for (const a of s.data.actions ?? []) {
+        if (a.modelId === 2294 && a.motion) {
+          assert.notEqual(a.motion, 'w-normal-sad01', 'must never emit nonexistent w-normal-sad01 onto 2294')
+          assert.notEqual(a.motion, 'w-normal-glad01', 'must never emit happy motion in sad scene')
+        }
+      }
+    }
+  }
+
+  // #5: No closeWindowOnFinish followed by instantaneous snippets directly into another Talk without a real break/transition
+  const realBreakTypes = new Set([
+    'LayoutClear',
+    'LayoutAppear',
+    'BlackOut',
+    'WhiteOut',
+    'SideFade',
+    'Telop',
+    'FullScreenText',
+    'HideTalk'
+  ])
+  for (let i = 0; i < fixed.snippets.length - 1; i++) {
+    const s = fixed.snippets[i]
+    if (s.type === 'Talk' && s.data.closeWindowOnFinish) {
+      let sawBreak = false
+      for (let j = i + 1; j < fixed.snippets.length; j++) {
+        const nxt = fixed.snippets[j]
+        if (realBreakTypes.has(nxt.type) || (nxt.type === 'Wait' && Number(nxt.data?.duration ?? 0) >= 300)) {
+          sawBreak = true
+          break
+        }
+        if (nxt.type === 'Talk') break
+      }
+      if (!sawBreak) {
+        assert.fail(`unexpected closeWindowOnFinish with no real break/transition before next Talk at #${i}`)
+      }
+    }
+  }
+
+  // Also test enforceOfficialStoryInvariants strips spurious closeWindowOnFinish before Motion -> Talk
+  const polluted = structuredClone(fixed)
+  const firstTalkIdx = polluted.snippets.findIndex((s) => s.type === 'Talk')
+  polluted.snippets[firstTalkIdx].data.closeWindowOnFinish = true
+  polluted.snippets.splice(firstTalkIdx + 1, 0, {
+    type: 'Motion',
+    wait: true,
+    progressBehavior: 'WaitFinished',
+    delay: 0.25,
+    data: { modelId: 2295, motion: 'w-normal-sigh01', facial: '', facialFirst: true }
+  })
+  enforceOfficialStoryInvariants(polluted, mizukiNoNormalSadView, () => {})
+  const fixedFirstTalk = polluted.snippets[firstTalkIdx]
+  assert.notEqual(
+    fixedFirstTalk.data.closeWindowOnFinish,
+    true,
+    'enforceOfficialStoryInvariants must strip closeWindowOnFinish before instantaneous Motion -> Talk'
+  )
+
+  // Irodori ZWJ / \uFE0F emoji preservation in ttsText through applyDirectorReviewPatches (no content edit)
+  const irodoriTts = 'ごめんね……\u200D♀️本当は怖かったんだ。️'
+  polluted.snippets[firstTalkIdx].data.ttsText = irodoriTts
+  const patched = applyDirectorReviewPatches(polluted, {
+    dramaticArc: 'ok',
+    emotionalContinuityAndVoice: 'ok',
+    audioAndSeDesign: 'ok',
+    stageRhythm: 'ok',
+    actingNaturalness: 'ok',
+    concreteFixes: ['polish acting'],
+    operations: [{ op: 'update_acting', index: firstTalkIdx, facial: 'face_cry_01' }]
+  })
+  assert.equal(patched.story.snippets[firstTalkIdx].data.ttsText, irodoriTts)
 })

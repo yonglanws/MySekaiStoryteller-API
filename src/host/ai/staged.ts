@@ -29,6 +29,7 @@ import { type DialogueLintIssue } from './dialogueLinter'
 import * as facialSemanticsMod from './facialSemantics'
 import {
   annotateFacialName,
+  inspectModelFacial,
   isFacialCompatibleWithLine,
   isSmileLikeFacial,
   pickMoodMatchedFacial
@@ -458,7 +459,8 @@ function isMotionCompatibleWithContext(params: {
   const text = (params.line.content ?? '').trim()
   const monologue = /^[（(]/.test(text) && /[）)]$/.test(text)
   const isTense = params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble'
-  const isJoyful = /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing/.test(lower)
+  const isJoyful =
+    /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(lower)
   const isNegative = /angry|disgust|sad|cry|sigh/.test(lower)
   if (isTense && isJoyful) return false
   if (mood === 'smile' && !params.prevTense && isNegative) return false
@@ -482,6 +484,43 @@ function isMotionCompatibleWithContext(params: {
   return true
 }
 
+function ensureRealModelAnim(
+  view: CatalogView,
+  modelId: number,
+  field: 'motion' | 'facial',
+  candidate: string | undefined
+): string {
+  const clean = (candidate ?? '').trim()
+  if (!clean) return ''
+  const choices = view.animationChoices(modelId, field)
+  if (choices.size === 0) return clean
+  return view.canonicalAnimation(modelId, field, clean) ?? ''
+}
+
+function collectModelNonStandingMotions(view: CatalogView, modelId: number): string[] {
+  const model = view.modelById(modelId)
+  if (!model) return []
+  const curated = view.promptMotions(model)
+  const curatedSet = new Set(curated)
+  const rest = (model.motions ?? []).filter((m) => !curatedSet.has(m))
+  const sortNormalFirst = (arr: string[]): string[] => {
+    const nonStand = arr.filter((name) => !isStandingMotion(name))
+    return [
+      ...nonStand.filter((m) => /^w-normal/i.test(m)),
+      ...nonStand.filter((m) => !/^w-normal/i.test(m))
+    ]
+  }
+  return [...sortNormalFirst(curated), ...sortNormalFirst(rest)]
+}
+
+function collectModelFacials(view: CatalogView, modelId: number): string[] {
+  const model = view.modelById(modelId)
+  if (!model) return []
+  const curated = view.promptFacials(model)
+  const curatedSet = new Set(curated)
+  return [...curated, ...(model.facials ?? []).filter((f) => !curatedSet.has(f))]
+}
+
 function pickFollowupMotion(
   view: CatalogView,
   modelId: number,
@@ -495,38 +534,43 @@ function pickFollowupMotion(
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
-  const curated = view.promptMotions(model)
-  const rawNonStanding = curated.filter((name) => !isStandingMotion(name))
-  const nonStanding = [
-    ...rawNonStanding.filter((m) => /^w-normal/i.test(m)),
-    ...rawNonStanding.filter((m) => !/^w-normal/i.test(m))
-  ]
+  const nonStanding = collectModelNonStandingMotions(view, modelId)
   const moodKey = inferMotionMoodKey(moodContext?.line, Boolean(moodContext?.prevTense))
+  const isTense = Boolean(
+    moodContext?.prevTense || moodKey === 'sad' || moodKey === 'angry' || moodKey === 'trouble'
+  )
+  const safeNonStanding = isTense
+    ? nonStanding.filter(
+        (m) => !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)
+      )
+    : nonStanding
+  const baseList = safeNonStanding.length > 0 ? safeNonStanding : nonStanding
   if (typeof facialStagedApi.pickMoodMatchedMotion === 'function' && moodContext?.line) {
     const avoid = new Set<string>(recentlyUsed ?? [])
     if (currentMotion) avoid.add(currentMotion)
     const matched = facialStagedApi.pickMoodMatchedMotion(
-      nonStanding,
+      baseList,
       moodKey,
       model.path,
       moodContext.restrained,
       avoid
     )
-    if (matched && matched !== currentMotion) return matched
+    const verified = ensureRealModelAnim(view, modelId, 'motion', matched)
+    if (verified && verified !== currentMotion) return verified
   }
   const moodHints: Record<typeof moodKey, RegExp> = {
-    sad: /sad|sigh|lookdown|trouble|think/i,
+    sad: /sad|cry|sigh|lookdown|trouble|think|shakehead/i,
     angry: /angry|shakehead|forward|serious/i,
-    trouble: /trouble|think|lookaway|sigh|nod/i,
+    trouble: /trouble|think|lookaway|sigh/i,
     surprise: /surprise|tilthead|forward|nod/i,
     shy: /shy|blush|fidget|tilthead|lookaway/i,
     smile: /glad|nod|tilthead|relief|greeting|playful/i,
-    thinking: /think|lookaway|nod|sigh|trouble/i,
+    thinking: /think|lookaway|sigh|trouble|sad/i,
     neutral: /nod|tilthead|relief|think|lookaway|forward|shy|sigh/i
   }
   const calmRe = moodHints[moodKey] ?? moodHints.neutral
   const compatiblePool = moodContext?.line
-    ? nonStanding.filter((name) =>
+    ? baseList.filter((name) =>
         isMotionCompatibleWithContext({
           motion: name,
           modelPath: model.path,
@@ -535,17 +579,17 @@ function pickFollowupMotion(
           restrainedRole: moodContext.restrained
         })
       )
-    : nonStanding
+    : baseList
   if (compatiblePool.length === 0) return ''
   const pool = compatiblePool
   const isFresh = (name: string): boolean => name !== currentMotion && !recentlyUsed?.has(name)
-  return (
+  const raw =
     pool.find((name) => isFresh(name) && calmRe.test(name)) ??
     pool.find((name) => isFresh(name)) ??
     pool.find((name) => name !== currentMotion && calmRe.test(name)) ??
     pool.find((name) => name !== currentMotion) ??
     ''
-  )
+  return ensureRealModelAnim(view, modelId, 'motion', raw)
 }
 
 function pickAppearFallbackMotion(
@@ -556,75 +600,33 @@ function pickAppearFallbackMotion(
   tense = false
 ): string {
   const model = view.modelById(modelId)
-  if (!model) return view.exampleMotion(modelId) || view.defaultMotion(modelId)
-  const curated = view.promptMotions(model)
-  const rawNonStanding = curated.filter((name) => !isStandingMotion(name))
-  const nonStanding = [
-    ...rawNonStanding.filter((m) => /^w-normal/i.test(m)),
-    ...rawNonStanding.filter((m) => !/^w-normal/i.test(m))
-  ]
+  if (!model) {
+    return ensureRealModelAnim(
+      view,
+      modelId,
+      'motion',
+      view.exampleMotion(modelId) || view.defaultMotion(modelId)
+    )
+  }
+  const nonStanding = collectModelNonStandingMotions(view, modelId)
   const entryRe = tense
-    ? /trouble|sad|sigh|think|lookaway|nod/i
+    ? /trouble|sad|cry|sigh|think|lookaway/i
     : /tilthead|lookaway|greeting|nod|forward|relief|think|shy/i
+  const isSafe = (name: string): boolean =>
+    !tense || !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful|tilthead/i.test(name)
   const distinctAndAvoided = (name: string): boolean =>
     !usedInEntry?.has(name) && name !== avoidMotion
   const pick =
-    nonStanding.find((name) => distinctAndAvoided(name) && entryRe.test(name)) ??
-    nonStanding.find(
-      (name) =>
-        distinctAndAvoided(name) && (!tense || !/glad|happy|cheer|greeting|tilthead/i.test(name))
-    ) ??
-    nonStanding.find((name) => name !== avoidMotion && entryRe.test(name)) ??
-    nonStanding.find(
-      (name) =>
-        name !== avoidMotion && (!tense || !/glad|happy|cheer|greeting|tilthead/i.test(name))
-    ) ??
+    nonStanding.find((name) => distinctAndAvoided(name) && isSafe(name) && entryRe.test(name)) ??
+    nonStanding.find((name) => distinctAndAvoided(name) && isSafe(name)) ??
+    nonStanding.find((name) => name !== avoidMotion && isSafe(name) && entryRe.test(name)) ??
+    nonStanding.find((name) => name !== avoidMotion && isSafe(name)) ??
     nonStanding[0]
-  return pick || view.exampleMotion(modelId) || view.defaultMotion(modelId)
-}
-
-function pickMoveMotion(
-  view: CatalogView,
-  modelId: number,
-  avoidMotion?: string,
-  recentlyUsed?: ReadonlySet<string>,
-  tense = false
-): string {
-  const model = view.modelById(modelId)
-  if (!model) return view.exampleMotion(modelId) || view.defaultMotion(modelId)
-  const curated = view.promptMotions(model)
-  const rawNonStanding = curated.filter((name) => !isStandingMotion(name))
-  const nonStanding = [
-    ...rawNonStanding.filter((m) => /^w-normal/i.test(m)),
-    ...rawNonStanding.filter((m) => !/^w-normal/i.test(m))
-  ]
-  const moveRe = tense
-    ? /trouble|sad|sigh|think|lookaway|forward|nod/i
-    : /forward|nod|tilthead|relief|lookaway|greeting|think|shy/i
   return (
-    nonStanding.find(
-      (name) => name !== avoidMotion && !recentlyUsed?.has(name) && moveRe.test(name)
-    ) ??
-    nonStanding.find(
-      (name) =>
-        name !== avoidMotion &&
-        !recentlyUsed?.has(name) &&
-        (!tense || !/glad|happy|cheer|greeting|tilthead/i.test(name))
-    ) ??
-    nonStanding.find(
-      (name) =>
-        name !== avoidMotion && (!tense || !/glad|happy|cheer|greeting|tilthead/i.test(name))
-    ) ??
-    nonStanding[0] ??
-    view.exampleMotion(modelId) ??
-    view.defaultMotion(modelId) ??
-    ''
+    ensureRealModelAnim(view, modelId, 'motion', pick) ||
+    ensureRealModelAnim(view, modelId, 'motion', view.exampleMotion(modelId)) ||
+    ensureRealModelAnim(view, modelId, 'motion', view.defaultMotion(modelId))
   )
-}
-
-function pickMoveFacial(view: CatalogView, modelId: number, fallbackFacial?: string): string {
-  if (fallbackFacial) return fallbackFacial
-  return view.exampleFacial(modelId) || view.defaultFacial(modelId) || ''
 }
 
 const FACIAL_EXTREME_EXCLUDE_RE =
@@ -722,7 +724,7 @@ function pickSpeakerSubtleFacial(
 ): string {
   const model = view.modelById(modelId)
   if (!model) return ''
-  const facials = view.promptFacials(model)
+  const facials = collectModelFacials(view, modelId)
   const emotion = line.emotion ?? ''
   const text = line.content ?? ''
   const restrained = context.restrained ?? (isRestrainedRole(role) || isRestrainedRole(model.name))
@@ -744,13 +746,19 @@ function pickSpeakerSubtleFacial(
     )
   }
   if (emotion === '伤心') {
+    const isCryingOrClimax = /哭|泣|泪|呜|😭|🥺|不行|别走|再见|窒息|崩溃|绝望|对不起|抱歉/.test(
+      text
+    )
+    const hints = isCryingOrClimax
+      ? [/cry/i, /sad|darksad|ossad/i, /worry|trouble|lookaway/i, /closeeye|smallmouth/i]
+      : [/sad|darksad|cry/i, /worry|trouble|lookaway/i, /closeeye|smallmouth/i]
     return (
       pickFacialFromHints(
         safePool,
-        [/sad|worry|cry|darksad|closeeye/i, /trouble|lookaway|smallmouth/i],
+        hints,
         currentFacial,
         /smile|smug|wink|sparkling|angry/i
-      ) || pickMoodMatchedFacial(facials, 'sad', modelPath, restrained)
+      ) || pickMoodMatchedFacial(safePool, 'sad', modelPath, restrained)
     )
   }
   if (emotion === '生气') {
@@ -875,7 +883,11 @@ function pickListenerReactionFacial(
 ): string {
   const model = view.modelById(listenerId)
   if (!model) return ''
-  const facials = view.promptFacials(model)
+  const allFacials = collectModelFacials(view, listenerId)
+  const facials = allFacials.filter(
+    (f) => !isSmileLikeFacial(f, context.modelPath ?? model.path)
+  )
+  const safeListenerPool = facials.length > 0 ? facials : allFacials
   const speakerEmotion = speakerLine.emotion ?? ''
   const text = speakerLine.content ?? ''
   const restrained = isRestrainedRole(listenerRole) || isRestrainedRole(model.name)
@@ -886,7 +898,7 @@ function pickListenerReactionFacial(
     /别再|不要再|少啰嗦|笨蛋|推开|擅自|搞什么|为什么|吵|责怪|闭嘴/.test(text)
   if (isScoldingOrConfronting) {
     return pickFacialFromHints(
-      facials,
+      safeListenerPool,
       [/trouble|worry|sad|lookaway/i, /closeeye|serious|smallmouth/i],
       currentFacial,
       /angry|disgust|scared|smile|smug|wink|sparkling/i
@@ -894,15 +906,15 @@ function pickListenerReactionFacial(
   }
   if (speakerEmotion === '伤心') {
     return pickFacialFromHints(
-      facials,
-      [/worry|sad|trouble|closeeye/i, /serious|smallmouth/i],
+      safeListenerPool,
+      [/worry|sad|trouble/i, /closeeye|serious|smallmouth/i],
       currentFacial,
       /smile|smug|wink|sparkling|angry|disgust/i
     )
   }
   if (speakerEmotion === '害怕') {
     return pickFacialFromHints(
-      facials,
+      safeListenerPool,
       [/worry|serious|trouble|surprise/i, /sad|closeeye|smallmouth/i],
       currentFacial,
       /smile|smug|wink|sparkling|angry/i
@@ -910,7 +922,7 @@ function pickListenerReactionFacial(
   }
   if (speakerEmotion === '惊讶') {
     return pickFacialFromHints(
-      facials,
+      allFacials,
       [/surprise|notice|baffling/i, /serious|smallmouth|trouble/i],
       currentFacial,
       /angry|disgust|cry/i
@@ -918,7 +930,7 @@ function pickListenerReactionFacial(
   }
   if (speakerEmotion === '害羞') {
     return pickFacialFromHints(
-      facials,
+      allFacials,
       restrained
         ? [/smallmouth|serious|closeeye/i, /normal/i]
         : [/smile|wink|smug|notice/i, /serious|normal/i],
@@ -928,7 +940,7 @@ function pickListenerReactionFacial(
   }
   if (speakerEmotion === '开心') {
     return pickFacialFromHints(
-      facials,
+      allFacials,
       restrained
         ? [/smallmouth|closeeye|serious/i, /normal/i]
         : [/smile|sparkling|wink/i, /closeeye|normal/i],
@@ -940,7 +952,7 @@ function pickListenerReactionFacial(
   // 说话者平静：根据内容判断倾听者神情（疑惑/担忧 vs 轻松赞同 vs 认真倾听）
   if (/？|\?|……|难道|怎么|是不是|真的/.test(text)) {
     return pickFacialFromHints(
-      facials,
+      precededByTense ? safeListenerPool : allFacials,
       [/serious|notice|trouble|lookaway/i, /smallmouth|closeeye|normal/i],
       currentFacial,
       precededByTense ? FACIAL_SMILE_EXCLUDE_RE : FACIAL_EXTREME_EXCLUDE_RE
@@ -948,7 +960,7 @@ function pickListenerReactionFacial(
   }
   if (precededByTense ? /♪|～♪|太好了/.test(text) : /♪|～|笑|谢谢|太好了|没关系|一起/.test(text)) {
     return pickFacialFromHints(
-      facials,
+      allFacials,
       restrained
         ? [/smallmouth|closeeye|serious/i, /normal/i]
         : [/smile|wink|closeeye/i, /smallmouth|normal/i],
@@ -3083,32 +3095,28 @@ export function buildStagingPrompt(
       {
         lineId: midLine,
         pauseBefore: 1.0,
-        move: {
-          modelId: plan.cast[0]?.modelId,
-          kind: 'stepCloser',
-          offset: 90,
-          moveSpeed: 'Normal'
+        stageGroup: {
+          activeCast: [plan.cast[0]?.name ?? '']
         },
         ...(secondBgm ? { bgmCut: { action: 'play', file: secondBgm, fadeMs: 900 } } : {})
       },
       {
         lineId: lateLine,
         se: { file: 'se00053_b.mp3', timing: 'before' },
-        camera: { kind: 'zoomIn', scale: 1.08, durationMs: 500 },
-        closeWindowAfter: true
+        camera: { kind: 'zoomIn', scale: 1.08, durationMs: 500 }
       }
     ]
   }
 
   const presenceRule =
     plan.cast.length === 2
-      ? '- **双人同框与单人思考留白（Normal 模式）**：本场 2 人，日常对话保持两人在场（Left / Right）；但当角色出现内心独白（如括号心理描写）、独自思索或沉重特写时，**鼓励用 `events[].stageGroup: { activeCast: [角色名] }` 或幕次 `activeCast` 短暂切到单人 Center**（另一人淡出留白），思考结束再切回两人 Left / Right 同框，无需为了“全片同场”而把无关倾听者死板留在台上。此外**同一时间地点连续对话只写 1 幕（s1）即可，切勿硬拆成 s2/s3**；仅当真正切换地点、跳过时段、切入回忆或出入 SEKAI 时才新开幕次。'
-      : '- **多人动态分组与自然分幕（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），按对话节奏在幕次或 events.stageGroup 中轮换 1~2 人在场，通过 `LayoutClear` + `LayoutAppear` 交叠淡出淡入切换，严禁 3 人以上同时挤在台上。同一时间地点无需硬拆幕次，仅切换地点/时段/回忆/SEKAI 时再新开幕。'
+      ? '- **双人同框与单人思考留白（Normal 模式，一律原地淡入淡出）**：本场 2 人，日常对话保持两人在场（Left / Right）；但当角色出现内心独白（如括号心理描写）、独自思索或沉重特写时，**鼓励用 `events[].stageGroup: { activeCast: [角色名] }` 短暂切到单人 Center**（先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入，**严禁 `Move` 横向滑动**），思考结束再切回两人 Left / Right 同框，无需为了“全片同场”而把无关倾听者死板留在台上。此外**同一时间地点连续对话只写 1 幕（s1）即可，切勿硬拆成 s2/s3**；仅当真正切换地点、跳过时段、切入回忆或出入 SEKAI 时才新开幕次。'
+      : '- **多人动态分组与自然分幕（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），按对话节奏在幕次或 events.stageGroup 中轮换 1~2 人在场，通过 `LayoutClear` + `LayoutAppear` 原地淡出淡入切换，严禁 3 人以上同时挤在台上，也严禁横向滑动。同一时间地点无需硬拆幕次，仅切换地点/时段/回忆/SEKAI 时再新开幕。'
 
   return {
     system: [
       '你是 Project SEKAI 官方演出的舞台监督与摄影导演（directStaging）。',
-      '台词已经定稿；你负责规划幕次转场（Telop/PlaceInfo/SideFade/Flashback/Sekai）、站位移动（Move）、音效（PlaySe）、镜头/震动、虚拟歌手全息与 BGM 静音切停。',
+      '台词已经定稿；你负责规划幕次转场（Telop/PlaceInfo/SideFade/Flashback/Sekai）、原地单双人切镜（stageGroup）、音效（PlaySe）、镜头/震动、虚拟歌手全息与 BGM 静音切停。',
       '只输出一个 JSON 对象，不要改写台词。',
       options.systemPrompt?.trim() ?? ''
     ]
@@ -3134,10 +3142,9 @@ ${view.seList(stagingQuery, 32)}
 
 ## 舞台与摄影规则
 ${presenceRule}
-- **默认原地渐变淡入淡出（对齐 PJSK 原版 event_145_08）**：所有上下场默认使用原地淡入淡出（\`from.side === to.side\`）；**仅当台词明确表现“奔跑冲入/推门走入/转身跑离”时**才在 \`walkInCast\`/\`walkOutCast\` 标出对应角色（配合脚步/门音效），切勿滥用画外滑动进出场。
-- **Move 走位（克制使用，每 40 句约 1~3 次）**：仅在明显靠近倾诉或犹豫后退时使用 \`move: { modelId, kind: "stepCloser"|"stepBack"|"shiftSlot", offset: 80~140, moveSpeed: "Normal"|"Fast" }\`，不要频繁左右滑位。
+- **严禁滑动入出场与横向滑位**：所有 \`LayoutAppear\` / \`LayoutClear\` 必须原地渐变淡入淡出（\`from.side === to.side, offset: 0\`），禁止使用 \`walkInCast\` / \`walkOutCast\` / \`LeftOver\` / \`RightOver\` 画外滑入滑出，也禁止 \`Move\` 左右偏移滑行或从 Left/Right 滑到 Center。
 - **静默反应 / 受惊抖动 / 全息**：
-  - 说话后需要角色沉默点头/低头反应时，设 \`closeWindowAfter: true\` + \`silentReaction: { modelId }\`（或下句 \`pauseBefore: 1.0\`）。
+  - 说话后需要角色沉默留白或低头反应时，设 \`silentReaction: { modelId }\`（无需强行把 \`closeWindowAfter: true\` 挂在紧接瞬时动作之前）；仅在停顿 \`Wait >= 300ms\` 或场景/幕次切换前才设置 \`closeWindowAfter: true\`。
   - 突发惊吓可用 \`characterShake: { modelId, axis: "X"|"Y" }\`；大喊/震惊句可用 \`camera: { kind: "shakeWindow" }\` 或 \`shakeScreen\`。
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与场景**：可选 \`Telop\`（开场/跳时间小标题）、\`PlaceInfo\`（地点条）、\`SideFade\`（\`transitionIn: "sideFade"\`）、回忆（\`transitionIn: "flashback"\`, \`isFlashback: true\`）、出入 SEKAI（\`sekaiIn\`/\`sekaiOut\`）、天气/氛围粒子（${CURATED_SCENARIO_EFFECTS.join('/')}）。
@@ -3329,25 +3336,8 @@ function enrichStagingBaseline(
     }
   }
 
-  // 长篇剧本（>=16句）若模型未出 Move / SE，按台词语义轻度补齐（不破坏小测试）
+  // 长篇剧本（>=16句）若模型未出 SE，按台词语义轻度补齐（严禁自动注入 Move 横向滑动）
   if (lines.length >= 16) {
-    const moveCount = [...eventsByLine.values()].filter((e) => e.move).length
-    if (moveCount === 0) {
-      const targets = [Math.floor(lines.length * 0.35), Math.floor(lines.length * 0.72)]
-      for (const idx of targets) {
-        const line = lines[idx]
-        const member = plan.cast.find((c) => c.name === line?.speaker)
-        if (!member) continue
-        const ev = ensureEvent(idx)
-        ev.move = {
-          modelId: member.modelId,
-          kind: idx === targets[0] ? 'stepCloser' : 'stepBack',
-          offset: idx === targets[0] ? 90 : 0,
-          moveSpeed: 'Normal'
-        }
-      }
-    }
-
     const seCount = [...eventsByLine.values()].filter((e) => e.se).length
     if (seCount === 0) {
       const seHits: Array<{ idx: number; file: string }> = []
@@ -3416,8 +3406,6 @@ export function normalizeStaging(
           ? 'silence'
           : matchBgm(view, bgmRaw)
     const hologramCast = resolveCastIds(item.hologramCast, plan, view)
-    const walkInCast = resolveCastIds(item.walkInCast, plan, view)
-    const walkOutCast = resolveCastIds(item.walkOutCast, plan, view)
     const effect = normalizeScenarioEffectName(item.scenarioEffect ?? item.effect)
 
     const bg = normalizeBackground(view, item.background ?? item.image ?? plan.background)
@@ -3441,8 +3429,6 @@ export function normalizeStaging(
       ...(isSekai ? { isSekai: true } : {}),
       activeCast,
       ...(hologramCast.length > 0 ? { hologramCast } : {}),
-      ...(walkInCast.length > 0 ? { walkInCast } : {}),
-      ...(walkOutCast.length > 0 ? { walkOutCast } : {}),
       ...(bgm ? { bgm } : {}),
       ...(effect ? { scenarioEffect: effect } : {})
     })
@@ -3484,37 +3470,22 @@ export function normalizeStaging(
           ...(motion ? { motion } : {}),
           ...(facial ? { facial } : {})
         }
-        ev.closeWindowAfter = true
       }
     }
 
     if (isRecord(item.move)) {
       const m = resolveModel(view, [], item.move.modelId ?? item.move.speaker ?? lines[idx].speaker)
       if (m && plan.cast.some((c) => c.modelId === m.id)) {
-        const rawKind = str(item.move.kind, 'stepCloser')
-        const kind =
-          rawKind === 'stepBack' ? 'stepBack' : rawKind === 'shiftSlot' ? 'shiftSlot' : 'stepCloser'
-        const rawSpeed = str(item.move.moveSpeed, 'Normal')
-        const moveSpeed = rawSpeed === 'Fast' ? 'Fast' : rawSpeed === 'Slow' ? 'Slow' : 'Normal'
-        const offset = Math.max(
-          -200,
-          Math.min(200, num(item.move.offset, kind === 'stepBack' ? 0 : 90))
-        )
         const toSideRaw = str(item.move.toSide)
         const toSide =
           toSideRaw === 'Left' || toSideRaw === 'Center' || toSideRaw === 'Right'
             ? toSideRaw
             : undefined
-        const moveMotion = view.canonicalAnimation(m.id, 'motion', item.move.motion) ?? undefined
-        const moveFacial = view.canonicalAnimation(m.id, 'facial', item.move.facial) ?? undefined
-        ev.move = {
-          modelId: m.id,
-          kind,
-          offset,
-          moveSpeed,
-          ...(toSide ? { toSide } : {}),
-          ...(moveMotion ? { motion: moveMotion } : {}),
-          ...(moveFacial ? { facial: moveFacial } : {})
+        if (toSide && !isRecord(item.stageGroup)) {
+          // 若模型仍写了 shiftSlot 到 Center，转为 stageGroup 原地渐变切镜，禁止 Move 滑动
+          if (toSide === 'Center') {
+            ev.stageGroup = { activeCast: [m.id] }
+          }
         }
       }
     }
@@ -3594,12 +3565,8 @@ export function normalizeStaging(
         view
       )
       if (activeCast.length > 0) {
-        const walkIn = resolveCastIds(item.stageGroup.walkIn, plan, view)
-        const walkOut = resolveCastIds(item.stageGroup.walkOut, plan, view)
         ev.stageGroup = {
-          activeCast,
-          ...(walkIn.length > 0 ? { walkIn } : {}),
-          ...(walkOut.length > 0 ? { walkOut } : {})
+          activeCast
         }
       }
     }
@@ -3795,12 +3762,12 @@ ${
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
 - **静默反应**：官方全量剧本里，台词之外的独立 Motion 约每 2 句 1 个；本场每 2~4 句可安排 1 个 \`silentMotion\`（听者反应、环境小动作或停顿），让双方表演自然接力。
 - **听者反应对齐官方 PJSK（禁止句中错峰刷屏）**：同一句 \`Talk\` 绝不同时触发说话者与听者的身体动作；当 A 连续说话时，听者 B 优先仅切 **纯表情（只写 \`facial\`，不写 \`motion\`）** 在 \`at: 0\` 自然过渡，或仅在真正情绪转折点通过 \`silentMotion\` / 独立 \`Motion\` 片段表现听者身体反应。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上。
-- **表情严格贴合语境与括号语义**：务必看清上方表情清单括号里的具体含义（例如 \`face_smile_05(苦笑/勉强笑)\`、\`face_closeeye_02(闭眼微笑)\`、\`face_darknormal_01(阴沉面无表情)\`），悲伤/生气/道歉/沉重语境严禁错选真笑或闭眼大笑。${
+- **表情严格贴合语境与括号语义**：务必看清上方表情清单括号里的具体含义（例如 \`face_smile_05(苦笑/勉强笑)\`、\`face_trouble_02(苦笑/嘴角上扬)\`、\`face_closeeye_02(闭眼微笑)\`、\`face_darknormal_01(阴沉面无表情)\`），悲伤/哭泣/生气/道歉/沉重对峙语境严禁错选真笑、含泪微笑或嘴角上扬表情（除非台词明确写到苦笑/含泪安抚微笑）。${
       hasEmotionTags
         ? '〔情绪〕只代表 TTS 语音基调，**严禁把〔平静〕死板锁死在 face_normal_01**！即使在〔平静〕段内，也要根据每句台词的实际语气细腻切换微表情：温和/寒暄/赞同/调侃用真正的微笑或俏皮；认真/思索/倾听用 serious / closeeye / smallmouth / notice；无奈/窘迫/犹豫用 trouble / lookaway / worry / 苦笑；只有毫无波澜的平铺陈述才用 normal。'
         : '随每句台词语气细腻切换表情：温和/寒暄/赞同用微笑；认真/思索用 serious / closeeye / smallmouth；无奈/犹豫用 trouble / lookaway / worry；开心/伤心/生气/惊讶/害羞严格对应各自语义表情。'
     }
-- 同一角色跨句延续同一表情很自然（官方约 6 成连句保持同一神情），**避免无意义逐句乱换脸**，但也别连续多句卡死在 \`face_normal_01\`；善用角色丰富的动作变体与贴合气氛的跨风格动作（不必锁死 4~5 个动作循环），情绪延续句可直接省略 \`motion\` 保持姿态；**朝比奈真冬**保持克制内敛的表情与动作。
+- **哭戏/高潮持续表情与自然换姿**：在哭泣/崩溃/泪目表白段落（连续 4~8+ 句），应持续保持 \`face_cry_*\` / \`face_sad_*\` 哭泣神情，期间通过微妙身体动作或省略 \`motion\` 保持情绪连贯，**严禁每句机械乱跳表情（如哭泣途中有事无事切回 face_closeeye_01 或 face_trouble_02）**！日常段同一角色跨句延续同一表情也很自然，善用角色丰富的动作变体与贴合气氛的跨风格动作（不必锁死 4~5 个动作循环）；**朝比奈真冬**保持克制内敛的表情与动作。
 - 背景的时段（白天/黄昏/夜晚）和室内外要和台词写的时间一致；优先选有描述的条目。
 
 ## 输出 JSON
@@ -4332,8 +4299,6 @@ export function composeStory(
   let lastSilentReactionLine = -10
   let lastSilentReactionTargetId: number | null = null
   let silentReactionsEmitted = 0
-  let movedWithMotionLine = -10
-  let movedWithMotionActorId: number | null = null
   const directionById = new Map(direction.lines.map((line) => [line.id, line]))
 
   const closeWindowBeforeBreak = (): void => {
@@ -4397,7 +4362,7 @@ export function composeStory(
     layoutMode = 'Normal'
   }
 
-  const clearActors = (ids: number[], walkOutSet = new Set<number>()): number => {
+  const clearActors = (ids: number[], _walkOutSet = new Set<number>()): number => {
     const toClear = ids.filter((id) => onStage.has(id))
     if (toClear.length === 0) return 0
     toClear.forEach((id, idx) => {
@@ -4414,8 +4379,6 @@ export function composeStory(
     })
     toClear.forEach((id, idx) => {
       const state = onStage.get(id)!
-      const isWalk = walkOutSet.has(id)
-      const toSide = isWalk ? (state.side === 'Left' ? 'LeftOver' : 'RightOver') : state.side
       snippets.push({
         type: 'LayoutClear',
         wait: idx === 0,
@@ -4423,8 +4386,8 @@ export function composeStory(
         delay: 0,
         data: {
           modelId: id,
-          from: { side: state.side, offset: state.offset },
-          to: { side: toSide, offset: isWalk ? 0 : state.offset },
+          from: { side: state.side, offset: 0 },
+          to: { side: state.side, offset: 0 },
           motion: '',
           facial: '',
           moveSpeed: 'Normal'
@@ -4449,8 +4412,6 @@ export function composeStory(
     const validIds = targetIds.filter((id) => cast.some((c) => c.modelId === id)).slice(0, 2)
     if (validIds.length === 0) return
 
-    const walkInSet = options.walkInSet ?? new Set<number>()
-    const walkOutSet = options.walkOutSet ?? new Set<number>()
     const hologramSet = options.hologramSet ?? new Set<number>()
 
     const sameGroup =
@@ -4494,71 +4455,32 @@ export function composeStory(
       }
     }
 
-    // 单人 Center -> 双人 Left/Right（或相反）时，先关窗再离场/移动，保留角色直接 Move 到新槽位
-    const outgoing = [...onStage.keys()].filter((id) => !validIds.includes(id))
-    const needsStageTransition =
-      outgoing.length > 0 ||
-      validIds.some((id) => {
-        const st = onStage.get(id)
-        return Boolean(st && st.side !== desiredSlotFor.get(id))
-      })
-    if (needsStageTransition) closeWindowBeforeBreak()
-    const clearedCount = clearActors(outgoing, walkOutSet)
-    ensureNormalLayoutMode()
-
-    let movedExisting = false
-    for (const id of validIds) {
-      const st = onStage.get(id)
-      const targetSide = desiredSlotFor.get(id)!
-      if (st && st.side !== targetSide) {
-        closeWindowBeforeBreak()
-        const moveMotion = pickMoveMotion(
-          view,
-          id,
-          st.lastBodyMotion,
-          new Set(st.recentBodyMotions)
-        )
-        const moveFacial = pickMoveFacial(view, id, st.lastFacial || st.appearFacial)
-        snippets.push({
-          type: 'Move',
-          wait: clearedCount === 0 && !movedExisting,
-          progressBehavior: clearedCount === 0 && !movedExisting ? 'WaitFinished' : 'Now',
-          delay: 0,
-          data: {
-            modelId: id,
-            from: { side: st.side, offset: st.offset },
-            to: { side: targetSide, offset: 0 },
-            moveSpeed: 'Fast',
-            motion: moveMotion,
-            facial: moveFacial
-          }
-        })
-        if (moveMotion) {
-          trackActorBodyMotion(st, moveMotion, id)
-          movedWithMotionLine = lineIndex
-          movedWithMotionActorId = id
+    // 单人 Center <-> 双人 Left/Right 切镜统一采用「原地 LayoutClear 淡出 -> 原地 LayoutAppear 淡入」，严禁横向 Move 滑动
+    const slotShiftedStates = new Map<number, StageActorState>()
+    const outgoing: number[] = []
+    for (const [id, st] of onStage.entries()) {
+      const targetSide = desiredSlotFor.get(id)
+      if (!validIds.includes(id) || (targetSide && st.side !== targetSide)) {
+        outgoing.push(id)
+        if (validIds.includes(id)) {
+          slotShiftedStates.set(id, { ...st, recentBodyMotions: [...st.recentBodyMotions] })
         }
-        if (moveFacial) st.lastFacial = moveFacial
-        st.side = targetSide
-        st.offset = 0
-        movedExisting = true
       }
     }
+    if (outgoing.length > 0) closeWindowBeforeBreak()
+    const clearedCount = clearActors(outgoing)
+    ensureNormalLayoutMode()
 
-    const overlapsPreceding = (!options.hadPrecedingClear && clearedCount > 0) || movedExisting
+    const overlapsPreceding = !options.hadPrecedingClear && clearedCount > 0
     const lineAtEntry = dialogue.lines[lineIndex]
     const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
     const incoming = validIds.filter((id) => !onStage.has(id))
     const usedEntryMotions = new Set<string>()
     incoming.forEach((id, idx) => {
       const slot = desiredSlotFor.get(id)!
-      const isWalk = walkInSet.has(id)
-      // 官方 LayoutData 的 Type=2 入场全部 SideFrom==SideTo（Left/Center/Right
-      // 槽位原地淡入，没有画外起点）。默认 from 与 to 同槽位（offset 0）；
-      // 仅 walkInCast 显式“走入”保留 LeftOver/RightOver 画外起点。
-      const fromPos = isWalk
-        ? { side: slot === 'Left' ? 'LeftOver' : 'RightOver', offset: 0 }
-        : { side: slot, offset: 0 }
+      const prevShiftState = slotShiftedStates.get(id)
+      // 所有入场严格使用原地渐变淡入（from == to, offset: 0），严禁 LeftOver/RightOver 滑入
+      const fromPos = { side: slot, offset: 0 }
       const member = cast.find((c) => c.modelId === id)
       const memberName = member?.name
       const isEntrySpeaker = Boolean(memberName && lineAtEntry?.speaker === memberName)
@@ -4603,11 +4525,24 @@ export function composeStory(
       )
         ? ''
         : directedFacial
+      const shiftedModelPath = view.modelById(id)?.path
+      const preservedShiftFacial =
+        prevShiftState?.lastFacial &&
+        !shouldAvoidIncongruousSmile(
+          prevShiftState.lastFacial,
+          firstLineForMember ?? { content: '', emotion: '平静' },
+          entryPrecededByTense,
+          { modelPath: shiftedModelPath }
+        )
+          ? prevShiftState.lastFacial
+          : ''
       const entryFacial =
         safeDirectedFacial ||
+        preservedShiftFacial ||
         (firstLineForMember
           ? pickSpeakerSubtleFacial(view, id, firstLineForMember, undefined, member?.role, {
-              precededByTense: entryPrecededByTense
+              precededByTense: entryPrecededByTense,
+              modelPath: shiftedModelPath
             })
           : '') ||
         (surroundingTense
@@ -4617,7 +4552,7 @@ export function composeStory(
               { content: '', emotion: '平静' },
               undefined,
               member?.role,
-              { precededByTense: true }
+              { precededByTense: true, modelPath: shiftedModelPath }
             )
           : '') ||
         view.exampleFacial(id) ||
@@ -4657,14 +4592,16 @@ export function composeStory(
         appearedWithMotion: Boolean(entryMotion),
         lastAppearMotion: entryMotion,
         appearFacial: entryFacial,
-        lastBodyMotion: entryMotion,
+        lastBodyMotion: entryMotion || prevShiftState?.lastBodyMotion || '',
         consecutiveSameBodyMotion: entryMotion ? 1 : 0,
         lastFacial: entryFacial,
-        lastSpeakingFacial: '',
-        consecutiveSameFacial: 0,
+        lastSpeakingFacial: prevShiftState?.lastSpeakingFacial || '',
+        consecutiveSameFacial: prevShiftState?.consecutiveSameFacial ?? 0,
         lastSpeakingWasShortWithMotion: false,
-        recentBodyMotions: entryMotion ? [entryMotion] : [],
-        speakingCountSinceAppear: 0,
+        recentBodyMotions: entryMotion
+          ? [entryMotion]
+          : prevShiftState?.recentBodyMotions ?? [],
+        speakingCountSinceAppear: prevShiftState?.speakingCountSinceAppear ?? 0,
         linesSinceLastBodyMotion: 0
       })
     })
@@ -5077,53 +5014,7 @@ export function composeStory(
       })
     }
 
-    if (ev?.move && onStage.has(ev.move.modelId)) {
-      const st = onStage.get(ev.move.modelId)!
-      let targetSide = st.side
-      if (ev.move.kind === 'shiftSlot' && ev.move.toSide) {
-        const occupied = [...onStage.entries()].some(
-          ([otherId, pos]) =>
-            otherId !== ev.move!.modelId &&
-            (pos.side === ev.move!.toSide ||
-              (layoutMode === 'Normal' && (pos.side === 'Center' || ev.move!.toSide === 'Center')))
-        )
-        if (!occupied) targetSide = ev.move.toSide
-      }
-      const nextOffset =
-        ev.move.kind === 'stepBack'
-          ? 0
-          : (ev.move.offset ?? (st.side === 'Left' ? 90 : st.side === 'Right' ? -90 : 0))
-      if (targetSide !== st.side || nextOffset !== st.offset) {
-        closeWindowBeforeBreak()
-        const moveMotion =
-          ev.move.motion ||
-          pickMoveMotion(view, ev.move.modelId, st.lastBodyMotion, new Set(st.recentBodyMotions))
-        const moveFacial =
-          ev.move.facial || pickMoveFacial(view, ev.move.modelId, st.lastFacial || st.appearFacial)
-        snippets.push({
-          type: 'Move',
-          wait: true,
-          progressBehavior: 'WaitFinished',
-          delay: 0,
-          data: {
-            modelId: ev.move.modelId,
-            from: { side: st.side, offset: st.offset },
-            to: { side: targetSide, offset: nextOffset },
-            moveSpeed: ev.move.moveSpeed ?? 'Normal',
-            motion: moveMotion,
-            facial: moveFacial
-          }
-        })
-        if (moveMotion) {
-          trackActorBodyMotion(st, moveMotion, ev.move.modelId)
-          movedWithMotionLine = index
-          movedWithMotionActorId = ev.move.modelId
-        }
-        if (moveFacial) st.lastFacial = moveFacial
-        st.side = targetSide
-        st.offset = nextOffset
-      }
-    }
+    // 禁止任何横向 Move 滑动/偏移（原地渐变切镜已由 stageGroup 的 LayoutClear + LayoutAppear 处理）
 
     if (ev?.characterShake && onStage.has(ev.characterShake.modelId)) {
       snippets.push({
@@ -5184,10 +5075,8 @@ export function composeStory(
       lastSpeakerId === member.modelId &&
       Boolean(actorState?.lastSpeakingWasShortWithMotion) &&
       talkDelay < 0.8
-    const justMovedWithMotion =
-      movedWithMotionActorId === member.modelId && movedWithMotionLine === index && talkDelay < 0.8
     const skipImmediateBodyMotion =
-      justAppeared || justHadStandaloneMotion || justHadShortClipMotion || justMovedWithMotion
+      justAppeared || justHadStandaloneMotion || justHadShortClipMotion
 
     const actions: JsonRecord[] = []
     if (directed?.beats && directed.beats.length > 0) {
@@ -5230,11 +5119,26 @@ export function composeStory(
         allowStaleCheck &&
         Boolean(currentSpeakerFacial && /^face_normal/i.test(currentSpeakerFacial)) &&
         /^face_normal/i.test(actorState.lastSpeakingFacial || actorState.lastFacial)
+      const currentFacialRole = currentSpeakerFacial
+        ? inspectModelFacial(speakerModelPath ?? '', currentSpeakerFacial).role
+        : 'neutral'
+      const isSustainedSadCryLine =
+        ['伤心', '害怕', '困惑'].includes(line.emotion ?? '') ||
+        /哭|泪|哽咽|抽泣|对不起|求你|不要|别走|原谅|痛苦|难过|崩溃|受不了|委屈|悲伤/.test(
+          line.content
+        )
+      const isSustainedCryRole =
+        currentFacialRole === 'cry' ||
+        currentFacialRole === 'sad' ||
+        currentFacialRole === 'cold_hollow' ||
+        (currentFacialRole === 'closed_troubled' && /^face_(cry|sad)/i.test(currentSpeakerFacial ?? ''))
+      const repeatThreshold = isSustainedCryRole && isSustainedSadCryLine ? 8 : 2
       const staleRepeatedFacial =
         allowStaleCheck &&
         Boolean(currentSpeakerFacial) &&
         currentSpeakerFacial === actorState.lastSpeakingFacial &&
-        actorState.consecutiveSameFacial >= 2
+        actorState.consecutiveSameFacial >= repeatThreshold &&
+        !(isSustainedCryRole && isSustainedSadCryLine)
       const incongruousSmile = shouldAvoidIncongruousSmile(
         currentSpeakerFacial,
         line,
@@ -5431,7 +5335,8 @@ export function composeStory(
 
     const hasSilentAfter =
       explicitSilentReaction || pendingListenerMotion !== null || autoSilentTargetId !== null
-    const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter || hasSilentAfter)
+    // 仅当调用方显式要求关窗（如停顿/场景切镜前）才设 closeWindowAfter；严禁因瞬时 Motion 静默拍反复关闭并闪烁对话框
+    const closeAfter = Boolean(ev?.closeWindowAfter || line.closeWindowAfter)
 
     // 官方 TalkData.Motions 每条动作都同时带 MotionName 与 FacialName；
     // 回填时必须校验情绪兼容性，绝不把之前残留的笑脸带进伤心/生气/紧张台词。
@@ -5644,30 +5549,40 @@ export function composeStory(
         )
           ? ''
           : rawSilentFacial
+        const holdExistingCryFacial =
+          !safeSilentFacial &&
+          Boolean(targetState.lastFacial) &&
+          silentPrecededByTense &&
+          (() => {
+            const r = inspectModelFacial(targetModelPath ?? '', targetState.lastFacial).role
+            return r === 'cry' || r === 'sad'
+          })()
         const facial =
           safeSilentFacial ||
-          (directed?.silentMotion ||
-          autoSilentTargetId !== null ||
-          rawSilentFacial ||
-          fromPendingListener
-            ? targetId === member.modelId
-              ? pickSpeakerSubtleFacial(
-                  view,
-                  targetId,
-                  line,
-                  targetState.lastFacial,
-                  targetMember?.role,
-                  { precededByTense: silentPrecededByTense, modelPath: targetModelPath }
-                )
-              : pickListenerReactionFacial(
-                  view,
-                  targetId,
-                  line,
-                  targetMember?.role,
-                  targetState.lastFacial,
-                  { precededByTense: silentPrecededByTense, modelPath: targetModelPath }
-                )
-            : '') ||
+          (holdExistingCryFacial
+            ? ''
+            : directed?.silentMotion ||
+                autoSilentTargetId !== null ||
+                rawSilentFacial ||
+                fromPendingListener
+              ? targetId === member.modelId
+                ? pickSpeakerSubtleFacial(
+                    view,
+                    targetId,
+                    line,
+                    targetState.lastFacial,
+                    targetMember?.role,
+                    { precededByTense: silentPrecededByTense, modelPath: targetModelPath }
+                  )
+                : pickListenerReactionFacial(
+                    view,
+                    targetId,
+                    line,
+                    targetMember?.role,
+                    targetState.lastFacial,
+                    { precededByTense: silentPrecededByTense, modelPath: targetModelPath }
+                  )
+              : '') ||
           ''
         if (motion || facial) {
           snippets.push({

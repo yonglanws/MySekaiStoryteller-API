@@ -27,7 +27,7 @@ import { CURATED_SCENARIO_SES, resolveScenarioSe, sePromptList } from './scenari
 // 全量清单会占掉提示词绝大部分，而且长编号列表会诱导模型拼出不存在的名称。
 // 这里按语义挑出覆盖常见情绪的完整名称：既小又准，模型不必猜编号。
 const MOTION_PROMPT_LIMIT = 34
-const FACIAL_PROMPT_LIMIT = 28
+const FACIAL_PROMPT_LIMIT = 32
 const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['nod', 2],
   ['tilthead', 2],
@@ -75,8 +75,8 @@ const FACIAL_PROMPT_KINDS: Array<[string, number]> = [
   ['face_closeeye', 2],
   ['face_serious', 2],
   ['face_trouble', 2],
-  ['face_sad', 2],
-  ['face_cry', 2],
+  ['face_sad', 3],
+  ['face_cry', 3],
   ['face_worry', 1],
   ['face_purpose', 1],
   ['face_regret', 1],
@@ -1169,10 +1169,10 @@ export class CatalogView {
 }
 
 const STORY_SYSTEM_PROMPT =
-  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。入场默认槽位原地淡入（from == to，offset=0，moveSpeed Normal）；只有明确走入才用 LeftOver/RightOver 画外起点，退场默认原地淡出，禁止 ±100px Slow 滑行；93% 台词 delay 为 0。'
+  '你是 Project SEKAI 风格视觉小说导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。写成约 3 分钟的短戏，禁止超长剧情；对话多少按角色人设自行把握。所有入场/退场与切镜（包括单人 Center 思考模式切换）一律采用槽位原地渐变淡入淡出（from == to，offset=0，moveSpeed Normal），严禁使用 LeftOver/RightOver 或 Move 横向滑动；93% 台词 delay 为 0。'
 
 const CHAT_SYSTEM_PROMPT =
-  '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，入场默认槽位原地淡入（from == to，offset=0，moveSpeed Normal）；只有明确走入才用 LeftOver/RightOver 画外起点，退场默认原地淡出。'
+  '你是 Project SEKAI 风格视觉小说角色扮演导演。只输出合法 JSON（仅含 models、images、snippets，可选 bgm），不要 markdown 或解释。对话多少按角色人设自行把握。表演克制：一句台词一个自然小动作，所有入场/退场一律采用槽位原地渐变淡入淡出（from == to，offset=0，moveSpeed Normal），严禁滑动入出场。'
 
 /** 用当前目录里真实存在的模型/动作/背景生成一段可执行的示例。 */
 export function buildActingExample(view: CatalogView): string {
@@ -1380,7 +1380,7 @@ const STORY_PROMPT = `# 视觉小说剧本生成
 
 你是 Project SEKAI 风格视觉小说导演。根据场景写出一场约 {target_minutes} 分钟的短戏，完整、自然，但不要写成超长剧情。只输出合法 JSON（仅含 models、images、snippets 三个字段，可选顶层 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数。一场只演完一件事或一个情绪转折就退场，禁止把整段人生、多条支线或连续多场戏塞进这一次。
-表演克制、贴近原作：93% 的台词 delay 为 0，入场默认槽位原地淡入（from == to，offset=0，moveSpeed Normal）；只有明确走入才用 LeftOver/RightOver 画外起点，退场默认原地淡出，禁止 ±100px Slow 滑行。
+表演克制、贴近原作：93% 的台词 delay 为 0，所有入场/退场及思考模式切镜一律使用槽位原地淡入与原地淡出（from == to，offset=0，moveSpeed Normal），严禁 LeftOver/RightOver 滑入滑出与 Move 横向滑动。
 
 ## 角色池
 
@@ -1397,13 +1397,12 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 
 - ChangeLayoutMode.data.mode：固定为 "Normal"（Left / Right 双人或单人 Center）；严禁 3 人及以上同时在场或槽位冲突。
 - **始终维护在场名单与槽位**：models 是整场演员表，不是在场名单。只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位；换背景/黑屏不清空名单。
-- **双人主同框与单人思考留白原则**：当整场只有 2 名角色时，日常对话保持两人在场（Left/Right），不要无故每句切人；但遇到角色内心独白、独自思考或特写反应时，允许用 LayoutClear + LayoutAppear(Center)（或 Move 到 Center）切出自然单人画面，思索结束后再切回 Left/Right 同框。当整场 >=3 名角色时，保持每次最多 2 人在场，按场景或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
-- **入场/退场动画规则（官方渐变进出默认）**：
-  - 官方 PJSK（如 event_145_08 全片 41/41 入场、42/42 退场）默认采用**槽位原地淡入淡出**：LayoutAppear / LayoutClear 的 from 与 to 写同一目标槽位（\`from.side === to.side\`, \`offset: 0\`），\`moveSpeed: "Normal"\`；即使奔跑/追逐场景也优先原地淡入淡出配脚步 SE。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
-  - 仅在镜头明确强调角色物理冲入/跑离画框时，才偶尔使用 LeftOver/RightOver 画外起点/终点（可配脚步 SE），严禁把滑入滑出当默认，也禁止 ±100px 偏移滑行或无故 \`LayoutClear -> Move Center -> Move Left -> LayoutAppear\` 反复挪位。
+- **双人主同框与单人思考留白原则**：当整场只有 2 名角色时，日常对话保持两人在场（Left/Right），不要无故每句切人；遇到角色内心独白、独自思考或特写反应时，必须通过 **原地渐变切镜**（先 \`LayoutClear\` 原地淡出 -> \`LayoutAppear\` 在 \`Center\` 原地淡入，独白结束后 \`LayoutClear(Center)\` 原地淡出 -> \`LayoutAppear(Left/Right)\` 原地淡入）切出单人画面，**严禁用 \`Move\` 在 \`Left/Right <-> Center\` 之间横向滑动**。当整场 >=3 名角色时，保持每次最多 2 人在场，按场景或说话人通过 LayoutClear(Now) + LayoutAppear 交叠淡出淡入轮换。
+- **入场/退场动画规则（严格禁止滑动效果）**：
+  - 所有 LayoutAppear / LayoutClear **一律使用槽位原地渐变淡入淡出**：from 与 to 必须写同一在场槽位（\`from.side === to.side\`, \`offset: 0\`），\`moveSpeed: "Normal"\`；**严禁使用 \`LeftOver\`/\`RightOver\` 滑入滑出或 \`offset != 0\` 横向偏移滑动**（奔跑/追逐/离去统一用原地渐变淡入淡出配合脚步 \`PlaySe\` 表现）。双人同入时第一条 progressBehavior="WaitFinished" (wait:true)，第二条 progressBehavior="Now" (wait:false)。
   - LayoutAppear 若已带入场动作（禁止 default 站姿），紧接着 0.4s 内的该角色首句 Talk 不要再重复触发 body motion（可只改 facial）。
-  - LayoutClear 默认原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
-- 可用 Move 做小幅跨步/移近（offset ±80~150 或单人移至 Center），用 CharacterShake（X/Y）演受惊，用 AttachCharacterShader（hologram）演虚拟歌手投影/通话。
+  - LayoutClear 同样必须原地淡出（from == to, offset: 0）；可留空 motion/facial 或使用非 default 收尾动作。
+- 如需受惊可用 CharacterShake（X/Y），虚拟歌手投影/通话用 AttachCharacterShader（hologram）；**不要用 Move 做跨槽位或横向偏移滑动**。
 - Talk 的说话者和 actions 的目标都必须在场；旁白可用 modelId=-1，但不能给 -1 安排动作。
 
 ## 开场与转场序列
@@ -1411,13 +1410,13 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可选 Telop / PlaceInfo）→ LayoutAppear...
 - **自然分幕（不强制拆幕）**：同一时间地点的连续对话保持 1 幕即可；仅在换地点、跳时间、回忆或出入 SEKAI 时才换背景/分幕。
 - 支持 Telop（居中小标题，如时间/地点/回忆提示）、PlaceInfo（左上角地点条，下句说完自动关闭）、SideFade（Out/In 方向擦除转场）、BlackOut(white) -> FlashbackIn -> BlackIn(white)（回忆滤镜，结束前必配 FlashbackOut）、SekaiOut/SekaiIn（出入 SEKAI）、ShakeWindow / ShakeScreen + StopShakeScreen、CameraZoom / CameraMove（转场或结尾前复位）。
-- 转场、Telop 或静默 Move/Motion 前的最后一句 Talk 必须设 \`closeWindowOnFinish: true\`（或插 HideTalk）。
+- 仅在实际停顿/转场（\`Wait >= 300ms\`、\`BlackOut\`、\`WhiteOut\`、\`SideFade\`、\`Telop\`、\`FullScreenText\` 或切场 \`LayoutClear\`/\`LayoutAppear\`）前的最后一句 Talk 设 \`closeWindowOnFinish: true\`（或插 HideTalk）；**不要在连贯对话中的瞬时 \`Motion\`/\`PlaySe\`/\`ChangeBgm\` 前乱加 \`closeWindowOnFinish: true\`**，以免对话框频繁闪灭。
 
 ## 对话与表演规范
 
 - **每句台词最多 1 个身体动作（官方句首 at=0 节奏）**：[{"at":0,"modelId":角色ID,"motion":"完整动作名","facial":"完整表情名"}]。官方 PJSK 100% 的台词动作均在句首 \`at: 0\` 触发；禁止同句里让说话者和听者同时做身体动作，也**禁止在句中 \`at: 0.5..0.85\` 塞入听者错峰身体动作**。
-- **自然动作频率与听者回应**：约 70%~80% 的台词在句首配 1 个贴合情绪的身体动作，其余约 20%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 或自然保持姿态，跨句延续同一表情很正常，不要为了防重复而每句硬切无关动作；长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 \`Motion\`（\`wait:false, delay:2.5~4.5\`）。听者反应优先通过单人 Center 反打切镜、句间原地 \`Move\` / 独立 \`Motion\` 静默拍或双人同框句首 \`at: 0\` 纯 \`facial\` 微调表现（内心独白句听者听不见，不给听者加反应）。
-- **动作与表情双重对位剧情（丰富自然不死板）**：善用角色多样的动作编号与贴合气氛的跨风格动作（近期官方跨风格切换约 30%），避免整场只循环 4~5 个动作；仔细核对动作与表情括号语义，禁止在悲伤/道歉/紧张/愤怒语境误用 glad/smug/greeting 动作或真笑表情；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`Move\` / \`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，避免默认站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
+- **自然动作频率、哭戏持续表情与听者回应**：约 70%~80% 的台词在句首配 1 个贴合情绪的身体动作，其余约 20%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 或自然保持姿态；**哭泣/崩溃/高潮吐露段落（连续 4~8+ 句）应自然持续保持 \`face_cry_*\` / \`face_sad_*\` 哭泣表情**（期间仅微调身体动作或省略 motion），切忌每句机械轮换跳脸或插入 \`face_closeeye\` 破坏情绪连贯；长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 \`Motion\`（\`wait:false, delay:2.5~4.5\`）。听者反应优先通过单人 Center 原地渐变反打切镜、句间独立 \`Motion\` 静默拍或双人同框句首 \`at: 0\` 纯 \`facial\` 微调表现（内心独白句听者听不见，不给听者加反应）。
+- **动作与表情双重对位剧情（丰富自然不死板）**：善用角色多样的动作编号与贴合气氛的跨风格动作（近期官方跨风格切换约 30%），避免整场只循环 4~5 个动作；仔细核对动作与表情括号语义（含 \`ParamMouthForm >= 0.2\` 标出的 \`苦笑/嘴角上扬\`），**悲伤/哭泣/愤怒/惊愕/绝望对峙句严禁使用任何微笑、含泪微笑或嘴角上扬表情（除非台词明确写到苦笑或安抚微笑）**，也禁止用 \`glad\`/\`happy\`/\`greeting\`/\`playful\` 动作；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，避免默认站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
 - **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
 - **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
@@ -1467,7 +1466,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 
 ## 输出要求
 1. 只输出合法 JSON，无 markdown、无解释；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear 默认槽位原地淡入（from == to, offset=0；moveSpeed Normal），只有明确走入才用 LeftOver/RightOver 画外起点；LayoutClear 默认原地淡出（from == to, offset: 0）；全片 Normal 模式最多 2 人同时在场
+2. 开场与退场序列完整；所有 LayoutAppear/LayoutClear 一律采用槽位原地渐变淡入淡出（from == to, offset=0, moveSpeed Normal），严禁 LeftOver/RightOver 滑入滑出与 Move 横向滑动；全片 Normal 模式最多 2 人同时在场
 3. models 的 id 和路径必须与对照表一致，多角色绝不能写成同一个模型；数组顺序与登场顺序一致
 4. 所有 Talk/Motion/LayoutAppear/LayoutClear 的 modelId：{id_mapping}
 5. 每条 Talk 只写 content、不要写 ttsText；入场后 <0.4s 勿重复触发同角色 body motion；短反应保留 facial
@@ -1483,7 +1482,7 @@ const CHAT_PROMPT = `# 视频角色对话生成
 
 代入人格池中选定的角色，以该角色的身份、口吻和心理状态，生成一段视觉小说式的对话剧本。只输出合法 JSON（仅含 models、images、snippets，可选 bgm）。
 对话多少、每句长短都按角色人设来：话多的角色就多说，话少的角色就少说。不规定条数和字数，按人设把这场回应说完再退场。
-表演克制、贴近原作：93% 的台词 delay 为 0；角色开口时做一个自然小动作，入场默认槽位原地淡入（from == to, offset=0，moveSpeed Normal）；只有明确走入才用 LeftOver/RightOver 画外起点，退场默认原地淡出。
+表演克制、贴近原作：93% 的台词 delay 为 0；角色开口时做一个自然小动作，所有入场/退场一律采用槽位原地渐变淡入淡出（from == to, offset=0，moveSpeed Normal），严禁滑动入出场。
 
 ## 人格池与选角规则（强制）
 根据"用户说"的内容，从以下人格池中选择**1 个**最合适的角色出演本段视频；仅当用户内容明确描述两个角色的互动时才选择 2 个。优先选择用户点名的角色；未点名时选择与内容最相关的角色。未提供详细人设的角色，请依据角色名与场景合理演绎，保持言行前后一致。
@@ -1535,15 +1534,17 @@ Talk.modelId 必须与 speaker 对应：{id_mapping}
 4. 每条 Talk **最多 3 行**（最多 2 个 \\n）；超长请拆成连续多条 Talk（delay=0）
 5. 不要写 ttsText；宿主会按 content 逐条补日文翻译；**严禁在 content 中混入零宽字符（如 \\u200b/\\ufeff）**
 
-开场槽位原地淡入（from == to；明确走入才用画外起点）+ 对话表演 + 结尾原地淡出退场：
+开场槽位原地淡入（from == to, offset: 0）+ 对话表演 + 结尾原地淡出退场（全程严禁 LeftOver/RightOver 滑入滑出和横移 Move）：
 \`\`\`
-ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(槽位原地淡入；明确走入才画外进入) -> Talk(actions)... -> HideTalk/closeWindowOnFinish -> LayoutClear(原地淡出) -> BlackOut
+ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear(槽位原地淡入) -> Talk(actions)... -> HideTalk/closeWindowOnFinish -> LayoutClear(原地淡出) -> BlackOut
 \`\`\`
 
 **舞台与替换规则**：
 - ChangeLayoutMode.data.mode 写 "Normal"。单人用 Center，两人用 Left / Right，不能同侧，也不能 Center 与另一槽混用。
 - 始终维护在场名单：models 是整场演员表，不是在场名单。任意时刻最多两人；只有 LayoutAppear 完成才在场，LayoutClear 完成才释放槽位。
-- **入场默认槽位原地淡入（from == to, offset=0，moveSpeed Normal）**：只有明确走入才用 LeftOver/RightOver 画外起点；禁止 ±100px 偏移滑行。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
+- **入出场与双人/独白切换一律原地渐变淡入淡出（from == to, offset=0，moveSpeed Normal）**：禁止 LeftOver/RightOver/Under 画外滑入滑出，禁止 ±100px 偏移滑行与跨槽 Move 横移；切换为单人思考时先 LayoutClear 原地淡出再 LayoutAppear(Center) 原地淡入。LayoutAppear 可配入场小动作，但禁止 default 站姿；LayoutClear 原地淡出（from == to, offset: 0）。
+- **持续哭戏与表情一致性**：撕心裂肺哭诉/哽咽/失控等高潮段应自然维持 face_cry_* / face_sad_* 连续 4~8+ 句，禁止每句乱跳表情或用 ParamMouthForm >= 0.2 的强颜欢笑（如 face_trouble_02）。
+- **closeWindowOnFinish 节制使用**：仅在真实停顿（Wait >= 300ms）或转场/淡出（BlackOut/SideFade/Telop/LayoutClear）前设为 true；紧接瞬时 Motion/PlaySe/ChangeBgm 后立刻下句 Talk 时严禁设 true。
 - Talk 和 actions 只指向已入场角色；旁白可用 modelId=-1，但不能给 -1 配动作。
 
 **结尾退场序列（缺一不可）：**
@@ -1558,7 +1559,7 @@ ChangeLayoutMode -> BlackOut -> ChangeBackgroundImage -> BlackIn -> LayoutAppear
 
 ## 输出要求
 1. 只输出合法 JSON，无额外文字；含 models、images、snippets，可选顶层 bgm
-2. 开场与退场序列完整；LayoutAppear 默认槽位原地淡入（from == to, offset=0；moveSpeed Normal），只有明确走入才用 LeftOver/RightOver 画外起点；LayoutClear 原地淡出（from == to, offset: 0）；任意时刻最多两人在场
+2. 开场与退场序列完整；所有 LayoutAppear / LayoutClear 一律采用槽位原地渐变淡入淡出（from == to, offset=0, moveSpeed Normal），严禁 LeftOver/RightOver 滑入滑出；任意时刻最多两人在场
 3. speaker 与 modelId 必须来自对照表；每条 Talk 只写 content、不写 ttsText；动作幅度小而自然，禁止大动作
 4. models=[{"id":<所选角色modelId>,"model":"<对照表中的model路径>","normal_scale":2.1,"small_scale":1.8,"anchor":0.5}]（多角色按登场顺序排列）
 5. images=[{"id":1,"image":"<从可用背景清单按氛围选择的背景名或 id>"}]

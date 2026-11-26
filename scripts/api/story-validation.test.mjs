@@ -435,17 +435,17 @@ test('keeps configured emotion labels and clears unknown ones', () => {
   assert.equal(clearedTalk.data.emotion, '')
 })
 
-test('preserves explicit LeftOver/RightOver walk-ins and under=true raises', () => {
+test('normalizes LeftOver/RightOver walk-ins and under=true to pure in-place fade (no slide)', () => {
   const story = makeStory()
   story.snippets[1].data.from = { side: 'LeftOver', offset: 0 }
-  story.snippets[2].data.from = { side: 'Right', offset: 0, under: true }
+  story.snippets[2].data.from = { side: 'Right', offset: 90, under: true }
   story.snippets[6].data.to = { side: 'RightOver', offset: 0 }
   const { story: fixed } = validateAndFixStory(story, makeView())
   const appears = fixed.snippets.filter((snippet) => snippet.type === 'LayoutAppear')
   const clears = fixed.snippets.filter((snippet) => snippet.type === 'LayoutClear')
-  assert.deepEqual(appears[0].data.from, { side: 'LeftOver', offset: 0 })
-  assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 0, under: true })
-  assert.deepEqual(clears[0].data.to, { side: 'RightOver', offset: 0 })
+  assert.deepEqual(appears[0].data.from, { side: 'Left', offset: 0 })
+  assert.deepEqual(appears[1].data.from, { side: 'Right', offset: 0 })
+  assert.deepEqual(clears[0].data.to, { side: 'Left', offset: 0 })
 })
 
 test('supports ThreeMode with three simultaneous characters and rejects four on stage', () => {

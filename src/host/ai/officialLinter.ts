@@ -138,10 +138,12 @@ function estimateSnippetDurationSec(snippet: JsonRecord, windowOpen: boolean): n
 function isTransitionOrBreak(snippet: JsonRecord): boolean {
   const kind = str(snippet.type)
   const data = isRecord(snippet.data) ? snippet.data : {}
-  if (kind === 'BlackOut' || kind === 'SekaiOut' || kind === 'Telop') return true
+  if (kind === 'BlackOut' || kind === 'SekaiOut' || kind === 'Telop' || kind === 'FullScreenText') {
+    return true
+  }
   if (kind === 'SideFade' && str(data.mode).toLowerCase() === 'out') return true
-  if (kind === 'Move') return true
-  if (kind === 'Motion') return true
+  if (kind === 'Wait' && num(data.duration, 0) >= 300) return true
+  if (kind === 'LayoutClear') return true
   return false
 }
 
@@ -464,9 +466,9 @@ export function lintOfficialStory(
   if (stageViolationCount > 0) issues.push(`舞台槽位/人数违规 ${stageViolationCount} 处`)
   const inPlaceAppearShare = appearCount > 0 ? inPlaceAppearCount / appearCount : 1
   const inPlaceClearShare = clearCount > 0 ? inPlaceClearCount / clearCount : 1
-  if (slideEntryExitCount >= 2 && (inPlaceAppearShare < 0.6 || inPlaceClearShare < 0.6)) {
-    warnings.push(
-      `存在 ${slideEntryExitCount} 处画外滑入/滑出（原地淡入占比 ${(inPlaceAppearShare * 100).toFixed(0)}%，原地淡出占比 ${(inPlaceClearShare * 100).toFixed(0)}%），官方 PJSK 默认使用槽位原地淡入淡出（from.side === to.side）`
+  if (slideEntryExitCount > 0) {
+    issues.push(
+      `存在 ${slideEntryExitCount} 处滑动入场/退场（原地淡入占比 ${(inPlaceAppearShare * 100).toFixed(0)}%，原地淡出占比 ${(inPlaceClearShare * 100).toFixed(0)}%），一律要求槽位原地渐变（from.side === to.side, offset: 0）`
     )
   }
   if (staggeredListenerMotionCount > 0) {
@@ -511,14 +513,15 @@ export function lintOfficialStory(
 export function enforceOfficialStoryInvariants(
   story: JsonRecord,
   view: CatalogView,
-  warn: (message: string) => void
+  rawWarn?: (message: string) => void
 ): OfficialLintReport {
+  const warn = typeof rawWarn === 'function' ? rawWarn : () => {}
   const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
 
-  // 1) Talk.delay == 0 >= 85%：去掉 0 < delay <= 0.25 的机械小停顿，保留 >= 0.5s 刻意留白
+  // 1) Talk.delay == 0 >= 85%：去掉 0 < delay <= 0.25 的机械小停顿；若仍低于 85%，按从小到大裁剪多余停顿以保留真正重停顿
   const talks = snippets.filter((s) => s.type === 'Talk')
   if (talks.length >= 3) {
-    const zeroCount = talks.filter((s) => num(s.delay, 0) === 0).length
+    let zeroCount = talks.filter((s) => num(s.delay, 0) === 0).length
     if (zeroCount / talks.length < 0.85) {
       let cleared = 0
       for (const talk of talks) {
@@ -526,12 +529,73 @@ export function enforceOfficialStoryInvariants(
         if (d > 0 && d <= 0.25) {
           talk.delay = 0
           cleared += 1
+          zeroCount += 1
+        }
+      }
+      if (zeroCount / talks.length < 0.85) {
+        const minZero = Math.ceil(talks.length * 0.85)
+        const remaining = talks
+          .filter((t) => num(t.delay, 0) > 0)
+          .sort((a, b) => num(a.delay, 0) - num(b.delay, 0))
+        for (const talk of remaining) {
+          if (zeroCount >= minZero) break
+          talk.delay = 0
+          cleared += 1
+          zeroCount += 1
         }
       }
       if (cleared > 0) {
-        warn(`[Linter] 已将 ${cleared} 条机械微停顿 (<=0.25s) 归零，对齐官方 93% delay=0 节奏`)
+        warn(`[Linter] 已将 ${cleared} 条多余句前停顿归零，对齐官方 >=85% delay=0 节奏`)
       }
     }
+  }
+
+  // 1.5) 清理无实际停顿/转场前的误触 closeWindowOnFinish（避免连续对白间因瞬时 Motion/PlaySe/ChangeBgm 导致对话框闪灭）
+  let strippedSpuriousCloses = 0
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    if (str(s.type) !== 'Talk' || !isRecord(s.data) || s.data.closeWindowOnFinish !== true) continue
+    let hasRealBreakBeforeNextTalk = false
+    let foundNextTalk = false
+    for (let j = i + 1; j < snippets.length; j++) {
+      const next = snippets[j]
+      const nKind = str(next?.type)
+      const nData = isRecord(next?.data) ? next.data : {}
+      if (
+        nKind === 'Wait' &&
+        num(nData.duration, 0) >= 300
+      ) {
+        hasRealBreakBeforeNextTalk = true
+        break
+      }
+      if (
+        nKind === 'BlackOut' ||
+        nKind === 'SideFade' ||
+        nKind === 'SekaiOut' ||
+        nKind === 'Telop' ||
+        nKind === 'FullScreenText' ||
+        nKind === 'LayoutClear' ||
+        nKind === 'LayoutAppear' ||
+        nKind === 'HideTalk'
+      ) {
+        hasRealBreakBeforeNextTalk = true
+        break
+      }
+      if (nKind === 'Talk') {
+        if (num(next?.delay, 0) >= 0.3) {
+          hasRealBreakBeforeNextTalk = true
+        }
+        foundNextTalk = true
+        break
+      }
+    }
+    if (foundNextTalk && !hasRealBreakBeforeNextTalk) {
+      delete s.data.closeWindowOnFinish
+      strippedSpuriousCloses += 1
+    }
+  }
+  if (strippedSpuriousCloses > 0) {
+    warn(`[Linter] 已移除 ${strippedSpuriousCloses} 处瞬时动作/音效前多余的 closeWindowOnFinish`)
   }
 
   // 2) 去 <0.4s 入场动作连打 & 转场前收窗

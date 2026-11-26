@@ -277,9 +277,8 @@ function isMotionMoodCompatible(params: {
   const isGenuineShock = emo === '惊讶' || (GENUINE_SHOCK_TEXT_RE.test(text) && emo !== '伤心')
   const isTense =
     params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble' || emo === '害怕'
-  const isJoyfulMotion = /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing/.test(
-    lower
-  )
+  const isJoyfulMotion =
+    /glad|happy|cheer|joy|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(lower)
   const isNegativeMotion = /angry|disgust|sad|cry|sigh/.test(lower)
   if (isTense && isJoyfulMotion) return false
   if (mood === 'smile' && !params.prevTense && isNegativeMotion) return false
@@ -305,6 +304,19 @@ function isMotionMoodCompatible(params: {
   return true
 }
 
+function ensureRealCatalogAnimation(
+  view: CatalogView,
+  modelId: number,
+  field: 'motion' | 'facial',
+  candidate: string
+): string {
+  const clean = candidate.trim()
+  if (!clean) return ''
+  const choices = view.animationChoices(modelId, field)
+  if (choices.size === 0) return clean
+  return view.canonicalAnimation(modelId, field, clean) ?? ''
+}
+
 function pickCompatibleMotionFallback(
   view: CatalogView,
   modelId: number,
@@ -313,26 +325,37 @@ function pickCompatibleMotionFallback(
   avoidMotion?: string
 ): string {
   const model = view.modelById(modelId)
-  if (!model) return view.defaultMotion(modelId)
-  const rawCandidates = view.promptMotions(model).filter((m) => !isStandingMotion(m))
-  if (rawCandidates.length === 0) return view.defaultMotion(modelId)
-  // 优先同一套 w-normal-* 常规风格动作，避免莫名跳切到 w-cool-* / w-cute-* 风格
-  const candidates = [
-    ...rawCandidates.filter((m) => /^w-normal/i.test(m)),
-    ...rawCandidates.filter((m) => !/^w-normal/i.test(m))
+  if (!model) return ''
+  const promptSet = new Set(view.promptMotions(model))
+  const rawPrompt = view.promptMotions(model).filter((m) => !isStandingMotion(m))
+  const rawAll = (model.motions ?? []).filter((m) => !isStandingMotion(m) && !promptSet.has(m))
+  // 先在精选词表内选，若缺失再扩展到该模型真实全量 motions（防止模型缺少 w-normal-sad01 时回退失败）
+  const sortNormalFirst = (arr: string[]): string[] => [
+    ...arr.filter((m) => /^w-normal/i.test(m)),
+    ...arr.filter((m) => !/^w-normal/i.test(m))
   ]
+  const candidates = [...sortNormalFirst(rawPrompt), ...sortNormalFirst(rawAll)]
+  const isTenseMood = mood === 'sad' || mood === 'angry' || mood === 'trouble'
+  const safeFilter = (m: string): boolean =>
+    !isTenseMood || !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)
+  const filteredCandidates = candidates.filter(safeFilter)
+  const pool = filteredCandidates.length > 0 ? filteredCandidates : candidates
+  if (pool.length === 0) {
+    return ensureRealCatalogAnimation(view, modelId, 'motion', view.defaultMotion(modelId))
+  }
   if (typeof facialValidationApi.pickMoodMatchedMotion === 'function') {
     const picked = facialValidationApi.pickMoodMatchedMotion(
-      candidates,
+      pool,
       mood,
       model.path,
       restrainedRole,
       avoidMotion ? [avoidMotion] : undefined
     )
-    if (picked) return picked
+    const verified = ensureRealCatalogAnimation(view, modelId, 'motion', picked)
+    if (verified) return verified
   }
   const hintsByMood: Record<facialSemanticsMod.TargetMood, RegExp[]> = {
-    sad: [/sad|cry|sigh|lookdown/i, /trouble|think/i],
+    sad: [/sad|cry|sigh|lookdown/i, /trouble|think|shakehead/i],
     trouble: [/trouble|think|sigh|lookaway/i, /nod/i],
     angry: [/angry|disgust|shakehead/i, /forward|serious/i],
     surprise: [/surprise|tilthead|forward/i, /nod/i],
@@ -346,17 +369,20 @@ function pickCompatibleMotionFallback(
   }
   const tiers = hintsByMood[mood] ?? hintsByMood.neutral
   for (const hint of tiers) {
-    const match = candidates.find((m) => m !== avoidMotion && hint.test(m))
-    if (match) return match
+    const match = pool.find((m) => m !== avoidMotion && hint.test(m))
+    const verified = match ? ensureRealCatalogAnimation(view, modelId, 'motion', match) : ''
+    if (verified) return verified
   }
   for (const hint of tiers) {
-    const match = candidates.find((m) => hint.test(m))
-    if (match) return match
+    const match = pool.find((m) => hint.test(m))
+    const verified = match ? ensureRealCatalogAnimation(view, modelId, 'motion', match) : ''
+    if (verified) return verified
   }
-  return (
-    candidates.find((m) => m !== avoidMotion && !/glad|angry|sad|cry|greeting|tilthead/i.test(m)) ??
-    ''
-  )
+  const safeFinal =
+    pool.find(
+      (m) => m !== avoidMotion && !/glad|happy|cheer|joy|angry|sad|cry|greeting|tilthead/i.test(m)
+    ) ?? pool[0]
+  return safeFinal ? ensureRealCatalogAnimation(view, modelId, 'motion', safeFinal) : ''
 }
 
 function pickCompatibleFacialFallback(
@@ -369,8 +395,12 @@ function pickCompatibleFacialFallback(
   options: { isMonologue?: boolean; isListener?: boolean; avoidFacial?: string } = {}
 ): string {
   const model = view.modelById(modelId)
-  if (!model) return view.neutralFacial(modelId)
-  const facials = view.promptFacials(model)
+  if (!model) return ensureRealCatalogAnimation(view, modelId, 'facial', view.neutralFacial(modelId))
+  const promptSet = new Set(view.promptFacials(model))
+  const facials = [
+    ...view.promptFacials(model),
+    ...(model.facials ?? []).filter((f) => !promptSet.has(f))
+  ]
   const mood = inferValidationMood(content, emotion)
   const targetMood: facialSemanticsMod.TargetMood =
     prevTense && mood === 'smile' && emotion !== '开心' ? 'neutral' : mood
@@ -380,11 +410,12 @@ function pickCompatibleFacialFallback(
     model.path,
     restrainedRole
   )
+  const verifiedPicked = ensureRealCatalogAnimation(view, modelId, 'facial', picked)
   if (
-    picked &&
-    picked !== options.avoidFacial &&
+    verifiedPicked &&
+    verifiedPicked !== options.avoidFacial &&
     isFacialStrictlyCompatible({
-      facial: picked,
+      facial: verifiedPicked,
       modelPath: model.path,
       emotion,
       content,
@@ -394,7 +425,7 @@ function pickCompatibleFacialFallback(
       restrainedRole
     })
   ) {
-    return picked
+    return verifiedPicked
   }
   const compatCandidate = facials.find(
     (f) =>
@@ -410,13 +441,17 @@ function pickCompatibleFacialFallback(
         restrainedRole
       })
   )
-  if (compatCandidate) return compatCandidate
-  return facialSemanticsMod.pickNeutralFacial(
+  if (compatCandidate) {
+    const verified = ensureRealCatalogAnimation(view, modelId, 'facial', compatCandidate)
+    if (verified) return verified
+  }
+  const neutral = facialSemanticsMod.pickNeutralFacial(
     facials,
     model.defaultFacial,
     model.path,
     restrainedRole
   )
+  return ensureRealCatalogAnimation(view, modelId, 'facial', neutral)
 }
 
 function repairActingMismatches(
@@ -732,12 +767,28 @@ export function ensureListenerReactivity(
         continue
       }
 
+      // 若听者当前已持续挂着 cry 哭泣表情，允许自然延续更长时间，避免机械切回 closeeye 破坏持续哭戏
+      const currentLF = lastListenerFacial.get(listenerId) ?? ''
+      const currentLFRole = currentLF
+        ? facialSemanticsMod.inspectModelFacial(listenerModel.path, currentLF).role
+        : 'other'
+      if ((emotion === '伤心' || prevTense) && currentLFRole === 'cry' && nextIdle < 6) {
+        idleTalks.set(listenerId, nextIdle)
+        continue
+      }
+
       const restrained = isRestrainedActor(listenerModel.name, listenerModel.path)
       let pickedFacial = ''
 
+      const listenerFacialPool = [
+        ...view.promptFacials(listenerModel),
+        ...(listenerModel.facials ?? []).filter(
+          (f) => !view.promptFacials(listenerModel).includes(f)
+        )
+      ]
       if (typeof facialValidationApi.recommendActingForLine === 'function') {
         const rec = facialValidationApi.recommendActingForLine({
-          facials: view.promptFacials(listenerModel),
+          facials: listenerFacialPool,
           motions: view.promptMotions(listenerModel),
           modelPath: listenerModel.path,
           content,
@@ -1118,9 +1169,12 @@ function validateActions(
  * 严格舞台校验：支持 Normal（<=2人，Left/Right 或单人 Center）与 Three（<=3人，Left/Center/Right）；
  * 不在场说话、重复入场、槽位冲突、4人以上同台都会抛错，由上层重写（不删角色或台词）。
  */
-function normalizeScene(story: JsonRecord): void {
+function normalizeScene(story: JsonRecord, warn?: (message: string) => void): void {
   const visible = new Map<number, JsonRecord>()
   let layoutMode: 'Normal' | 'Three' = 'Normal'
+  const rewrittenSnippets: JsonRecord[] = []
+  let normalizedSlides = 0
+  let convertedMoves = 0
 
   const checkSlotAvailable = (
     targetSide: string,
@@ -1152,6 +1206,7 @@ function normalizeScene(story: JsonRecord): void {
       }
       layoutMode = mode
       data.mode = mode
+      rewrittenSnippets.push(snippet)
       continue
     }
     if (kind === 'LayoutAppear') {
@@ -1166,19 +1221,23 @@ function normalizeScene(story: JsonRecord): void {
         )
       }
       const toRaw = parsePosition(data.to, 'Left')
+      const fromRaw = parsePosition(data.from, toStr(toRaw.side))
       const side = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : 'Left'
-      const position: JsonRecord = {
-        side,
-        offset: toNumber(toRaw.offset, 0),
-        ...(toRaw.under ? { under: true } : {})
+      if (
+        isOffscreenPosition(fromRaw) ||
+        isOffscreenPosition(toRaw) ||
+        toStr(fromRaw.side) !== side ||
+        toNumber(fromRaw.offset, 0) !== 0 ||
+        toNumber(toRaw.offset, 0) !== 0
+      ) {
+        normalizedSlides += 1
       }
+      const position: JsonRecord = { side, offset: 0 }
       checkSlotAvailable(side, undefined, label)
       data.to = position
-
-      const fromRaw = parsePosition(data.from, side)
-      // 默认原地淡入（from == to, offset: 0）；仅保留明确的 LeftOver/RightOver/Under 物理入场
-      data.from = isOffscreenPosition(fromRaw) ? fromRaw : { ...position }
+      data.from = { side, offset: 0 }
       visible.set(modelId, position)
+      rewrittenSnippets.push(snippet)
       continue
     }
     if (kind === 'LayoutClear' || kind === 'Move') {
@@ -1186,23 +1245,84 @@ function normalizeScene(story: JsonRecord): void {
         throw new Error(`${label} 角色不在场`)
       }
       const current = visible.get(modelId)!
-      data.from = { ...current }
+      const currentSide = toStr(current.side)
       if (kind === 'LayoutClear') {
-        const toRaw = parsePosition(data.to, toStr(current.side))
-        // 默认原地淡出（from == to）；仅保留明确的 LeftOver/RightOver/Under 物理离场
-        data.to = isOffscreenPosition(toRaw) ? toRaw : { ...current }
-        visible.delete(modelId)
-      } else {
-        const toRaw = parsePosition(data.to, toStr(current.side))
-        const side = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : toStr(current.side)
-        checkSlotAvailable(side, modelId, label)
-        const nextPos: JsonRecord = {
-          side,
-          offset: toNumber(toRaw.offset, 0),
-          ...(toRaw.under ? { under: true } : {})
+        const toRaw = parsePosition(data.to, currentSide)
+        if (
+          isOffscreenPosition(toRaw) ||
+          toStr(toRaw.side) !== currentSide ||
+          toNumber(toRaw.offset, 0) !== 0 ||
+          toNumber(current.offset, 0) !== 0
+        ) {
+          normalizedSlides += 1
         }
-        data.to = nextPos
-        visible.set(modelId, nextPos)
+        data.from = { side: currentSide, offset: 0 }
+        data.to = { side: currentSide, offset: 0 }
+        visible.delete(modelId)
+        rewrittenSnippets.push(snippet)
+      } else {
+        const toRaw = parsePosition(data.to, currentSide)
+        const targetSide = ON_STAGE_SIDES.has(toStr(toRaw.side))
+          ? toStr(toRaw.side)
+          : currentSide
+        checkSlotAvailable(targetSide, modelId, label)
+        if (targetSide !== currentSide) {
+          // 严禁槽位间滑动（如 Center <-> Left/Right）：改为原地渐变淡出 -> 目标槽位原地渐变淡入
+          convertedMoves += 1
+          const motion = toStr(data.motion)
+          const facial = toStr(data.facial)
+          const origWait = snippet.wait !== false
+          const origBehavior =
+            snippet.progressBehavior === 'Now' || snippet.progressBehavior === 'WaitFinished'
+              ? snippet.progressBehavior
+              : origWait
+                ? 'WaitFinished'
+                : 'Now'
+          rewrittenSnippets.push({
+            type: 'LayoutClear',
+            wait: true,
+            progressBehavior: 'WaitFinished',
+            delay: toNumber(snippet.delay, 0),
+            data: {
+              modelId,
+              from: { side: currentSide, offset: 0 },
+              to: { side: currentSide, offset: 0 },
+              motion: '',
+              facial: '',
+              moveSpeed: 'Normal'
+            }
+          })
+          rewrittenSnippets.push({
+            type: 'LayoutAppear',
+            wait: origWait,
+            progressBehavior: origBehavior,
+            delay: 0,
+            data: {
+              modelId,
+              from: { side: targetSide, offset: 0 },
+              to: { side: targetSide, offset: 0 },
+              motion,
+              facial,
+              facialFirst: true,
+              moveSpeed: 'Normal',
+              hologram: false
+            }
+          })
+          visible.set(modelId, { side: targetSide, offset: 0 })
+        } else {
+          if (
+            isOffscreenPosition(toRaw) ||
+            toNumber(toRaw.offset, 0) !== 0 ||
+            toNumber(current.offset, 0) !== 0
+          ) {
+            normalizedSlides += 1
+          }
+          const nextPos: JsonRecord = { side: targetSide, offset: 0 }
+          data.from = { side: currentSide, offset: 0 }
+          data.to = nextPos
+          visible.set(modelId, nextPos)
+          rewrittenSnippets.push(snippet)
+        }
       }
       continue
     }
@@ -1210,6 +1330,7 @@ function normalizeScene(story: JsonRecord): void {
       if (typeof modelId !== 'number' || !visible.has(modelId)) {
         throw new Error(`${label} 角色不在场`)
       }
+      rewrittenSnippets.push(snippet)
       continue
     }
     if (kind === 'Talk' || kind === 'Motion' || kind === 'DoParam') {
@@ -1234,6 +1355,15 @@ function normalizeScene(story: JsonRecord): void {
         snippet.wait = true
       }
     }
+    rewrittenSnippets.push(snippet)
+  }
+
+  story.snippets = rewrittenSnippets
+  if (normalizedSlides > 0) {
+    warn?.(`已将 ${normalizedSlides} 处滑动入出场/偏移规范化为槽位原地渐变（offset: 0）`)
+  }
+  if (convertedMoves > 0) {
+    warn?.(`已将 ${convertedMoves} 处跨槽位 Move 滑动转换为原地渐变切镜（LayoutClear + LayoutAppear）`)
   }
 }
 
@@ -1767,11 +1897,18 @@ export function validateAndFixStory(
       for (const field of ['motion', 'facial'] as const) {
         const rawAnim = cleanPath(data[field])
         if (!rawAnim) {
-          data[field] = field === 'facial' ? view.defaultFacial(modelId) : ''
+          data[field] =
+            field === 'facial'
+              ? ensureRealCatalogAnimation(view, modelId, 'facial', view.defaultFacial(modelId))
+              : ''
           continue
         }
         const fixed = fixAnimation(view, modelId, field, rawAnim)
-        data[field] = fixed ?? (field === 'facial' ? view.defaultFacial(modelId) : '')
+        data[field] =
+          fixed ??
+          (field === 'facial'
+            ? ensureRealCatalogAnimation(view, modelId, 'facial', view.defaultFacial(modelId))
+            : '')
       }
       if (isStandingMotion(toStr(data.motion))) {
         data.motion = ''
@@ -1783,15 +1920,10 @@ export function validateAndFixStory(
       data.hologram = toBool(data.hologram, false)
       const toRaw = parsePosition(data.to, 'Left')
       const toSide = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : 'Left'
-      const toPos: JsonRecord = {
-        side: toSide,
-        offset: toNumber(toRaw.offset, 0),
-        ...(toRaw.under ? { under: true } : {})
-      }
+      const toPos: JsonRecord = { side: toSide, offset: 0 }
       data.to = toPos
-      const fromRaw = parsePosition(data.from, toSide)
-      // 默认原地淡入（from == to, offset: 0），保留 motion；LeftOver/RightOver/Under 保留物理走入
-      data.from = isOffscreenPosition(fromRaw) ? fromRaw : { ...toPos }
+      // 严禁滑动入场：一律槽位原地渐变淡入（from == to, offset: 0）
+      data.from = { side: toSide, offset: 0 }
       delete data.fadeIn
       snippet.data = data
       continue
@@ -1802,11 +1934,12 @@ export function validateAndFixStory(
       data.moveSpeed = VALID_MOVE_SPEEDS.has(toStr(data.moveSpeed))
         ? toStr(data.moveSpeed)
         : 'Normal'
-      const fromPos = parsePosition(data.from, 'Center')
+      const fromRaw = parsePosition(data.from, 'Center')
+      const fromSide = ON_STAGE_SIDES.has(toStr(fromRaw.side)) ? toStr(fromRaw.side) : 'Center'
+      const fromPos: JsonRecord = { side: fromSide, offset: 0 }
       data.from = fromPos
-      const toRaw = parsePosition(data.to, toStr(fromPos.side))
-      // 默认原地淡出（from == to）；LeftOver/RightOver/Under 保留物理走出
-      data.to = isOffscreenPosition(toRaw) ? toRaw : { ...fromPos }
+      // 严禁滑动退场：一律槽位原地渐变淡出（from == to, offset: 0）
+      data.to = { side: fromSide, offset: 0 }
       let motion = fixAnimation(view, modelId, 'motion', data.motion) ?? ''
       if (isStandingMotion(motion)) motion = ''
       data.motion = motion
@@ -1859,8 +1992,16 @@ export function validateAndFixStory(
       }
       const motion = fixAnimation(view, modelId, 'motion', data.motion)
       const facial = fixAnimation(view, modelId, 'facial', data.facial)
-      data.motion = motion ?? (hasActions ? '' : view.defaultMotion(modelId))
-      data.facial = facial ?? (hasActions ? '' : view.defaultFacial(modelId))
+      data.motion =
+        motion ??
+        (hasActions
+          ? ''
+          : ensureRealCatalogAnimation(view, modelId, 'motion', view.defaultMotion(modelId)))
+      data.facial =
+        facial ??
+        (hasActions
+          ? ''
+          : ensureRealCatalogAnimation(view, modelId, 'facial', view.defaultFacial(modelId)))
       data.facialFirst = toBool(data.facialFirst, true)
       snippet.data = data
       continue
@@ -2144,7 +2285,7 @@ export function validateAndFixStory(
   ensureOpeningAndEnding(story)
   compileStoryBgm(story, view, warn)
   dedupeConsecutiveChangeBgm(story, warn)
-  normalizeScene(story)
+  normalizeScene(story, warn)
   repairActingMismatches(story, view, warn)
   ensureListenerReactivity(story, view, warn)
   splitOverflowTalks(story)

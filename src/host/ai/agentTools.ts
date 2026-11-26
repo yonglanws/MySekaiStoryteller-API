@@ -2016,11 +2016,13 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     story: StoryData
     warnings: string[]
     actingReport: ActingFidelityReport
+    postActingReport: ActingFidelityReport
     postOfficialReport: ReturnType<typeof officialLinterMod.lintOfficialStory>
     dialogueLint: ReturnType<typeof lintDialogueFidelity>
     bodyMotions: Record<string, number>
     stageLeaks: number[]
     officialPassed: boolean
+    postActingPassed: boolean
     readyToFinalize: boolean
   } => {
     const { story, warnings } = validateAndFixStory(candidate, view, logger, {
@@ -2030,6 +2032,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     // 位移索引或 repairActingMismatches 掩盖尚未修复的表情/动作冲突。
     const rawAuditStory = buildRawAuditStory(candidate, story.models, story.images)
     const actingReport = runActingAndFidelityAudit(rawAuditStory, view)
+    const postActingReport = runActingAndFidelityAudit(story, view)
     const postOfficialReport = officialLinterMod.lintOfficialStory(story, view)
     const dialogueLines = extractDialogueLinesFromStory(
       rawAuditStory as unknown as Record<string, unknown>
@@ -2064,15 +2067,21 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       postOfficialReport.passed &&
       (actingReport.talkCount < 6 || actingReport.zeroMotionModelIds.length === 0) &&
       stageLeaks.length === 0
+    const postActingPassed =
+      postActingReport.passed &&
+      (postActingReport.talkCount < 6 || postActingReport.zeroMotionModelIds.length === 0) &&
+      !dialogueLint.issues.some((i) => i.severity === 'high')
     return {
       story,
       warnings,
       actingReport,
+      postActingReport,
       postOfficialReport,
       dialogueLint,
       bodyMotions,
       stageLeaks,
       officialPassed,
+      postActingPassed,
       readyToFinalize:
         officialPassed &&
         actingReport.passed &&
@@ -2088,6 +2097,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         schemaValid: true,
         officialPassed: audited.officialPassed,
         actingPassed: audited.actingReport.passed,
+        postActingPassed: audited.postActingPassed,
         actingScore: audited.actingReport.score,
         readyToFinalize: audited.readyToFinalize,
         directorReviewed: Boolean(directorReview),
@@ -2165,6 +2175,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       labelFn: (item: string) => string,
       maxPerStem = 2
     ): string[] => {
+      const isSadMood = tokens.some((t) => /^(sad|cry|crying|trouble|worry|伤心|难过|哭|困扰|绝望)$/i.test(t))
       const scored =
         tokens.length === 0
           ? items
@@ -2173,9 +2184,15 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 const hay = `${item} ${labelFn(item)}`.toLowerCase()
                 const hits = tokens.filter((tok) => hay.includes(tok)).length
                 const normalBonus = /^w-normal/i.test(item) ? 0.25 : 0
-                return { item, score: hits + normalBonus, hits, idx }
+                const wrySmilePenalty =
+                  isSadMood && /\b(wry_smile|tearful_smile|genuine_smile|closed_smile|smile)\b/.test(hay)
+                    ? -2
+                    : 0
+                const trueCryBonus =
+                  isSadMood && wrySmilePenalty === 0 && /\b(cry|sad)\b/.test(hay) ? 0.5 : 0
+                return { item, score: hits + normalBonus + trueCryBonus + wrySmilePenalty, hits, idx }
               })
-              .filter((entry) => entry.hits > 0)
+              .filter((entry) => entry.hits > 0 && entry.score > 0)
               .sort((a, b) => b.score - a.score || a.idx - b.idx)
               .map((entry) => entry.item)
       const base = scored.length > 0 ? scored : items
@@ -3106,15 +3123,27 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 const primaryIdx = acts.findIndex((a) => a && a.modelId === speakerId)
                 const baseAct: Record<string, unknown> =
                   primaryIdx >= 0 ? { ...acts[primaryIdx] } : { at: 0, modelId: speakerId }
+                const resolveAnim = (
+                  mid: number,
+                  kind: 'motion' | 'facial',
+                  rawVal: string
+                ): string | null => {
+                  const trimmed = rawVal.trim()
+                  if (!trimmed) return ''
+                  if (mid < 0) return trimmed
+                  return view.canonicalAnimation(mid, kind, trimmed)
+                }
                 if (hasMotionArg) {
-                  if ((opObj.motion as string).trim())
-                    baseAct.motion = (opObj.motion as string).trim()
-                  else delete baseAct.motion
+                  const canonical = resolveAnim(speakerId, 'motion', opObj.motion as string)
+                  if (canonical === '') delete baseAct.motion
+                  else if (canonical) baseAct.motion = canonical
+                  else appliedNotes.push(`ignored_invalid_motion@${idx}:${String(opObj.motion)}`)
                 }
                 if (hasFacialArg) {
-                  if ((opObj.facial as string).trim())
-                    baseAct.facial = (opObj.facial as string).trim()
-                  else delete baseAct.facial
+                  const canonical = resolveAnim(speakerId, 'facial', opObj.facial as string)
+                  if (canonical === '') delete baseAct.facial
+                  else if (canonical) baseAct.facial = canonical
+                  else appliedNotes.push(`ignored_invalid_facial@${idx}:${String(opObj.facial)}`)
                 }
                 if (baseAct.motion || baseAct.facial) {
                   if (primaryIdx >= 0) acts[primaryIdx] = baseAct
@@ -3177,12 +3206,18 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                       ? { ...acts[existingIdx], at: desiredAt, modelId: lModelId }
                       : { at: desiredAt, modelId: lModelId }
                   if (lMotion !== undefined) {
-                    if (lMotion) nextAct.motion = lMotion
-                    else delete nextAct.motion
+                    if (lMotion === '') delete nextAct.motion
+                    else {
+                      const canonM = view.canonicalAnimation(lModelId, 'motion', lMotion)
+                      if (canonM) nextAct.motion = canonM
+                    }
                   }
                   if (lFacial !== undefined) {
-                    if (lFacial) nextAct.facial = lFacial
-                    else delete nextAct.facial
+                    if (lFacial === '') delete nextAct.facial
+                    else {
+                      const canonF = view.canonicalAnimation(lModelId, 'facial', lFacial)
+                      if (canonF) nextAct.facial = canonF
+                    }
                   }
                   if (nextAct.motion || nextAct.facial) {
                     if (existingIdx >= 0) acts[existingIdx] = nextAct
@@ -3196,8 +3231,25 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 d.actions = acts
               }
             } else {
-              if (hasMotionArg) d.motion = opObj.motion
-              if (hasFacialArg) d.facial = opObj.facial
+              const targetModelId = typeof d.modelId === 'number' ? d.modelId : -1
+              if (hasMotionArg) {
+                const rawM = String(opObj.motion ?? '').trim()
+                if (!rawM) d.motion = ''
+                else {
+                  const canonM =
+                    targetModelId >= 0 ? view.canonicalAnimation(targetModelId, 'motion', rawM) : rawM
+                  if (canonM) d.motion = canonM
+                }
+              }
+              if (hasFacialArg) {
+                const rawF = String(opObj.facial ?? '').trim()
+                if (!rawF) d.facial = ''
+                else {
+                  const canonF =
+                    targetModelId >= 0 ? view.canonicalAnimation(targetModelId, 'facial', rawF) : rawF
+                  if (canonF) d.facial = canonF
+                }
+              }
             }
           }
           target.data = d
@@ -3273,7 +3325,12 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
 
       const audit = runCompactAudit(savedDraft)
       const wantsFinalize = args.finalizeIfReady === true
-      if (wantsFinalize && audit.schemaValid && audit.officialPassed && audit.readyToFinalize) {
+      if (
+        wantsFinalize &&
+        audit.schemaValid &&
+        audit.officialPassed &&
+        (audit.readyToFinalize || audit.postActingPassed)
+      ) {
         finalized = true
         return JSON.stringify({
           reviewed: true,
@@ -3564,8 +3621,11 @@ export async function runAgenticStoryGeneration(
 
   const castSummary = view
     .primaryModels()
-    .slice(0, 14)
-    .map((m) => `${view.shortName(m)}(modelId=${m.id}, path=${m.path})`)
+    .map((m, idx) =>
+      idx < 14
+        ? `${view.shortName(m)}(modelId=${m.id}, path=${m.path})`
+        : `${view.shortName(m)}(modelId=${m.id})`
+    )
     .join('；')
   const emotionNote =
     emotionLabels.length > 0
@@ -3576,12 +3636,12 @@ export async function runAgenticStoryGeneration(
     '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
     '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se"], queries: [...] })` + `search_official_corpus({ query })`；**不要**按角色逐一重复查 `lookup_character` 或 `inspect_character_expressions`！',
     '- **第 2 步（直接起草）**：基于已获取的人设、表情/动作调色板与素材，直接起草完整高质量 StoryData 并调用 1 次 `save_story_draft`（复杂多幕可先 `plan_story_outline`）。**严禁**把整场几十句台词重发一遍给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`！`save_story_draft` 已自带全套规则体检与 `directorTelemetry`，**无需**再重复调用 `validate_story_draft` 或 `critique_story_draft`。',
-    '- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框切镜、原地 `Move` / 独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！',
+    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框原地淡入淡出切镜、独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
     '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
-    '1. **自然灵活、有呼吸感的表演（破除 4 动作循环，也拒绝机械乱动）**：从角色调色板中灵活选用丰富的表情（含 `face_sad_02+`/`face_cry_*`/`face_closeeye_*` 等层次）与动作变体（支持贴合气氛的跨风格动作如 `w-normal-*`/`w-adult-*`/`w-cool-*`/`w-cute-*`）；约 70%~80% 台词在句首 `at: 0` 配贴合语气的身体动作 + 表情，其余约 20%~25% 可省略 `motion` 自然保持姿态；跨句延续同一表情很自然（不必每句强行换脸），长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 `Motion`（`wait:false, delay:2.5~4.5`）演完句中神态变化。悲伤/绝望/独白禁误挂 `face_surprise_01`/`face_notice_01`/`face_shock_01`（真正惊愕除外），含泪自责禁误挂 `face_angry_01`，真冬保持克制内敛。',
-    '2. **电影感切镜、听者反应与原地淡入淡出**：近期官方 PJSK 剧集大量穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear`/`LayoutClear` 默认使用原地淡入淡出（`from.side === to.side, offset: 0`），避免全程僵在固定双人广角或滥用 `LeftOver`/`RightOver` 滑入滑出；听者反应优先用切镜、句间原地 `Move` / 独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
+    '1. **持续情绪与真伪笑脸分辨（严禁哭戏强颜欢笑/每句跳脸）**：泣不成声、哽咽、悲伤倾诉、冲突崩溃等情绪高潮段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句（可适度微调身体动作而不必每句硬换表情）；严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；只允许填写**该角色自身目录真实存在**的动作与表情名，切勿编造或跨角色套用不存在的动作（如没有 `w-normal-sad01` 的模型禁止强写）；真冬保持克制内敛。',
+    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**（切换单人思考模式先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入）；听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
     '3. **声画与节奏**：开场用 `ChangeBgm` 起乐（不要与顶层 `bgm` 冲突，严禁重复连续播同一首），情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白；物理/情绪节拍（脚步、奔跑、开门、衣料、惊觉、回忆）务必配 `PlaySe`（不要整场 0 音效）；夜晚/黄昏配 `AmbientColor`；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵，不要瞬间黑屏。',
-    '4. **凝练对白与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；转场与静默 `Motion` 前设 `closeWindowOnFinish: true`。',
+    '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''
   ]
@@ -3883,6 +3943,27 @@ export async function runAgenticStoryGeneration(
         switchToReactFallback = true
         break
       }
+      if (isFinalTurn) {
+        const recovered = recoverSavedDraftIfValid()
+        if (recovered) {
+          const review = toolkit.getDirectorReview()
+          logger.warn(
+            `[AI] Agentic 末轮响应失败（${error instanceof Error ? error.message : String(error)}），已直接采用工作区通过校验的草稿`
+          )
+          return {
+            story: recovered.story,
+            ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
+            warnings: recovered.warnings,
+            rounds,
+            latencyMs: totalLatency,
+            model: lastModel,
+            usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
+            toolCallsUsed,
+            modeUsed: 'native',
+            ...(review ? { directorReview: review } : {})
+          }
+        }
+      }
       throw error
     }
   }
@@ -3933,7 +4014,33 @@ export async function runAgenticStoryGeneration(
   for (let turn = 0; turn < maxToolTurns; turn++) {
     rounds += 1
     const isFinalTurn = turn >= maxToolTurns - 1
-    const res = await llm.chat(reactMessages, { json: true, signal })
+    let res
+    try {
+      res = await llm.chat(reactMessages, { json: true, signal })
+    } catch (error) {
+      if (isFinalTurn) {
+        const recovered = recoverSavedDraftIfValid()
+        if (recovered) {
+          const review = toolkit.getDirectorReview()
+          logger.warn(
+            `[AI] ReAct 末轮响应失败（${error instanceof Error ? error.message : String(error)}），已直接采用工作区通过校验的草稿`
+          )
+          return {
+            story: recovered.story,
+            ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
+            warnings: recovered.warnings,
+            rounds,
+            latencyMs: totalLatency,
+            model: lastModel,
+            usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
+            toolCallsUsed,
+            modeUsed: 'react-json',
+            ...(review ? { directorReview: review } : {})
+          }
+        }
+      }
+      throw error
+    }
     totalLatency += res.latencyMs
     lastModel = res.model
     addUsage(totalUsage, res.usage)

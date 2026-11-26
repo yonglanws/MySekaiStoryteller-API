@@ -588,9 +588,14 @@ export class StoryWriter {
       }
     } catch (error) {
       if (options.signal?.aborted) throw error
-      this.logger.warn(`[AI] Agentic 模式回退至 staged 流水线：${errorMessage(error)}`)
+      const reason = errorMessage(error)
+      this.logger.warn(`[AI] Agentic 模式回退至 staged 流水线：${reason}`)
       const fallback = await this.generateStaged({ prompt, view, personas, targetMinutes, options })
       fallback.meta.agentMode = 'staged-fallback'
+      fallback.meta.warnings = [
+        `[Agentic->staged-fallback] ${reason}`,
+        ...(fallback.meta.warnings ?? [])
+      ]
       return fallback
     }
   }
