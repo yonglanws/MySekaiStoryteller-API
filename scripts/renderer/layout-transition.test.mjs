@@ -417,7 +417,7 @@ test('LayoutClear matches hidden/in-place/slide fade offsets and visibility pree
   assert.equal(clock.now, 0)
   assert.equal(removed.length, 1)
 
-  // 2) 原地 Clear：0.15s delay + 0.1s fade = 250ms
+  // 2) 原地 Clear：0ms delay + 350ms (21f) fade = 350ms
   const appear2 = new LayoutAppearSnippet(app, {
     type: 'LayoutAppear',
     delay: 0,
@@ -447,9 +447,9 @@ test('LayoutClear matches hidden/in-place/slide fade offsets and visibility pree
     }
   })
   await clock.drive(clearInPlace.runSnippet())
-  assert.equal(round(clock.now - tStartInPlace), 250)
-  assert.equal(round(app.getModelById(2).calls.hides[0].startAt - tStartInPlace), 150)
-  assert.equal(round(app.getModelById(2).calls.hides[0].fadeMs), 100)
+  assert.equal(round(clock.now - tStartInPlace), 350)
+  assert.equal(round(app.getModelById(2).calls.hides[0].startAt - tStartInPlace), 0)
+  assert.equal(round(app.getModelById(2).calls.hides[0].fadeMs), 350)
   assert.equal(removed.at(-1).id, 2)
 
   // 3) 滑动 Clear (Slow = 766.667ms = 46 帧)：等 666.667ms 后淡出 100ms

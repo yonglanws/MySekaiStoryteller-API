@@ -5,7 +5,9 @@ import { visibleTextLength } from '../../../common/official/text'
 import { hasSpeakableSpeechText } from '../../../common/tts/speechText'
 import {
   APPEAR_FADE_TOTAL_MS,
+  APPEAR_IN_PLACE_FADE_TOTAL_MS,
   APPEAR_SHOWN_MOVE_MS,
+  CHARACTER_FADE_IN_PLACE_MS,
   CHARACTER_FADE_MS,
   CHARACTER_SHAKE_MS,
   FLASHBACK_DEFAULT_MS,
@@ -14,8 +16,8 @@ import {
   FULLSCREEN_CHAR_FADE_MS,
   FULLSCREEN_TEXT_HOLD_MS,
   FULLSCREEN_TEXT_PRE_DELAY_MS,
-  HIDE_DELAY_IN_PLACE_MS,
-  HIDE_IN_PLACE_TOTAL_MS,
+  HIDE_DELAY_IN_PLACE_SMOOTH_MS,
+  HIDE_IN_PLACE_SMOOTH_TOTAL_MS,
   MOVE_DURATION_FAST_MS,
   MOVE_DURATION_NORMAL_MS,
   MOVE_DURATION_SLOW_MS,
@@ -122,8 +124,8 @@ const SNIPPET_TYPE_DEFAULTS: Record<string, number> = {
   // 600~800ms 预算，否则每条都会累积几百毫秒的 planned/actual 漂移。
   ChangeBackgroundImage: 1,
   ChangeLayoutMode: 1,
-  LayoutAppear: APPEAR_FADE_TOTAL_MS,
-  LayoutClear: HIDE_IN_PLACE_TOTAL_MS,
+  LayoutAppear: APPEAR_IN_PLACE_FADE_TOTAL_MS,
+  LayoutClear: HIDE_IN_PLACE_SMOOTH_TOTAL_MS,
   Move: MOVE_DURATION_NORMAL_MS,
   Motion: 0,
   HideTalk: 0,
@@ -438,24 +440,25 @@ function calculatePathA_ContentBased(snippet: SnippetData): {
       const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
       if (snippet.type === 'LayoutAppear') {
-        // 官方 Appear 在 1 帧 alpha=0 + 0.1s 淡入后就算完成；新 view 没有滑入。
+        // 滑动 Appear 等 1 帧 alpha=0 + 0.1s 淡入；原地 Appear 等 1 帧 alpha=0 + 0.35s 平滑淡入。
         // 带 motion 且角色未显示时，类型分支延后一帧（at = frame + forced）。
         const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
-        const appearMs = APPEAR_FADE_TOTAL_MS + (hasMotion ? FRAME_MS : 0)
+        const baseAppearMs = moved ? APPEAR_FADE_TOTAL_MS : APPEAR_IN_PLACE_FADE_TOTAL_MS
+        const appearMs = baseAppearMs + (hasMotion ? FRAME_MS : 0)
         return {
           durationMs: appearMs,
           source: 'content_estimation',
-          detail: `LayoutAppear: fade ${APPEAR_FADE_TOTAL_MS}ms${hasMotion ? ' (+1 frame motion branch)' : ''}; move=${moveMs}ms not waited`
+          detail: `LayoutAppear: fade ${baseAppearMs}ms${hasMotion ? ' (+1 frame motion branch)' : ''}; move=${moveMs}ms not waited`
         }
       }
       if (snippet.type === 'LayoutClear') {
-        const ms = moved ? Math.max(CHARACTER_FADE_MS, moveMs) : HIDE_IN_PLACE_TOTAL_MS
+        const ms = moved ? Math.max(CHARACTER_FADE_MS, moveMs) : HIDE_IN_PLACE_SMOOTH_TOTAL_MS
         return {
           durationMs: ms,
           source: 'content_estimation',
           detail: moved
             ? `LayoutClear: slide ${moveMs}ms, fade starts at ${Math.max(0, moveMs - CHARACTER_FADE_MS)}ms`
-            : `LayoutClear: in place, delay 150ms + fade 100ms = ${ms}ms`
+            : `LayoutClear: in place, delay ${HIDE_DELAY_IN_PLACE_SMOOTH_MS}ms + fade ${CHARACTER_FADE_IN_PLACE_MS}ms = ${ms}ms`
         }
       }
       if (speed === 'Immediate') {
@@ -688,7 +691,6 @@ export function calculateTimeline(
   const traceLog: TimelineTraceRecord[] = []
   const anomalies: string[] = []
   const isExport = options.exportFps !== undefined
-  const fadeMs = isExport ? resolveCharacterFadeMs(true, options.exportFps) : CHARACTER_FADE_MS
   let cursorMs = 0
   let runningEndMs = 0
   let runningFenceEndMs = 0
@@ -832,17 +834,24 @@ export function calculateTimeline(
           ? Number(rawModelId)
           : NaN
       const shown = Number.isFinite(modelId) && visibleModels.has(modelId)
+      const moved = layoutPositionMoved(
+        getSnippetDataField(snippet, 'from'),
+        getSnippetDataField(snippet, 'to')
+      )
+      const baseAppearMs = moved ? APPEAR_FADE_TOTAL_MS : APPEAR_IN_PLACE_FADE_TOTAL_MS
       // 官方 `at = frame + (hidden && motion)`：隐藏角色的类型分支（淡入与滑入）
-      // 带 motion 时延后一帧。片段只等淡入 0.1s，滑入在后台继续。
+      // 带 motion 时延后一帧。片段只等淡入完成，滑入在后台继续。
       const hasMotion = String(getSnippetDataField(snippet, 'motion') ?? '').trim() !== ''
       const forcedMs = hasMotion ? FRAME_MS : 0
-      layoutDurationMs = shown ? APPEAR_SHOWN_MOVE_MS : APPEAR_FADE_TOTAL_MS + forcedMs
+      layoutDurationMs = shown ? APPEAR_SHOWN_MOVE_MS : baseAppearMs + forcedMs
       layoutDecision = shown
         ? 'LayoutAppear: character already shown, CharacterMoveTo 0.2s'
-        : 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade, slide in background'
+        : moved
+          ? 'LayoutAppear: new view, 1 frame alpha=0 + 0.1s fade, slide in background'
+          : 'LayoutAppear: new view in place, 1 frame alpha=0 + 0.35s smooth fade'
       // Talk 的布局门只等片段本身（淡入结束）；后台滑入不阻塞下一句
       // （参考 `layout_running` 只看片段，`motions_settled` 只看 body motion）。
-      const layoutGateMs = shown ? APPEAR_SHOWN_MOVE_MS : forcedMs + APPEAR_FADE_TOTAL_MS
+      const layoutGateMs = shown ? APPEAR_SHOWN_MOVE_MS : forcedMs + baseAppearMs
       activeLayoutEndMs = Math.max(
         activeLayoutEndMs,
         startTimeMs + (layoutGateMs >= 30 ? quantizeMsToFrame(layoutGateMs) : layoutGateMs)
@@ -860,12 +869,11 @@ export function calculateTimeline(
       const to = getSnippetDataField(snippet, 'to')
       const moved = layoutPositionMoved(from, to)
       const moveMs = speed && MOVE_SPEED_DURATION_MAP[speed] ? MOVE_SPEED_DURATION_MAP[speed] : 0
-      const clearMs = isExport
-        ? moved
-          ? Math.max(fadeMs, moveMs)
-          : HIDE_DELAY_IN_PLACE_MS + fadeMs
-        : crossResult.finalDurationMs
-      layoutDurationMs = shown ? (isExport ? clearMs : null) : 0
+      const clearFadeMs = resolveCharacterFadeMs(isExport, options.exportFps, !moved)
+      const clearMs = moved
+        ? Math.max(clearFadeMs, moveMs)
+        : HIDE_DELAY_IN_PLACE_SMOOTH_MS + clearFadeMs
+      layoutDurationMs = shown ? clearMs : 0
       layoutDecision = shown ? '' : 'LayoutClear: character not shown, OnFinished immediately'
       if (shown) {
         const quantizedClearMs = clearMs >= 30 ? quantizeMsToFrame(clearMs) : clearMs

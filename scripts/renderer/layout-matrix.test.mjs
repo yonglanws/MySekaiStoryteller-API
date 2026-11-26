@@ -1,9 +1,9 @@
 /**
  * 布局矩阵回归：Appear / Clear / Move × Slow/Normal/Fast/Immediate × 位移/原地。
  *
- * 这张表直接对应官方 `ScenarioCharacterLayout`：
- * - Appear 只等淡入 7 帧（1 帧 alpha=0 + 6 帧淡入），滑入继续在后台；
- * - Clear 原地 9+6=15 帧；滑动 fade 从 move-6 帧开始，总长 move；
+ * 这张表直接对应舞台布局与淡入/淡出时序：
+ * - Appear 滑动等 7 帧（1 帧 alpha=0 + 6 帧淡入），原地等 22 帧（1 帧 alpha=0 + 21 帧 350ms 淡入），滑入继续在后台；
+ * - Clear 原地 0+21=21 帧（350ms 平滑淡出）；滑动 fade 从 move-6 帧开始，总长 move；
  * - Move 按 MoveSpeedType 20/30/46 帧，Immediate 0；
  * - timeline 与 plan 的 moveEnd/fade 帧必须逐项一致。
  */
@@ -56,39 +56,41 @@ function run(type, speed, position) {
   }
 }
 
-test('LayoutAppear always completes on the 7-frame fade; move continues in background', () => {
+test('LayoutAppear waits 22-frame fade in place and 7-frame fade when sliding; move continues in background', () => {
   for (const speed of speeds) {
     for (const position of ['inPlace', 'moved']) {
       const result = run('LayoutAppear', speed, position)
       const base = result.startFrame
-      assert.equal(result.durationFrames, timing.APPEAR_FADE_TOTAL_FRAMES, `${speed}/${position}`)
-      assert.equal(result.durationMs, timing.APPEAR_FADE_TOTAL_MS, `${speed}/${position}`)
-      assert.equal(result.estimatedMs, timing.APPEAR_FADE_TOTAL_MS, `${speed}/${position}`)
+      const expectedFrames =
+        position === 'moved'
+          ? timing.APPEAR_FADE_TOTAL_FRAMES
+          : timing.APPEAR_IN_PLACE_FADE_TOTAL_FRAMES
+      const expectedMs =
+        position === 'moved' ? timing.APPEAR_FADE_TOTAL_MS : timing.APPEAR_IN_PLACE_FADE_TOTAL_MS
+      assert.equal(result.durationFrames, expectedFrames, `${speed}/${position}`)
+      assert.equal(result.durationMs, expectedMs, `${speed}/${position}`)
+      assert.equal(result.estimatedMs, expectedMs, `${speed}/${position}`)
       assert.equal(result.layout.fadeStartFrame - base, 1, `${speed}/${position}`)
-      assert.equal(
-        result.layout.fadeEndFrame - base,
-        timing.APPEAR_FADE_TOTAL_FRAMES,
-        `${speed}/${position}`
-      )
+      assert.equal(result.layout.fadeEndFrame - base, expectedFrames, `${speed}/${position}`)
       assert.equal(result.layout.moveEndFrame - base, framesForSpeed(speed), `${speed}/${position}`)
     }
   }
 })
 
-test('LayoutClear in place is 15 frames; sliding ends exactly when the fade ends', () => {
+test('LayoutClear in place is 21 smooth frames; sliding ends exactly when the 6-frame fade ends', () => {
   const fadeFrames = timing.framesForSeconds(timing.CHARACTER_FADE_MS / 1000)
   for (const speed of speeds) {
     const inPlace = run('LayoutClear', speed, 'inPlace')
-    assert.equal(inPlace.durationFrames, timing.HIDE_IN_PLACE_TOTAL_FRAMES, `${speed}/in-place`)
+    assert.equal(inPlace.durationFrames, timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES, `${speed}/in-place`)
     assert.equal(inPlace.layout.moveEndFrame, inPlace.startFrame, `${speed}/in-place`)
     assert.equal(
       inPlace.layout.fadeStartFrame - inPlace.startFrame,
-      timing.framesForSeconds(timing.HIDE_DELAY_IN_PLACE_MS / 1000),
+      timing.msToFrameCount(timing.HIDE_DELAY_IN_PLACE_SMOOTH_MS),
       `${speed}/in-place`
     )
     assert.equal(
       inPlace.layout.fadeEndFrame - inPlace.startFrame,
-      timing.HIDE_IN_PLACE_TOTAL_FRAMES,
+      timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES,
       `${speed}/in-place`
     )
 

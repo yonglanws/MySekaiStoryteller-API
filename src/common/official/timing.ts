@@ -208,16 +208,28 @@ export const APPEAR_SHOWN_MOVE_SECONDS = 0.2
 export const APPEAR_SHOWN_MOVE_FRAMES = framesForSeconds(APPEAR_SHOWN_MOVE_SECONDS)
 export const APPEAR_SHOWN_MOVE_MS = framesToMs(APPEAR_SHOWN_MOVE_FRAMES)
 
-/** layout.character_fade_duration = 0.1s。 */
+/** layout.character_fade_duration = 0.1s（官方滑动入场/退场共用 6 帧）。 */
 export const CHARACTER_FADE_SECONDS = 0.1
 export const CHARACTER_FADE_MS = framesToMs(framesForSeconds(CHARACTER_FADE_SECONDS))
 
 /**
- * 角色淡入/淡出固定 100ms（6 个故事帧），不再对 30fps 导出放大到 200ms：
- * 官方 `layout.character_fade_duration` 是剧本时间，与成片帧率无关。
+ * 原地无位移入场/退场（`from == to`）的平滑淡入/淡出时长：0.35s（21 帧 @ 60fps）。
+ * 与滑动分支（`CHARACTER_FADE_SECONDS = 0.1s`）分离，避免禁用滑动后 6 帧瞬闪。
  */
-export function resolveCharacterFadeMs(_isExporting = false, _encodeFps = STORY_FPS): number {
-  return CHARACTER_FADE_MS
+export const CHARACTER_FADE_IN_PLACE_SECONDS = 0.35
+export const CHARACTER_FADE_IN_PLACE_FRAMES = framesForSeconds(CHARACTER_FADE_IN_PLACE_SECONDS)
+export const CHARACTER_FADE_IN_PLACE_MS = framesToMs(CHARACTER_FADE_IN_PLACE_FRAMES)
+
+/**
+ * 角色淡入/淡出固定时长：滑动模式沿用官方 100ms（6 个故事帧），
+ * 原地纯淡入/淡出使用 350ms（21 个故事帧），不再对 30fps 导出放大。
+ */
+export function resolveCharacterFadeMs(
+  _isExporting = false,
+  _encodeFps = STORY_FPS,
+  inPlace = false
+): number {
+  return inPlace ? CHARACTER_FADE_IN_PLACE_MS : CHARACTER_FADE_MS
 }
 
 /** 30fps 导出模式下纯标点静默句（如「…………」）打字结束后的短停顿（0.8s = 48 帧）。 */
@@ -225,9 +237,16 @@ export const SILENT_PUNCTUATION_HOLD_SECONDS = 0.8
 export const SILENT_PUNCTUATION_HOLD_FRAMES = framesForSeconds(SILENT_PUNCTUATION_HOLD_SECONDS)
 export const SILENT_PUNCTUATION_HOLD_MS = framesToMs(SILENT_PUNCTUATION_HOLD_FRAMES)
 
-/** 原地 HideCharacter 的 delay = 0.15s。 */
+/** 官方原地 HideCharacter 的 delay = 0.15s（9 帧）。 */
 export const HIDE_DELAY_IN_PLACE_SECONDS = 0.15
 export const HIDE_DELAY_IN_PLACE_MS = framesToMs(framesForSeconds(HIDE_DELAY_IN_PLACE_SECONDS))
+
+/** 平滑原地 HideCharacter 前导停顿 = 0s（0 帧），立即开始 21 帧溶解淡出。 */
+export const HIDE_DELAY_IN_PLACE_SMOOTH_SECONDS = 0
+export const HIDE_DELAY_IN_PLACE_SMOOTH_FRAMES = framesForSeconds(
+  HIDE_DELAY_IN_PLACE_SMOOTH_SECONDS
+)
+export const HIDE_DELAY_IN_PLACE_SMOOTH_MS = framesToMs(HIDE_DELAY_IN_PLACE_SMOOTH_FRAMES)
 
 /** 滑动 HideCharacter：delay = move_duration - 0.1s。 */
 export const HIDE_SLIDE_FADE_OFFSET_SECONDS = -0.1
@@ -253,10 +272,19 @@ export const TELOP_TOTAL_MS = framesToMs(TELOP_TOTAL_FRAMES)
 export const APPEAR_FADE_TOTAL_FRAMES = 1 + framesForSeconds(CHARACTER_FADE_SECONDS)
 export const APPEAR_FADE_TOTAL_MS = framesToMs(APPEAR_FADE_TOTAL_FRAMES)
 
-/** 原地 Hide 的片段完成帧数：0.15s delay（9 帧）+ 0.1s fade（6 帧）= 250ms。 */
+/** 原地 Appear 的片段完成帧数：1 帧 alpha=0 + 21 帧平滑淡入（350ms）= 22 帧（366.667ms）。 */
+export const APPEAR_IN_PLACE_FADE_TOTAL_FRAMES = 1 + CHARACTER_FADE_IN_PLACE_FRAMES
+export const APPEAR_IN_PLACE_FADE_TOTAL_MS = framesToMs(APPEAR_IN_PLACE_FADE_TOTAL_FRAMES)
+
+/** 原地 Hide 的官方参考完成帧数：0.15s delay（9 帧）+ 0.1s fade（6 帧）= 250ms。 */
 export const HIDE_IN_PLACE_TOTAL_FRAMES =
   framesForSeconds(HIDE_DELAY_IN_PLACE_SECONDS) + framesForSeconds(CHARACTER_FADE_SECONDS)
 export const HIDE_IN_PLACE_TOTAL_MS = framesToMs(HIDE_IN_PLACE_TOTAL_FRAMES)
+
+/** 原地平滑 Hide 的片段完成帧数：0ms delay + 21 帧淡出（350ms）= 21 帧（350ms）。 */
+export const HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES =
+  HIDE_DELAY_IN_PLACE_SMOOTH_FRAMES + CHARACTER_FADE_IN_PLACE_FRAMES
+export const HIDE_IN_PLACE_SMOOTH_TOTAL_MS = framesToMs(HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES)
 
 /** layout.transform_map：普通/三人模式的侧位 X（参考像素，舞台宽 1920）。 */
 export const SIDE_X_DEFAULT = 350

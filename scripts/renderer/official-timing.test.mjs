@@ -109,8 +109,19 @@ test('framesForSeconds follows Unity f32 accumulation, not a 1e-3 ceil', () => {
   assert.equal(timing.APPEAR_FADE_TOTAL_FRAMES, 7)
   assert.equal(round(timing.APPEAR_FADE_TOTAL_MS), 116.667)
   assert.equal(round(timing.HIDE_IN_PLACE_TOTAL_MS), 250)
+  assert.equal(timing.CHARACTER_FADE_IN_PLACE_FRAMES, 21)
+  assert.equal(timing.CHARACTER_FADE_IN_PLACE_MS, 350)
+  assert.equal(timing.APPEAR_IN_PLACE_FADE_TOTAL_FRAMES, 22)
+  assert.equal(round(timing.APPEAR_IN_PLACE_FADE_TOTAL_MS), 366.667)
+  assert.equal(timing.HIDE_DELAY_IN_PLACE_SMOOTH_MS, 0)
+  assert.equal(timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES, 21)
+  assert.equal(timing.HIDE_IN_PLACE_SMOOTH_TOTAL_MS, 350)
+  assert.equal(timing.resolveCharacterFadeMs(false, 60, false), 100)
+  assert.equal(timing.resolveCharacterFadeMs(false, 60, true), 350)
+  assert.equal(timing.resolveCharacterFadeMs(true, 60, true), 350)
   // 已量化的毫秒不再被二次换算成多一帧。
   assert.equal(round(timing.quantizeMsToFrame(timing.APPEAR_FADE_TOTAL_MS)), 116.667)
+  assert.equal(round(timing.quantizeMsToFrame(timing.APPEAR_IN_PLACE_FADE_TOTAL_MS)), 366.667)
 })
 
 test('video frame n maps to story frame floor(n×60/fps) and steps by floor difference', () => {
@@ -290,7 +301,7 @@ test('layout and staging match the official transition map', () => {
         snippet('LayoutAppear', {
           modelId: 1,
           from: { side: 'Left', offset: 0 },
-          to: { side: 'Center', offset: 0 },
+          to: { side: 'Left', offset: 0 },
           moveSpeed: 'Slow'
         }),
         snippet('LayoutClear', {
@@ -321,7 +332,7 @@ test('layout and staging match the official transition map', () => {
       ])
       .entries.map((entry) => entry.durationMs)
   )
-  assert.deepEqual(durations, [116.667, 250, 116.667, 766.667, 333.333])
+  assert.deepEqual(durations, [366.667, 350, 116.667, 766.667, 333.333])
   assert.equal(round(stage.side_to_position('Left', 'Normal', 0).x), 0.318)
   assert.equal(round(stage.side_to_position('Right', 'Normal', 0).x), 0.682)
   assert.equal(round(stage.side_to_position('Left', 'Three', 0).x), 0.214)
