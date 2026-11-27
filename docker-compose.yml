@@ -1,0 +1,42 @@
+# =============================================================================
+# MySekaiStoryteller-API — Default Docker Compose
+# =============================================================================
+# Quick start:
+#   cp .env.example .env          # Edit MSS_LLM_API_KEY / MSS_LLM_BASE_URL / MSS_LLM_MODEL
+#   docker compose up -d --build
+#
+# Hardware acceleration overlays:
+#   Intel iGPU / Arc (VAAPI + QSV + Vulkan):
+#     docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#   NVIDIA GPU (NVENC + Vulkan):
+#     docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+# =============================================================================
+
+services:
+  mysekai-storyteller:
+    image: mysekai-storyteller-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_MIRROR: ${BUILD_MIRROR:-global}
+    ports:
+      - '${MSS_HOST_PORT:-9881}:9881'
+    init: true
+    shm_size: 2gb
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MALLOC_ARENA_MAX: '${MALLOC_ARENA_MAX:-2}'
+      MALLOC_MMAP_THRESHOLD_: '${MALLOC_MMAP_THRESHOLD_:-131072}'
+    volumes:
+      - ./apifile:/app/apifile
+      - ./resources:/app/resources
+      - ./cache:/app/cache
+      # Optional: mount custom config.yaml (copy config.example.yaml -> config.yaml first)
+      # - ./config.yaml:/app/config.yaml:ro
+      # Optional: mount custom character personas (pair with MSS_LLM_PERSONA_DIRS=/app/personas)
+      # - ./personas:/app/personas:ro
+    restart: unless-stopped
+    stop_grace_period: 150s
