@@ -529,14 +529,15 @@ async function bootstrap(): Promise<void> {
           typeof body.targetMinutes === 'number' && body.targetMinutes > 0
             ? body.targetMinutes
             : config.llm.targetMinutes
-        let pipeline: 'single' | 'staged' | 'agent' | undefined
+        let pipeline: 'single' | 'staged' | 'agent' | 'hybrid' | undefined
         if (body.pipeline !== undefined) {
           if (
             body.pipeline !== 'single' &&
             body.pipeline !== 'staged' &&
-            body.pipeline !== 'agent'
+            body.pipeline !== 'agent' &&
+            body.pipeline !== 'hybrid'
           ) {
-            throw new StoryGenerationError('pipeline 必须是 "single"、"staged" 或 "agent"', [])
+            throw new StoryGenerationError('pipeline 必须是 "single"、"staged"、"agent" 或 "hybrid"', [])
           }
           pipeline = body.pipeline
         }
