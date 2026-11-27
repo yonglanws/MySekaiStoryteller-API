@@ -472,16 +472,88 @@ function resolveRootDir(): string {
   return path.resolve(process.cwd())
 }
 
+export type GpuProfile = 'intel' | 'nvidia' | 'amd' | 'cpu'
+export type MemoryProfile = 'low' | 'standard'
+
+export interface LoadHostConfigOptions {
+  /** 可选覆盖平台判定（默认 process.platform；主要用于跨平台单测） */
+  platform?: NodeJS.Platform
+}
+
+const LINUX_INTEL_CHROME_ARGS = '--use-gl=angle --use-angle=vulkan --enable-features=Vulkan'
+const LINUX_NVIDIA_CHROME_ARGS = '--use-angle=vulkan'
+
+function parseEnvBool(raw: string): boolean {
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase())
+}
+
+function resolveConfigPath(rootDir: string): { path: string; isCustom: boolean } {
+  const custom = process.env.MSS_CONFIG_PATH?.trim()
+  if (custom) {
+    return { path: path.resolve(rootDir, custom), isCustom: true }
+  }
+  return { path: path.join(rootDir, 'config.yaml'), isCustom: false }
+}
+
 function readYamlConfig(rootDir: string): Record<string, unknown> {
-  const configPath = path.join(rootDir, 'config.yaml')
+  const { path: configPath, isCustom } = resolveConfigPath(rootDir)
   if (!fs.existsSync(configPath)) {
+    if (isCustom) {
+      console.warn(
+        `[config] MSS_CONFIG_PATH points to a missing file (${configPath}); using built-in defaults and env overrides.`
+      )
+    }
     return {}
   }
   try {
     const loaded = yaml.load(fs.readFileSync(configPath, 'utf-8')) as unknown
     return (loaded && typeof loaded === 'object' ? loaded : {}) as Record<string, unknown>
   } catch (err) {
-    throw new Error(`Failed to parse config.yaml: ${err instanceof Error ? err.message : err}`)
+    throw new Error(
+      `Failed to parse config file (${configPath}): ${err instanceof Error ? err.message : err}`
+    )
+  }
+}
+
+function applyProfilePresets(
+  config: Omit<HostConfig, 'rootDir' | 'paths'>,
+  platform: NodeJS.Platform
+): void {
+  const env = process.env
+
+  // 硬件/GPU 预设（MSS_GPU_PROFILE 优先于别名 MSS_GPU_MODE），在显式单字段 env 之前应用
+  const gpuRaw = (env.MSS_GPU_PROFILE?.trim() || env.MSS_GPU_MODE?.trim() || '').toLowerCase()
+  if (gpuRaw === 'intel') {
+    config.video.encoder = 'intel'
+    if (platform === 'linux') {
+      config.render.linuxGpuAngle = false
+      if (!config.render.extraChromeArgs.trim()) {
+        config.render.extraChromeArgs = LINUX_INTEL_CHROME_ARGS
+      }
+    }
+  } else if (gpuRaw === 'nvidia') {
+    config.video.encoder = 'nvidia'
+    if (platform === 'linux') {
+      config.render.linuxGpuAngle = false
+      if (!config.render.extraChromeArgs.trim()) {
+        config.render.extraChromeArgs = LINUX_NVIDIA_CHROME_ARGS
+      }
+    }
+  } else if (gpuRaw === 'amd') {
+    config.video.encoder = 'amd'
+  } else if (gpuRaw === 'cpu') {
+    config.video.encoder = 'libx264'
+  }
+
+  // 内存规格预设（low 适用于 4–8GB RAM 主机/NAS；standard 维持当前默认值），在显式单字段 env 之前应用
+  const memRaw = (env.MSS_MEMORY_PROFILE?.trim() || '').toLowerCase()
+  if (memRaw === 'low') {
+    config.render.workers = 1
+    config.render.maxConcurrentExports = 1
+    config.render.workerRecycleExports = 2
+    config.video.fps = 30
+    config.video.fastFps = 30
+    config.video.renderScale = 1.0
   }
 }
 
@@ -501,7 +573,14 @@ function applyBgmEnvOverrides(bgm: BgmSettings): void {
   }
 }
 
-function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void {
+function applyEnvOverrides(
+  config: Omit<HostConfig, 'rootDir' | 'paths'>,
+  platform: NodeJS.Platform = process.platform
+): void {
+  // 先应用组合预设（MSS_GPU_PROFILE / MSS_GPU_MODE、MSS_MEMORY_PROFILE），
+  // 再由下方各细粒度 MSS_* 环境变量精确覆盖。
+  applyProfilePresets(config, platform)
+
   const env = process.env
 
   // server
@@ -512,9 +591,14 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_HOST) config.server.host = env.MSS_HOST
   const apiKeyEnv = env.MSST_API_KEY ?? env.MSS_API_KEY
   if (apiKeyEnv !== undefined) config.server.apiKey = apiKeyEnv
+  if (env.MSS_SERVER_CORS !== undefined && env.MSS_SERVER_CORS.trim() !== '') {
+    config.server.cors = parseEnvBool(env.MSS_SERVER_CORS)
+  }
 
   // video
-  if (env.MSS_FFMPEG_ENCODER) config.video.encoder = env.MSS_FFMPEG_ENCODER.toLowerCase()
+  // MSS_VIDEO_ENCODER 是 MSS_FFMPEG_ENCODER 的便捷别名；两者同时设置时优先 MSS_FFMPEG_ENCODER
+  const encoderEnv = env.MSS_FFMPEG_ENCODER?.trim() || env.MSS_VIDEO_ENCODER?.trim()
+  if (encoderEnv) config.video.encoder = encoderEnv.toLowerCase()
   if (env.MSS_VIDEO_WIDTH) {
     const v = parseInt(env.MSS_VIDEO_WIDTH, 10)
     if (Number.isFinite(v)) config.video.width = v
@@ -704,6 +788,17 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
       env.MSS_LLM_TRANSLATE.toLowerCase()
     )
   }
+  if (env.MSS_LLM_POLISH_DIALOGUE !== undefined && env.MSS_LLM_POLISH_DIALOGUE.trim() !== '') {
+    config.llm.polishDialogue = parseEnvBool(env.MSS_LLM_POLISH_DIALOGUE)
+  }
+  if (env.MSS_LLM_PERSONA_DIRS !== undefined) {
+    const dirs = env.MSS_LLM_PERSONA_DIRS.split(',')
+      .map((d) => d.trim())
+      .filter(Boolean)
+    if (dirs.length > 0) {
+      config.llm.personaDirs = dirs
+    }
+  }
   if (env.MSS_LLM_TARGET_MINUTES) {
     const v = parseFloat(env.MSS_LLM_TARGET_MINUTES)
     if (Number.isFinite(v) && v > 0) config.llm.targetMinutes = v
@@ -790,9 +885,80 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   if (env.MSS_LOG_LEVEL) config.logLevel = env.MSS_LOG_LEVEL
 }
 
-export function loadHostConfig(): HostConfig {
+/**
+ * 面向新手与公开发布场景的配置体检提示（纯函数，不修改配置）。
+ * 返回可直接输出给用户/运维的中文+英文操作建议列表；配置无常见坑位时返回空数组。
+ */
+export function validateConfigHints(
+  config: HostConfig,
+  env: NodeJS.ProcessEnv = process.env
+): string[] {
+  const hints: string[] = []
+
+  if (config.llm.enabled) {
+    const keyName = config.llm.apiKeyEnv || 'MSS_LLM_API_KEY'
+    if (!env[keyName]?.trim()) {
+      hints.push(
+        `[LLM] 已启用 AI 剧本生成，但环境变量 ${keyName} 未设置；请在 .env 或运行环境中设置 ${keyName}=sk-...（使用本地免鉴权 Ollama/vLLM 可忽略）。(LLM enabled but env ${keyName} is empty)`
+      )
+    }
+  }
+
+  if (config.tts.enabled) {
+    if (
+      config.tts.provider === 'gpt-sovits' &&
+      !config.tts.defaultRefAudioPath.trim() &&
+      config.tts.characters.length === 0
+    ) {
+      hints.push(
+        '[TTS] 已启用 GPT-SoVITS，但未配置 defaultRefAudioPath 且 characters 为空；无配音需求可设 tts.enabled: false 或 MSS_TTS_ENABLED=false。(TTS gpt-sovits has no defaultRefAudioPath or characters configured)'
+      )
+    } else if (
+      config.tts.provider === 'irodori' &&
+      !config.tts.defaultRefAudioPath.trim() &&
+      !config.tts.irodori.defaultLoraAdapter.trim() &&
+      config.tts.characters.length === 0
+    ) {
+      hints.push(
+        '[TTS] 已启用 IrodoriTTS，但未配置 defaultRefAudioPath、defaultLoraAdapter 或 characters；无配音需求可设 tts.enabled: false 或 MSS_TTS_ENABLED=false。(TTS irodori has no voice config)'
+      )
+    }
+  }
+
+  if (config.video.fps !== config.video.fastFps) {
+    hints.push(
+      `[Video] video.fps (${config.video.fps}) 与 video.fastFps (${config.video.fastFps}) 不一致：动画按 ${config.video.fps}fps 推进，fast 模式编码上限为 ${config.video.fastFps}fps；如需满帧输出请将两者设为相同值。(video.fps !== video.fastFps)`
+    )
+  }
+
+  if (
+    (config.server.host === '0.0.0.0' || config.server.host === '::') &&
+    !config.server.apiKey.trim()
+  ) {
+    hints.push(
+      `[Security] 服务监听在 ${config.server.host}:${config.server.port} 且未配置 server.apiKey（MSS_API_KEY）；公网部署请设置鉴权密钥，仅本机使用建议将 server.host 改为 127.0.0.1。(Listening on ${config.server.host} without server.apiKey)`
+    )
+  }
+
+  if (config.render.maxConcurrentExports > config.render.workers) {
+    hints.push(
+      `[Render] render.maxConcurrentExports (${config.render.maxConcurrentExports}) 大于 render.workers (${config.render.workers})，实际并发仍受 workers 数量限制。(maxConcurrentExports > workers)`
+    )
+  }
+
+  if (!config.assets.cloudOnly && !config.assets.cloudCatalog) {
+    hints.push(
+      '[Assets] cloudCatalog 与 cloudOnly 均已关闭，需确保本地 resources/ 已准备好模型与媒体资源；零本地资源运行请设 MSS_ASSETS_CLOUD_ONLY=true。(Both cloudCatalog and cloudOnly are disabled)'
+    )
+  }
+
+  return hints
+}
+
+export function loadHostConfig(options?: LoadHostConfigOptions): HostConfig {
   const rootDir = resolveRootDir()
   const raw = readYamlConfig(rootDir)
+  const platform = options?.platform ?? process.platform
 
   const pathsRaw = PathsSchema.parse(raw.paths ?? {})
   // 路径的 env 覆盖在解析为绝对路径前应用
@@ -814,7 +980,7 @@ export function loadHostConfig(): HostConfig {
       .parse(raw.logLevel ?? 'info')
   }
 
-  applyEnvOverrides(config)
+  applyEnvOverrides(config, platform)
 
   // 4:2:0 编码要求宽高为偶数；在启动时就拒绝而不是等导出半程失败
   const { width: encodeWidth, height: encodeHeight } = config.video

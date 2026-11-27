@@ -1,11 +1,31 @@
 # =============================================================================
 # MySekaiStoryteller-API 渲染宿主统一配置
 # =============================================================================
-# 使用方法：
-#   cp config.example.yaml config.yaml   然后按需修改 config.yaml
 #
-# 优先级：MSS_* 环境变量 > config.yaml > 内置默认值（即本文件的注释值）
-# config.yaml 不会被 git 跟踪，可放心存放私有路径
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ 5 分钟极速配置区 / 5-Minute Quick Start                                     │
+# ├───────────────────────────────────────────────────────────────────────────┤
+# │ 推荐使用交互式向导一键生成 config.yaml 和 .env：                              │
+# │   npm run init                                                            │
+# │ 或手动复制本模板：                                                          │
+# │   cp config.example.yaml config.yaml                                      │
+# │                                                                           │
+# │ 绝大多数用户只需关注以下 4 项，其余保持默认即可开箱运行：                      │
+# │   1. AI 剧本模型：修改下方 llm.baseUrl + llm.model，并在 .env/环境中设置     │
+# │      MSS_LLM_API_KEY=sk-...（密钥绝不写入 config.yaml）                     │
+# │   2. 语音合成 TTS：暂无外部 TTS 服务时，将 tts.enabled 设为 false            │
+# │      （或 MSS_TTS_ENABLED=false），视频仍可正常导出（仅无角色配音）            │
+# │   3. 视频帧率与硬件加速：按机器条件选 video.fps (60/30) 与 video.encoder     │
+# │      (auto/intel/nvidia/amd/libx264)；Docker/纯环境变量场景推荐直接设        │
+# │      MSS_GPU_PROFILE=intel|nvidia|amd|cpu（别名 MSS_GPU_MODE）              │
+# │      与 MSS_MEMORY_PROFILE=low|standard（4–8GB 内存主机/NAS 用 low）         │
+# │   4. 零本地资源纯云端模式：assets.cloudOnly 默认已为 true，无需手动下载       │
+# │      Live2D 模型/背景/BGM，导出时自动按需拉取并缓存                          │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# 优先级：细粒度 MSS_* 环境变量 > 组合预设 (MSS_GPU_PROFILE / MSS_MEMORY_PROFILE)
+#         > config.yaml (可用 MSS_CONFIG_PATH 指定自定义路径) > 内置默认值
+# config.yaml 与 .env 均已被 .gitignore 忽略，可放心存放私有配置
 
 # ---------------------------------------------------------------------------
 # 服务监听
@@ -14,7 +34,7 @@ server:
   port: 9881          # API / 静态资源 / 桥接层共用端口（env: MSS_PORT）
   host: 0.0.0.0       # 监听地址；仅本机使用可改 127.0.0.1（env: MSS_HOST）
   apiKey: ""          # Bearer 鉴权密钥；留空表示关闭（env: MSST_API_KEY / MSS_API_KEY）
-  # cors: false       # 是否开启 CORS；省略时不主动覆盖宿主默认策略
+  # cors: false       # 是否开启 CORS；省略时不主动覆盖宿主默认策略（env: MSS_SERVER_CORS）
   # corsOrigins:      # CORS 允许的 Origin 白名单（env: MSST_CORS_ORIGINS / MSS_CORS_ORIGINS）
   #   - http://localhost:3000
 
@@ -22,11 +42,11 @@ server:
 # 视频导出参数
 # ---------------------------------------------------------------------------
 video:
-  width: 1920         # 输出视频宽度
-  height: 1080         # 输出视频高度
-  fps: 60             # 帧率
+  width: 1920         # 输出视频宽度（env: MSS_VIDEO_WIDTH）
+  height: 1080        # 输出视频高度（env: MSS_VIDEO_HEIGHT）
+  fps: 60             # 帧率（env: MSS_VIDEO_FPS；MSS_MEMORY_PROFILE=low 时自动降为 30）
   crf: 27             # 质量因子（越小质量越高、体积越大；hevc_qsv -low_power 1 推荐 26–27）
-  renderScale: 1    # 渲染倍率（相对 1280 宽逻辑坐标；1 = 按输出分辨率 1:1 渲染，
+  renderScale: 1      # 渲染倍率（相对 1280 宽逻辑坐标；1 = 按输出分辨率 1:1 渲染，
                       # 1.5 = 超采样抗锯齿更好、每帧成本 x2.25，
                       # <1 = 降渲染分辨率提速，画面变软。例：1080p 输出下
                       # 1 = 渲染 1080p，0.75 = 渲染 810p 再放大）
@@ -36,7 +56,9 @@ video:
   encoder: auto       # 视频编码器：auto | nvidia | amd | intel | libx264
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264
                       # 对应 ffmpeg：nvidia=h264_nvenc，amd=h264_amf，intel=h264_qsv (hevc_qsv -low_power 1)
-                      # 无独显或只要 CPU 编码时写 libx264（env: MSS_FFMPEG_ENCODER）
+                      # 无独显或只要 CPU 编码时写 libx264
+                      # （env: MSS_FFMPEG_ENCODER，便捷别名 MSS_VIDEO_ENCODER；两者同时设置时优先 MSS_FFMPEG_ENCODER；
+                      #   也可由 MSS_GPU_PROFILE / MSS_GPU_MODE 预设：intel|nvidia|amd|cpu）
   watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
                       # 本视频由 MySekaiStoryteller-API 生成
                       # Designed by GuangChen2333 & 慵懒午睡
@@ -69,10 +91,10 @@ video:
 # ---------------------------------------------------------------------------
 render:
   workers: 2                      # 常驻渲染 worker 数（每 worker 独立 WebGL 上下文，
-                                  # 约占 300-500MB 内存）（env: MSS_WORKERS）
-  maxConcurrentExports: 0         # 同时导出上限；0 = 跟随 workers（env: MSS_MAX_CONCURRENT_EXPORTS）。
+                                  # 约占 300-500MB 内存）（env: MSS_WORKERS；MSS_MEMORY_PROFILE=low 自动设为 1）
+  maxConcurrentExports: 0         # 同时导出上限；0 = 跟随 workers（env: MSS_MAX_CONCURRENT_EXPORTS；low 预设为 1）。
                                   # 设成小于 workers 可保留热备 worker：并发仍受限，崩溃/回收时不用等新浏览器
-  workerRecycleExports: 5         # 每个页面完成 N 次导出后回收重建，防止 Live2D 内存累积（0 = 不回收）
+  workerRecycleExports: 5         # 每个页面完成 N 次导出后回收重建，防止 Live2D 内存累积（0 = 不回收；low 预设为 2）
   browserChannels:                # 浏览器探测顺序，依次回退（env: MSS_BROWSER_CHANNELS）
     - msedge
     - chrome
@@ -191,15 +213,16 @@ llm:
   # hybrid / agent：统一三段式上下文隔离 + 工具驱动流水线（只读工具探索锁定规划 → 独立上下文纯对白与人设 Critic → 并行编译 + 轻量导演终审）。
   # single：快速选角后一次调用写完整剧本（env: MSS_LLM_PIPELINE）。
   pipeline: staged
+  agentMaxSteps: 16               # hybrid/agent 模式最大工具调用迭代步数（env: MSS_LLM_AGENT_MAX_STEPS）
   jsonMode: auto                  # auto = 先带 response_format 再回退；on = 必须；off = 不发送
   translateForTts: true           # 把中文台词翻译成 ttsText 日文（env: MSS_LLM_TRANSLATE）
   targetMinutes: 3                # 提示词里的目标成片时长（env: MSS_LLM_TARGET_MINUTES）
   systemPrompt: ""                # single 覆盖内置系统提示词；staged 追加到每段系统提示词（env: MSS_LLM_SYSTEM_PROMPT）
   extraBody: {}                   # 原样并入请求体，例如 {"thinking":{"type":"disabled"}}（env: MSS_LLM_EXTRA_BODY）
-  personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（文件名或 frontmatter name 为角色名）
+  personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（env: MSS_LLM_PERSONA_DIRS，逗号分隔）
                                   # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
   personas: []                    # 内联人格：name / prompt / aliases / group
-  polishDialogue: true            # 启用反套路台词质检与条件外科润色
+  polishDialogue: true            # 启用反套路台词质检与条件外科润色（env: MSS_LLM_POLISH_DIALOGUE）
   # 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b + SQ8 磁盘缓存 + 零网络词法回退；严格 PJSK 领域隔离）
   rag:
     enabled: true                 # env: MSS_RAG_ENABLED
