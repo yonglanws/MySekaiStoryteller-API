@@ -1,13 +1,17 @@
+import type { PersonaEntry } from './personas'
 import type { StagedCastPlan, StagedDialogue } from './staged'
 import { hasZeroWidthChars, stripZeroWidthChars } from './ttsText'
 
 export type DialogueLintCode =
   | 'therapy_cliche'
+  | 'ai_slop_phrasing'
   | 'stage_direction_leak'
   | 'moralizing_ending'
   | 'uniform_cadence'
   | 'exclamation_overload'
   | 'address_mismatch'
+  | 'gender_label_violation'
+  | 'persona_ooc'
   | 'prompt_coverage_gap'
   | 'monologue_overload'
   | 'speaker_imbalance'
@@ -27,10 +31,12 @@ export interface DialogueLintReport {
   shouldPolish: boolean
 }
 
-/** Linter 只需要称呼表、意图理解与角色表，避免把整个 plan 耦合进来。 */
+/** Linter 只需要称呼表、意图理解、角色表与可选人设，避免把整个 plan 耦合进来。 */
 export type DialogueLintContext = Partial<
   Pick<StagedCastPlan, 'pairwiseAddress' | 'understanding' | 'cast'>
->
+> & {
+  personas?: PersonaEntry[]
+}
 
 const THERAPY_CLICHE_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /其实我一直想说/, label: '心理咨询式直白剖白「其实我一直想说」' },
@@ -55,20 +61,38 @@ const THERAPY_CLICHE_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /治愈了我的心|我们之间的羁绊|今后也要携手|心意相通/, label: 'AI 鸡汤抒情套话' }
 ]
 
+/** 重写人设「用词语感与反AI约束 / 会说与绝不会说」中明确禁用的 AI 客服/公众号/元叙述腔。 */
+const AI_SLOP_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /总的来说|综上所述|总而言之|归根结底/, label: '公众号/AI 总结腔' },
+  { re: /不得不说|值得一提的是/, label: '公众号点评过渡词' },
+  { re: /我(?:非常|完全)?理解你(?:此刻)?的(?:感受|心情|困扰|焦虑|痛苦)/, label: 'AI 共情客服模板' },
+  { re: /很高兴为您(?:服务|解答)|请问还有什么我可以帮您/, label: 'AI 客服礼貌模板' },
+  { re: /希望这能帮到你|希望能帮到您|祝您今天愉快/, label: 'AI 客服收尾模板' },
+  { re: /(?:从以下|提供以下)(?:几|三)[个条](?:方面|建议|方案|维度)/, label: 'AI 分点建议腔' },
+  { re: /这个问题很有(?:深度|探讨价值)|值得我们好好探讨/, label: 'AI 访谈总结腔' },
+  {
+    re: /作为(?:你的朋友，我觉得|一名.{1,10}(?:虚拟歌手|偶像|演员|高中生|画家))/,
+    label: 'AI 元身份自述腔'
+  },
+  { re: /每个人的经历都是宝贵的|人生总有低谷|学会接纳(?:真实|自己)的情绪/, label: 'AI 心灵鸡汤腔' },
+  { re: /在数字世界陪伴你|身处不同的次元/, label: 'AI 破壁元叙事模板' },
+  { re: /从心理学角度来看|这背后反映出/, label: 'AI 论文分析腔' }
+]
+
 const STAGE_ACTION_CORE_RE =
-  /^(?:轻笑|大笑|微笑|苦笑|冷笑|坏笑|干笑|嗤笑|偷笑|尴尬地笑|笑着|笑|叹气|轻叹|长叹|叹息|叹了口气|深吸一口气|沉默|沉默片刻|顿了顿|停顿|稍作停顿|点头|点点头|微微点头|摇头|摇摇头|低头|低下头|垂眸|抬头|抬起头|歪头|歪了歪头|脸红|耳根微红|红着脸|撇嘴|鼓脸|嘟嘴|转身|转过身|转过头|背过身|挥手|招手|摆手|挠头|挠了挠头|摸头|抓头发|耸肩|摊手|握拳|攥紧拳头|咬唇|咬住下唇|眨眼|眨眨眼|瞪眼|瞪大眼睛|揉眼睛|擦眼泪|抽泣|哽咽|移开视线|别过视线|别开视线|环顾四周|走近|走上前|后退|退后一步|站起身|起身|坐下|俯身|前倾|抱臂|双手抱胸|摊开双手|伸懒腰|打哈欠|拍拍肩|拍了拍|敲了敲|竖起食指|捂脸|捂嘴|捂住嘴|托腮|叉腰|小声|轻声|低声|压低声音|喃喃|自言自语|干咳|咳嗽|清了清嗓子|深呼吸|耸耸肩|摊摊手|摸摸鼻子|鼓起腮帮|皱眉|皱起眉|瞪了一眼)$/
+  /^(?:轻笑|大笑|微笑|苦笑|冷笑|坏笑|干笑|嗤笑|偷笑|尴尬地笑|笑着|笑|叹气|轻叹|长叹|叹息|叹了口气|深吸一口气|沉默|沉默片刻|顿了顿|停顿|稍作停顿|点头|点点头|微微点头|摇头|摇摇头|低头|低下头|垂眸|抬头|抬起头|歪头|歪了歪头|脸红|耳根微红|红着脸|撇嘴|鼓脸|嘟嘴|转身|转过身|转过头|背过身|挥手|招手|摆手|挠头|挠了挠头|摸头|抓头发|耸肩|摊手|握拳|攥紧拳头|咬唇|咬住下唇|眨眼|眨眨眼|瞪眼|瞪大眼睛|揉眼睛|擦眼泪|抽泣|哽咽|移开视线|别过视线|别开视线|环顾四周|走近|走上前|后退|退后一步|站起身|起身|坐下|俯身|前倾|抱臂|双手抱胸|摊开双手|伸懒腰|打哈欠|拍拍肩|拍了拍|敲了敲|竖起食指|捂脸|捂嘴|捂住嘴|托腮|叉腰|小声|轻声|低声|压低声音|喃喃|自言自语|干咳|咳嗽|清了清嗓子|深呼吸|耸耸肩|摊摊手|摸摸鼻子|鼓起腮帮|皱眉|皱起眉|瞪了一眼|跳起来|挂上营业微笑|礼貌地欠身|叉起腰笑|抱起吉他|端起茶杯|翻开草图本)$/
 
 const STAGE_ACTION_MODIFIED_RE =
-  /^(?:微微|轻轻|无奈地?|苦笑着?|笑着|冷冷地?|温柔地?|认真地?|小声地?|轻声地?|低声地?|慌忙地?|犹豫地?|平静地?|若有所思地?|尴尬地?|突然|停下来|忍不住|悄悄)?(?:一笑|笑了一声|笑了笑|笑出声|露出微笑|叹了口气|叹了声|点点头|摇摇头|低下头|抬起头|歪了歪头|转过头|转过身|挠了挠头|摸了摸鼻子|耸了耸肩|摊了摊手|眨了眨眼|移开了?视线|别过头|擦了擦眼角|咬了咬嘴唇|皱了皱眉|双手合十|看向[^，。！？]{1,8}|望向[^，。！？]{1,8}|盯向[^，。！？]{1,8}|看着[^，。！？]{1,8}|举起[^，。！？]{1,8}|递出[^，。！？]{1,8}|伸出手|缩回手|握紧[^，。！？]{1,8}|压低声音|拉了拉[^，。！？]{1,8}|跺了跺脚|拍了拍[^，。！？]{1,8})$/
+  /^(?:微微|轻轻|无奈地?|苦笑着?|笑着|冷冷地?|温柔地?|认真地?|小声地?|轻声地?|低声地?|慌忙地?|犹豫地?|平静地?|若有所思地?|尴尬地?|俏皮地?|突然|停下来|忍不住|悄悄)?(?:一笑|笑了一声|笑了笑|笑出声|露出微笑|露出受伤的表情|叹了口气|叹了声|点点头|摇摇头|低下头|抬起头|歪了歪头|转过头|转过身|挠了挠头|摸了摸鼻子|耸了耸肩|摊了摊手|眨了眨眼|吐了吐舌头|移开了?视线|别过头|别过脸去|擦了擦眼角|咬了咬嘴唇|皱了皱眉|皱起眉头抱着手臂|双手合十|冷哼一声转过头去|揉了揉眼睛|端起茶杯微微皱眉|笑着拍了拍[^，。！？]{1,8}|看向[^，。！？]{1,8}|望向[^，。！？]{1,8}|盯向[^，。！？]{1,8}|看着[^，。！？]{1,8}|举起[^，。！？]{1,8}|递出[^，。！？]{1,8}|伸出手|缩回手|握紧[^，。！？]{1,8}|压低声音|拉了拉[^，。！？]{1,8}|跺了跺脚|拍了拍[^，。！？]{1,8})$/
 
 const STAGE_DIRECTION_BODY_CUE_RE =
-  /^(?:眼神|目光|视线|声音|嘴角|脸上|耳根|双手|手指|眉头)(?:微动|一顿|闪烁|飘向别处|躲闪|柔和下来|冷了下来|压低|上扬|微红|紧握|交叠|紧锁|微蹙)/
+  /^(?:眼神|目光|视线|声音|嘴角|脸上|耳根|双手|手指|眉头)(?:微动|一顿|闪烁|飘向别处|躲闪|柔和下来|冷了下来|暗了一瞬|暗了一下|压低|上扬|微扬|微红|紧握|交叠|紧锁|微蹙)|^心里(?:一紧|暗暗啧了一声)/
 
 const STAGE_DIRECTION_LEAK_PATTERNS: RegExp[] = [
   /(?:^|[，。！？\s])(?:她|他)(?:转过头|低下头|笑了笑|叹了口气|轻声说道|小声嘀咕|沉默了片刻|移开视线|摇了摇头|点了点头)/
 ]
 
-/** 判断括号内部文本是否属于舞台动作/神态提示，而非角色心里话。 */
+/** 判断括号或星号内部文本是否属于舞台动作/神态提示，而非角色心里话。 */
 export function isStageDirectionParenthetical(inner: string): boolean {
   const clean = inner
     .trim()
@@ -90,12 +114,16 @@ export function isStageDirectionParenthetical(inner: string): boolean {
   )
 }
 
-/** 检测台词中是否夹带括号动作提示或第三人称动作旁白。 */
+/** 检测台词中是否夹带括号动作提示、星号动作描写（如 *叹了口气*）或第三人称动作旁白。 */
 export function hasSpokenStageDirectionLeak(content: string): boolean {
   if (STAGE_DIRECTION_LEAK_PATTERNS.some((re) => re.test(content))) return true
-  const re = /[（(]([^（）()]+)[）)]/g
+  const parenRe = /[（(]([^（）()]+)[）)]/g
   let match: RegExpExecArray | null
-  while ((match = re.exec(content)) !== null) {
+  while ((match = parenRe.exec(content)) !== null) {
+    if (isStageDirectionParenthetical(match[1])) return true
+  }
+  const starRe = /\*([^*\n]{1,24})\*/g
+  while ((match = starRe.exec(content)) !== null) {
     if (isStageDirectionParenthetical(match[1])) return true
   }
   return false
@@ -107,12 +135,17 @@ export function sanitizeDialogueContent(content: string): string {
   return stripZeroWidthChars(content)
 }
 
-/** 清理台词中的括号动作提示（如 (微笑)、（挠头））与零宽字符，同时保留真正的心里话括号独白。 */
+/** 清理台词中的括号/星号动作提示（如 (微笑)、*叹了口气*）与零宽字符，同时保留真正的心里话括号独白。 */
 export function repairSpokenStageDirections(content: string): string {
   if (!content) return content
   const withoutZwc = stripZeroWidthChars(content)
   let changed = withoutZwc !== content
-  const replaced = withoutZwc.replace(/[（(]([^（）()]+)[）)]/g, (full, inner: string) => {
+  let replaced = withoutZwc.replace(/[（(]([^（）()]+)[）)]/g, (full, inner: string) => {
+    if (!isStageDirectionParenthetical(inner)) return full
+    changed = true
+    return ''
+  })
+  replaced = replaced.replace(/\*([^*\n]{1,24})\*/g, (full, inner: string) => {
     if (!isStageDirectionParenthetical(inner)) return full
     changed = true
     return ''
@@ -145,10 +178,6 @@ const MORALIZING_ENDING_PATTERNS: RegExp[] = [
 /** Stage 2 常见的句首填充词：同一个人反复用同一种开场，会像 AI 在轮播模板。 */
 const REPETITIVE_OPENERS = ['其实', '不过', '说起来', '那个', '话说'] as const
 
-/**
- * 请求关键词里太泛的虚词/元词：不参与覆盖率判断，否则任何台词都会被判成“已覆盖”。
- * 只保留单字（按字符比对），多字短语没有分词器时无法可靠匹配。
- */
 const REQUEST_FUNCTION_CHARS = new Set([
   '的',
   '了',
@@ -213,10 +242,6 @@ function visibleLength(text: string): number {
   return Array.from(text.replace(/[\s\n]/g, '')).length
 }
 
-/**
- * 抽出诉求里真正有区分度的汉字（去掉虚词、标点、数字与登场角色名），
- * 用于零成本的“诉求是否落地”检查。没有分词器时按字符比对更稳。
- */
 function distinctiveChars(text: string, castNames: string[]): string[] {
   let rest = text
   for (const name of castNames) {
@@ -231,7 +256,6 @@ function distinctiveChars(text: string, castNames: string[]): string[] {
   return [...chars]
 }
 
-/** 至少命中 2 个区分字（或全部区分字）才算这条诉求在台词里真正落地。 */
 function isCovered(chars: string[], fullText: string): boolean {
   if (chars.length === 0) return true
   const hits = chars.filter((char) => fullText.includes(char)).length
@@ -286,7 +310,6 @@ function distributionIssues(dialogue: StagedDialogue): DialogueLintIssue[] {
   const issues: DialogueLintIssue[] = []
   const lines = dialogue.lines
 
-  // 连续 6 句以上、每句都超过 26 字：典型说教墙/长独白堆叠。
   let wallRun = 0
   for (const line of lines) {
     if (visibleLength(line.content) > 26) {
@@ -304,7 +327,6 @@ function distributionIssues(dialogue: StagedDialogue): DialogueLintIssue[] {
     }
   }
 
-  // 双人场景一人占掉 > 72% 的台词：官方几乎没有这种失衡。
   if (lines.length >= 10) {
     const perSpeaker = new Map<string, number>()
     for (const line of lines) perSpeaker.set(line.speaker, (perSpeaker.get(line.speaker) ?? 0) + 1)
@@ -349,18 +371,128 @@ function repetitiveOpenerIssues(dialogue: StagedDialogue): DialogueLintIssue[] {
   return issues
 }
 
+const MIZUKI_SPEAKER_RE = /^(?:晓山)?瑞希$|^Amia$/i
+const MIZUKI_SELF_GENDER_LABEL_RE =
+  /(?:其实)?我是(?:个)?(?:男孩子|男生|女孩子|女生|男孩|女孩|男的|女的)|作为(?:一个)?(?:男孩子|男生|女孩子|女生)|跨性别|伪娘|男娘/
+const MIZUKI_THIRD_PARTY_GENDER_RE =
+  /(?:瑞希|晓山|Amia)[^。！？\n]{0,8}(?:是个?|本来就是|其实是|毕竟是)(?:男孩子|男生|女孩子|女生|男孩|女孩|男的|女的)|(?:男孩子|男生|女孩子|女生|伪娘|男娘)[^。！？\n]{0,6}(?:瑞希|晓山|Amia)|(?:瑞希|晓山|Amia)[^。！？\n]{0,12}(?:跨性别|伪娘|男娘)/
+
+function genderLabelIssues(
+  dialogue: StagedDialogue,
+  plan?: DialogueLintContext
+): DialogueLintIssue[] {
+  const hasMizuki =
+    dialogue.lines.some((l) => MIZUKI_SPEAKER_RE.test(l.speaker.trim())) ||
+    (plan?.cast ?? []).some((m) => /瑞希|mizuki/i.test(`${m.name} ${m.fullName} ${m.path}`))
+  if (!hasMizuki) return []
+
+  const issues: DialogueLintIssue[] = []
+  for (const line of dialogue.lines) {
+    const isMizukiSpeaker = MIZUKI_SPEAKER_RE.test(line.speaker.trim())
+    if (
+      (isMizukiSpeaker && MIZUKI_SELF_GENDER_LABEL_RE.test(line.content)) ||
+      MIZUKI_THIRD_PARTY_GENDER_RE.test(line.content)
+    ) {
+      issues.push({
+        lineId: line.id,
+        code: 'gender_label_violation',
+        severity: 'high',
+        message: '违反「晓山瑞希」人设留白红线：严禁替瑞希下性别认同定论或贴任何性别标签'
+      })
+    }
+  }
+  return issues
+}
+
+function personaOocIssues(
+  dialogue: StagedDialogue,
+  plan?: DialogueLintContext
+): DialogueLintIssue[] {
+  const issues: DialogueLintIssue[] = []
+  const cast = plan?.cast ?? []
+  const personas = plan?.personas ?? []
+
+  const isModeActive = (speaker: string, keywordRe: RegExp): boolean => {
+    if (keywordRe.test(speaker)) return true
+    const member = cast.find(
+      (m) => m.name === speaker || m.fullName === speaker || m.role.includes(speaker)
+    )
+    if (member && keywordRe.test(`${member.name} ${member.fullName} ${member.role}`)) return true
+    if (
+      personas.some(
+        (p) => keywordRe.test(p.name) && (p.name === speaker || p.canonicalName?.includes(speaker))
+      )
+    ) {
+      return true
+    }
+    return false
+  }
+
+  for (const line of dialogue.lines) {
+    const sp = line.speaker.trim()
+    // 宵崎奏 / 东云慎英：人设严禁波浪号「～」与音符「♪」
+    if (/^(?:宵崎)?奏$|^东云慎英$|^慎英$/.test(sp) && /[～~♪]/.test(line.content)) {
+      issues.push({
+        lineId: line.id,
+        code: 'persona_ooc',
+        severity: 'high',
+        message: `${sp} 的语感克制平淡，人设明确禁用波浪号「～」与音符「♪」`
+      })
+    }
+
+    // 优男彰人形态：严禁窜戏到私下毒舌腔
+    if (
+      isModeActive(sp, /优男彰人|优男模式/) &&
+      /(?:……啧|啰里啰唆|狂什么啊|别胡说八道)/.test(line.content)
+    ) {
+      issues.push({
+        lineId: line.id,
+        code: 'persona_ooc',
+        severity: 'high',
+        message: '「优男彰人」营业模式下严禁混入私下粗口或毒舌腔，请改用礼貌却暗藏疏离的措辞'
+      })
+    }
+
+    // 优等生真冬形态：严禁泄露 25时 / Nightcord / OWN / 深夜称呼
+    if (
+      isModeActive(sp, /优等生真冬|班长真冬/) &&
+      /(?:25时|Nightcord|\bOWN\b|绘绘|Amia)/i.test(line.content)
+    ) {
+      issues.push({
+        lineId: line.id,
+        code: 'persona_ooc',
+        severity: 'high',
+        message: '「优等生真冬」白天营业模式下严禁泄露 25时 / Nightcord / OWN / 深夜网名等机密'
+      })
+    }
+  }
+  return issues
+}
+
+function matchesSpeakerName(
+  speaker: string,
+  target: string,
+  cast: StagedCastPlan['cast']
+): boolean {
+  if (speaker === target) return true
+  const member = cast.find((m) => m.name === speaker || m.fullName === speaker)
+  return Boolean(member && (member.name === target || member.fullName === target))
+}
+
 /**
  * 零延迟、确定性官方质感反套路对白 Linter。
  *
- * 检查 8 类高频 AI 写作痕迹：
+ * 检查高频 AI 写作痕迹与人设红线：
  * 1. 心理咨询式直白剖白与套话（therapy_cliche）
- * 2. 夹带动作/神态旁白泄露（stage_direction_leak）
- * 3. 结尾最后两句升华说教总结（moralizing_ending）
- * 4. 连续齐整句长或感叹号过载（uniform_cadence / exclamation_overload）
- * 5. 违背 Stage 1 规划的两两官方称呼（address_mismatch，含姓氏误称）
- * 6. 用户明示诉求/官方钩子没有落地（prompt_coverage_gap）
- * 7. 长句说教墙与双人戏份失衡（monologue_overload / speaker_imbalance）
- * 8. 句首填充词模板化重复（repetitive_opener）
+ * 2. AI 客服/公众号总结/元叙事禁语（ai_slop_phrasing）
+ * 3. 夹带括号/星号动作或第三人称动作旁白泄露（stage_direction_leak）
+ * 4. 结尾最后两句升华说教总结（moralizing_ending）
+ * 5. 连续齐整句长或感叹号过载（uniform_cadence / exclamation_overload）
+ * 6. 违背 Stage 1 / 人设称呼表的两两官方称呼（address_mismatch，含姓氏误称）
+ * 7. 晓山瑞希性别认同留白红线（gender_label_violation）与确定性 OOC 红线（persona_ooc）
+ * 8. 用户明示诉求/官方钩子没有落地（prompt_coverage_gap）
+ * 9. 长句说教墙与双人戏份失衡（monologue_overload / speaker_imbalance）
+ * 10. 句首填充词模板化重复（repetitive_opener）与零宽字符（zero_width_char）
  */
 export function lintDialogueFidelity(
   dialogue: StagedDialogue,
@@ -372,7 +504,6 @@ export function lintDialogueFidelity(
     return { issues, flaggedLineIds: [], shouldPolish: false }
   }
 
-  // 1 & 2. 逐句检查套话与动作旁白泄露
   for (const line of lines) {
     const content = line.content
     for (const rule of THERAPY_CLICHE_PATTERNS) {
@@ -386,12 +517,23 @@ export function lintDialogueFidelity(
         break
       }
     }
+    for (const rule of AI_SLOP_PATTERNS) {
+      if (rule.re.test(content)) {
+        issues.push({
+          lineId: line.id,
+          code: 'ai_slop_phrasing',
+          severity: 'high',
+          message: `命中人设禁用的${rule.label}，请改为符合角色口语与年龄的真实对话`
+        })
+        break
+      }
+    }
     if (hasSpokenStageDirectionLeak(content)) {
       issues.push({
         lineId: line.id,
         code: 'stage_direction_leak',
         severity: 'high',
-        message: '台词内夹带了动作/神态描写，请删除括号动作或第三人称叙述，只保留说出口的话'
+        message: '台词内夹带了动作/神态描写，请删除括号/星号动作或第三人称叙述，只保留说出口的话'
       })
     }
     if (hasZeroWidthChars(content)) {
@@ -404,7 +546,7 @@ export function lintDialogueFidelity(
     }
   }
 
-  // 3. 结尾反说教总结（仅检查最后 2 句）
+  // 结尾反说教总结（仅检查最后 2 句）
   const tailStart = Math.max(0, lines.length - 2)
   for (let i = tailStart; i < lines.length; i++) {
     const line = lines[i]
@@ -418,7 +560,7 @@ export function lintDialogueFidelity(
     }
   }
 
-  // 4a. 连续齐整句长检查（连续 >= 5 句长度几乎一致且均 >= 10 字）
+  // 连续齐整句长检查（连续 >= 5 句长度几乎一致且均 >= 10 字）
   let uniformRun = 1
   for (let i = 1; i < lines.length; i++) {
     const prevLen = visibleLength(lines[i - 1].content)
@@ -438,7 +580,7 @@ export function lintDialogueFidelity(
     }
   }
 
-  // 4b. 感叹号过载检查（>= 6 句且含叹号句占比 > 28%）
+  // 感叹号过载检查（>= 6 句且含叹号句占比 > 28%）
   if (lines.length >= 6) {
     const exclLines = lines.filter((l) => /[!！]/.test(l.content))
     if (exclLines.length / lines.length > 0.28) {
@@ -452,7 +594,7 @@ export function lintDialogueFidelity(
     }
   }
 
-  // 5. 两两称呼一致性检查（昵称偏离 + 姓氏/两字误称）
+  // 两两称呼一致性检查（昵称偏离 + 姓氏/两字误称）
   const addresses = plan?.pairwiseAddress ?? []
   if (addresses.length > 0) {
     const cast = plan?.cast ?? []
@@ -461,12 +603,18 @@ export function lintDialogueFidelity(
       const to = rule.to?.trim()
       const from = rule.from?.trim()
       if (!from || !to || !zh || zh === to) continue
-      const member = cast.find((entry) => entry.name === to)
+      const member = cast.find((entry) => entry.name === to || entry.fullName === to)
+      const toShort = member?.name ?? to
+      const toFull = member?.fullName ?? to
       const familyName = member ? member.fullName.replace(member.name, '').trim() : ''
+      if (zh === toShort) continue
       for (const line of lines) {
-        if (line.speaker !== from) continue
+        if (!matchesSpeakerName(line.speaker, from, cast)) continue
         if (line.content.includes(zh)) continue
-        if (line.content.includes(to)) {
+        if (
+          line.content.includes(toShort) ||
+          (toFull !== toShort && line.content.includes(toFull))
+        ) {
           issues.push({
             lineId: line.id,
             code: 'address_mismatch',
@@ -487,7 +635,9 @@ export function lintDialogueFidelity(
     }
   }
 
-  // 6. 用户诉求与官方钩子覆盖率
+  issues.push(...genderLabelIssues(dialogue, plan))
+  issues.push(...personaOocIssues(dialogue, plan))
+
   const understanding = plan?.understanding
   if (understanding) {
     const castNames = (plan?.cast ?? []).flatMap((member) =>
@@ -498,10 +648,7 @@ export function lintDialogueFidelity(
     issues.push(...promptCoverageIssues(dialogue, understanding, castNames))
   }
 
-  // 7. 说教墙与双人戏份失衡
   issues.push(...distributionIssues(dialogue))
-
-  // 8. 句首填充词模板化
   issues.push(...repetitiveOpenerIssues(dialogue))
 
   const flaggedLineIds = Array.from(new Set(issues.map((item) => item.lineId)))
