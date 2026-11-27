@@ -7,11 +7,24 @@ Type=simple
 User=YOUR_USER
 Group=YOUR_GROUP
 WorkingDirectory=/opt/MySekaiStoryteller-API
-# 编码器：auto 自动探测 nvidia/amd/intel（h264_nvenc / h264_amf / h264_qsv），失败回退 libx264
+
+# 从 .env 加载密钥与覆盖项（前缀 "-" 表示文件不存在时不报错）
+EnvironmentFile=-/opt/MySekaiStoryteller-API/.env
+Environment=NODE_ENV=production
+# glibc 低碎片内存分配参数（减轻长驻 Chromium/Node 内存膨胀）
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+# 编码器：auto 自动探测 nvidia/amd/intel（hevc_nvenc / hevc_amf / hevc_qsv 或 h264_*，默认 codec=hevc），失败回退 libx265/libx264
 Environment=MSS_FFMPEG_ENCODER=auto
+# 硬件/内存组合预设示例（按需取消注释；优先在 .env 中设置）：
+# Environment=MSS_GPU_PROFILE=intel
+# Environment=MSS_MEMORY_PROFILE=low
 # 渲染工作进程数（每 worker 约 300-500MB 内存）
 Environment=MSS_WORKERS=2
+
 ExecStart=/usr/bin/node out-host/host/main.js
+# 留足关停排空时间（需大于宿主默认 120s SHUTDOWN_DRAIN_MS）
+TimeoutStopSec=150
 Restart=on-failure
 RestartSec=10
 

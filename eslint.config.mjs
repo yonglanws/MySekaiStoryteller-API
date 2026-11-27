@@ -10,6 +10,13 @@ export default tseslint.config([
       '**/out-host',
       '**/.zcode',
       'apifile/**',
+      'astrbot_plugin_msst/**',
+      '.mimosa/**',
+      'cache/**',
+      'output/**',
+      'native/**',
+      'resources/**',
+      'personas/**',
       'src/renderer/public/live2d.min.js',
       'src/renderer/public/live2dcubismcore.min.js'
     ]

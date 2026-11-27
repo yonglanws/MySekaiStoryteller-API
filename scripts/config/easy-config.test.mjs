@@ -6,6 +6,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { loadHostConfig, validateConfigHints } from '../../out-host/host/config.js'
+import { loadDotEnv, parseDotEnv } from '../../out-host/host/env.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const INIT_SCRIPT = path.join(REPO_ROOT, 'scripts', 'init-config.mjs')
@@ -448,4 +449,77 @@ test('config.example.yaml parses cleanly, preserves key defaults, and has zero p
   assert.equal(cfg.video.useRustExporter, true)
   assert.ok(['staged', 'hybrid'].includes(cfg.llm.pipeline))
   assert.deepEqual(cfg.llm.personaDirs, [path.resolve(cfg.rootDir, 'personas/pjsk')])
+})
+
+test('parseDotEnv handles quotes, inline comments, export prefix, and CRLF/LF', () => {
+  const raw = [
+    '\uFEFF# Leading comment',
+    '  ',
+    'PLAIN=hello',
+    'SPACED = world  # trailing inline comment',
+    'export EXPORTED_KEY=from-export # comment',
+    'DOUBLE_QUOTED="value with # hash and \\"quotes\\" and \\nnewline" # trailing',
+    "SINGLE_QUOTED='literal # hash and \\n not escaped' # trailing",
+    'EMPTY=',
+    'URL=https://api.example.com/v1'
+  ].join('\r\n')
+
+  const parsed = parseDotEnv(raw)
+  assert.equal(parsed.PLAIN, 'hello')
+  assert.equal(parsed.SPACED, 'world')
+  assert.equal(parsed.EXPORTED_KEY, 'from-export')
+  assert.equal(parsed.DOUBLE_QUOTED, 'value with # hash and "quotes" and \nnewline')
+  assert.equal(parsed.SINGLE_QUOTED, 'literal # hash and \\n not escaped')
+  assert.equal(parsed.EMPTY, '')
+  assert.equal(parsed.URL, 'https://api.example.com/v1')
+})
+
+test('loadDotEnv loads .env into env without overwriting existing values and supports MSS_ENV_FILE', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mss-dotenv-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  writeFileSync(
+    path.join(dir, '.env'),
+    [
+      'MSS_LLM_API_KEY=sk-from-dotenv',
+      'MSS_API_KEY="dotenv-api-key"',
+      'export MSS_LLM_MODEL=gpt-4.1-mini # default model',
+      "MSS_HOST='127.0.0.1'"
+    ].join('\n'),
+    'utf8'
+  )
+
+  const targetEnv = {
+    MSS_LLM_API_KEY: 'sk-from-shell',
+    MSS_HOST: ''
+  }
+
+  const res = loadDotEnv(dir, { env: targetEnv })
+  assert.equal(res.loaded, true)
+  assert.equal(res.path, path.join(dir, '.env'))
+  // Existing process.env entries (even empty string) MUST win over .env
+  assert.equal(targetEnv.MSS_LLM_API_KEY, 'sk-from-shell')
+  assert.equal(targetEnv.MSS_HOST, '')
+  // Unset keys are populated from .env
+  assert.equal(targetEnv.MSS_API_KEY, 'dotenv-api-key')
+  assert.equal(targetEnv.MSS_LLM_MODEL, 'gpt-4.1-mini')
+  assert.deepEqual(res.loadedKeys.sort(), ['MSS_API_KEY', 'MSS_LLM_MODEL'])
+
+  // MSS_ENV_FILE override (relative to rootDir)
+  writeFileSync(
+    path.join(dir, 'custom.env'),
+    'MSS_PORT=9900\nMSS_LLM_MODEL=override-model\n',
+    'utf8'
+  )
+  const customEnv = { MSS_ENV_FILE: 'custom.env' }
+  const customRes = loadDotEnv(dir, { env: customEnv })
+  assert.equal(customRes.loaded, true)
+  assert.equal(customRes.path, path.join(dir, 'custom.env'))
+  assert.equal(customEnv.MSS_PORT, '9900')
+  assert.equal(customEnv.MSS_LLM_MODEL, 'override-model')
+
+  // Missing .env file is a silent no-op
+  const missingRes = loadDotEnv(dir, { env: {}, envFile: 'does-not-exist.env' })
+  assert.equal(missingRes.loaded, false)
+  assert.deepEqual(missingRes.loadedKeys, [])
 })

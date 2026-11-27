@@ -5,7 +5,28 @@
   "license": "GPL-3.0",
   "main": "./out-host/host/main.js",
   "author": "GuangChen2333",
+  "contributors": [
+    "yonglanws"
+  ],
   "homepage": "https://github.com/yonglanws/MySekaiStoryteller-API/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yonglanws/MySekaiStoryteller-API.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yonglanws/MySekaiStoryteller-API/issues"
+  },
+  "keywords": [
+    "project-sekai",
+    "pjsk",
+    "live2d",
+    "video-rendering",
+    "headless",
+    "playwright",
+    "pixijs",
+    "storyteller",
+    "api"
+  ],
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -22,18 +43,19 @@
     "start": "node out-host/host/main.js",
     "fetch:models": "npm run build:host && node out-host/host/tools/fetchAssets.js",
     "fetch:media": "npm run build:host && node out-host/host/tools/fetchMedia.js",
-    "test": "npm run build:host && node --test scripts/api/export-timeout.test.mjs scripts/api/ffmpeg-and-security.test.mjs scripts/api/tts-lease.test.mjs scripts/api/story-validation.test.mjs scripts/api/story-writer.test.mjs scripts/api/staged-writer.test.mjs scripts/api/ai-harness.test.mjs scripts/api/irodori-payload.test.mjs scripts/api/tts-japanese.test.mjs scripts/api/export-diagnostics.test.mjs scripts/api/personas.test.mjs scripts/assets/motion3.test.mjs scripts/assets/fetch-models.test.mjs scripts/assets/fetch-media.test.mjs scripts/assets/soundtracks.test.mjs scripts/audio/bgm-mix.test.mjs scripts/audio/se-mix.test.mjs scripts/assets/cloud-catalog.test.mjs scripts/assets/cloud-assets.test.mjs scripts/assets/cloud-only-isolation.test.mjs scripts/assets/background-names.test.mjs scripts/assets/zero-local-cloud.test.mjs",
-    "test:pool": "npm run build:host && node --test scripts/render-pool.test.mjs",
-    "test:config": "npm run build:host && node --test scripts/config/bgm.test.mjs scripts/config/bgm-catalog.test.mjs scripts/config/cloud-catalog-merge.test.mjs scripts/config/easy-config.test.mjs scripts/config/docker-assets.test.mjs",
-    "test:renderer": "node --test scripts/renderer/*.test.mjs",
-    "test:export": "npm run build:host && node --test scripts/export/*.test.mjs",
+    "test": "npm run build:host && node scripts/run-tests.mjs",
+    "test:api": "npm run build:host && node scripts/run-tests.mjs --group api",
+    "test:ai": "npm run build:host && node scripts/run-tests.mjs --group ai",
+    "test:pool": "npm run build:host && node scripts/run-tests.mjs --group pool",
+    "test:config": "npm run build:host && node scripts/run-tests.mjs --group config",
+    "test:renderer": "node scripts/run-tests.mjs --group renderer",
+    "test:export": "npm run build:host && node scripts/run-tests.mjs --group export",
     "test:tts": "npm run build:host && node --test scripts/api/tts-lease.test.mjs",
-    "test:all": "npm run build:host && node --test scripts/api/export-timeout.test.mjs scripts/api/ffmpeg-and-security.test.mjs scripts/api/tts-lease.test.mjs scripts/api/story-validation.test.mjs scripts/api/story-writer.test.mjs scripts/api/staged-writer.test.mjs scripts/api/ai-harness.test.mjs scripts/api/irodori-payload.test.mjs scripts/api/tts-japanese.test.mjs scripts/api/export-diagnostics.test.mjs scripts/api/personas.test.mjs scripts/assets/motion3.test.mjs scripts/assets/fetch-models.test.mjs scripts/assets/fetch-media.test.mjs scripts/assets/soundtracks.test.mjs scripts/audio/bgm-mix.test.mjs scripts/audio/se-mix.test.mjs scripts/render-pool.test.mjs scripts/config/bgm.test.mjs scripts/config/bgm-catalog.test.mjs scripts/config/easy-config.test.mjs scripts/config/docker-assets.test.mjs scripts/export/*.test.mjs scripts/renderer/*.test.mjs scripts/assets/cloud-catalog.test.mjs scripts/assets/cloud-assets.test.mjs scripts/assets/cloud-only-isolation.test.mjs scripts/assets/background-names.test.mjs scripts/assets/zero-local-cloud.test.mjs scripts/config/cloud-catalog-merge.test.mjs",
+    "test:all": "npm run build:host && node scripts/run-tests.mjs",
     "e2e": "node scripts/test-export.mjs",
-    "test:stories": "npm run build:host && node --test scripts/stories/*.test.mjs"
+    "test:stories": "npm run build:host && node scripts/run-tests.mjs --stories"
   },
   "dependencies": {
-    "@pixi/canvas-renderer": "^7.4.3",
     "@pixi/sound": "^5.2.3",
     "@pixi/unsafe-eval": "^7.4.3",
     "@sinonjs/fake-timers": "^15.4.0",
@@ -42,7 +64,6 @@
     "fontfaceobserver": "^2.3.0",
     "js-yaml": "^5.4.1",
     "mp4-muxer": "^5.2.2",
-    "pixi-filters": "^5.3.0",
     "pixi-live2d-display-advanced": "^1.0.1",
     "pixi.js": "^7.4.3",
     "playwright": "^1.54.0",
