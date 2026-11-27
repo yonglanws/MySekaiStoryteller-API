@@ -130,7 +130,9 @@ test('FrameContentValidator fast-path exits after 1 center readPixels on lit fra
   // Center-lit frame: single 32x32 readPixels early exit
   readCalls = 0
   const lit = validator.validateFrame(
-    makeCanvas((x, y) => (x > 800 && x < 1100 && y > 400 && y < 700 ? [220, 220, 220, 255] : [0, 0, 0, 255])),
+    makeCanvas((x, y) =>
+      x > 800 && x < 1100 && y > 400 && y < 700 ? [220, 220, 220, 255] : [0, 0, 0, 255]
+    ),
     0
   )
   assert.equal(lit.isBlackScreen, false)
@@ -147,7 +149,10 @@ test('FrameContentValidator fast-path exits after 1 center readPixels on lit fra
 
   // Completely black frame scans all 9 tiles and flags black screen
   readCalls = 0
-  const black = validator.validateFrame(makeCanvas(() => [0, 0, 0, 255]), 2)
+  const black = validator.validateFrame(
+    makeCanvas(() => [0, 0, 0, 255]),
+    2
+  )
   assert.equal(black.isBlackScreen, true)
   assert.equal(readCalls, 9)
 })
@@ -286,16 +291,19 @@ test('ConcurrentExportPipeline logs wire-level Irodori emotion, ref_wav, cfg_sca
   const loader = createRendererLoader()
   const { exportLogBus } = loader.load('managers/video-export/ExportLogBus.ts')
   exportLogBus.reset()
-  const { ConcurrentExportPipeline } = loader.load('managers/video-export/ConcurrentExportPipeline.ts')
+  const { ConcurrentExportPipeline } = loader.load(
+    'managers/video-export/ConcurrentExportPipeline.ts'
+  )
 
+  const mockIrodoriDir = process.env.MSS_IRODORI_DIR || '/srv/irodori/models/mizuki'
   const mockVoice = {
-    refAudioPath: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/emotion_refs/main.wav',
-    loraAdapter: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/lora_adapter',
+    refAudioPath: `${mockIrodoriDir}/emotion_refs/main.wav`,
+    loraAdapter: `${mockIrodoriDir}/lora_adapter`,
     caption: '落ち着いた、穏やかな口調で話している。',
     emotions: [
       {
         emotion: '伤心',
-        refAudioPath: '/vol2/1000/Irodori-TTS/models/LoRA/PJSK/晓山瑞希/emotion_refs/sad.wav',
+        refAudioPath: `${mockIrodoriDir}/emotion_refs/sad.wav`,
         caption: '悲しげで、今にも泣きそうな声で話している。',
         speed: 0.94
       }
@@ -607,16 +615,20 @@ test('native mss-export-rs handles version, segment planning, pipe-encode, mix-w
   assert.equal(copyRes.ok, true)
   assert.equal(copyRes.transcoded, false, 'compliant stream must use zero-reencode copy')
   assert.equal(copyRes.encoder, 'copy+bt709')
-  const copyProbe = await execFileAsync(ffmpeg.ffmpegPath(), ['-hide_banner', '-i', copyTaggedPath]).catch(
-    (e) => e
-  )
+  const copyProbe = await execFileAsync(ffmpeg.ffmpegPath(), [
+    '-hide_banner',
+    '-i',
+    copyTaggedPath
+  ]).catch((e) => e)
   assert.match(String(copyProbe.stderr ?? ''), /yuv420p\(tv, bt709/)
 })
 
 test('SegmentCoordinator orchestrates single-pass prepare, Rust plan-segments, parallel segments, and concat-mix', async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'mss-seg-coord-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
-  const { SegmentCoordinator } = require(path.join(root, 'out-host/host/export/segmentCoordinator.js'))
+  const { SegmentCoordinator } = require(
+    path.join(root, 'out-host/host/export/segmentCoordinator.js')
+  )
   const { Logger } = require('tslog')
 
   // Create two tiny valid MP4 segment files + 1 WAV using Rust pipe-encode & mix-wav

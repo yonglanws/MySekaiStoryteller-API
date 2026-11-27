@@ -1,7 +1,7 @@
 /**
  * 官方剧情基线的回归测试。
  *
- * 语料在仓库外（默认 D:/Users/桌面/mzkbot/msst-ai-lab/corpus，可用 MSS_CORPUS 覆盖）。
+ * 语料放在仓库外，通过环境变量 MSS_CORPUS_DIR（或 MSS_CORPUS）指向 fetch-official-corpus 的输出目录。
  * 找不到语料时跳过，不阻塞普通 npm test；找到时断言我们据以改提示词的关键数字没有漂移。
  */
 import assert from 'node:assert/strict'
@@ -10,8 +10,8 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { aggregate, officialToLines, summarize, windowsOf } from './story-metrics-lib.mjs'
 
-const CORPUS = process.env.MSS_CORPUS || 'D:/Users/桌面/mzkbot/msst-ai-lab/corpus'
-const hasCorpus = fs.existsSync(path.join(CORPUS, 'index.json'))
+const CORPUS = process.env.MSS_CORPUS_DIR || process.env.MSS_CORPUS || ''
+const hasCorpus = Boolean(CORPUS) && fs.existsSync(path.join(CORPUS, 'index.json'))
 
 test(
   'official 3-minute two-speaker windows keep their measured shape',

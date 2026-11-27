@@ -1,8 +1,8 @@
 /**
  * 官方剧情语料批量回归。
  *
- * 语料在仓库外（默认 `D:/Users/桌面/mzkbot/msst-ai-lab/corpus`）。存在时逐集跑
- * `calculateTimeline + bakeStoryPlan`，把 328 集 / 10 万级 snippets 的真实官方数据
+ * 语料放在仓库外，通过环境变量 MSS_CORPUS_DIR（或 MSST_CORPUS_ROOT / MSS_CORPUS）指定。
+ * 存在时逐集跑 `calculateTimeline + bakeStoryPlan`，把 328 集 / 10 万级 snippets 的真实官方数据
  * 当作回归输入；不存在时跳过，不影响普通 clone。
  *
  * 锁死的不是资源路径，而是时序语义：
@@ -18,13 +18,14 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { auditCorpus, listCorpusEpisodes } from './official-plan-audit.mjs'
 
-const corpusRoot = process.env.MSST_CORPUS_ROOT || 'D:/Users/桌面/mzkbot/msst-ai-lab/corpus'
-const indexPath = path.join(corpusRoot, 'index.json')
-const hasCorpus = fs.existsSync(indexPath)
+const corpusRoot =
+  process.env.MSS_CORPUS_DIR || process.env.MSST_CORPUS_ROOT || process.env.MSS_CORPUS || ''
+const indexPath = corpusRoot ? path.join(corpusRoot, 'index.json') : ''
+const hasCorpus = Boolean(indexPath) && fs.existsSync(indexPath)
 
 test(
   'official JP scenario corpus maps to a frame plan with zero timing failures',
-  { skip: hasCorpus ? false : `官方语料不存在：${corpusRoot}` },
+  { skip: hasCorpus ? false : '官方语料不存在（设置 MSS_CORPUS_DIR 指向官方语料目录）' },
   () => {
     const episodes = listCorpusEpisodes(corpusRoot)
     assert.ok(episodes.length >= 300, `日服集数异常：${episodes.length}`)

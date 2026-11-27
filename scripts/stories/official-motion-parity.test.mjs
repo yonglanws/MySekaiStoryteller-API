@@ -16,10 +16,15 @@ import { test } from 'node:test'
 
 import { BODY_MOTION_FADE_SECONDS } from '../../out-host/common/official/timing.js'
 
-const CORPUS = process.env.MSS_CORPUS || 'D:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/jp'
+const rawCorpusEnv =
+  process.env.MSS_CORPUS_JP || process.env.MSS_CORPUS_DIR || process.env.MSS_CORPUS || ''
+const CORPUS =
+  rawCorpusEnv && fs.existsSync(path.join(rawCorpusEnv, 'raw', 'jp'))
+    ? path.join(rawCorpusEnv, 'raw', 'jp')
+    : rawCorpusEnv
 const MOTIONS =
   process.env.MSS_MOTIONS || 'resources/models/01ichika_normal/01ichika_normal_3.0_f_t04/motions'
-const hasCorpus = fs.existsSync(CORPUS)
+const hasCorpus = Boolean(CORPUS) && fs.existsSync(CORPUS)
 const hasMotions = fs.existsSync(MOTIONS)
 
 test(

@@ -238,10 +238,10 @@ FullScreenText slot 计时与语音、Movie 时序、场景特效延迟/残留/S
 
 ## 2026-11 口型、眨眼、呼吸按 sse-live2d/sse-bake 重写
 
-本节取代下面「2026-11 口型链路按 ournotes 忠实重构」一节。参考实现回到仓库外的
-SekaiStoryExporter checkout（`sse-bake/src/lipsync.rs`、`sse-bake/src/lib.rs`、
-`sse-live2d/src/blink.rs`、`runtime.rs`、`motion.rs`、`sse-core/src/consts.rs`），
-按「能整段移植就整段移植」重写口型两条链与待机自然动作。ournotes 的
+本节取代下面「2026-11 早期口型链路重构记录」一节。参考实现以公开的
+SekaiStoryExporter（`sse-bake/src/lipsync.rs`、`sse-bake/src/lib.rs`、
+`sse-live2d/src/blink.rs`、`runtime.rs`、`motion.rs`、`sse-core/src/consts.rs`）为准，
+按「能整段移植就整段移植」重写口型两条链与待机自然动作。早期的
 `AdvLipSyncPolicy` 预设、p95 响度归一、450ms 指数尾、8Hz 音节正弦、四段线性眨眼
 全部删除。
 
@@ -304,31 +304,15 @@ SekaiStoryExporter checkout（`sse-bake/src/lipsync.rs`、`sse-bake/src/lib.rs`�
 已知未移植（口型）：点击提前结束时截断 PCM 后继续平滑（`Lip::cut_voice`）。
 导出没有点击；交互播放点击后整个 snippet 结束并 `releaseMouth()`。
 
-## 2026-11 口型链路按 ournotes 忠实重构
+## 2026-11 早期口型链路重构记录
 
 > 已被上一节取代；本节仅保留为历史记录。
 
-本节记录 2026-11 对语音口型链路（`src/common/official/timing.ts` + `src/renderer/src/utils/LipSyncEnvelope.ts`）的第二次对齐：以 ournotes-player 的实时口型观感为蓝本，不再在官方曲线上叠本项目自加的平滑层。
+本节记录 2026-11 对语音口型链路（`src/common/official/timing.ts` + `src/renderer/src/utils/LipSyncEnvelope.ts`）的早期试验：曾尝试用 `AdvLipSyncPolicy` 配合裸 `Live2DVoice` RMS 曲线并去掉额外低通平滑，后续已在上一节中统一替换为 `sse-bake` 的 60Hz `Lip::Voice` / `Lip::Text` 官方三档 `smooth()` 实现。
 
-背景：与 ournotes-player `src/live2d/lipsync.js` 逐行核对后确认，MSST 的 `stepMouthSync` 与 ournotes `AdvLipSyncPolicy` 已逐位一致；「张嘴怪」不在 policy 层，而在输入特征层叠了 ournotes 没有的两层——官方 `Live2DVoice.smoothLipValue` 三段权重平滑（等效 tau 约 75ms 低通，把 4-8Hz 音节节奏滤平，是「发黏」主形态）与 `LIP_RMS_MIN_VALUE=0.08` 下限 × 响度增益的叠加（句内间隙永不闭嘴的放大器），以及被下调过的 preset（speechFloor/minSpeech/openCap/onset/formOpenSupp）。ournotes 两条实时路径（CRI Lips 神经网络、MotionSync WASM 元音口型）均不可移植：CRI 权重来自用户 APK 提取的 `crilips.json/crilips.bin` 数据文件，ournotes 与 MSST 仓库均无此数据；MSST 模型栈（pixi-live2d-display-advanced）无 MotionSync 控制器与元音 mapping。故特征层唯一可用的是官方 `Live2DVoice` RMS 曲线（官方客户端语音口型路径），重构目标是让它裸地喂给逐位忠实的 policy。
-
-改动（`buildLipSyncEnvelope` 重写，`stepMouthSync` policy 本体零改动，导出无实时 PCM pull 的架构前提不变）：
-
-- 官方曲线裸输出：`lipTargetFromRms(rms, 1, 1.75, 0)`——`a×(a+1)^1.75`、阈值 0.06、上限 1，`minValue` 传 0；删除 `LIP_RMS_MIN_VALUE` 下限放宽，删除包络构建中的 `smoothLipValue` 调用（函数本体保留导出）。轻声保底职责归还 policy 的 `speechFloor/minSpeech`。
-- 响度归一保留（p95 目标 0.78、增益上限 2.4、只放大不衰减）：ournotes 输入层天生归一（CRI net2 输出 sigmoid×0.9+0.1、MotionSync viseme clamp [-1,1]），此处是它的离线等效物，不是调参。
-- `MOUTH_SYNC_FALLBACK_PRESET` 换回 ournotes 官方 fallback 原值（逐位）：attack 0.032 / release 0.10 / hold 0.06 / hfs 0.022 / speakingThr 0.026 / silenceFloor 0.015 / speechFloor 0.11 / minSpeech 0.17 / onset 0.13 / openScale 1.03 / comp 0.07 / openCap 0.88 / formScale 1 / formOpenSupp 0 / baseToDefault 0。`formScale/baseToDefault` 两个字段本 policy 不消费，仅数据忠实。
-- 释放尾 300ms 改 450ms 指数尾，删除 120ms 线性收尾（ournotes 无对应物，静音回填的离线等价是指数尾；450ms 出处：末帧残值 0.76×exp(-4.5) 约 0.009，且小于 AUTO_WAIT_AFTER_VOICE 0.5s，语音后停留期内合完）。无语音的文本口型尾处理同步。
-- `ParamMouthForm` 不再由口型链路写：删除说话时向默认值中和的三函数，form 完全由表情/动作拥有（ournotes fallback 路径 hasForm:false 的语义；托管路径的 formOpenSupp 是元音 delta 的抑制因子，MSST 无元音数据时向默认中和不是 ournotes 任何路径的行为）。
-- 写入时机：Cubism4 绘制网格在 `coreModel.update()` 里定稿，`loadParameters()` 只把参数还原给下一帧。听者自己的 `updateMotions` 又会在自己绘制前把动作张嘴写回来，所以口型挂在每个模型自己的 `coreModel.update()` 之前。说话期间同台非说话人每帧写 0。长元音 RMS 几乎恒定时，说话人侧再叠约 8Hz、±35% 的开合（不改包络、不改 preset）。
-
-轻语音观感预期（接受不改参数）：极轻语音（gain 已顶 2.4 上限）在新链路下 peak 恰好钉在 `minSpeech=0.17` 保底（0.08 振幅正弦实测 peak 0.1700 / gain 2.4000）——气声台词的嘴型是恒定保底开度而非随语音起伏。这是 official AdvCalm fallback 预设本身的行为（ournotes 同值同行为），按「忠实 ournotes 蓝本」接受，不调参；若实片观感不可接受再立独立决策（改 minSpeech 属偏离蓝本，需用户拍板）。另注意：低于官方阈值（shaped < 0.06）的输入不开嘴，是官方曲线裸输出的一部分，无下限放宽。
-
-未引入项：per-model profile（ournotes `openScale = 1 + 0.08 × 口型参数数`）——包络在导出解码时预计算、与模型解耦（`prepareTalkLipSync` 签名只有 audioBuffer + snippetIndex），profile 需在采样侧按模型缩放会破坏该架构；且 MSST 模型典型只有 `ParamMouthOpenY`（n=0，profile=1）。已在 `LipSyncEnvelope.ts` 注释注明此偏差。
-
-> 上下文被压缩后先读这份文件，再读 `scripts/renderer/sekai-exporter-parity.test.mjs` 顶部的
-> “PLAN SNAPSHOT”。本计划不是“再做一个播放器”，而是把
-> `https://github.com/StarMoe-org/SekaiStoryExporter` 已经核对过的官方演出语义，落到本项目的
-> TypeScript/Pixi 渲染管线里。参考 checkout 在仓库外：`/tmp/sekai-story-exporter`。
+> 配合契约测试 `scripts/renderer/sekai-exporter-parity.test.mjs` 维护。本计划旨在把
+> `https://github.com/StarMoe-org/SekaiStoryExporter` 核对过的官方演出语义，落到本项目的
+> TypeScript/Pixi 渲染管线里。
 
 ## 1. 参考实现的关键结论
 
@@ -566,8 +550,7 @@ SekaiStoryExporter（下称 SSE）是 Rust + wgpu 的原生导出器，核心不
       `event_147_05` 的三个 250ms Clear 从 0ms 恢复为 253ms，Appear 从 218ms 回到 127ms；
       原先 81~83s 台词期间消失的角色恢复可见（抽帧确认）。
       依据：SSE `crates/sse-timeline` 的 Hide 分支在协程开始时就把 shown 置 false，
-      随后的 Appear 对非 shown 视图走 `FadeOpacity(1, 0.1)`；ournotes-player 的 `In`/`Out`
-      同样是注册后淡入、淡出后移除，确认退场应按异步协程处理。
+      随后的 Appear 对非 shown 视图走 `FadeOpacity(1, 0.1)`，确认退场应按异步协程处理。
 - [x] 黑屏保护改为画面 3x3 网格取样，并跳过准备片段、脚本黑/白场与覆盖转场；
       `event_191_04` 不再因“纯黑背景 + 居中角色”被误杀（首轮 500 -> 复跑 200）。
 - [x] 长片累计漂移不再逐句记异常，只报突然新增 >100ms 的跳变；

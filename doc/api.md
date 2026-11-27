@@ -14,27 +14,28 @@
   内部接口 `/api/v1/tts/lease` 和 `/api/v1/tts/lease/release` 额外允许同机渲染 worker 通过内部桥接令牌调用。不设密钥则关闭鉴权（仅建议本机回环使用）。
 - **CORS 策略**：默认开启（可用 `server.cors: false` 关闭）。配置了 `server.corsOrigins` 或 `MSST_CORS_ORIGINS` / `MSS_CORS_ORIGINS`（逗号分隔）时按白名单放行；没配时只放行本机回环地址（`localhost`、`127.0.0.1`、`[::1]`）。
 - **路径与脱敏**：`downloadUrl` 是相对服务根的下载路径；`videoPath` / `scriptPath` 是服务端本地磁盘路径。500 报错文本里的输出目录和临时目录路径会自动脱敏成 `[path]`。
+- **优雅停机排空（Draining）**：宿主收到 `SIGINT` / `SIGTERM` 进入停机排空阶段后，会立即停止接收新的 `POST /api/v1/export` 与 `POST /api/v1/generate` 请求并返回 HTTP **`503 Service Unavailable`**，同时等待在途导出与 AI 生成收尾（最多 120 秒）。
 
 ## 接口一览
 
-| 方法   | 路径                             | 作用                                                            |
-| ------ | -------------------------------- | --------------------------------------------------------------- |
-| `POST` | `/api/v1/export`                 | 提交故事 JSON 导出 MP4（支持同步等待或 `wait: false` 异步入队） |
-| `GET`  | `/api/v1/export/:taskId/status`  | 查询单个任务状态（保留期 1 小时，最多 200 条）                  |
-| `POST` | `/api/v1/export/:taskId/cancel`  | 取消排队或渲染中的任务，并立即清理关联临时目录                  |
-| `POST` | `/api/v1/script/generate`        | 内置 AI 生成剧本 JSON（不渲染视频）                             |
-| `POST` | `/api/v1/generate`               | 内置 AI 生成剧本并直接提交导出 MP4                              |
-| `GET`  | `/api/v1/files`                  | 分页列出输出目录里的 `.mp4`、`.json`、`.log`、`.txt` 文件       |
-| `GET`  | `/api/v1/download/:filename`     | 下载输出目录里的指定文件（带防越界校验）                        |
-| `GET`  | `/api/v1/resources`              | 获取合并后的模型、动作、表情、背景、BGM 与 SE 目录              |
-| `POST` | `/api/v1/cloud/refresh`          | 强制重新拉取并刷新云端目录快照                                  |
-| `GET`  | `/api/v1/assets/moesekai/models` | 浏览 Moesekai 远端模型索引（不下载）                            |
-| `GET`  | `/api/v1/assets/moesekai/media`  | 浏览远端背景 / BGM 列表（不下载）                               |
-| `POST` | `/api/v1/assets/fetch`           | 手动拉取模型、背景或 BGM 到本地 `resources/`                    |
-| `GET`  | `/api/v1/health`                 | 健康检查（渲染池、GPU、TTS、LLM、清理统计）                     |
-| `GET`  | `/api/v1/status`                 | 查看当前正在跑的、排队中的和最近 10 次导出记录                  |
-| `POST` | `/api/v1/cleanup`                | 立即清理过期导出文件和过期临时目录                              |
-| `GET`  | `/api/v1/cleanup/stats`          | 查看自动清理策略和累计清理计数                                  |
+| 方法   | 路径                             | 作用                                                                 |
+| ------ | -------------------------------- | -------------------------------------------------------------------- |
+| `POST` | `/api/v1/export`                 | 提交故事 JSON 导出 MP4（支持同步等待或 `wait: false` 异步入队）      |
+| `GET`  | `/api/v1/export/:taskId/status`  | 查询单个任务状态（保留期 1 小时，最多 200 条）                       |
+| `POST` | `/api/v1/export/:taskId/cancel`  | 取消排队或渲染中的任务，并立即清理关联临时目录                       |
+| `POST` | `/api/v1/script/generate`        | 内置 AI 生成剧本 JSON（不渲染视频）                                  |
+| `POST` | `/api/v1/generate`               | 内置 AI 生成剧本并直接提交导出 MP4                                   |
+| `GET`  | `/api/v1/files`                  | 异步分页列出输出目录里的 `.mp4`、`.json`、`.log`、`.txt` 文件        |
+| `GET`  | `/api/v1/download/:filename`     | 下载输出目录里的指定文件（带防越界校验，支持 HTTP `Range` 断点续传） |
+| `GET`  | `/api/v1/resources`              | 获取合并后的模型、动作、表情、背景、BGM 与 SE 目录                   |
+| `POST` | `/api/v1/cloud/refresh`          | 强制重新拉取并刷新云端目录快照                                       |
+| `GET`  | `/api/v1/assets/moesekai/models` | 浏览 Moesekai 远端模型索引（不下载）                                 |
+| `GET`  | `/api/v1/assets/moesekai/media`  | 浏览远端背景 / BGM 列表（不下载）                                    |
+| `POST` | `/api/v1/assets/fetch`           | 手动拉取模型、背景或 BGM 到本地 `resources/`                         |
+| `GET`  | `/api/v1/health`                 | 健康检查（渲染池、GPU、Rust 导出器、TTS、LLM/人设、清理统计）        |
+| `GET`  | `/api/v1/status`                 | 查看当前正在跑的、排队中的和最近 10 次导出记录                       |
+| `POST` | `/api/v1/cleanup`                | 立即清理过期导出文件和过期临时目录                                   |
+| `GET`  | `/api/v1/cleanup/stats`          | 查看自动清理策略和累计清理计数                                       |
 
 AI 剧本生成和云端拉取的详细参数看 [宿主内置 AI 剧本生成](ai-script.md) 和 [云端资源获取](cloud-assets.md)。
 
@@ -42,7 +43,7 @@ AI 剧本生成和云端拉取的详细参数看 [宿主内置 AI 剧本生成](
 
 ## 提交导出：`POST /api/v1/export`
 
-支持**同步等待（默认 `wait: true`）**和**异步入队（`wait: false`）**两种用法。无论哪种模式，收到请求后都会先做尺寸校验、故事 Schema 校验、云端素材按需下载，以及（启用 IrodoriTTS 时）日语 `ttsText` 预检，全部通过才会放进队列。
+支持**同步等待（默认 `wait: true`）**和**异步入队（`wait: false`）**两种用法。无论哪种模式，收到请求后都会先检查服务是否处于停机排空状态（若是则返回 `503`），再做尺寸校验、故事 Schema 校验、云端素材按需下载，以及（启用 IrodoriTTS 时）日语 `ttsText` 预检，全部通过才会放进队列。
 
 请求体只认下面三个字段（分辨率、帧率、编码器、TTS 等全部走宿主 `config.yaml`）：
 
@@ -72,7 +73,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 {
   "success": true,
   "message": "Video exported successfully",
-  "videoPath": "C:\\mss\\apifile\\export-1800000000000-demo01.mp4",
+  "videoPath": "/srv/msst/apifile/export-1800000000000-demo01.mp4",
   "fileSize": 5242880,
   "duration": 21.4,
   "frameCount": 900,
@@ -89,9 +90,9 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
     "avgPumpFps": 72.6,
     "videoDurationMs": 30000
   },
-  "logPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log",
-  "logJsonPath": "C:\\mss\\apifile\\export-1800000000000-demo01.log.json",
-  "reportPath": "C:\\mss\\apifile\\export-1800000000000-demo01.report.txt",
+  "logPath": "/srv/msst/apifile/export-1800000000000-demo01.log",
+  "logJsonPath": "/srv/msst/apifile/export-1800000000000-demo01.log.json",
+  "reportPath": "/srv/msst/apifile/export-1800000000000-demo01.report.txt",
   "downloadUrl": "/api/v1/download/export-1800000000000-demo01.mp4"
 }
 ```
@@ -138,7 +139,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 ### `POST /api/v1/export/:taskId/cancel`
 
-不用传请求体。会立即取消排队或正在渲染的任务，关闭对应的文件句柄和帧管道（`FramesPipeSession`），并删掉本次生成的临时目录，等待清理完成后返回：
+不用传请求体。会立即取消排队或正在渲染的任务，关闭对应的文件句柄和帧管道（`FramesPipeSession` / Rust 二进制流），并删掉本次生成的临时目录，等待清理完成后返回：
 
 ```json
 {
@@ -155,7 +156,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 ### `GET /api/v1/files`
 
-分页列出输出目录（默认 `apifile/`）中的 `.mp4`、`.json`、`.log`、`.txt` 文件。
+异步分页列出输出目录（默认 `apifile/`）中的 `.mp4`、`.json`、`.log`、`.txt` 文件。
 
 - `page`：页码，从 `1` 开始（默认 `1`）
 - `limit`：每页条数，`1` ~ `100`（默认 `20`）
@@ -163,7 +164,9 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 ### `GET /api/v1/download/:filename`
 
-只传文件名，不要带路径斜杠或 `..`。服务端会做字符检查并用 `fs.realpathSync` 校验真实路径没有通过软链接跳出输出目录。支持 `.mp4`、`.json`、`.log`、`.txt`、`.webm`。
+只传文件名，不要带路径斜杠或 `..`。服务端会做字符检查并用真实路径校验防止通过软链接跳出输出目录。支持 `.mp4`、`.json`、`.log`、`.txt`、`.webm`。
+
+- **支持 HTTP `Range` 分片下载**：响应头带 `Accept-Ranges: bytes`；客户端携带 `Range: bytes=start-end` 时返回 HTTP **`206 Partial Content`** 与 `Content-Range`（支持视频播放器拖拽进度与断点续传）；不带 `Range` 时返回完整文件 `200 OK`；越界范围返回 `416 Range Not Satisfiable`。
 
 ---
 
@@ -171,7 +174,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 ### `GET /api/v1/resources`
 
-返回本地和云端合并后的完整可用素材目录（内存缓存 30 秒；冷启动无快照时最多等 60 秒首轮拉取，有快照最多等 2 秒刷新）：
+返回本地和云端合并后的完整可用素材目录（内存缓存 30 秒；**冷启动无快照时最多等 180 秒首轮拉取**，已有快照时最多等 2 秒刷新）：
 
 - `models`：含角色 id、`name`、`shortName`、`path`、`motions`、`facials`、`defaultMotion`、`defaultFacial`、`source`（`local` / `cloud`）以及服装分类、组合标签等。
 - `images` / `imageDetails`：背景列表及中文地点名、别名、`timeOfDay`、室内外标签。
@@ -179,7 +182,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 - `seDetails`：云端 SE 音效列表及场景分类标签。
 - `cloud`：云端目录统计（`generatedAt`、`models`、`backgrounds`、`bgm`、`se`）。
 
-注意：**本地 `models.yaml` 只占对应角色的默认首选位，不会屏蔽该角色的其他云端服装或别的角色**；本地已下载的背景和 BGM 也会自动贴上官方中文名和标签。
+注意：在 `assets.cloudOnly: true`（模板默认）下，仅暴露云端目录；在 `assets.cloudOnly: false` 下，**本地 `models.yaml` 只占对应角色的默认首选位，不会屏蔽该角色的其他云端服装或别的角色**，本地已下载的背景和 BGM 也会自动贴上官方中文名和标签。
 
 ### `POST /api/v1/cloud/refresh`
 
@@ -193,9 +196,13 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 该接口不要求 Bearer 鉴权（方便监控探活）。注意 `status: "ok"` 只代表 HTTP 服务活着，还要重点看 `renderPool.readyWorkers` 和 `renderPool.webglRenderers`。
 
-当服务开启了 `apiKey` 且调用方没带合法 Bearer 令牌时，接口会自动隐藏敏感配置：`tts.apiBaseUrl`、`llm.baseUrl`、`assets.indexBase`、`assets.libraryBase` 不会返回，`ttsLease` 只返回计数与 `hasWeights`。
+当服务开启了 `apiKey` 且调用方**未带合法 Bearer 令牌**时，接口会自动脱敏敏感配置与本机绝对路径：
 
-主要字段：`activeExports`、`queuedExports`、`pendingExports`、`cleanup`、`videoConfig`（含真实的 `codec`：`hevc` 或 `h264`）、`renderPool`、`ttsLease`、`tts`、`llm`、`assets`、`host`（含启动时实测出来的 `ffmpegEncoderDetected`）。
+- `tts.apiBaseUrl`、`llm.baseUrl`、`assets.indexBase`、`assets.libraryBase` 不会返回；
+- `ttsLease` 只返回计数与 `hasWeights`；
+- `rustExporter` 会隐藏服务器本地二进制路径 `binaryPath` 与 `napiPath`（仅保留 `enabled` / `available` / `mode` 等状态字段）。
+
+主要字段：`version`（自动读取自 `package.json`）、`activeExports`、`queuedExports`、`pendingExports`、`cleanup`、`videoConfig`（含真实的 `codec`：`hevc` 或 `h264`）、`rustExporter`（原生 Rust 导出器/N-API 可用状态）、`renderPool`、`ttsLease`、`tts`、`llm`（含 **`llm.personas`**：当前已加载角色人设数量，内置 `personas/pjsk/` 默认为 `58`）、`assets`、`host`（含启动时实测出来的 `ffmpegEncoderDetected`）。
 
 ### `GET /api/v1/status`
 
@@ -207,7 +214,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 
 - **定时清理**：每 60 分钟自动跑一次。
   - 输出目录（`apifile/`）里修改时间超过 **24 小时** 的 `.mp4`、`.json`、`.log`、`.txt` 会被删除（正在导出的任务产物会跳过）。
-  - 系统临时目录与输出目录里超过 **6 小时** 的残留临时项（`mss-fpipe-*`、`mss-hf-*`、`mss-export-*`、`mss-api-audio-*`、`mss-audio-*`、`mss-fast-*` 和 `.mss-frames-video-*.mp4`）会被清掉。
+  - 系统临时目录与输出目录里超过 **6 小时** 的残留临时项（`mss-fpipe-*`、`mss-hf-*`、`mss-export-*`、`mss-api-audio-*`、`mss-audio-*`、`mss-fast-*`、`mss-segs-*` 和 `.mss-frames-video-*.mp4`）会被清掉。
 - **手动触发**：`POST /api/v1/cleanup` 立即跑一遍清理；`GET /api/v1/cleanup/stats` 查看策略和累计清理数。
 
 ---
@@ -219,13 +226,15 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 | `200`  | 正常成功（查不到任务时返回 `status: "unknown"` 也是 200）                                                                    |
 | `202`  | `POST /api/v1/export` 传了 `wait: false`，异步入队成功                                                                       |
 | `204`  | CORS `OPTIONS` 预检                                                                                                          |
+| `206`  | `GET /api/v1/download/:filename` 携带有效 `Range` 头返回部分内容                                                             |
 | `400`  | 故事格式错、尺寸不是偶数、`timeout` / `exportTimeout` 非正整数、`wait` 非布尔值、缺失日文 `ttsText` 预检失败、下载文件名非法 |
 | `401`  | 开启了 `apiKey` 但未提供或提供了错误的 Bearer 密钥                                                                           |
 | `404`  | 下载文件不存在或软链接越界                                                                                                   |
 | `409`  | `cloudCatalog: false` 时调用 `/cloud/refresh`，或重复并发调用 `/assets/fetch`                                                |
+| `416`  | `GET /api/v1/download/:filename` 的 `Range` 请求范围越界                                                                     |
 | `422`  | AI 剧本生成/校验失败，或 `llm.enabled` 为 `false`                                                                            |
 | `429`  | 触发 IP 限流（10 次/60 秒，看 `Retry-After`）或 AI 并发生成数达上限                                                          |
 | `500`  | 导出失败、同步等待超时/被取消、生成成功但导出阶段报错                                                                        |
 | `502`  | 上游 LLM 或云端资源站请求失败                                                                                                |
-| `503`  | 渲染池还没就绪，或 TTS 权重租约被中止                                                                                        |
+| `503`  | 渲染池还没就绪、服务正在优雅停机排空（draining），或 TTS 权重租约被中止                                                      |
 | `504`  | AI 剧本生成阶段超时                                                                                                          |

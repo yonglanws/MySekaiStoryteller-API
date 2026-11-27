@@ -2,11 +2,11 @@
 
 [返回文档总览](README.md) · [API 参考](api.md) · [云端资源获取](cloud-assets.md)
 
-配好 `llm` 后，你只需要发一句场景描述（比如“放学后的天台，瑞希和绘名聊起下次 Live”），宿主就能自动完成选角、写台词、配表情动作、切镜头、翻译日语配音文本并按官方规则质检修复，最后输出标准剧本 JSON 或直接导出 MP4。
+配好 `llm` 后，你只需要发一句场景描述（比如“放学后的天台，瑞希和绘名聊起下次 Live”），宿主就能自动完成选角、加载内置 PJSK 角色人设与官方 RAG 语料、写台词、配表情动作、切镜头、翻译日语配音文本并按官方规则质检修复，最后输出标准剧本 JSON 或直接导出 MP4。
 
 ## 基础配置
 
-在 `config.yaml` 里配置 `llm`（密钥**只从环境变量读取**，不要写进文件）：
+在 `config.yaml` 里配置 `llm`（密钥**只从环境变量或 `.env` 读取**，不要写进 `config.yaml`）：
 
 ```bash
 export MSS_LLM_API_KEY=sk-...
@@ -26,7 +26,7 @@ llm:
   timeoutMs: 120000
   retries: 2
   repairRounds: 2
-  pipeline: staged # staged（默认） | hybrid | agent | single
+  pipeline: staged # staged（schema 默认） | hybrid（.env.example 默认） | agent | single
   agentMaxSteps: 16
   jsonMode: auto # auto | on | off
   translateForTts: true
@@ -34,7 +34,7 @@ llm:
   targetMinutes: 3
   systemPrompt: ''
   extraBody: {} # 比如 {"thinking":{"type":"disabled"}}
-  personaDirs: []
+  personaDirs: [personas/pjsk] # 省略时同样自动发现内置 personas/pjsk（58 份 PJSK 角色人设）
   personas: []
 ```
 
@@ -43,20 +43,41 @@ llm:
 - **`baseUrl`**：填根地址就行（兼容 OpenAI、new-api、one-api、Ollama、vLLM），宿主会自动拼 `/chat/completions`，别自己再写一遍。
 - **`pipeline`**：
   - `hybrid` / `agent`（二者内部已合并为同一套**统一三段式上下文隔离 + 工具驱动管线**，`agent` 和 `agentic: true` 均作为向后兼容别名路由到此路径）：Phase 1 允许 1~4 轮只读工具自主核实重写人设、官方跨话剧情与云端素材并锁定 `StagedCastPlan` + `researchBrief`；Phase 2 **彻底丢弃 Phase 1 工具对话历史**，仅注入精炼规划与高占比重写人设写台词并做 `dialogueLinter` + 人设 Critic 自检；Phase 3 走确定性编译并由单一轻量导演终审做局部 `operations` 修补。详见下文 [统一三段式管线架构](#统一三段式上下文隔离与工具驱动架构hybrid--agent)。
-  - `staged`（内置默认）：与上述共享 Phase 2/3 核心编译骨干，跳过 Phase 1 工具循环，直接用 `buildCastPrompt` + 预取 RAG 选角定纲。
+  - `staged`（`config.ts` / `config.example.yaml` 默认）：与上述共享 Phase 2/3 核心编译骨干，跳过 Phase 1 工具循环，直接用 `buildCastPrompt` + 预取 RAG 选角定纲。
   - `single`：快速选角后让模型一次把整份剧本写完（`mode: chat` 固定走 `single`），适合极速省流场景。
 - **`agentMaxSteps`**：统一管线 Phase 1 允许的最大工具探索/迭代步数（`2~40`，默认 `16`）。
 - **`jsonMode`**：`auto` 会先试着带 `response_format: { type: "json_object" }`，如果接口报错不支持就自动去掉重发。
 - **`extraBody`**：原样塞进请求体。带深度思考开关的模型想加速可以写 `{"thinking":{"type":"disabled"}}`；如果开着高思考（如 Gemini `-high` 或带 `reasoning_effort`），记得把 `maxTokens` 调到 `16384`~`32768` 以上，不然思考 token 把额度吃光会导致 JSON 截断。
 - **`polishDialogue`**：开启后会对生成的台词做 `dialogueLinter` 反套路与 OOC 质检，触发人设 Critic / 润色并在 Phase 3 启用长篇 `director-review` 导演终审。
-- **`personaDirs` / `personas`**：放自定义/重写角色人设。`personaDirs` 会**递归扫描**各级子目录中的 `*.md` / `*.txt`（例如 5 个分团子目录下的不同世界线虚拟歌手与角色变体），解析可选 YAML frontmatter（`name`、`aliases`、`group`、`unit`）与所属分团；系统会自动剥离 AI 聊天机器人交互协议噪声（如打字聊天感、括号心理描写、禁止换行等提示词规范），并按阶段提纯注入：**Phase 2 台词阶段注入高达 `11,000` 字 `dialoguePersonaPrompt` 与 `extractPairwiseAddressBook` 两两官称呼表，表演阶段注入 `actingPersonaPrompt`**，避免角色被模型预训练先验同化。
 
-人设文件长这样：
+## 内置角色人设（`personas/pjsk/`）与自定义覆盖
+
+仓库已内置 **58 份重写 PJSK 角色人设**，位于 `personas/pjsk/`（包含 20 位 5 个原创团角色、各分团世界线虚拟歌手子目录 `虚拟歌姬/{25时_Nightcord,Leo_need,MORE_MORE_JUMP,Vivid_BAD_SQUAD,Wonderlands_Showtime}/` 以及配角与变体形态）。启动时宿主会打印已加载人设数量，并在 `GET /api/v1/health` 的 `llm.personas` 字段展示（默认 `58`）。
+
+**自动发现与覆盖优先级**：
+
+1. **环境变量 `MSS_LLM_PERSONA_DIRS`（最高优先级）**：
+   - 设为逗号分隔的目录列表即可覆盖默认目录，**后者可覆盖前者中的同名角色**，例如叠加扩展：`MSS_LLM_PERSONA_DIRS=personas/pjsk,/path/to/custom-personas`（Docker 中为 `/app/personas/pjsk,/app/custom-personas`）。
+   - 设为 `none` 或 `off` 可显式关闭所有人设目录加载。
+   - 留空或未设置时，不覆盖配置。
+2. **`config.yaml` 中的 `llm.personaDirs`**：
+   - `config.example.yaml` 与 `npm run init` 默认写入 `[personas/pjsk]`。
+   - 如需叠加扩展，改为 `[personas/pjsk, /path/to/custom]`；设为 `[]` 则禁用目录加载（仍可保留内联 `llm.personas`）。
+3. **内置自动发现（默认兜底）**：
+   - 当环境变量与 `config.yaml` 均未显式指定 `personaDirs` 时，宿主通过 `resolveBuiltinPersonaDir()` 自动定位 `personas/pjsk`（依次探测仓库根、编译包根目录、`process.cwd()` 与 Docker 容器内的 `/app/personas/pjsk`），无需任何额外配置。
+
+> [!TIP]
+> 在 Docker 中扩展自定义人设时，请挂载到独立的 `/app/custom-personas`（例如 `- ./custom-personas:/app/custom-personas:ro`）并设置 `MSS_LLM_PERSONA_DIRS=/app/personas/pjsk,/app/custom-personas`，**不要直接挂载覆盖 `/app/personas`**，否则会遮蔽镜像自带的 58 份内置人设。
+
+### 自定义人设文件格式
+
+`personaDirs` 会**递归扫描**各级子目录中的 `*.md` / `*.txt`，解析可选 YAML frontmatter（`name`、`aliases`、`group`、`unit`）与所属分团；系统会自动剥离聊天机器人交互协议噪声，并按阶段提纯注入：**Phase 2 台词阶段注入高达 `11,000` 字 `dialoguePersonaPrompt` 与 `extractPairwiseAddressBook` 两两官方称呼表，表演阶段注入 `actingPersonaPrompt`**，避免角色被模型预训练先验同化：
 
 ```markdown
 ---
 name: 晓山瑞希
 aliases: [瑞希, mizuki]
+unit: 25时
 ---
 
 说话轻快活泼，喜欢开玩笑……
@@ -87,7 +108,7 @@ Phase 1: runPhase1Exploration（仅 hybrid / agent / agentic: true 启用）
 Phase 2: 纯净上下文写词 + 人设自检
    ├── dialogue：仅注入 researchBrief + dialoguePersonaPrompt（11,000 字上限）+ pairwiseAddress + 三分区 RAG
    ├── 后处理：不足字数自动扩写、过碎短句合并、标点柔化、剥离口头括号动作
-   └── dialogueLinter + dialogue-polish / dialogue-persona-critic：修复 OOC、官称偏离（如 绘名名）、AI 腔
+   └── dialogueLinter + dialogue-polish / dialogue-persona-critic：修复 OOC、官称偏离、AI 腔
    │
    ▼
 Phase 3: 确定性工作流编译 + 单一轻量导演终审闭环
@@ -106,10 +127,10 @@ Phase 3: 确定性工作流编译 + 单一轻量导演终审闭环
 - **说出口的话里绝不带 `(微笑)` / `（挠头）`**：提示词、质检器（`dialogueLinter.ts`）、自动修复和日语翻译都统一清理口头台词里的括号动作描写，同时**保留**整句的 `（……心里话）` 内心独白。
 - **TTS 情绪与语速更稳**：情绪标注会按段平滑，抑制同一角色相邻句之间剧烈跳情绪和 `ttsSpeed` 大幅跳变（相邻跳变限制在 `<= 0.08`），平静句也不会乱开高强度 `ttsSpecialScene`。
 
-### 3. 向后兼容说明（`src/host/ai/agentTools.ts`）
+### 3. 向后兼容说明（`src/host/ai/agentTools.ts` / `src/host/ai/agent/`）
 
 - 外部继续传入 `pipeline: "agent"`、`pipeline: "hybrid"` 或 `agentic: true` 时，`StoryWriter` 内部统一路由到上述三段式融合管线（`meta.pipeline` 保留调用方传入的别名；`meta.agentMode` 标注实际执行的 `native` / `react-json` / `staged-fallback`，`meta.toolCalls` 与 `meta.agentSteps` 记录 Phase 1 工具调用详情）。
-- `agentTools.ts` 的 `search_assets`、`lookup_character`、`search_official_corpus` 也与统一管线共用一套 `CatalogView`、分团虚拟歌手消歧和 RAG 检索内核。
+- `agentTools.ts`（模块化为 `src/host/ai/agent/`）的 `search_assets`、`lookup_character`、`search_official_corpus` 也与统一管线共用一套 `CatalogView`、分团虚拟歌手消歧和 RAG 检索内核。
 
 ---
 
@@ -160,13 +181,13 @@ curl -sS -X POST http://127.0.0.1:9881/api/v1/script/generate \
 
 ```bash
 # 拉取官方活动语料并计算基线（建议放仓库外）
-node scripts/stories/fetch-official-corpus.mjs --out D:/msst-lab/corpus
-node scripts/stories/official-metrics.mjs --corpus D:/msst-lab/corpus --out D:/msst-lab/official-baseline.json
+node scripts/stories/fetch-official-corpus.mjs --out /path/to/msst-lab/corpus
+node scripts/stories/official-metrics.mjs --corpus /path/to/msst-lab/corpus --out /path/to/msst-lab/official-baseline.json
 
 # 跑批量 AI 生成评测
-MSS_LLM_API_KEY=... MSS_LLM_BASE_URL=... \
-  node scripts/stories/ai-eval.mjs --runs 1 --out D:/msst-lab/runs/latest
+MSS_LLM_API_KEY=sk-... MSS_LLM_BASE_URL=https://api.openai.com/v1 \
+  node scripts/stories/ai-eval.mjs --runs 1 --pipeline hybrid --out /path/to/msst-lab/runs/latest
 
-# 跑回归测试
+# 跑回归测试（通过 MSS_CORPUS_DIR / MSS_EVAL_REPORT 可选启用语料与评测门禁）
 npm run test:stories
 ```

@@ -14,8 +14,8 @@
  *
  * 用法：
  *   node scripts/stories/official-plan-audit.mjs \
- *     --corpus D:/Users/桌面/mzkbot/msst-ai-lab/corpus \
- *     --out D:/Users/桌面/mzkbot/msst-ai-lab/official-plan-audit.json
+ *     --corpus /path/to/msst-ai-lab/corpus \
+ *     --out /path/to/msst-ai-lab/official-plan-audit.json
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -27,8 +27,13 @@ import { layoutModeOf, sideFadeOf, sideOf, speedOf } from './pjsk-scenario.mjs'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const renderer = path.join(root, 'src/renderer/src')
 
-const DEFAULT_CORPUS = 'D:/Users/桌面/mzkbot/msst-ai-lab/corpus'
-const DEFAULT_OUT = 'D:/Users/桌面/mzkbot/msst-ai-lab/official-plan-audit.json'
+const DEFAULT_CORPUS =
+  process.env.MSS_CORPUS_DIR ||
+  process.env.MSST_CORPUS_ROOT ||
+  process.env.MSS_CORPUS ||
+  path.join(root, 'cache', 'official-corpus')
+const DEFAULT_OUT =
+  process.env.MSS_PLAN_AUDIT_OUT || path.join(root, 'cache', 'official-plan-audit.json')
 
 /** 加载 renderer TS（不依赖浏览器），返回审计需要的纯函数。 */
 export function loadAuditRuntime() {
@@ -880,9 +885,14 @@ export function auditEpisode(scenario, episodeId, runtime) {
         ? 0
         : timing.msToFrameCount(timelineEntry.durationMs)
     let expectedWaitFrames = timelineFrames
-    if (snippet.type !== 'Talk' && snippet.type !== 'FullScreenText' &&
-      snippet.type !== 'LayoutAppear' && snippet.type !== 'LayoutClear' && snippet.type !== 'Move' &&
-      timing.SECONDS_DURATION_SNIPPET_TYPES.has(snippet.type)) {
+    if (
+      snippet.type !== 'Talk' &&
+      snippet.type !== 'FullScreenText' &&
+      snippet.type !== 'LayoutAppear' &&
+      snippet.type !== 'LayoutClear' &&
+      snippet.type !== 'Move' &&
+      timing.SECONDS_DURATION_SNIPPET_TYPES.has(snippet.type)
+    ) {
       const rawDuration = typeof snippet.data?.duration === 'number' ? snippet.data.duration : 0
       const durationMs = timing.normalizeEffectDurationMs(rawDuration, 0)
       expectedWaitFrames = timing.framesForSeconds(durationMs / 1000)
@@ -906,9 +916,7 @@ export function auditEpisode(scenario, episodeId, runtime) {
 
     if (snippet.type === 'Talk') {
       talks++
-      const expectedWindow = talkWindowOpen
-        ? 0
-        : timing.TALK_WINDOW_OPEN_CLOSE_FRAMES
+      const expectedWindow = talkWindowOpen ? 0 : timing.TALK_WINDOW_OPEN_CLOSE_FRAMES
       talkWindowOpen = true
       const talk = entry.talk
       if (!talk) {
