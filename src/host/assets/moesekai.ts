@@ -1,7 +1,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AssetsSettings } from '../config'
-import { assetUrl, atomicWrite, fetchJson, request, withSlash, type RequestOptions } from './http'
+import {
+  assetUrl,
+  atomicWrite,
+  fetchJson,
+  request,
+  withSlash,
+  writeFileFastAsync,
+  type RequestOptions
+} from './http'
 import { appendModelsManifest, readModelsManifest, type ModelManifestEntry } from './manifest'
 import { buildMoc3BindingResolver, convertAnyMotion, type Moc3BindingResolver } from './motion3'
 import { characterById, CHARACTERS, resolveCharacterToken } from './names'
@@ -787,6 +795,23 @@ export async function ripperManifest(
   return manifest
 }
 
+async function fileExistsNonEmptyAsync(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.promises.stat(filePath)
+    return stat.size > 0
+  } catch {
+    return false
+  }
+}
+
+function isIndividualMotionClipFile(file: RipperFile): boolean {
+  return (
+    file.kind === 'live2d-motion' ||
+    file.path.endsWith('.sse-motion.json') ||
+    file.path.endsWith('.live2d-motion.json')
+  )
+}
+
 async function downloadBundle(
   libraryRoot: string,
   bundle: string,
@@ -803,18 +828,22 @@ async function downloadBundle(
 
   await mapPool(
     files,
-    options.concurrency ?? (isCanonical ? 8 : DEFAULT_CONCURRENCY),
+    options.concurrency ?? (isCanonical ? 12 : DEFAULT_CONCURRENCY),
     async (file) => {
       const targetRel =
         isCanonical && file.kind === 'live2d-motion'
           ? file.path.replace(/\.sse-motion\.json$/, '.live2d-motion.json')
           : file.path
       const dest = path.join(destDir, ...targetRel.split('/'))
-      if (!options.force && fs.existsSync(dest) && fs.statSync(dest).size > 0) return
+      if (!options.force && (await fileExistsNonEmptyAsync(dest))) return
       const url =
         file.canonicalUrl ?? file.storageUrl ?? assetUrl(libraryRoot, `${bundle}/${file.path}`)
       const data = await fetchBuffer(url, options)
-      atomicWrite(dest, data)
+      if (isIndividualMotionClipFile(file)) {
+        await writeFileFastAsync(dest, data)
+      } else {
+        atomicWrite(dest, data)
+      }
       downloaded += 1
       bytes += data.length
     }
@@ -1066,7 +1095,10 @@ export async function downloadModel(
   const walk = (dir: string): string[] => {
     if (!fs.existsSync(dir)) return []
     const result: string[] = []
-    for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))
+    for (const item of entries) {
       const full = path.join(dir, item.name)
       if (item.isDirectory()) result.push(...walk(full))
       else if (
@@ -1079,14 +1111,22 @@ export async function downloadModel(
     return result
   }
 
+  const motionsOutDir = path.join(destDir, 'motions')
+  const existingMotionFiles = new Set<string>(
+    await fs.promises.readdir(motionsOutDir).catch(() => [])
+  )
+  const claimedClipNames = new Set<string>()
+  const MOTION_CONVERT_CONCURRENCY = 16
+
   for (const motionDir of motionDirs) {
-    for (const file of walk(motionDir)) {
+    const files = walk(motionDir)
+    const convertedBatch = await mapPool(files, MOTION_CONVERT_CONCURRENCY, async (file) => {
       let raw: unknown
       try {
-        raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
+        raw = JSON.parse(await fs.promises.readFile(file, 'utf-8'))
       } catch (error) {
         progress(`跳过无法解析的动作 ${path.relative(motionDir, file)}: ${String(error)}`)
-        continue
+        return null
       }
       const fallbackName = path.basename(file).replace(/\.(?:sse-motion|live2d-motion)\.json$/, '')
       let converted
@@ -1094,20 +1134,37 @@ export async function downloadModel(
         converted = convertAnyMotion(raw, mocResolver, fallbackName)
       } catch (error) {
         progress(`跳过无法转换的动作 ${path.relative(motionDir, file)}: ${String(error)}`)
-        continue
+        return null
       }
-      if (converted.motion3.Curves.length === 0) continue
-      if (clips.has(converted.name)) continue
+      if (converted.motion3.Curves.length === 0) return null
+      if (claimedClipNames.has(converted.name)) return null
+      claimedClipNames.add(converted.name)
 
       const filename = `${safeClipName(converted.name)}.motion3.json`
-      const motionFile = path.join(destDir, 'motions', filename)
-      if (options.force || !fs.existsSync(motionFile) || fs.statSync(motionFile).size === 0) {
-        atomicWrite(motionFile, JSON.stringify(converted.motion3))
+      const motionFile = path.join(motionsOutDir, filename)
+      const needsWrite =
+        Boolean(options.force) ||
+        !existingMotionFiles.has(filename) ||
+        !(await fileExistsNonEmptyAsync(motionFile))
+      if (needsWrite) {
+        await writeFileFastAsync(motionFile, JSON.stringify(converted.motion3))
+        existingMotionFiles.add(filename)
       }
-      clips.set(converted.name, {
+      return {
+        name: converted.name,
         filename,
         fadeIn: converted.fadeIn,
         fadeOut: converted.fadeOut
+      }
+    })
+
+    // 按排序后的输入索引顺序写入 clips，保证 model3.json 的 Motions 映射顺序完全确定。
+    for (const item of convertedBatch) {
+      if (!item || clips.has(item.name)) continue
+      clips.set(item.name, {
+        filename: item.filename,
+        fadeIn: item.fadeIn,
+        fadeOut: item.fadeOut
       })
     }
   }
@@ -1117,7 +1174,11 @@ export async function downloadModel(
   const existingMotions: NonNullable<Model3JsonShape['FileReferences']>['Motions'] = {}
   for (const [name, list] of Object.entries(model3.FileReferences.Motions ?? {})) {
     const fileRel = Array.isArray(list) ? list[0]?.File : undefined
-    if (fileRel && fs.existsSync(path.join(destDir, ...fileRel.split('/')))) {
+    if (!fileRel) continue
+    const exists = fileRel.startsWith('motions/')
+      ? existingMotionFiles.has(fileRel.slice('motions/'.length))
+      : fs.existsSync(path.join(destDir, ...fileRel.split('/')))
+    if (exists) {
       existingMotions[name] = list
     }
   }

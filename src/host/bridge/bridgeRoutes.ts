@@ -573,10 +573,12 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
 
   interface PipeStreamEntry {
     id: string
-    session: FramesPipeSession
+    session: FramesPipeSession | RustFramesPipeSession
     dir: string
     videoPath: string
     fps: number
+    rawFrameBytes: number
+    lastRawFrame: Buffer | null
     workerId: string | null
     taskId: string | null
     idleTimer: ReturnType<typeof setTimeout> | null
@@ -650,6 +652,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
       return
     }
     framesPipeSessions.delete(id)
+    entry.lastRawFrame = null
     pipeVideoFrameCounts.delete(canonicalComparePath(entry.videoPath))
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer)
@@ -888,6 +891,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         startedPipeId ?? ((args[0] as { id?: unknown } | undefined)?.id as string | undefined)
       if (
         (channel === 'electron:frames-stream-start' ||
+          channel === 'electron:frames-stream-repeat' ||
           channel === 'electron:frames-stream-finish') &&
         typeof targetId === 'string' &&
         targetId
@@ -976,7 +980,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     const videoPath = path.join(dir, 'video.mp4')
     const id = randomSuffix()
 
-    let session: FramesPipeSession
+    let session: FramesPipeSession | RustFramesPipeSession
     try {
       const pipeOpts = {
         fps,
@@ -993,7 +997,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         outputPath: videoPath
       }
       if (!deps.createFramesPipe && isRustExporterAvailable(config.video.useRustExporter !== false)) {
-        session = RustFramesPipeSession.create(pipeOpts) as unknown as FramesPipeSession
+        session = RustFramesPipeSession.create(pipeOpts)
         logger.info(`[Bridge] Started native Rust pipe-encode session (id=${id}, format=${frameFormat})`)
       } else {
         session = await createPipe(pipeOpts)
@@ -1010,12 +1014,15 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     }
 
     registerTempPath(dir, workerId, taskId)
+    const rawFrameBytes = frameFormat === 'rawvideo' ? (width * height * 3) / 2 : 0
     const entry: PipeStreamEntry = {
       id,
       session,
       dir,
       videoPath,
       fps,
+      rawFrameBytes,
+      lastRawFrame: null,
       workerId,
       taskId,
       idleTimer: null,
@@ -1080,6 +1087,53 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         return null
       }
 
+      case 'electron:frames-stream-repeat': {
+        const payload = args[0] as { id?: string; count?: unknown } | undefined
+        const id = payload?.id
+        const entry = id ? framesPipeSessions.get(id) : undefined
+        if (!entry || !id) throw new Error('Unknown frames stream session')
+        const rawCount = payload?.count === undefined ? 1 : payload.count
+        if (
+          typeof rawCount !== 'number' ||
+          !Number.isInteger(rawCount) ||
+          rawCount < 0 ||
+          rawCount > 3600
+        ) {
+          throw new BridgeSecurityError('Invalid count in frames-stream-repeat', 400)
+        }
+        if (rawCount === 0) return { repeated: 0 }
+        touchPipeIdle(entry)
+        try {
+          if (entry.lastRawFrame && entry.lastRawFrame.length > 0) {
+            if (entry.session instanceof RustFramesPipeSession) {
+              await entry.session.write(entry.lastRawFrame, 1, { repeatCount: rawCount })
+            } else {
+              for (let i = 0; i < rawCount; i++) {
+                await entry.session.write(entry.lastRawFrame, 1)
+              }
+            }
+          } else {
+            const repeatable = entry.session as FramesPipeSession & {
+              repeatLastFrame?: (count?: number) => Promise<void>
+            }
+            if (typeof repeatable.repeatLastFrame === 'function') {
+              await repeatable.repeatLastFrame(rawCount)
+            } else {
+              throw new BridgeSecurityError(
+                'Cannot repeat frame before any frame was written',
+                400
+              )
+            }
+          }
+          if (framesPipeSessions.has(id)) touchPipeIdle(entry)
+          return { repeated: rawCount }
+        } catch (error) {
+          if (error instanceof BridgeSecurityError) throw error
+          await cleanupPipeSession(id, error instanceof Error ? error : new Error(String(error)))
+          throw error
+        }
+      }
+
       case 'electron:frames-stream-finish': {
         const payload = args[0] as { id?: string } | undefined
         const id = payload?.id
@@ -1095,6 +1149,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
           if (typeof frameCount === 'number') {
             rememberPipeFrameCount(videoPath, frameCount, entry.fps)
           }
+          entry.lastRawFrame = null
           framesPipeSessions.delete(id)
           return { videoPath }
         } catch (error) {
@@ -1761,6 +1816,16 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         touchPipeIdle(entry)
         try {
           await entry.session.write(body, framesInChunk)
+          if (
+            entry.rawFrameBytes > 0 &&
+            body.length >= entry.rawFrameBytes &&
+            body.length % entry.rawFrameBytes === 0
+          ) {
+            if (!entry.lastRawFrame || entry.lastRawFrame.length !== entry.rawFrameBytes) {
+              entry.lastRawFrame = Buffer.allocUnsafe(entry.rawFrameBytes)
+            }
+            body.copy(entry.lastRawFrame, 0, body.length - entry.rawFrameBytes)
+          }
           if (framesPipeSessions.has(id)) touchPipeIdle(entry)
           return null
         } catch (error) {
