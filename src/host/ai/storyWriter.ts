@@ -815,14 +815,14 @@ export class StoryWriter {
     // 测试/调试用极短 targetMinutes 时不启用，避免和合成用例互相干扰。
     const enforceDialogueLength = targetMinutes >= 0.5
     const minDialogueLines = Math.max(2, Math.round(targetMinutes * 10))
-    // 官方 3 分钟约 746 字、40 句；下限按 250 字/分钟给，避免补写到 4 分钟。
-    const minDialogueChars = Math.max(10, Math.round(targetMinutes * 250))
+    // 按 ~19 字/句的官方均值校准下限（3 分钟 >= 30 句 / 570 字），避免 34~36 句/680~740 字的优质初稿触发无效补写。
+    const minDialogueChars = Math.max(10, Math.round(targetMinutes * 190))
     const actualDialogueChars = countDialogueChars(dialogue)
     if (
       enforceDialogueLength &&
       (dialogue.lines.length < minDialogueLines || actualDialogueChars < minDialogueChars)
     ) {
-      const requiredLines = Math.max(minDialogueLines, Math.ceil(minDialogueChars / 18))
+      const requiredLines = Math.max(minDialogueLines, Math.ceil(minDialogueChars / 19))
       const expandDialogue = async (stage: string): Promise<boolean> => {
         const currentDialogue = dialogue as StagedDialogue
         const currentLines = currentDialogue.lines.length
@@ -1197,7 +1197,13 @@ export class StoryWriter {
     }
 
     if (translateForTts) {
-      ttsTranslated += await this.translateTtsText(validated.story, options.signal)
+      ttsTranslated += await this.translateTtsText(
+        validated.story,
+        options.signal,
+        personas,
+        plan.pairwiseAddress,
+        postCastRag
+      )
     }
     const alignedStaged = alignStoryTtsEmotionsAndCaptions(validated.story, {
       emotionLabels: this.emotionLabels
@@ -1401,10 +1407,16 @@ export class StoryWriter {
    * 把缺失/非日文的 ttsText 批量翻译成日语。
    * 生成阶段翻译失败只保留空 ttsText，不阻断剧本；导出前会再做一次严格预检。
    */
-  private async translateTtsText(story: StoryData, signal?: AbortSignal): Promise<number> {
+  private async translateTtsText(
+    story: StoryData,
+    signal?: AbortSignal,
+    personas: PersonaEntry[] = this.getPersonas(),
+    pairwiseAddress?: StagedPairwiseAddress[],
+    ragContext?: RagRetrieveResult | null
+  ): Promise<number> {
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal),
+      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext),
       this.logger
     )
     return translated

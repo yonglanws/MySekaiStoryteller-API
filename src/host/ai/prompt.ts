@@ -41,13 +41,13 @@ const MOTION_PROMPT_KINDS: Array<[string, number]> = [
   ['surprise', 1],
   ['shy', 1],
   ['blushed', 1],
-  ['relief', 1],
-  ['lookaway', 1],
+  ['relief', 2],
+  ['lookaway', 2],
   ['lookdown', 1],
   ['lookup', 1],
   ['angry', 1],
   ['fidget', 1],
-  ['greeting', 1],
+  ['greeting', 2],
   ['smug', 1],
   ['wink', 1],
   ['purpose', 1],
@@ -949,7 +949,7 @@ export class CatalogView {
       .join(', ')
   }
 
-  promptMotions(model: CatalogModel): string[] {
+  promptMotions(model: CatalogModel, limit = MOTION_PROMPT_LIMIT): string[] {
     const filtered = (model.motions ?? []).filter(
       (name) => !isSpecialOrStandingMotion(name) || motionKind(name) === 'default'
     )
@@ -958,7 +958,7 @@ export class CatalogView {
       source,
       motionKind,
       MOTION_PROMPT_KINDS,
-      MOTION_PROMPT_LIMIT,
+      limit,
       model.defaultMotion ?? ''
     )
   }
@@ -1032,13 +1032,13 @@ export class CatalogView {
   }
 
   /** 带剧情语义简注的身体动作清单，帮助模型按情境选出点头/叹气/前倾/害羞/思索等动作。 */
-  annotatedMotionList(modelIds?: number[]): string {
+  annotatedMotionList(modelIds?: number[], limit = 44): string {
     const scope = modelIds?.length
       ? this.promptScopeModels().filter((model) => modelIds.includes(model.id))
       : this.promptScopeModels()
     return scope
       .map((model) => {
-        const names = this.promptMotions(model)
+        const names = this.promptMotions(model, limit)
         const annotated = names.map((name) => annotateMotionName(model.path, name))
         return `${this.shortName(model)}(${model.id})：${annotated.length ? annotated.join('，') : '（目录暂未提供）'}`
       })
@@ -1118,46 +1118,30 @@ export class CatalogView {
   }
 
   seList(query = '', limit = 30): string {
-    const curatedList = CURATED_SCENARIO_SES.map((cue) => ({
-      file: cue.file,
-      id: cue.id,
-      name: cue.id,
-      category: cue.category,
-      description: cue.description,
-      tags: [...cue.tags]
-    }))
     if (this.seDetails.length === 0) {
       return sePromptList()
     }
     const keywords = extractQueryKeywords(query)
-    const merged: CatalogSe[] = []
-    const seen = new Set<string>()
-    for (const item of curatedList) {
-      const key = item.id.toLowerCase()
-      if (!seen.has(key)) {
-        seen.add(key)
-        merged.push(item)
-      }
-    }
-    if (keywords.length > 0) {
-      const extra = this.seDetails
-        .filter((d) => {
-          const hay =
-            `${d.id ?? ''} ${d.category ?? ''} ${d.description} ${(d.tags ?? []).join(' ')}`.toLowerCase()
-          return keywords.some((kw) => hay.includes(kw))
-        })
-        .slice(0, Math.max(0, limit - merged.length))
-      for (const item of extra) {
-        const key = (item.id ?? item.file).toLowerCase()
-        if (!seen.has(key)) {
-          seen.add(key)
-          merged.push(item)
+    const curatedIds = new Set(CURATED_SCENARIO_SES.map((c) => c.id.toLowerCase()))
+    const scored = this.seDetails
+      .map((detail) => {
+        const stem = (detail.id ?? detail.file.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '').toLowerCase()
+        const hay =
+          `${detail.id ?? ''} ${detail.file} ${detail.category ?? ''} ${detail.description} ${(detail.tags ?? []).join(' ')}`.toLowerCase()
+        let score = curatedIds.has(stem) ? 6 : 0
+        for (const kw of keywords) {
+          if (hay.includes(kw)) score += 12
         }
-      }
-    }
-    return merged
+        if (/^(?:剧情环境与动作音效|本地音效)（/.test(detail.description ?? '')) {
+          score -= 4
+        }
+        return { detail, score }
+      })
+      .sort((a, b) => b.score - a.score || a.detail.file.localeCompare(b.detail.file))
+
+    return scored
       .slice(0, limit)
-      .map((detail) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
+      .map(({ detail }) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
       .join('\n')
   }
 
@@ -1439,7 +1423,7 @@ ChangeLayoutMode → BlackOut → ChangeBackgroundImage → BlackIn → （可�
 - **自然动作频率、哭戏持续表情与听者回应**：约 70%~80% 的台词在句首配 1 个贴合情绪的身体动作，其余约 20%~25%（如短回应、情绪延续句、刚入场首句）可留空 \`motion\` 仅切 \`facial\` 或自然保持姿态；**哭泣/崩溃/高潮吐露段落（连续 4~8+ 句）应自然持续保持 \`face_cry_*\` / \`face_sad_*\` 哭泣表情**（期间仅微调身体动作或省略 motion），切忌每句机械轮换跳脸或插入 \`face_closeeye\` 破坏情绪连贯；长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 \`Motion\`（\`wait:false, delay:2.5~4.5\`）。听者反应优先通过单人 Center 原地渐变反打切镜、句间独立 \`Motion\` 静默拍或双人同框句首 \`at: 0\` 纯 \`facial\` 微调表现（内心独白句听者听不见，不给听者加反应）。
 - **动作与表情双重对位剧情（丰富自然不死板）**：善用角色多样的动作编号与贴合气氛的跨风格动作（近期官方跨风格切换约 30%），避免整场只循环 4~5 个动作；仔细核对动作与表情括号语义（含 \`ParamMouthForm >= 0.2\` 标出的 \`苦笑/嘴角上扬\`），**悲伤/哭泣/愤怒/惊愕/绝望对峙句严禁使用任何微笑、含泪微笑或嘴角上扬表情（除非台词明确写到苦笑或安抚微笑）**，也禁止用 \`glad\`/\`happy\`/\`greeting\`/\`playful\` 动作；**悲伤/绝望/独白句禁止误挂 \`face_surprise_01\`/\`face_notice_01\`/\`face_shock_01\`（除非台词本身明确吃惊），含泪自责/懊悔句禁止误挂 \`face_angry_01\`**；\`LayoutAppear\` 的 \`facial\` 也必须贴合前后对话氛围，避免默认站姿。**朝比奈真冬 / 真冬**保持克制内敛神情，避免大笑与夸张欢快动作。
 - **停顿节奏**：约 90% 的 Talk 设 \`delay: 0\`；仅在沉默/转折/静默反应后使用 \`delay: 1.0\` 或 \`1.5\`，不要每句写 0.1/0.15。
-- **禁止括号动作提示**：台词里只写说出口的话或心理独白（如「（……怎么突然这么问）」）；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
+- **自然连说与内心独白（贴合原作节奏）**：避免机械一问一答交替，同一角色常用 2~3 句自然连说（先短反应或内心戏，再跟进想法）；全片自然穿插 3~5 句括号内心独白（如「（……她其实也很在意吧）」）表现迟疑与潜台词；**禁止在台词里夹带「（微笑）」「（挠头）」「（叹气）」等舞台动作括号**（动作神态用 motion/facial 表现）。
 - 每个 Talk 只写 content（中文）；**不要写 ttsText**，宿主会统一翻译成日文后再配音。
 - 站内固定译名：凤笑梦口号写 **Wonderhoy**，草薙宁宁机器人写 **宁宁号**。
 
