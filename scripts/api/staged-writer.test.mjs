@@ -10,6 +10,7 @@ import { LlmClient } from '../../out-host/host/ai/llm.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { ResourceCatalog } from '../../out-host/host/resources/resourceCatalog.js'
+import { alignStoryTtsEmotionsAndCaptions } from '../../out-host/host/ai/ttsText.js'
 import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
 import {
   applyDirectorReviewPatches,
@@ -1784,4 +1785,141 @@ test('applyDirectorReviewPatches preserves ttsText when update_talk content is u
   const story = composeStory(view, plan, dialogue, direction, staging)
   assert.ok(story.snippets.some((s) => s.type === 'CameraZoom' && s.data.scale === 1))
   assert.ok(!story.snippets.some((s) => s.type === 'CameraMove'), 'zoom reset must not emit spurious CameraMove')
+})
+
+test('buildCastPrompt recognizes 1-char PJSK shortNames in 02_wxs and 04_mmj prompts while rejecting Chinese compound false positives', () => {
+  const mk = (id, characterId, name, shortName, unit) => ({
+    id,
+    characterId,
+    name,
+    shortName,
+    unit,
+    path: `${id}/${id}.model3.json`,
+    motions: ['w-normal-nod01'],
+    facials: ['face_normal_01'],
+    defaultMotion: 'w-normal-nod01',
+    defaultFacial: 'face_normal_01'
+  })
+  const view = new CatalogView({
+    models: [
+      mk(5, 5, '花里实乃理', '实乃理', 'MORE MORE JUMP!'),
+      mk(6, 6, '桐谷遥', '遥', 'MORE MORE JUMP!'),
+      mk(7, 7, '桃井爱莉', '爱莉', 'MORE MORE JUMP!'),
+      mk(8, 8, '日野森雫', '雫', 'MORE MORE JUMP!'),
+      mk(10, 10, '白石杏', '杏', 'Vivid BAD SQUAD'),
+      mk(13, 13, '天马司', '司', 'Wonderlands×Showtime'),
+      mk(14, 14, '凤笑梦', '笑梦', 'Wonderlands×Showtime'),
+      mk(15, 15, '草薙宁宁', '宁宁', 'Wonderlands×Showtime'),
+      mk(16, 16, '神代类', '类', 'Wonderlands×Showtime'),
+      mk(17, 17, '宵崎奏', '奏', '25时，Nightcord de.'),
+      mk(19, 19, '东云绘名', '绘名', '25时，Nightcord de.'),
+      mk(20, 20, '晓山瑞希', '瑞希', '25时，Nightcord de.'),
+      mk(22, 22, '镜音铃', '铃', 'Virtual Singer'),
+      mk(23, 23, '镜音连', '连', 'Virtual Singer')
+    ],
+    images: ['bg_stage.jpg'],
+    imageDetails: [{ file: 'bg_stage.jpg', name: '舞台', description: '奇幻舞台' }],
+    voices: [],
+    bgm: [],
+    bgmDetails: []
+  })
+
+  const wxsPrompt = buildCastPrompt(view, {
+    scene:
+      '奇幻舞台的早间排练，笑梦元气满满地冲来和宁宁、类汇合，天马司又夸张地投入新剧目彩排。气氛热闹搞笑又充满冲劲，结尾笑梦却突然流露出一丝说不清的失落。',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(wxsPrompt.user.includes('严格只选这 4 名角色'))
+  assert.ok(wxsPrompt.user.includes('类(modelId=16)'))
+  assert.ok(wxsPrompt.user.includes('司(modelId=13)'))
+
+  const mmjPrompt = buildCastPrompt(view, {
+    scene:
+      'MORE MORE JUMP! 接到越来越多工作邀约却被日程安排卡住，爱莉在房间发愁后与雫想出新方案，并在学校天台和实乃理、遥一起开会敲定计划、互相打气。',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(mmjPrompt.user.includes('严格只选这 4 名角色'))
+  assert.ok(mmjPrompt.user.includes('雫(modelId=8)'))
+  assert.ok(mmjPrompt.user.includes('遥(modelId=6)'))
+
+  const falsePositivePrompt = buildCastPrompt(view, {
+    scene:
+      '瑞希和绘名在公司附近聊类似题材的作品，谈到遥远地方的银杏树、门外铃声和演奏节奏，连我都忘了时间。',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(falsePositivePrompt.user.includes('严格只选这 2 名角色'))
+  assert.ok(!falsePositivePrompt.user.includes('类(modelId=16)'))
+  assert.ok(!falsePositivePrompt.user.includes('司(modelId=13)'))
+  assert.ok(!falsePositivePrompt.user.includes('遥(modelId=6)'))
+  assert.ok(!falsePositivePrompt.user.includes('杏(modelId=10)'))
+  assert.ok(!falsePositivePrompt.user.includes('奏(modelId=17)'))
+  assert.ok(!falsePositivePrompt.user.includes('铃(modelId=22)'))
+  assert.ok(!falsePositivePrompt.user.includes('连(modelId=23)'))
+})
+
+test('sharp reprimand lines override stale 开心 emotion across stabilizeEmotions and alignStoryTtsEmotionsAndCaptions', () => {
+  const dialogue = {
+    title: '天台对峙',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '哎呀，今天风好大呀～♪' },
+      { id: 'l2', speaker: '瑞希', content: '一起回去吃可丽饼嘛～' },
+      { id: 'l3', speaker: '绘名', content: '别岔开话题！' },
+      { id: 'l4', speaker: '瑞希', content: '哈哈，真的只是吹吹风啦。' },
+      { id: 'l5', speaker: '瑞希', content: '别这么严肃嘛～' }
+    ]
+  }
+  const stable = stabilizeEmotions(
+    dialogue,
+    new Map([
+      ['l1', '开心'],
+      ['l2', '开心'],
+      ['l3', '生气'],
+      ['l4', '开心'],
+      ['l5', '开心']
+    ]),
+    ['平静', '开心', '生气', '伤心']
+  )
+  assert.equal(stable.get('l3'), '生气', '1-line sharp reprimand must not be smoothed back to 开心')
+
+  const story = {
+    models: [{ id: 1 }, { id: 2 }],
+    images: [],
+    snippets: [
+      {
+        type: 'Talk',
+        data: {
+          modelId: 1,
+          speaker: '瑞希',
+          content: '今天风好大呀～♪',
+          ttsText: '今日は風が強いね～♪😊',
+          emotion: '开心',
+          ttsCaption: '明るく軽やかな口調で話す。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_smile_01' }]
+        }
+      },
+      {
+        type: 'Talk',
+        data: {
+          modelId: 2,
+          speaker: '绘名',
+          content: '别岔开话题！',
+          ttsText: '話をそらさないで！😊',
+          emotion: '开心',
+          ttsCaption: '明るく軽やかな口調で話す。',
+          actions: [{ at: 0, modelId: 2, facial: 'face_serious_01' }]
+        }
+      }
+    ]
+  }
+  const aligned = alignStoryTtsEmotionsAndCaptions(story, {
+    emotionLabels: ['平静', '开心', '生气', '伤心']
+  })
+  assert.equal(aligned.updatedEmotions, 1)
+  assert.equal(story.snippets[1].data.emotion, '生气')
+  assert.equal(story.snippets[1].data.ttsText.includes('😊'), false, 'happy emoji stripped from reprimand')
+  assert.ok(!/明る|軽やか/.test(story.snippets[1].data.ttsCaption), 'stale happy ttsCaption replaced')
+  assert.equal(story.snippets[0].data.emotion, '开心', 'genuine teasing line stays 开心')
 })

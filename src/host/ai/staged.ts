@@ -1248,6 +1248,64 @@ function titleOrDefault(value: unknown, fallback: string): string {
 const EXPLICIT_GROUP_INTENT_RE =
   /大家|全员|全体|全团|全队|众人|成员们|其他成员|其余成员|队友们|三人|四人|五人|聚会|团建|live|演唱会|文化祭/i
 const META_EVENT_STYLE_RE = /活动风格|活动剧情|活动卡面|活动向|20\d\d\s*年活动/g
+const PERSON_LEFT_DELIM_RE =
+  /[与和跟找对向把给连比让请由被、，。！？（）()“”"‘’'「」『』：:/\s]/
+const PERSON_RIGHT_DELIM_RE =
+  /[与和跟对向把给、，。！？（）()“”"‘’'「」『』：:/\s]/
+const SINGLE_CHAR_NON_NAME_WORDS: Record<string, RegExp> = {
+  类: /类型|类似|种类|分类|人类|同类|这类|那类|此类|另类|肉类|酒类|鱼类|鸟类|门类|之类|各类|全类|品类|大类/,
+  司: /公司|司机|上司|司令|司仪|司法|司空|司职|司马|有司/,
+  遥: /遥远|遥望|遥控|逍遥|遥想|遥感|遥测|遥相|路遥/,
+  奏: /演奏|合奏|伴奏|前奏|间奏|节奏|独奏|重奏|奏效|奏章|奏折|奏鸣|先斩后奏/,
+  杏: /银杏|杏仁|杏花|杏色|杏黄|杏子|青杏/,
+  铃: /铃声|铃铛|门铃|电铃|响铃|风铃|闹铃|哑铃|铃兰/,
+  连: /连续|连线|连夜|连日|连同|连连|牵连|接连|连接|连带|连累|连衣|连忙|连载|连贯|连锁|连胜|连任|连长|连队|一连|连日|相连|流连/
+}
+
+function hasSingleCharNameMention(scene: string, shortName: string): boolean {
+  if (!scene || shortName.length !== 1) return false
+  const compoundRe = SINGLE_CHAR_NON_NAME_WORDS[shortName]
+  let idx = scene.indexOf(shortName)
+  while (idx !== -1) {
+    const prev = idx > 0 ? scene[idx - 1] : ''
+    const next = idx + 1 < scene.length ? scene[idx + 1] : ''
+    const leftOk = idx === 0 || PERSON_LEFT_DELIM_RE.test(prev)
+    const rightSepOk = idx + 1 === scene.length || PERSON_RIGHT_DELIM_RE.test(next)
+    // 「连」作副词（如「连我都忘了」）高频误判，仅在明确人名并列/介词称谓且非后续代词时匹配
+    const particleGuard =
+      shortName !== '连' ||
+      ((prev === '' || /[与和跟对向把给、，：:「『（\s]/.test(prev)) &&
+        !/^[我你他她它这那谁也都很再]/.test(next))
+    let spansCompound = false
+    if (compoundRe) {
+      const window2Left = scene.slice(Math.max(0, idx - 1), idx + 1)
+      const window2Right = scene.slice(idx, Math.min(scene.length, idx + 2))
+      const window3 = scene.slice(Math.max(0, idx - 1), Math.min(scene.length, idx + 2))
+      const window4 = scene.slice(Math.max(0, idx - 2), Math.min(scene.length, idx + 3))
+      if (
+        compoundRe.test(window2Left) ||
+        compoundRe.test(window2Right) ||
+        compoundRe.test(window3) ||
+        compoundRe.test(window4)
+      ) {
+        spansCompound = true
+      }
+    }
+    if (!spansCompound && particleGuard && (leftOk || rightSepOk)) {
+      return true
+    }
+    idx = scene.indexOf(shortName, idx + 1)
+  }
+  return false
+}
+
+function isModelMentionedInScene(scene: string, model: CatalogModel): boolean {
+  if (model.name && scene.includes(model.name)) return true
+  const short = (model.shortName ?? '').trim()
+  if (!short) return false
+  if (short.length >= 2) return scene.includes(short)
+  return hasSingleCharNameMention(scene, short)
+}
 
 function findMentionedPrimaryModels(scene: string, models: CatalogModel[]): CatalogModel[] {
   const seenChar = new Set<string>()
@@ -1258,10 +1316,7 @@ function findMentionedPrimaryModels(scene: string, models: CatalogModel[]): Cata
         ? `char:${model.characterId}`
         : `name:${model.name.toLowerCase()}`
     if (seenChar.has(key)) continue
-    if (
-      (model.name && scene.includes(model.name)) ||
-      (model.shortName && model.shortName.length >= 2 && scene.includes(model.shortName))
-    ) {
+    if (isModelMentionedInScene(scene, model)) {
       seenChar.add(key)
       picked.push(model)
     }
@@ -1315,11 +1370,7 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   const primary = view.primaryModels()
   const mainRoster = primary.filter((m) => !m.isSubCharacter)
   const subRosterAll = primary.filter((m) => m.isSubCharacter)
-  const subMentioned = subRosterAll.filter(
-    (m) =>
-      (m.name && options.scene.includes(m.name)) ||
-      (m.shortName && m.shortName.length >= 2 && options.scene.includes(m.shortName))
-  )
+  const subMentioned = subRosterAll.filter((m) => isModelMentionedInScene(options.scene, m))
   const subShown = [
     ...subMentioned,
     ...subRosterAll
@@ -1792,11 +1843,7 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
     seenChar.add(key)
     pool.push(model)
   }
-  const mentioned = pool.filter(
-    (model) =>
-      (model.name && options.scene.includes(model.name)) ||
-      (model.shortName && model.shortName.length >= 2 && options.scene.includes(model.shortName))
-  )
+  const mentioned = findMentionedPrimaryModels(options.scene, pool)
   const models =
     mentioned.length >= 2 ? mentioned.slice(0, 5) : pool.slice(0, Math.min(2, pool.length))
   const cast = models.map((model) => castMemberFor(view, model))
@@ -2592,7 +2639,7 @@ ${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、
   - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
   - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求，以及哭戏途中强忍泪水安慰对方（「没关系的」）、无奈解释（「大家都太温柔了」）或绝望吐露——**哭戏未真正释怀和解前全段保持「伤心」，严禁中途掉回「平静」**。
   - 结尾呼吸感与余韵过渡：当冲突在结尾真正走向释怀、夕阳缓和或安静接纳时（如「夕阳沉下去了」「再等我一会儿」），允许结尾数句自然过渡到柔和释放的「平静」或「开心」（搭配安堵/温柔的 ttsCaption），让情绪弧光有呼吸落点，不要把整场几十句锁死在单一哭腔。
-  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊。
+  - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊；**严禁因前文在打趣就把突然认真/反驳/斥责的急停句（如「别岔开话题！」「别开玩笑了！」「够了！」）惯性标成「开心」，必须立刻切回「生气」或「平静」**。
   - 害羞：被夸、慌张掩饰、不好意思。
   - 惊讶：突然的揭示、意外、倒吸一口气或惊呼。
   - 同一情绪拍内保持粗标签连贯，避免无意义的逐句 A/B 抖动或哭戏途中掉回「平静」；遇到真正的情感转折、哭诉、结尾释怀或欢快收尾时忠实切换。
@@ -2809,7 +2856,14 @@ ${raw.slice(0, 3000)}
 const isEmotionPivotCue = (text: string, emotion: string): boolean => {
   if (emotion === '开心') return /♪|～♪|哈哈|太好了|よかった/.test(text)
   if (emotion === '伤心') return /对不起|ごめん|别.*推开|不要.*走|求你|眼泪|哭|ダメ|呜/.test(text)
-  if (emotion === '生气') return /！！|!!|住口|够了|混蛋|やめろ|ふざけ/.test(text)
+  if (emotion === '生气') {
+    return /！！|!!|住口|够了|闭嘴|混蛋|别岔开话题|别转移话题|别开玩笑|别敷衍|别装|少啰嗦|别闹了|やめろ|ふざけ/.test(
+      text
+    )
+  }
+  if (emotion === '平静') {
+    return /别岔开话题|别转移话题|别开玩笑|别敷衍|我是认真的|认真一点|冷静/.test(text)
+  }
   if (emotion === '惊讶') return /？！|\?!|什么！？|怎么会|竟然|っ！|……！/.test(text)
   return false
 }
