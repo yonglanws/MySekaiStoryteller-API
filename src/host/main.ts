@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { ILogObj, Logger } from 'tslog'
-import { loadHostConfig } from './config'
+import { loadHostConfig, validateConfigHints } from './config'
 import { VideoApiServer } from './servers/VideoApiServer'
 import { createBridgeRouter, type BridgeController } from './bridge/bridgeRoutes'
 import { WsHub } from './bridge/wsHub'
@@ -53,6 +53,7 @@ function installProcessGuards(logger: Logger<ILogObj>): void {
 
 async function bootstrap(): Promise<void> {
   const config = loadHostConfig()
+  const configHints = validateConfigHints(config)
 
   const LOG_LEVEL_IDS: Record<string, number> = {
     silly: 0,
@@ -74,6 +75,10 @@ async function bootstrap(): Promise<void> {
   })
 
   installProcessGuards(logger)
+
+  for (const hint of configHints) {
+    logger.warn(hint)
+  }
 
   // 启动时并行探测一次硬件编码器：探测要真编 3 帧（QSV/NVENC 初始化可能数百毫秒），
   // 不阻塞 HTTP 服务启动；结果按 codec 缓存，health 与首次导出直接读取。
@@ -185,7 +190,7 @@ async function bootstrap(): Promise<void> {
     // resources/cloud/ 下的真实文件；cloudOnly=true 时严格忽略非 cloud/ 的旧本地资源。
     prepareStory: async (story) => {
       if (useCloudCatalog) {
-        await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 5_000 })
+        await cloudCatalog.waitReady({ coldTimeoutMs: 180_000, staleTimeoutMs: 5_000 })
         const cloudContext = {
           settings: config.assets,
           resourcesDir: config.paths.resources,
@@ -218,10 +223,10 @@ async function bootstrap(): Promise<void> {
         })
       )
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
-      // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 60 秒）。
+      // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 180 秒）。
       app.get('/api/v1/resources', async (_req, res) => {
         if (useCloudCatalog) {
-          await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000 })
+          await cloudCatalog.waitReady({ coldTimeoutMs: 180_000, staleTimeoutMs: 2_000 })
         }
         res.json({ success: true, ...resourceCatalog.get() })
       })
@@ -497,7 +502,7 @@ async function bootstrap(): Promise<void> {
           throw new StoryGenerationError('宿主未启用 LLM（llm.enabled=false）', [])
         }
         if (useCloudCatalog && !cloudCatalog.get()) {
-          await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000, signal })
+          await cloudCatalog.waitReady({ coldTimeoutMs: 180_000, staleTimeoutMs: 2_000, signal })
         }
         if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
           throw new StoryGenerationError('prompt 必须是非空字符串', [])

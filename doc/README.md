@@ -15,7 +15,7 @@
 
 ### 我想用 AI 一句话写剧本
 
-配好 `llm` 后，给宿主发一句场景描述就能直接出 `StoryData` JSON 或 MP4。关于提示词、角色人设、语义 RAG、5 阶段导演流程与 Agent 工具调用架构，看 [宿主内置 AI 剧本生成](ai-script.md)。
+配好 `llm` 后，给宿主发一句场景描述就能直接出 `StoryData` JSON 或 MP4。关于角色人设加载、语义 RAG、`staged` / 统一 `hybrid`（`agent`）三段式上下文隔离流水线，看 [宿主内置 AI 剧本生成](ai-script.md)。
 
 ### 我要写机器人插件或客户端接入
 
@@ -39,10 +39,10 @@
 | [云端资源获取](cloud-assets.md) | 零本地资源原理、511 模型 / 1,401 背景 / 421 BGM / 1,942 SE 索引、按需下载与 CLI |
 | [资源与音频配置](resources.md) | `resources/` 目录结构、本地 YAML 覆盖、GPT-SoVITS / IrodoriTTS 与 BGM 兜底 |
 | [故事文件格式](story-format.md) | 完整剧本 JSON 示例、所有片段类型、云端引用与 60fps 舞台/台词规则 |
-| [导出模式与提速调参](export-modes.md) | `fast` 管线、真实默认值与模板差异、GPU YUV420 / WebCodecs / 帧管道与耗时指标 |
+| [导出模式与提速调参](export-modes.md) | `fast` 管线、原生 Rust 导出器、默认值与模板差异、GPU YUV420 / WebCodecs / 帧管道 |
 | [部署指南](host-deployment.md) | 环境依赖、完整环境变量表、常驻配置、WebGL GPU 调试与安全边界 |
 | [故障排除](troubleshooting.md) | 常见故障按症状快速定位 |
-| [开发与验证](development.md) | 源码结构、npm 脚本、回归测试与成片检查 |
+| [开发与验证](development.md) | 源码结构、npm 与 Rust 构建/测试命令、回归测试与成片检查 |
 
 ## 历史规划与早期记录（仅供参考）
 
@@ -60,4 +60,4 @@
 - [src/common/types/Story.ts](../src/common/types/Story.ts)：故事 JSON 的 Zod 校验规则
 
 > [!NOTE]
-> 不复制 `config.example.yaml` 时用的是 `src/host/config.ts` 的内置默认值（如 `1280×720`、`30fps`、`crf: 18`）；复制模板后用的则是模板里写死的值（如 `1920×1080`、`60fps`、`crf: 28`）。详见 [导出模式与提速调参](export-modes.md)。
+> 不复制 `config.example.yaml` 时用的是 `src/host/config.ts` 的内置默认值（如 `1280×720`、`30fps`、`crf: 18`、`cloudOnly: false`）；复制模板后用的则是模板里显式写出的值（如 `1920×1080`、`60fps`、`crf: 27`、`cloudOnly: true`）。详见 [导出模式与提速调参](export-modes.md)。

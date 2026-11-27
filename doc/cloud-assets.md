@@ -14,7 +14,9 @@
 1. **启动只拉目录（几百 KB，不占硬盘）**：启动时读取内置的中文语义索引（`src/host/assets/*.json`）并合并 Moesekai / exmeaning / Sekai-World 的线上清单，生成一份缓存快照放到 `<assets.cacheDir>/catalog.json`（默认 6 小时自动刷新一次）。写剧本时 AI 只看名字和标签，不用提前把几万个文件下下来。
 2. **默认 BGM 自动兜底**：只要本地没有 `resources/audio/bgm/bgm.yaml` 和 `resources/audio/bgm/bg1.mp3`，且开启了云端目录，宿主会自动用云端日常曲 **`bgm00003`（`Slapstick!!`）** 当默认 BGM，省得去远端找根本不存在的 `bg1`。
 3. **导出前按需下载缺失项**：收到 `/api/v1/export` 或 `/api/v1/generate` 请求后，宿主在渲染前扫一遍剧本里真正用到的模型、背景、BGM、音效和 UI 贴图，**只把本地还没有的下载到 `resources/*/cloud/`**。
-4. **缓存复用 + 本地优先**：下过一次的素材直接留在 `resources/*/cloud/` 里，下次导出秒命中。如果你自己在 `resources/` 里放了本地文件或写了 YAML 清单，**永远优先用你本地的**。
+4. **缓存复用与严格纯云端隔离（`cloudOnly`）**：下过一次的素材直接留在 `resources/*/cloud/` 里，下次导出秒命中。
+   - 默认内置 schema `cloudOnly: false` 时，如果你自己在 `resources/` 里放了本地文件或写了 YAML 清单，本地资源优先。
+   - 当 **`assets.cloudOnly: true`**（`config.example.yaml` 默认启用，或设环境变量 `MSS_ASSETS_CLOUD_ONLY=true`）时，宿主会**彻底忽略旧本地资源**（`models/models.yaml`、`images/` 与 `images.yaml`、`audio/bgm/bgm.yaml` 与非 `cloud/` 音频、`audio/se/` 非 `cloud/` 音效及 `voices/`），`/resources` 静态路由也会拦截非 `cloud/` 资产访问，确保 100% 走云端资产。
 
 ## 云端目录能覆盖多少素材
 
@@ -51,6 +53,7 @@ assets:
   timeoutMs: 180000
   retries: 3
   cloudCatalog: true # 设为 false 则完全关闭云端，只认本地 YAML
+  cloudOnly: true # config.example.yaml 启用（schema 内置默认 false）；true 时彻底屏蔽旧本地资源，仅用 cloud/
   cloudCatalogTtlHours: 6
 ```
 

@@ -26,7 +26,8 @@ llm:
   timeoutMs: 120000
   retries: 2
   repairRounds: 2
-  pipeline: staged # staged（默认） | single
+  pipeline: staged # staged（默认） | hybrid | agent | single
+  agentMaxSteps: 16
   jsonMode: auto # auto | on | off
   translateForTts: true
   polishDialogue: true
@@ -41,13 +42,14 @@ llm:
 
 - **`baseUrl`**：填根地址就行（兼容 OpenAI、new-api、one-api、Ollama、vLLM），宿主会自动拼 `/chat/completions`，别自己再写一遍。
 - **`pipeline`**：
-  - `staged`（默认）：拆成多个小步骤做，选角 → 写台词 → 三路并行（情绪/舞台/翻译）→ 配动作表情 → 合成校验。台词和演出分开写，最稳、质量最好。
-  - `single`：先快速选人，再让模型一次把整份剧本吐出来（`mode: chat` 时固定走 `single`）。适合想省请求次数时用。
-  - 另：`StoryWriter`（`src/host/ai/storyWriter.ts`）内部还提供了 **`agent` 工具调用模式**（`pipeline: 'agent'` 或 `agentic: true`），详见下文 [Agent 工具调用架构](#agent-工具调用架构)。
+  - `hybrid` / `agent`（二者内部已合并为同一套**统一三段式上下文隔离 + 工具驱动管线**，`agent` 和 `agentic: true` 均作为向后兼容别名路由到此路径）：Phase 1 允许 1~4 轮只读工具自主核实重写人设、官方跨话剧情与云端素材并锁定 `StagedCastPlan` + `researchBrief`；Phase 2 **彻底丢弃 Phase 1 工具对话历史**，仅注入精炼规划与高占比重写人设写台词并做 `dialogueLinter` + 人设 Critic 自检；Phase 3 走确定性编译并由单一轻量导演终审做局部 `operations` 修补。详见下文 [统一三段式管线架构](#统一三段式上下文隔离与工具驱动架构hybrid--agent)。
+  - `staged`（内置默认）：与上述共享 Phase 2/3 核心编译骨干，跳过 Phase 1 工具循环，直接用 `buildCastPrompt` + 预取 RAG 选角定纲。
+  - `single`：快速选角后让模型一次把整份剧本写完（`mode: chat` 固定走 `single`），适合极速省流场景。
+- **`agentMaxSteps`**：统一管线 Phase 1 允许的最大工具探索/迭代步数（`2~40`，默认 `16`）。
 - **`jsonMode`**：`auto` 会先试着带 `response_format: { type: "json_object" }`，如果接口报错不支持就自动去掉重发。
-- **`extraBody`**：原样塞进请求体。带深度思考开关的模型想加速可以写 `{"thinking":{"type":"disabled"}}`；如果开着高思考（如 Gemini `-high`），记得把 `maxTokens` 调到 `32768` 以上，不然思考 token 把额度吃光会导致 JSON 截断。
-- **`polishDialogue`**：开启后会对生成的台词做反套路质检，发现模板腔或舞台腔时自动做局部润色。
-- **`personaDirs` / `personas`**：放自定义角色人设。`personaDirs` 会读取里面的 `*.md` / `*.txt`，优先看文件头的 YAML frontmatter（`name`、`aliases`、`group`），没有就用文件名。长人设会自动提取“核心机制 / 语言与风格 / 角色档案 / 核心禁忌”这几段（每人最多 5,000 字），不会被废话稀释语气。
+- **`extraBody`**：原样塞进请求体。带深度思考开关的模型想加速可以写 `{"thinking":{"type":"disabled"}}`；如果开着高思考（如 Gemini `-high` 或带 `reasoning_effort`），记得把 `maxTokens` 调到 `16384`~`32768` 以上，不然思考 token 把额度吃光会导致 JSON 截断。
+- **`polishDialogue`**：开启后会对生成的台词做 `dialogueLinter` 反套路与 OOC 质检，触发人设 Critic / 润色并在 Phase 3 启用长篇 `director-review` 导演终审。
+- **`personaDirs` / `personas`**：放自定义/重写角色人设。`personaDirs` 会**递归扫描**各级子目录中的 `*.md` / `*.txt`（例如 5 个分团子目录下的不同世界线虚拟歌手与角色变体），解析可选 YAML frontmatter（`name`、`aliases`、`group`、`unit`）与所属分团；系统会自动剥离 AI 聊天机器人交互协议噪声（如打字聊天感、括号心理描写、禁止换行等提示词规范），并按阶段提纯注入：**Phase 2 台词阶段注入高达 `11,000` 字 `dialoguePersonaPrompt` 与 `extractPairwiseAddressBook` 两两官称呼表，表演阶段注入 `actingPersonaPrompt`**，避免角色被模型预训练先验同化。
 
 人设文件长这样：
 
@@ -71,24 +73,28 @@ aliases: [瑞希, mizuki]
 
 ## 当前 AI 导演是怎么把剧本写自然的
 
-### 1. 五阶段流水线（`staged`，默认）
+### 1. 统一三段式上下文隔离与工具驱动架构（`hybrid` / `agent`）
+
+`StoryWriter` 已将原 `hybrid` 与 `agent` 合并为唯一一套**三段式上下文隔离 + 工具驱动流水线**（`staged` 沿用 Phase 2/3 核心编译骨干），同时消除早期 Agent 手写百条原始 JSON 与双重终审的冗余成本：
 
 ```text
-Stage 1: cast        → 选人（1~5 人）、匹配服装、挑贴题背景与 BGM，按剧情需要分 1~3 幕
+Phase 1: runPhase1Exploration（仅 hybrid / agent / agentic: true 启用）
+   ├── 精简只读工具（1~4 轮）：lookup_character · search_official_corpus（含 mode:"expand"）· search_assets
+   ├── 输出并锁定结构化 StagedCastPlan + researchBrief（按分团消歧虚拟歌手与服装变体）
+   └── 若网关不支持原生 tools：自动切换 ReAct JSON 协议，或优雅降级 staged-fallback（buildCastPrompt + RAG）
    │
-Stage 2: dialogue    → 只写逐字台词（带入选角色核心人设与官方参考），定稿后字面锁定；
-   │                   不足目标字数自动补写、过碎短句合并、标点柔化，剥离口头括号动作
-   │
-   ├── Stage 2.5a: emotion           → 低温 0.2 按段落打 TTS 情绪标签 + 平滑防抖
-   ├── Stage 2.5b: staging           → 安排转场、环境色、音效、运镜、单人内心特写、双人轮换
-   └── Stage 2.5c: translateDialogue → 并发批量把台词翻成日语 ttsText（每批 20 句，最多 3 并发）
+   ▼  【严格上下文隔离：彻底丢弃 Phase 1 工具调用对话历史】
+Phase 2: 纯净上下文写词 + 人设自检
+   ├── dialogue：仅注入 researchBrief + dialoguePersonaPrompt（11,000 字上限）+ pairwiseAddress + 三分区 RAG
+   ├── 后处理：不足字数自动扩写、过碎短句合并、标点柔化、剥离口头括号动作
+   └── dialogueLinter + dialogue-polish / dialogue-persona-critic：修复 OOC、官称偏离（如 绘名名）、AI 腔
    │
    ▼
-Stage 3: direction   → 给每句配 Live2D 动作和表情（单拍句首、均衡双人动作、听者反应）
-   │
-   ▼
-Stage 4/5: composeStory + validateAndFixStory + OfficialLinter
-                     → 拼装完整 StoryData，纠偏资源名，按 7 项官方硬指标兜底修复
+Phase 3: 确定性工作流编译 + 单一轻量导演终审闭环
+   ├── 并行 stage：VoiceDirection（情绪/语速） + Staging（切镜/环境/BGM/SE） + translateDialogue（日文 ttsText）
+   ├── Direction：注入 actingPersonaPrompt，按真实 motion3 曲线与单拍错峰规则配表情动作
+   ├── composeStory → alignStoryTtsEmotionsAndCaptions → validateAndFixStory
+   └── director-review：合并 auditStoryActingAndFidelity 与局部推荐（onlyIssues），以局部 operations 外科修补收口
 ```
 
 ### 2. 针对常见“AI 味”痛点的专项优化
@@ -100,21 +106,10 @@ Stage 4/5: composeStory + validateAndFixStory + OfficialLinter
 - **说出口的话里绝不带 `(微笑)` / `（挠头）`**：提示词、质检器（`dialogueLinter.ts`）、自动修复和日语翻译都统一清理口头台词里的括号动作描写，同时**保留**整句的 `（……心里话）` 内心独白。
 - **TTS 情绪与语速更稳**：情绪标注会按段平滑，抑制同一角色相邻句之间剧烈跳情绪和 `ttsSpeed` 大幅跳变（相邻跳变限制在 `<= 0.08`），平静句也不会乱开高强度 `ttsSpecialScene`。
 
-### 3. Agent 工具调用架构（`src/host/ai/agentTools.ts`）
+### 3. 向后兼容说明（`src/host/ai/agentTools.ts`）
 
-除了固定流水线，`StoryWriter` 现在还内置了一套 **Agent 式多轮工具调用循环**（通过 `StoryWriter.generate({ pipeline: 'agent' })` 或 `agentic: true` 触发），让模型在写剧本过程中主动查资料、先写先检再改：
-
-- **6 个内置工具**：
-  1. `lookup_character`：查角色资料、简称、模型 id 与服装列表
-  2. `inspect_character_expressions`：查指定角色真实可用的动作与带语义标注的表情列表
-  3. `search_assets`：按关键词或时段搜索背景、BGM 和 SE 音效
-  4. `search_official_corpus`：检索官方 PJSK 对白和演出样本
-  5. `validate_dialogue_draft`：检查台词草稿有没有括号动作漏网或明显毛病
-  6. `validate_story_draft`：在提交最终剧本前跑完整 `validateAndFixStory` + `OfficialLinter` 检查并拿到具体修改意见
-- **三层自动回退**（兼容各种大模型和代理）：
-  1. 优先走 OpenAI 原生 `tools` / `tool_calls` 函数调用；
-  2. 如果接口不支持 `tools`（返回 400/404/422/501 等），**自动切换到 ReAct JSON 文本协议**（`{"tool_call": ...}` / `{"final": ...}`）继续工具调用；
-  3. 如果到达轮数上限还没收尾，自动回落到 `staged` 流水线兜底，保证不空手而归。
+- 外部继续传入 `pipeline: "agent"`、`pipeline: "hybrid"` 或 `agentic: true` 时，`StoryWriter` 内部统一路由到上述三段式融合管线（`meta.pipeline` 保留调用方传入的别名；`meta.agentMode` 标注实际执行的 `native` / `react-json` / `staged-fallback`，`meta.toolCalls` 与 `meta.agentSteps` 记录 Phase 1 工具调用详情）。
+- `agentTools.ts` 的 `search_assets`、`lookup_character`、`search_official_corpus` 也与统一管线共用一套 `CatalogView`、分团虚拟歌手消歧和 RAG 检索内核。
 
 ---
 
@@ -126,23 +121,27 @@ Stage 4/5: composeStory + validateAndFixStory + OfficialLinter
 curl -sS -X POST http://127.0.0.1:9881/api/v1/script/generate \
   -H 'Content-Type: application/json' \
   -d '{
-    "prompt": "放学后的教室里，瑞希和绘名聊起下次 Live",
+    "prompt": "放学后的天台，瑞希和绘名聊起下次 Live",
     "mode": "story",
+    "pipeline": "hybrid",
     "targetMinutes": 3,
     "timeout": 600000
   }'
 ```
 
-| 字段              | 必填 | 说明                                                       |
-| ----------------- | ---- | ---------------------------------------------------------- |
-| `prompt`          | 是   | 场景描述或聊天消息                                         |
-| `mode`            | 否   | `story`（默认，短剧）或 `chat`（角色对话）                 |
-| `cast`            | 否   | 强制指定可选角色（支持名字、简称、数字 id 或云端模型片段） |
-| `targetMinutes`   | 否   | 覆盖配置里的 `targetMinutes`                               |
-| `history`         | 否   | `chat` 模式用的历史消息 `[{role, content}]`                |
-| `translateForTts` | 否   | 默认 `true`；传 `false` 可跳过日语翻译                     |
-| `pipeline`        | 否   | `staged` 或 `single`（`chat` 模式固定走 `single`）         |
-| `timeout`         | 否   | 生成超时毫秒数，默认 `600000`，上限 `1800000`              |
+| 字段              | 必填 | 说明                                                                                       |
+| ----------------- | ---- | ------------------------------------------------------------------------------------------ |
+| `prompt`          | 是   | 场景描述或聊天消息                                                                         |
+| `mode`            | 否   | `story`（默认，短剧）或 `chat`（角色对话）                                                 |
+| `cast`            | 否   | 强制指定可选角色（支持名字、简称、数字 id 或云端模型片段）                                 |
+| `targetMinutes`   | 否   | 覆盖配置里的 `targetMinutes`                                                               |
+| `history`         | 否   | `chat` 模式用的历史消息 `[{role, content}]`                                                |
+| `translateForTts` | 否   | 默认 `true`；传 `false` 可跳过日语翻译                                                     |
+| `pipeline`        | 否   | `staged` / `hybrid` / `agent`（均走统一管线，`hybrid`/`agent` 开 Phase 1）或 `single`      |
+| `agentic`         | 否   | 布尔值；传入 `true` 等价启用工具驱动 `hybrid`/`agent` 模式                                 |
+| `maxToolTurns`    | 否   | 整数 `2~40`（兼容 `agentMaxSteps`）；覆盖 Phase 1 最大工具轮次                             |
+| `directorReview`  | 否   | 布尔值；显式开关 Phase 3 导演终审（缺省时仅 `polishDialogue: true` 且台词 `>= 12` 句开启） |
+| `timeout`         | 否   | 生成超时毫秒数，默认 `600000`，上限 `1800000`                                              |
 
 ### 一句话生成并导出视频：`POST /api/v1/generate`
 

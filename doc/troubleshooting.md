@@ -2,7 +2,7 @@
 
 [返回 README](../README.md) · [部署指南](host-deployment.md) · [导出模式与提速调参](export-modes.md)
 
-排障先做两件事：看宿主终端日志，再访问一次健康检查：
+排障先做两件事：看宿主启动与终端日志（宿主启动时会自动执行配置体检并输出 `[LLM]`/`[TTS]`/`[Security]`/`[Video]` 等 `WARN` 提示），再访问一次健康检查：
 
 ```bash
 curl http://127.0.0.1:9881/api/v1/health
@@ -37,14 +37,19 @@ npx playwright install chromium
 
 这会直接把 GPU 活全扔给 CPU，导出耗时成倍暴涨。
 
+- **一键 GPU 预设**：先尝试设 `MSS_GPU_PROFILE=intel`（或 `nvidia` / `amd`），也可在 Docker 下使用对应的 `docker-compose.intel.yml` / `docker-compose.nvidia.yml` 叠加文件。
+- **Docker + Intel `/dev/dri` 权限失败**：在宿主机执行 `getent group video render`，将实际 GID 填入 `.env` 的 `VIDEO_GID` 和 `RENDER_GID` 后重建容器；确认宿主机存在 `/dev/dri/renderD128`。
+- **Docker + NVIDIA 无 GPU**：确认宿主机已安装并配置 NVIDIA Container Toolkit，且使用 `-f docker-compose.nvidia.yml` 启动。
 - Linux 有 NVIDIA 卡但**没有桌面 / Xorg**：把 `render.linuxGpuAngle` 设为 `false`，`render.extraChromeArgs` 设为 `"--use-angle=vulkan"`。
 - Linux 有 X11 桌面：保持 `linuxGpuAngle: true`。
-- 装完整版 Chrome / Edge，尽量别用阉割的 headless-shell。
+- 装完整版 Chrome / Edge，尽量别用阉割的 headless-shell（Docker 镜像启动脚本会自动定位完整版 Playwright Chromium，不会回退到 `chromium_headless_shell`）。
 
 另外，`health` 里的 `host.ffmpegEncoder` 是你填的配置值，**`host.ffmpegEncoderDetected`** 才是实际探测出来能用的硬件编码器。
 
 ## 3. 导出速度慢 / 内存或显存炸了
 
+- **低内存主机一键预设（4~8 GB RAM / NAS）**：设置 `MSS_MEMORY_PROFILE=low`（自动降为 `workers=1`、`maxConcurrentExports=1`、`workerRecycleExports=2`、`fps=30`、`fastFps=30`、`renderScale=1.0`）。如果 `.env` 里保留了 `MSS_VIDEO_FPS=60` / `MSS_FAST_FPS=60`，请注释掉以免精细变量覆盖预设。
+- **Linux 长驻内存碎片（RSS 持续上涨）**：在运行环境中设置 `MALLOC_ARENA_MAX=2` 与 `MALLOC_MMAP_THRESHOLD_=131072`（Docker 镜像与 `docker-compose.yml` 已默认开启，且已启用 `init: true` 回收 Chromium 僵尸进程）。
 - **降倍率**：`config.example.yaml` 默认 `renderScale: 1`，如果你用内置默认值跑会是 `1.5`（像素数 ×2.25），显式设回 `video.renderScale: 1` 立竿见影。
 - **降编码帧率**：保持 `video.fastFps: 30`（就算 `fps: 60` 也只编 30 帧，流畅度够用且省一半编码时间）。
 - **少开 worker**：每个 worker 吃 300~500 MB 内存和一份 WebGL 显存，小机器把 `render.workers` 设为 `1` 或 `2`。
@@ -52,15 +57,17 @@ npx playwright install chromium
 
 ## 4. 画质糊或文件太大
 
-- 走 **WebCodecs** 路径时调 `video.exportBitrate`（单位 bps，默认 `12000000`；想文件小改 `8000000`）。
+- 走 **WebCodecs** 路径时调 `video.exportBitrate`（单位 bps，默认 `5500000`，即 5.5 Mbps）与 `video.maxOutputMbps`（默认 `6.5` Mbps）；想文件更小可适当调低。
 - 走 **`rawvideo` / `image2pipe`（ffmpeg）** 路径时调 `video.crf`（越小越清晰、文件越大；常用 `23` ~ `28`）。
 - `renderScale` 设小于 `1` 导致的画面发虚，拉高码率是救不回来的，先改回 `1`。
 
 ## 5. 云端素材下载失败或默认 BGM 没声音
 
+- **首次冷启动拉取慢**：Docker 或空 `resources/` 目录首次拉取 600+ 云端模型索引时，`/api/v1/resources`、AI 生成和导出会自动等待最多 **180 秒**；若网络受限请配置 `HTTP_PROXY` / `HTTPS_PROXY`，恢复后再调一次 `POST /api/v1/cloud/refresh`。
 - 先看 `/api/v1/resources` 里有没有 `cloud` 字段；没有就检查启动日志里的 `[Cloud]` 报错，网络恢复后调一次 `POST /api/v1/cloud/refresh`。
 - 下载老超时的话，把 `assets.concurrency` 调小到 `1` 或 `2`，或把 `assets.timeoutMs` 调大。
 - 如果手动建了 `resources/audio/bgm/bgm.yaml`，它会**整体替换**主配置与默认 `bgm00003` 兜底；记得检查里面的 `enabled: true`、`volume > 0` 和路径是否正确，改完重启宿主。
+- **Docker 挂载 `config.yaml` 变成空目录**：如果宿主机还没建 `config.yaml` 就取消了 Compose 挂载注释，Docker 会创建同名目录导致配置无法读取（启动脚本会告警并回退纯环境变量模式）。删掉该目录，运行 `npm run init` 或 `cp config.example.yaml config.yaml` 后重启，或者干脆去掉挂载直接用 `.env`。
 
 ## 6. 端口被占用（`EADDRINUSE`）
 

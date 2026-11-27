@@ -136,11 +136,13 @@ tts:
 
 ## BGM 背景音乐
 
-1. **云端默认兜底**：`resources/audio/bgm/bgm.yaml` 和 `bg1.mp3` 都不在且开着云端目录时，自动播 `bgm00003`（`Slapstick!!`）。
-2. **自定义全局 BGM**：新建 `resources/audio/bgm/bgm.yaml`（注意它存在时会**整体替换**主配置里的 `bgm`，没写的字段用默认值 `enabled: true`、`volume: 0.2`）：
-   ```yaml
-   enabled: true
-   path: bgm00003
-   volume: 0.2
-   ```
-3. **剧本内切歌优先**：只要剧本里出现带文件的 `ChangeBgm` 片段，混音器就会改播剧本里写的曲目（支持交叉淡化、`stop: true` 静音留白和无缝循环点），不再叠放全局默认 BGM。把 `bgm.yaml` 的 `enabled` 设为 `false` 则会把全局和剧本内所有 BGM 一起关掉。
+1. **云端默认兜底**：在 `cloudOnly: true`（`config.example.yaml` 默认开启）或本地无 `bgm.yaml` / `bg1.mp3` 且启用云端目录时，默认 BGM 自动指向 **`bgm00003`（`Slapstick!!`）**，全局默认音量 **`0.35`**（已叠加 `0.75x` 增益与人声期间 `0.65x` 自动闪避）。
+2. **自定义全局 BGM**：
+   - 支持直接通过 `config.yaml` 的 `bgm` 节或环境变量 `MSS_BGM_ENABLED` / `MSS_BGM_PATH` / `MSS_BGM_VOLUME` 覆盖（`MSS_BGM_*` 始终优先级最高）。
+   - 若关闭 `cloudOnly` 并新建 `resources/audio/bgm/bgm.yaml`，该文件会**整体替换** `config.yaml` 的 `bgm` 节（缺省字段使用 `enabled: true`、`volume: 0.35`）；开启 `cloudOnly: true` 时会忽略本地 `bgm.yaml` 与非 `cloud/` 音频：
+     ```yaml
+     enabled: true
+     path: bgm00003
+     volume: 0.35
+     ```
+3. **剧本内切歌优先**：只要剧本里出现带文件的 `ChangeBgm` 片段，混音器就会改播剧本里写的曲目（支持交叉淡化、`stop: true` 静音留白和无缝循环点），不再叠放全局默认 BGM。把 `bgm.enabled` 设为 `false` 则会把全局和剧本内所有 BGM 一起关掉。
