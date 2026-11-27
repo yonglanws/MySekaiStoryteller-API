@@ -14,6 +14,7 @@ type IpcListener = (event: unknown, ...args: unknown[]) => void
 
 const JSON_INVOKE_CHANNELS = new Set([
   'electron:frames-stream-start',
+  'electron:frames-stream-repeat',
   'electron:frames-stream-finish',
   'electron:frames-stream-cancel',
   'electron:close-file-handle',

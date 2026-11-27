@@ -176,6 +176,7 @@ export default class AdvancedModel extends Live2DModel {
   private mouthFormRange: { min: number; max: number; defaultValue: number } | null = null
   private naturalMotionInstalled = false
   private lastNaturalUpdateMs = 0
+  private lastNaturalElapsedMs: number | null = null
   private firstBodyCue = true
   private facialForceNext = false
   private oneShotWaitDepth = 0
@@ -461,16 +462,51 @@ export default class AdvancedModel extends Live2DModel {
     this.breathParamId = breathCandidates.find((id) => has(id)) ?? null
     if (!eyeIds.length && !this.breathParamId) return
     this.lastNaturalUpdateMs = performance.now()
+    this.lastNaturalElapsedMs =
+      typeof this.elapsedTime === 'number' && Number.isFinite(this.elapsedTime)
+        ? this.elapsedTime
+        : null
     internal.on('beforeModelUpdate', () => {
       const now = performance.now()
       if (now < this.lastNaturalUpdateMs) {
         this.lastNaturalUpdateMs = now
       }
-      // 导出时帧泵按固定 1/60 故事步驱动 Ticker.shared，直接用步长而不是墙钟差，
-      // 避免 16/17ms 抖动影响眨眼与呼吸的相位。
-      const dt = AnimationManager.isExporting()
-        ? 1 / STORY_FPS
-        : Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
+      // 导出时 Ticker.shared 按 STORY_FPS=60 步进，但 render() 按 encodeFps（30/60 等）触发，
+      // 必须取自上次 beforeModelUpdate 以来实际累积的模拟时间（this.deltaTime / elapsedTime 差值），
+      // 避免 30fps 导出时眨眼与呼吸按硬编码 1/60s 半速播放。
+      let dt: number
+      if (AnimationManager.isExporting()) {
+        const modelDeltaMs = this.deltaTime
+        const internalDeltaMs = (this.internalModel as unknown as { deltaTime?: number })?.deltaTime
+        const rawDeltaMs =
+          typeof modelDeltaMs === 'number' && Number.isFinite(modelDeltaMs) && modelDeltaMs > 0
+            ? modelDeltaMs
+            : typeof internalDeltaMs === 'number' &&
+                Number.isFinite(internalDeltaMs) &&
+                internalDeltaMs > 0
+              ? internalDeltaMs
+              : null
+        const curElapsedMs =
+          typeof this.elapsedTime === 'number' && Number.isFinite(this.elapsedTime)
+            ? this.elapsedTime
+            : null
+        if (rawDeltaMs !== null) {
+          dt = Math.min(0.25, rawDeltaMs / 1000)
+        } else if (
+          curElapsedMs !== null &&
+          this.lastNaturalElapsedMs !== null &&
+          curElapsedMs > this.lastNaturalElapsedMs
+        ) {
+          dt = Math.min(0.25, (curElapsedMs - this.lastNaturalElapsedMs) / 1000)
+        } else {
+          dt = 1 / STORY_FPS
+        }
+        if (curElapsedMs !== null) {
+          this.lastNaturalElapsedMs = curElapsedMs
+        }
+      } else {
+        dt = Math.min(0.25, Math.max(0, (now - this.lastNaturalUpdateMs) / 1000))
+      }
       this.lastNaturalUpdateMs = now
       if (this.destroyed) return
       // 官方 `ModelRuntime::update` 的 active 对应模型是否在台显示（含 Appear 淡入与 Clear 淡出期间），
@@ -1035,11 +1071,18 @@ export default class AdvancedModel extends Live2DModel {
 
     const lastTimes = this.getPlayableLayerLastTime()
     const prevTime = lastTimes[channel]
-    const dt = AnimationManager.isExporting()
-      ? 1 / STORY_FPS
-      : prevTime !== null && userTimeSeconds >= prevTime
-        ? Math.min(0.25, userTimeSeconds - prevTime)
-        : 0
+    let dt: number
+    if (prevTime !== null && userTimeSeconds >= prevTime) {
+      dt = Math.min(0.25, userTimeSeconds - prevTime)
+    } else if (prevTime === null && AnimationManager.isExporting()) {
+      const modelDeltaMs = this.deltaTime
+      dt =
+        typeof modelDeltaMs === 'number' && Number.isFinite(modelDeltaMs) && modelDeltaMs > 0
+          ? Math.min(0.25, modelDeltaMs / 1000)
+          : 1 / STORY_FPS
+    } else {
+      dt = 0
+    }
     lastTimes[channel] = userTimeSeconds
 
     const pruned = advancePlayableBlendLayer(layer, dt)
@@ -1225,6 +1268,10 @@ export default class AdvancedModel extends Live2DModel {
 
   public resetClockBaselines(now = performance.now()): void {
     this.lastNaturalUpdateMs = now
+    this.lastNaturalElapsedMs =
+      typeof this.elapsedTime === 'number' && Number.isFinite(this.elapsedTime)
+        ? this.elapsedTime
+        : null
     this.currentBodyStartedAt = now
     this.deltaTime = 0
     // 同一 worker 连续导出时，眨眼/呼吸相位必须回到按模型 id 派生的确定性起点：

@@ -37,11 +37,54 @@ export function assetUrl(base: string, rel: string): string {
   return new URL(encoded, withSlash(base)).href
 }
 
+const ensuredDirs = new Map<string, Promise<void>>()
+const MAX_ENSURED_DIRS = 4096
+
+async function ensureDirCached(dir: string): Promise<void> {
+  const existing = ensuredDirs.get(dir)
+  if (existing) {
+    await existing
+    return
+  }
+  if (ensuredDirs.size >= MAX_ENSURED_DIRS) {
+    ensuredDirs.clear()
+  }
+  const task = fs.promises.mkdir(dir, { recursive: true }).then(() => undefined)
+  ensuredDirs.set(dir, task)
+  try {
+    await task
+  } catch (error) {
+    ensuredDirs.delete(dir)
+    throw error
+  }
+}
+
 export function atomicWrite(file: string, data: Buffer | string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
   fs.writeFileSync(tmp, data)
   fs.renameSync(tmp, file)
+}
+
+/**
+ * 面向大量独立小文件（如单个 `.sse-motion.json` / `.motion3.json` 片段）的异步快写：
+ * 缓存目录创建并跳过临时文件 + rename，显著减少 NAS 小文件元数据时延且不阻塞事件循环。
+ * 关键索引/清单（`model3.json`、`catalog.json`、`.moc3` 等）仍应使用 `atomicWrite`。
+ */
+export async function writeFileFastAsync(file: string, data: Buffer | string): Promise<void> {
+  const dir = path.dirname(file)
+  await ensureDirCached(dir)
+  try {
+    await fs.promises.writeFile(file, data)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      ensuredDirs.delete(dir)
+      await ensureDirCached(dir)
+      await fs.promises.writeFile(file, data)
+      return
+    }
+    throw error
+  }
 }
 
 export interface RequestOptions {

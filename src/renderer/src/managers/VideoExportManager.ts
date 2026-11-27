@@ -1490,7 +1490,7 @@ export default class VideoExportManager {
                 ? extendedStageApp.getStaticSceneSignature()
                 : ''
             const canSkipStatic =
-              Boolean(sinks.encoder) &&
+              Boolean(sinks.encoder || sinks.jpegSink?.canRepeatLastFrame) &&
               !isEdgeFrame &&
               !isVisuallyActive &&
               !prevWasVisuallyActive &&
@@ -1509,13 +1509,17 @@ export default class VideoExportManager {
               (inEndingTail ? frameIndex % 4 === 0 : localFrame % (encodeFps * 4) === 0)
 
             let handledStaticRepeat = false
-            if (canSkipStatic && sinks.encoder?.repeatLastFrame) {
+            if (canSkipStatic) {
               const captureStart = virtualClock.realTimeMs()
-              handledStaticRepeat = await sinks.encoder.repeatLastFrame(
-                timestampUs,
-                durationUs,
-                keyFrame
-              )
+              if (sinks.encoder?.repeatLastFrame) {
+                handledStaticRepeat = await sinks.encoder.repeatLastFrame(
+                  timestampUs,
+                  durationUs,
+                  keyFrame
+                )
+              } else if (sinks.jpegSink?.repeatLastFrame) {
+                handledStaticRepeat = await sinks.jpegSink.repeatLastFrame()
+              }
               snapshotMs += virtualClock.realTimeMs() - captureStart
               if (handledStaticRepeat) {
                 skippedStaticFrames++
