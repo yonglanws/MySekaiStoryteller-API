@@ -737,6 +737,20 @@ function appendContextAndListenerGuards(
 
   for (let i = 0; i < story.snippets.length; i++) {
     const snippet = story.snippets[i]
+    const rawData = (
+      'data' in snippet && snippet.data && typeof snippet.data === 'object' ? snippet.data : {}
+    ) as Record<string, unknown>
+    if (
+      snippet.type === 'BlackOut' ||
+      snippet.type === 'SekaiOut' ||
+      (snippet.type === 'SideFade' && String(rawData.mode ?? 'Out').toLowerCase() === 'out') ||
+      snippet.type === 'ChangeBackgroundImage'
+    ) {
+      prevContent = ''
+      prevEmotion = ''
+      lastEmotionByModel.clear()
+      continue
+    }
     if (snippet.type !== 'Talk' || !('data' in snippet) || !snippet.data) continue
     talkIdx += 1
     const data = snippet.data as unknown as Record<string, unknown>
@@ -802,7 +816,12 @@ function appendContextAndListenerGuards(
     for (const act of actions) {
       const lid = typeof act?.modelId === 'number' ? act.modelId : -1
       const lFacial = typeof act?.facial === 'string' ? act.facial.trim() : ''
-      if (lid !== -1 && lid !== modelId && lFacial && !hasDiagAt(i, lid, 'facial')) {
+      if (
+        lid !== -1 &&
+        lid !== modelId &&
+        lFacial &&
+        !hasDiagAt(i, lid, 'facial', 'listener_tense_smile_flip')
+      ) {
         const lPrevEmo = lastEmotionByModel.get(lid) ?? ''
         const lModel = view.modelById(lid)
         if (
@@ -1597,16 +1616,26 @@ function buildDirectorStageTelemetry(
       '长场次 BGM 全程单一未切停：可在情绪转折或爆发前用 ChangeBgm({stop:true}) 制造留白或切曲'
     )
   }
-  if (talkCount >= 14 && standaloneMotionCount === 0 && waitCount === 0 && moveCount === 0) {
-    reviewFocusPoints.push(
-      '舞台节奏偏平（0 独立 Motion、0 Wait、0 Move）：可在情绪重拍插入 1~3 处原地 Move 静默反应拍、独立 Motion（或长句后半拍 wait:false, delay:2.5~4.5 的说话者换姿）或短 Wait'
-    )
-  }
-  if (talkCount >= 16 && distinctMotions.size <= 6) {
-    reviewFocusPoints.push(
-      `全片仅使用了 ${distinctMotions.size} 种不同身体动作，容易陷入机械循环（近期官方主演单集约 12~18 种）：可从角色调色板中补充更多自然变体（含不同编号及贴合气氛的跨风格动作）`
-    )
-  }
+    if (talkCount >= 14 && standaloneMotionCount === 0 && waitCount === 0) {
+      reviewFocusPoints.push(
+        '舞台节奏偏平（0 独立 Motion、0 Wait）：可在情绪重拍或长句后插入 4~8 处句间独立 Motion 静默反应拍或短 Wait，切忌使用 Move 横向滑动'
+      )
+    }
+    if (talkCount >= 16 && soloTalkShare < 0.15) {
+      reviewFocusPoints.push(
+        `单人 Center 特写占比偏低（${(soloTalkShare * 100).toFixed(0)}%）：可在内心独白或强情绪段使用 LayoutClear + LayoutAppear(Center) 原地淡入淡出切镜（isMoved:false）`
+      )
+    }
+    if (talkCount >= 16 && distinctMotions.size <= 8) {
+      reviewFocusPoints.push(
+        `全片仅使用了 ${distinctMotions.size} 种不同身体动作，容易陷入机械循环（近期官方主演单集约 18~30+ 种）：请从角色全量动作库补充不同编号及贴合气氛的跨风格动作`
+      )
+    }
+    if (talkCount >= 12 && cameraOrShakeCount >= 4 && dominantEmotion === '平静') {
+      reviewFocusPoints.push(
+        `日常/平静场景镜头与震动偏多（${cameraOrShakeCount} 处）：请克制 CameraZoom/CameraMove（0~1 次）与 CharacterShake（仅真实受惊/物理碰撞），避免公式化抖动`
+      )
+    }
   if (talkCount >= 14 && avgTalkChars >= 19 && longLineShare >= 0.35) {
     reviewFocusPoints.push(
       `台词均长 ${avgTalkChars} 字且长句占比 ${(longLineShare * 100).toFixed(0)}%，容易像书面说明（官方近期多为短反应与中等句交错）：可将部分解释句拆短，留出停顿与潜台词`
@@ -2173,7 +2202,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             stageRhythm: {
               type: 'string',
               description:
-                '评估单人 Center 特写与双人同框切镜、Wait/独立 Motion 静默拍、Move 反应拍与镜头/震动点缀'
+                '评估单人 Center 特写与双人 Left/Right 原地淡入淡出切镜（isMoved:false，严禁 Move 滑动）、Wait/独立 Motion 静默拍（每 40 句约 16~22 处）、SideFade/Flashback/AmbientColor 与克制的镜头/震动使用'
             },
             actingNaturalness: {
               type: 'string',
@@ -3927,11 +3956,11 @@ export async function runAgenticStoryGeneration(
     '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
     '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se"], queries: [...] })` + `search_official_corpus({ query })`；**不要**按角色逐一重复查 `lookup_character` 或 `inspect_character_expressions`！',
     '- **第 2 步（直接起草）**：基于已获取的人设、表情/动作调色板与素材，直接起草完整高质量 StoryData 并调用 1 次 `save_story_draft`（复杂多幕可先 `plan_story_outline`）。**严禁**把整场几十句台词重发一遍给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`！`save_story_draft` 已自带全套规则体检与 `directorTelemetry`，**无需**再重复调用 `validate_story_draft` 或 `critique_story_draft`。',
-    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光、总句数时长达标与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写/双人同框原地淡入淡出切镜、独立 `Motion` 静默拍、`Wait` 留白、`AmbientColor`、必要时的 `ShakeScreen`/`CameraZoom`）（5）表情动作自然度与丰富度；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
+    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光、总句数时长达标与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写与双人 Left/Right 原地淡入淡出切镜、`SideFade`/`FlashbackIn`/`AmbientColor`、独立 `Motion` 静默拍、`Wait` 留白，以及克制的镜头/震动使用）（5）全量动作库多样性与表情自然度（严禁 `nod01`/`sad01` 刷屏，确保每位角色都有丰富动作）；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
     '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
-    '1. **持续情绪与真伪笑脸分辨（严禁哭戏强颜欢笑/每句跳脸/道具动作误用）**：泣不成声、哽咽、悲伤倾诉、冲突崩溃等情绪高潮段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句（可适度微调身体动作而不必每句硬换表情）；严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；当说话者强颜欢笑打岔时，先前处于「生气/伤心」的听者也严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝食物或犯困睡眠台词，平时严禁乱用；只允许填写**该角色自身目录真实存在**的动作与表情名，切勿编造或跨角色套用不存在的动作；真冬保持克制内敛。',
-    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」，所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**（切换单人思考模式先 `LayoutClear` 原地淡出再 `LayoutAppear(Center)` 原地淡入）；听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作，也不要在角色即将 `LayoutClear` 切镜退场前硬插多余独立 `Motion`。',
-    '3. **声画与节奏**：开场必须由 `ChangeBgm` 起乐（从清单选贴合氛围的曲目；若刻意做极短冷开场，最多 2~4 句后必须在第 5 句 Talk 前切入 `ChangeBgm`，严禁前段大段无声；不要与顶层 `bgm` 冲突，严禁重复连续播同一首），情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白；物理/情绪节拍（脚步、奔跑、开门、衣料、惊觉、回忆）务必配 `PlaySe`（不要整场 0 音效）；夜晚/黄昏配 `AmbientColor`；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵，不要瞬间黑屏。',
+    '1. **持续情绪、动作多样性与真伪笑脸分辨**：泣不成声、悲伤倾诉、冲突崩溃段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句；充分利用角色全量动作库（含 `nod02/03`、`forward02`、`sigh01`、`lookaway01`、`fidget01`、`relief01` 及贴合气氛的跨风格变体），同一词根整场不要重复超过 2~3 次，确保每位在场角色都有多样身体动作，并在句间/转折前点缀独立 `Motion` 节拍（约 16~22 次/40句）。严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；先前处于「生气/伤心」的听者严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝或睡眠台词；真冬保持克制内敛。',
+    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集高频穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（内心独白、连续说话或情绪爆发切单人 `Center`），所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**；转场善用 `SideFade`、`FlashbackIn/Out` 与 `AmbientColor`。听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
+    '3. **声画节拍与镜头/震动/字幕克制**：开场必须由 `ChangeBgm` 起乐，情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白，物理/情绪节拍务必配 `PlaySe`；**严禁公式化滥用镜头、震动与开场字幕**：日常/谈心/后台戏 `CameraZoom`/`CameraMove` 仅用 `0~1` 次（仅高潮爆点用 `1~3` 次），`CharacterShake` 仅限真实受惊/物理碰撞（平常对话不用），`Telop`/`PlaceInfo` 仅在明确需要交代时空时可选使用、不要每场模板双挂；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵。',
     '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教或重复独白拖长；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''

@@ -1812,3 +1812,125 @@ test('comedy over-guard regression: mock-angry banter in happy-dominated comedy 
     'mock-angry banter in happy-dominated comedy must not replace w-happy-wandahoi01 with w-normal-glad02'
   )
 })
+
+test('C2 regression: face_cry_02 classifies as cry, scene cuts reset tense mood, bitter laugh while sad is allowed, and zero_motions partner is repaired', () => {
+  if (hasLocalModels) {
+    const mizCry02 = inspectModelFacial('20mizuki_normal/20mizuki_normal.model3.json', 'face_cry_02', LOCAL_MODELS_ROOT)
+    assert.equal(mizCry02.role, 'cry', 'face_cry_02 must classify as cry rather than angry')
+  }
+
+  // Angry listener may keep angry expression while speaker deflects sadly
+  const listenerAngry = isFacialCompatibleWithLine({
+    facial: 'face_angry_01',
+    modelPath: '19ena_normal/19ena_normal.model3.json',
+    emotion: '伤心',
+    content: '……算了，是我自己没说明白。',
+    prevTense: true,
+    isListener: true
+  })
+  assert.equal(listenerAngry.ok, true, 'angry listener must not be flagged with angry_on_sad_or_regret')
+
+  // Bittersweet laugh while emotion is explicitly sad must not trigger positive_context_sad_or_angry
+  const bitterLaughCry = isFacialCompatibleWithLine({
+    facial: 'face_serious_01',
+    modelPath: hasLocalModels ? '12honami_normal/12honami_normal.model3.json' : undefined,
+    emotion: '伤心',
+    content: '……啊哈哈，果然瞒不过你呢。',
+    prevTense: false,
+    modelsRoot: hasLocalModels ? LOCAL_MODELS_ROOT : undefined
+  })
+  assert.equal(bitterLaughCry.ok, true, 'explicit 伤心 emotion overrides surface laugh cue')
+
+  const testView = new CatalogView({
+    models: [
+      {
+        id: 1,
+        name: '瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-sad01', 'w-normal-trouble01', 'w-normal-nod01', 'w-normal-pose01', 'w-normal-sigh01'],
+        facials: ['face_normal_01', 'face_sad_01', 'face_cry_02', 'face_smile_01', 'face_closeeye_04'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        name: '绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-forward01', 'w-normal-trouble01', 'w-normal-glad01'],
+        facials: ['face_normal_01', 'face_angry_01', 'face_sad_01', 'face_smile_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 3,
+        name: '奏',
+        shortName: '奏',
+        path: '17kanade_normal/17kanade_normal.model3.json',
+        motions: ['w-normal-default01', 'w-normal-nod02', 'w-normal-sigh01', 'w-normal-forward01'],
+        facials: ['face_normal_01', 'face_sad_01', 'face_trouble_01'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_room.jpg'],
+    imageDetails: [{ file: 'bg_room.jpg', name: '房间', description: '房间' }],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: 'Daily', description: '日常' }]
+  })
+
+  // Actor 3 enters with a motion and immediately speaks (<0.4s -> stripped), risking actor_zero_motions;
+  // plus LayoutAppear has mismatched smile before sad line, and scene cut resets tense state before playful pose01.
+  const raw = {
+    models: [
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 2, model: '19ena_normal/19ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 3, model: '17kanade_normal/17kanade_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    bgm: ['bgm00003.mp3'],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-sad01', facial: 'face_closeeye_04' } },
+      { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-trouble01', facial: 'face_angry_01' } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0.5, data: { speaker: '瑞希', emotion: '伤心', content: '对不起……都是我搞砸了，呜……', modelId: 1, actions: [{ at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_sad_01' }, { at: 0, modelId: 2, facial: 'face_angry_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '绘名', emotion: '生气', content: '别老是自己扛着啊！', modelId: 2, actions: [{ at: 0, modelId: 2, motion: 'w-normal-forward01', facial: 'face_angry_01' }] } },
+      { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 3, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-nod02', facial: 'face_sad_01' } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '奏', emotion: '伤心', content: '先深呼吸冷静一下吧。', modelId: 3, actions: [{ at: 0, modelId: 3, motion: 'w-normal-sigh01', facial: 'face_sad_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '绘名', emotion: '平静', content: '我知道了……', modelId: 2, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 2, motion: 'w-normal-nod01', facial: 'face_sad_01' }] } },
+      { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+      { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 3, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 400 } },
+      { type: 'BlackIn', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 400 } },
+      { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
+      { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-glad01', facial: 'face_smile_01' } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0.5, data: { speaker: '瑞希', emotion: '开心', content: '好啦！新的一天重新开始吧！', modelId: 1, actions: [{ at: 0, modelId: 1, motion: 'w-normal-pose01', facial: 'face_smile_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '绘名', emotion: '开心', content: '真拿你没办法呀。', modelId: 2, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 2, motion: 'w-normal-nod01', facial: 'face_smile_01' }] } },
+      { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const { story: fixed, lint } = validateAndFixStory(raw, testView, undefined, {
+    emotionLabels: ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  })
+  assert.equal(lint.passed, true, `expected lint pass, got: ${lint.issues.join('; ')}`)
+  const audit = auditStoryActingAndFidelity(fixed, testView)
+  assert.equal(audit.zeroMotionModelIds.length, 0, 'all actors must have non-entry body motion')
+  assert.equal(
+    audit.diagnostics.some((d) => d.code === 'glad_motion_on_tense_deflection'),
+    false,
+    'scene cut BlackOut must reset tense context before cheerful scene'
+  )
+  assert.equal(
+    audit.diagnostics.some((d) => d.code === 'negative_context_smile'),
+    false,
+    'LayoutAppear smile before sad beat must be repaired'
+  )
+  assert.equal(audit.passed, true, `unexpected diagnostics: ${JSON.stringify(audit.diagnostics)}`)
+})

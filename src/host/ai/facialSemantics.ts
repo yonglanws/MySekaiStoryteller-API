@@ -442,7 +442,16 @@ function classifyCurves(facialName: string, curves: Map<string, number>): Facial
     return { role: 'serious', label: '认真/锐利', fromMotion3: true, mouthForm }
   }
 
-  if (browAngle <= -0.3 && mouthForm <= 0.05) {
+  // 显式哭泣/悲伤/懊悔前缀即便在 ParamTear<=0.2 且皱眉（browAngle<=-0.3）时也属于哭泣/悲伤而非生气
+  if (/^face_(?:cry|ecry)/.test(lower)) {
+    return { role: 'cry', label: '含泪/哭泣', fromMotion3: true, mouthForm }
+  }
+  const isSadNamed =
+    /^face_(?:sad|lookdown|sigh|regret|tired|exhaustion|heartbreak|desperate|baffling|darksad)/.test(
+      lower
+    )
+
+  if (browAngle <= -0.3 && mouthForm <= 0.05 && !isSadNamed) {
     return { role: 'angry', label: '蹙眉不满/生气', fromMotion3: true, mouthForm }
   }
 
@@ -491,7 +500,7 @@ export function annotateFacialName(
   return info.label ? `${facialName}(${info.label})` : facialName
 }
 
-function parseMotionStem(motionName: string): { style: string; stem: string } {
+export function parseMotionStem(motionName: string): { style: string; stem: string } {
   const clean = motionName.trim()
   const rawParts = clean.split('-')
   const style = rawParts.length >= 3 ? rawParts[1].toLowerCase() : ''
@@ -1046,7 +1055,13 @@ export function isFacialCompatibleWithLine(params: {
   if (
     !isListener &&
     !(prevTense && !isGenuineHappyOrReconcile) &&
-    (emo === '开心' || (hasPosCue && !hasNegCue && !prevTense)) &&
+    (emo === '开心' ||
+      (hasPosCue &&
+        !hasNegCue &&
+        !prevTense &&
+        emo !== '伤心' &&
+        emo !== '生气' &&
+        emo !== '害怕')) &&
     (info.role === 'sad' ||
       info.role === 'angry' ||
       info.role === 'cry' ||
@@ -1088,8 +1103,9 @@ export function isFacialCompatibleWithLine(params: {
     return { ok: false, reason: 'surprise_on_sad_or_monologue' }
   }
 
-  // 7) 含泪自责/伤心懊悔台词（无明确怒气）严禁误挂生气脸
+  // 7) 含泪自责/伤心懊悔台词（无明确怒气）严禁误挂生气脸（听者前序若正在发火对峙允许维持生气神情）
   if (
+    !isListener &&
     info.role === 'angry' &&
     emo !== '生气' &&
     !ANGRY_TEXT_RE.test(text) &&
@@ -1576,14 +1592,18 @@ function sortMotionsByStyleConsistency(motions: string[], preferredStyle?: strin
     .map((entry) => entry.m)
 }
 
-/** 根据剧情情绪从角色真实动作集中挑选最贴切的身体动作（过滤掉 default 与 special 清场动作）。 */
+/** 根据剧情情绪从角色真实动作集中挑选最贴切的身体动作（过滤掉 default 与 special 清场动作，并优先未重复使用的新鲜变体）。 */
 export function pickMoodMatchedMotion(
   motions: string[],
   mood: DramaticContextMood | TargetMood,
   modelPath?: string,
   restrainedRole?: boolean,
   avoidMotions?: ReadonlySet<string> | string[],
-  modelsRoot?: string
+  modelsRoot?: string,
+  diversity?: {
+    motionCounts?: ReadonlyMap<string, number>
+    stemCounts?: ReadonlyMap<string, number>
+  }
 ): string {
   const dramaticMood: DramaticContextMood =
     mood in MOTION_ROLES_BY_DRAMATIC_MOOD
@@ -1612,18 +1632,6 @@ export function pickMoodMatchedMotion(
   const wantedRoles =
     MOTION_ROLES_BY_DRAMATIC_MOOD[dramaticMood] ?? MOTION_ROLES_BY_DRAMATIC_MOOD.neutral
 
-  const pickFromRoles = (allowAvoided: boolean): string => {
-    for (const wantedRole of wantedRoles) {
-      if (restrainedRole && wantedRole === 'playful') continue
-      const hit = pool.find((m) => {
-        if (!allowAvoided && avoid?.has(m)) return false
-        return inspectModelMotion(modelPath, m, modelsRoot).role === wantedRole
-      })
-      if (hit) return hit
-    }
-    return ''
-  }
-
   const isOppositeRole = (role: MotionSemanticRole): boolean => {
     if (
       dramaticMood === 'sad_regret' ||
@@ -1637,6 +1645,40 @@ export function pickMoodMatchedMotion(
       return role === 'sad' || role === 'angry'
     }
     return false
+  }
+
+  if (diversity?.motionCounts || diversity?.stemCounts) {
+    const mCounts = diversity.motionCounts
+    const sCounts = diversity.stemCounts
+    const scored = pool
+      .map((m, idx) => {
+        const info = inspectModelMotion(modelPath, m, modelsRoot)
+        if (info.contextTag || isOppositeRole(info.role)) return null
+        const roleIdx = wantedRoles.indexOf(info.role)
+        let score = roleIdx >= 0 ? 30 - roleIdx * 4 : 4
+        if (restrainedRole && info.role === 'playful') score -= 40
+        const { style, stem } = parseMotionStem(m)
+        if (style.startsWith('normal')) score += 1.5
+        if (avoid?.has(m)) score -= 25
+        score -= (mCounts?.get(m) ?? 0) * 40
+        score -= (sCounts?.get(stem) ?? 0) * 16
+        return { m, score, idx }
+      })
+      .filter((entry): entry is { m: string; score: number; idx: number } => entry !== null)
+      .sort((a, b) => b.score - a.score || a.idx - b.idx)
+    if (scored.length > 0) return scored[0].m
+  }
+
+  const pickFromRoles = (allowAvoided: boolean): string => {
+    for (const wantedRole of wantedRoles) {
+      if (restrainedRole && wantedRole === 'playful') continue
+      const hit = pool.find((m) => {
+        if (!allowAvoided && avoid?.has(m)) return false
+        return inspectModelMotion(modelPath, m, modelsRoot).role === wantedRole
+      })
+      if (hit) return hit
+    }
+    return ''
   }
 
   return (
