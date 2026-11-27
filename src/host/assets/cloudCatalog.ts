@@ -16,6 +16,7 @@ import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
 import type { AssetsSettings } from '../config'
 import { atomicWrite, type RequestOptions } from './http'
+import { mapPool } from './shared'
 import { listMedia, listScenarioSeFiles } from './media'
 import {
   isLegacyDeadMoesekaiUrl,
@@ -216,23 +217,6 @@ function pickPreferred(names: string[], preferences: string[]): string {
     if (names.includes(candidate)) return candidate
   }
   return names[0] ?? ''
-}
-
-async function mapPool<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const run = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++
-      results[index] = await worker(items[index], index)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, run))
-  return results
 }
 
 function motionNames(

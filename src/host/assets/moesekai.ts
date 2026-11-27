@@ -10,6 +10,7 @@ import {
   writeFileFastAsync,
   type RequestOptions
 } from './http'
+import { mapPool, MOTION_BUNDLES_SIDECAR } from './shared'
 import { appendModelsManifest, readModelsManifest, type ModelManifestEntry } from './manifest'
 import { buildMoc3BindingResolver, convertAnyMotion, type Moc3BindingResolver } from './motion3'
 import { characterById, CHARACTERS, resolveCharacterToken } from './names'
@@ -152,23 +153,6 @@ const DEFAULT_RETRIES = 2
 async function fetchBuffer(url: string, options: RequestOptions): Promise<Buffer> {
   const response = await request(url, options)
   return Buffer.from(await response.arrayBuffer())
-}
-
-async function mapPool<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const run = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++
-      results[index] = await worker(items[index], index)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, run))
-  return results
 }
 
 const bundleLocks = new Map<string, Promise<void>>()
@@ -980,8 +964,6 @@ async function downloadCanonicalModelBundle(
   atomicWrite(modelJsonPath, JSON.stringify(model3, null, 2))
   return { destDir, modelJsonPath, mocBuffer, bytes }
 }
-
-const MOTION_BUNDLES_SIDECAR = '.motion-bundles.json'
 
 function resolveMotionBundles(entry: MoesekaiIndexEntry): {
   required: string[]

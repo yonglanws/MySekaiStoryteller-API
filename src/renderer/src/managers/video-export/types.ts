@@ -16,8 +16,7 @@ export interface VideoExportOptions {
   /**
    * 导出管线模式：
    * - `'fast'`（默认）：虚拟时钟逐帧渲染（WebCodecs / frames 管道）
-   * - `'frames'`：直接走帧序列编码
-   * - `'record'` / `'stream'`：@deprecated 已废弃，自动委托为 `'fast'`
+   * - `'frames'` / `'record'` / `'stream'`：@deprecated 已废弃，自动委托为 `'fast'`
    */
   exportMode?: 'fast' | 'frames' | 'record' | 'stream'
   /** fast 模式视频码率（bps），缺省 3.2Mbps VBR */

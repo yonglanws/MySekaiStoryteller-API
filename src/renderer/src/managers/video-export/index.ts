@@ -16,8 +16,6 @@ export type {
   DiagnosticTtsLine,
   DiagnosticAction
 } from './ExportDiagnostics'
-export { CheckpointManager } from './CheckpointManager'
-export type { CheckpointData } from './CheckpointManager'
 export { ProgressTracker } from './ProgressTracker'
 export type { ExportProgress, ProgressCallback } from './ProgressTracker'
 export { ErrorRecoveryManager, ExportError, ExportErrorCode } from './ErrorRecovery'
@@ -30,13 +28,17 @@ export type {
   PipelineTTSResult,
   PipelineMetrics
 } from './ConcurrentExportPipeline'
-export { AudioExportPipeline } from './AudioExportPipeline'
-export type { AudioExportPipelineConfig, AudioExportResult } from './AudioExportPipeline'
-export type { AudioTimestampEntry, AudioTimestampManifest } from './AudioTimestampManifest'
 export { SnippetTimestampRecorder } from './SnippetTimestampRecorder'
 export type { SnippetTimestamp } from './SnippetTimestampRecorder'
 export { AsyncFrameCapturer } from './AsyncFrameCapturer'
 export type { AsyncFrameCapturerOptions } from './AsyncFrameCapturer'
 export { GpuYuv420Converter } from './GpuYuv420Converter'
-export { FrameRateController } from './FrameRateController'
-export type { FrameRateControllerConfig, FrameTiming } from './FrameRateController'
+export { LipSyncCoordinator, resolveLipSyncScale } from './LipSyncCoordinator'
+export type {
+  LipSyncEnvelopeData,
+  DecodedPcmData,
+  LipSyncLogger,
+  LipSyncCoordinatorDeps
+} from './LipSyncCoordinator'
+export { WebGLValidationProbe } from './WebGLValidationProbe'
+export type { WebGLValidatorLike, ValidationProbeLogger } from './WebGLValidationProbe'
