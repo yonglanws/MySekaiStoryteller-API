@@ -4,8 +4,14 @@ import type { AssetsSettings } from '../config'
 import {
   assetUrl,
   atomicWrite,
+  CANONICAL_ASSET_ORIGINS,
   fetchBuffer as httpFetchBuffer,
   fetchJson,
+  isLikelyOriginFailure,
+  markCanonicalOriginFailed,
+  markCanonicalOriginHealthy,
+  orderCanonicalOrigins,
+  resetCanonicalOriginPreference,
   withSlash,
   writeFileFastAsync,
   type RequestOptions
@@ -17,10 +23,7 @@ import { characterById, CHARACTERS, resolveCharacterToken } from './names'
 
 export type AssetRegion = AssetsSettings['region']
 
-export const CANONICAL_ASSET_SITES = [
-  'https://storage.pjsk.moe',
-  'https://storage.exmeaning.com'
-] as const
+export const CANONICAL_ASSET_SITES = CANONICAL_ASSET_ORIGINS
 
 export interface MoesekaiIndexEntry {
   id: string
@@ -149,21 +152,9 @@ export interface FetchAssetsResult {
 const DEFAULT_CONCURRENCY = 6
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_RETRIES = 2
-const CANONICAL_MIRROR_PREF_TTL_MS = 5 * 60_000
-
-let preferredCanonicalSite: { origin: string; until: number } | null = null
 
 export function resetCanonicalSitePreference(): void {
-  preferredCanonicalSite = null
-}
-
-function activePreferredCanonicalSite(sites: readonly string[]): string | null {
-  if (!preferredCanonicalSite) return null
-  if (Date.now() > preferredCanonicalSite.until) {
-    preferredCanonicalSite = null
-    return null
-  }
-  return sites.includes(preferredCanonicalSite.origin) ? preferredCanonicalSite.origin : null
+  resetCanonicalOriginPreference()
 }
 
 /**
@@ -182,12 +173,10 @@ export function canonicalFallbackUrls(
   }
   if (!sites.includes(parsed.origin)) return [url]
 
-  const sticky = activePreferredCanonicalSite(sites)
-  const orderedOrigins = [
-    ...(sticky ? [sticky] : []),
+  const orderedOrigins = orderCanonicalOrigins([
     parsed.origin,
-    ...sites.filter((site) => site !== parsed.origin && site !== sticky)
-  ]
+    ...sites.filter((site) => site !== parsed.origin)
+  ])
 
   const out: string[] = []
   const seen = new Set<string>()
@@ -242,15 +231,15 @@ async function fetchBuffer(
         )
       }
       if (candidates.length > 1) {
-        const origin = new URL(candidate).origin
-        if (CANONICAL_ASSET_SITES.includes(origin as (typeof CANONICAL_ASSET_SITES)[number])) {
-          preferredCanonicalSite = { origin, until: Date.now() + CANONICAL_MIRROR_PREF_TTL_MS }
-        }
+        markCanonicalOriginHealthy(candidate)
       }
       return buffer
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
       if (options.signal?.aborted) throw lastError
+      if (candidates.length > 1 && isLikelyOriginFailure(lastError)) {
+        markCanonicalOriginFailed(candidate)
+      }
     }
   }
 
@@ -299,10 +288,8 @@ function isCanonicalSiteHost(url: string): boolean {
 }
 
 function canonicalSitesFor(preferredUrl?: string): string[] {
-  const sticky = activePreferredCanonicalSite(CANONICAL_ASSET_SITES)
   const trimmed = (preferredUrl ?? '').trim()
   const base: string[] = []
-  if (sticky) base.push(sticky)
   if (trimmed && isCanonicalSiteHost(trimmed)) {
     const origin = new URL(trimmed).origin
     if (!base.includes(origin)) base.push(origin)
@@ -310,7 +297,7 @@ function canonicalSitesFor(preferredUrl?: string): string[] {
   for (const site of CANONICAL_ASSET_SITES) {
     if (!base.includes(site)) base.push(site)
   }
-  return base
+  return orderCanonicalOrigins(base)
 }
 
 function parseCanonicalLibraryRoot(
@@ -519,13 +506,20 @@ export async function loadMoesekaiIndex(
 
   const sites = canonicalSitesFor(configuredBase)
   let lastError: unknown = null
-  for (const site of sites) {
+  for (let i = 0; i < sites.length; i++) {
+    const site = sites[i]
+    const hasMoreMirrors = i < sites.length - 1
+    const attemptOptions: RequestOptions = {
+      ...requestOptions,
+      retries: hasMoreMirrors ? Math.min(requestOptions.retries, 1) : requestOptions.retries
+    }
     try {
       const { version, models, motions, indexUrl } = await fetchCanonicalListingsOnSite(
         site,
         region,
-        requestOptions
+        attemptOptions
       )
+      markCanonicalOriginHealthy(site)
       const motionSetIds = new Set(motions.keys())
       const entries: MoesekaiIndexEntry[] = []
       for (const [id, info] of [...models.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
@@ -567,6 +561,10 @@ export async function loadMoesekaiIndex(
       }
     } catch (error) {
       lastError = error
+      if (options.signal?.aborted) break
+      if (sites.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(site)
+      }
     }
   }
   throw lastError instanceof Error
@@ -748,9 +746,15 @@ async function fetchCanonicalAssetDocument(
   const id = bundle.split('/')[2] ?? ''
   let lastError: unknown = null
 
-  for (const site of sites) {
+  for (let i = 0; i < sites.length; i++) {
+    const site = sites[i]
+    const hasMoreMirrors = i < sites.length - 1
+    const attemptOptions: RequestOptions = {
+      ...options,
+      retries: hasMoreMirrors ? Math.min(options.retries, 1) : options.retries
+    }
     try {
-      const formCache = await ensureCanonicalFormCache(site, region, options)
+      const formCache = await ensureCanonicalFormCache(site, region, attemptOptions)
       const effectiveVer = version || formCache.version
       const baseUrl = effectiveVer
         ? `${site}/${region}@${encodeURIComponent(effectiveVer)}`
@@ -768,7 +772,7 @@ async function fetchCanonicalAssetDocument(
         for (let depth = 0; depth < 8; depth++) {
           const listing = await fetchJson<CanonicalDirectoryListing>(
             `${baseUrl}/${dirPath}`,
-            options
+            attemptOptions
           )
           const assetFile = (listing.files ?? []).find((f) => f.name.endsWith('.asset.json'))
           if (assetFile) {
@@ -786,13 +790,18 @@ async function fetchCanonicalAssetDocument(
       }
 
       const docUrl = assetUrl(baseUrl, `${assetName}.asset.json`)
-      const doc = await fetchJson<CanonicalAssetDocument>(docUrl, options)
+      const doc = await fetchJson<CanonicalAssetDocument>(docUrl, attemptOptions)
       if (doc.format !== 'asset' || !Array.isArray(doc.members)) {
         throw new Error(`${docUrl}: invalid canonical asset document`)
       }
+      markCanonicalOriginHealthy(site)
       return { site, baseUrl, assetName: doc.name || assetName, doc }
     } catch (error) {
       lastError = error
+      if (options.signal?.aborted) break
+      if (sites.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(site)
+      }
     }
   }
   throw lastError instanceof Error

@@ -4,11 +4,114 @@ import path from 'node:path'
 /** Moesekai 资源下载共用的 HTTP/落盘工具。 */
 
 export const ASSET_USER_AGENT = 'MySekaiStoryteller-API/1.0 (moesekai asset fetcher)'
+export const CANONICAL_ASSET_ORIGINS = [
+  'https://storage.pjsk.moe',
+  'https://storage.exmeaning.com'
+] as const
 const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
-const DEFAULT_BODY_STALL_TIMEOUT_MS = 30_000
+const DEFAULT_BODY_STALL_TIMEOUT_MS = 20_000
 const DEFAULT_RETRY_DELAY_MS = 500
+const CANONICAL_ORIGIN_PREF_TTL_MS = 10 * 60_000
+const CANONICAL_ORIGIN_FAIL_TTL_MS = 5 * 60_000
 let atomicWriteSeq = 0
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+let preferredCanonicalOrigin: { origin: string; until: number } | null = null
+const failedCanonicalOrigins = new Map<string, number>()
+
+function extractCanonicalOrigin(urlOrOrigin: string): string | null {
+  const trimmed = urlOrOrigin.trim()
+  if (!trimmed) return null
+  try {
+    const origin = new URL(trimmed).origin
+    return (CANONICAL_ASSET_ORIGINS as readonly string[]).includes(origin) ? origin : null
+  } catch {
+    return null
+  }
+}
+
+export function isCanonicalAssetOrigin(urlOrOrigin: string): boolean {
+  return extractCanonicalOrigin(urlOrOrigin) !== null
+}
+
+/**
+ * 判断错误是否更可能源于镜像站不可用/网络卡死（超时、断流、5xx/429 等），
+ * 而非正常的 404 路径不存在。
+ */
+export function isLikelyOriginFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  if (/:\s*HTTP\s+4(?:00|01|03|04|05|10|22)\b/.test(message)) {
+    return false
+  }
+  return true
+}
+
+/** 将某个 canonical 镜像标记为健康并置顶（共享给 Live2D 与背景/BGM/SE 链路）。 */
+export function markCanonicalOriginHealthy(urlOrOrigin: string): void {
+  const origin = extractCanonicalOrigin(urlOrOrigin)
+  if (!origin) return
+  failedCanonicalOrigins.delete(origin)
+  preferredCanonicalOrigin = { origin, until: Date.now() + CANONICAL_ORIGIN_PREF_TTL_MS }
+}
+
+/** 将某个 canonical 镜像标记为近期异常并降权，使后续请求优先走健康镜像。 */
+export function markCanonicalOriginFailed(urlOrOrigin: string): void {
+  const origin = extractCanonicalOrigin(urlOrOrigin)
+  if (!origin) return
+  failedCanonicalOrigins.set(origin, Date.now() + CANONICAL_ORIGIN_FAIL_TTL_MS)
+  if (preferredCanonicalOrigin?.origin === origin) {
+    preferredCanonicalOrigin = null
+  }
+}
+
+/** 重置共享 canonical 镜像健康状态（单测用）。 */
+export function resetCanonicalOriginPreference(): void {
+  preferredCanonicalOrigin = null
+  failedCanonicalOrigins.clear()
+}
+
+/**
+ * 按近期健康状态对候选 origin / URL 排序：
+ * 健康置顶镜像（10 分钟内）排最前，近期失败镜像（5 分钟内）排最后，其余保持原序。
+ */
+export function orderCanonicalOrigins(candidates: readonly string[]): string[] {
+  const unique: string[] = []
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    if (!seen.has(candidate)) {
+      seen.add(candidate)
+      unique.push(candidate)
+    }
+  }
+  if (unique.length <= 1) return unique
+
+  const now = Date.now()
+  if (preferredCanonicalOrigin && now > preferredCanonicalOrigin.until) {
+    preferredCanonicalOrigin = null
+  }
+  for (const [origin, until] of failedCanonicalOrigins) {
+    if (now > until) failedCanonicalOrigins.delete(origin)
+  }
+
+  const rankOf = (candidate: string): number => {
+    const origin = extractCanonicalOrigin(candidate)
+    if (!origin) return 1
+    if (
+      preferredCanonicalOrigin &&
+      origin === preferredCanonicalOrigin.origin &&
+      !failedCanonicalOrigins.has(origin)
+    ) {
+      return 0
+    }
+    if (failedCanonicalOrigins.has(origin)) return 2
+    return 1
+  }
+
+  return unique
+    .map((candidate, index) => ({ candidate, index, rank: rankOf(candidate) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.candidate)
+}
 
 export function withSlash(value: string): string {
   return value.endsWith('/') ? value : `${value}/`
@@ -102,7 +205,9 @@ export async function writeFileFastAsync(file: string, data: Buffer | string): P
 export interface RequestOptions {
   timeoutMs: number
   retries: number
-  /** 流式读取响应体期间的单次空闲超时（毫秒）；未设置时默认 min(timeoutMs, 30_000) */
+  /** 等待响应头（TTFB）的超时（毫秒）；未设置时默认 min(timeoutMs, stallTimeoutMs ?? 20_000) */
+  headerTimeoutMs?: number
+  /** 流式读取响应体期间的单次空闲超时（毫秒）；未设置时默认 min(timeoutMs, 20_000) */
   stallTimeoutMs?: number
   /** 重试退避基数（毫秒，默认 500；主要用于单测加速） */
   retryDelayMs?: number
@@ -208,56 +313,12 @@ async function readResponseBuffer(
 
 export async function request(url: string, options: RequestOptions): Promise<Response> {
   const parsed = assertHttpUrl(url, 'request')
-  let lastError: Error | null = null
-
-  for (let attempt = 0; attempt <= options.retries; attempt++) {
-    if (options.signal?.aborted) {
-      throw errorFromReason(options.signal.reason, `${url}: aborted`)
-    }
-    const controller = new AbortController()
-    const timer = setTimeout(
-      () => controller.abort(new Error(`timeout after ${options.timeoutMs}ms`)),
-      options.timeoutMs
-    )
-    const onAbort = (): void => controller.abort(options.signal?.reason)
-    options.signal?.addEventListener('abort', onAbort, { once: true })
-    try {
-      const response = await fetch(parsed, {
-        headers: { 'user-agent': ASSET_USER_AGENT, accept: '*/*' },
-        redirect: 'follow',
-        signal: controller.signal
-      })
-      if (response.ok) return response
-
-      if (!RETRY_STATUS.has(response.status) || attempt >= options.retries) {
-        throw new NonRetryableHttpError(`${url}: HTTP ${response.status} ${response.statusText}`)
-      }
-      await response.body?.cancel().catch(() => undefined)
-      lastError = new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error))
-      if (error instanceof NonRetryableHttpError || options.signal?.aborted) throw lastError
-      if (attempt >= options.retries) throw lastError
-    } finally {
-      clearTimeout(timer)
-      options.signal?.removeEventListener('abort', onAbort)
-    }
-    await sleep(retryBackoffMs(attempt, options.retryDelayMs))
-  }
-
-  throw lastError ?? new Error(`${url}: request failed`)
-}
-
-/**
- * 带完整响应体超时、流式卡死（stall）检测、Content-Length 截断校验与重试的二进制下载。
- * 解决 Node/undici 在收到响应头后读取响应体时连接中断（`TypeError: terminated`）
- * 或 TCP 假死（无超时）导致下载无限挂起/零重试的问题。
- */
-export async function fetchBuffer(url: string, options: RequestOptions): Promise<Buffer> {
-  const parsed = assertHttpUrl(url, 'fetchBuffer')
-  const stallTimeoutMs = Math.max(
+  const headerTimeoutMs = Math.max(
     1,
-    Math.min(options.timeoutMs, options.stallTimeoutMs ?? DEFAULT_BODY_STALL_TIMEOUT_MS)
+    Math.min(
+      options.timeoutMs,
+      options.headerTimeoutMs ?? options.stallTimeoutMs ?? DEFAULT_BODY_STALL_TIMEOUT_MS
+    )
   )
   let lastError: Error | null = null
 
@@ -270,6 +331,10 @@ export async function fetchBuffer(url: string, options: RequestOptions): Promise
       () => controller.abort(new Error(`timeout after ${options.timeoutMs}ms`)),
       options.timeoutMs
     )
+    const headerTimer = setTimeout(
+      () => controller.abort(new Error(`response header timeout after ${headerTimeoutMs}ms`)),
+      headerTimeoutMs
+    )
     const onAbort = (): void => controller.abort(options.signal?.reason)
     options.signal?.addEventListener('abort', onAbort, { once: true })
     try {
@@ -278,6 +343,71 @@ export async function fetchBuffer(url: string, options: RequestOptions): Promise
         redirect: 'follow',
         signal: controller.signal
       })
+      clearTimeout(headerTimer)
+      if (response.ok) return response
+
+      if (!RETRY_STATUS.has(response.status) || attempt >= options.retries) {
+        throw new NonRetryableHttpError(`${url}: HTTP ${response.status} ${response.statusText}`)
+      }
+      await response.body?.cancel().catch(() => undefined)
+      lastError = new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (error instanceof NonRetryableHttpError || options.signal?.aborted) throw lastError
+      if (attempt >= options.retries) throw lastError
+    } finally {
+      clearTimeout(headerTimer)
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
+    }
+    await sleep(retryBackoffMs(attempt, options.retryDelayMs))
+  }
+
+  throw lastError ?? new Error(`${url}: request failed`)
+}
+
+/**
+ * 带响应头（TTFB）超时、完整响应体超时、流式卡死（stall）检测、Content-Length 截断校验与重试的二进制下载。
+ * 解决 Node/undici 在等待响应头挂死、收到响应头后读取响应体时连接中断（`TypeError: terminated`）
+ * 或 TCP 假死（无超时）导致下载长时间挂起/零重试的问题。
+ */
+export async function fetchBuffer(url: string, options: RequestOptions): Promise<Buffer> {
+  const parsed = assertHttpUrl(url, 'fetchBuffer')
+  const stallTimeoutMs = Math.max(
+    1,
+    Math.min(options.timeoutMs, options.stallTimeoutMs ?? DEFAULT_BODY_STALL_TIMEOUT_MS)
+  )
+  const headerTimeoutMs = Math.max(
+    1,
+    Math.min(
+      options.timeoutMs,
+      options.headerTimeoutMs ?? options.stallTimeoutMs ?? DEFAULT_BODY_STALL_TIMEOUT_MS
+    )
+  )
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt <= options.retries; attempt++) {
+    if (options.signal?.aborted) {
+      throw errorFromReason(options.signal.reason, `${url}: aborted`)
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(
+      () => controller.abort(new Error(`timeout after ${options.timeoutMs}ms`)),
+      options.timeoutMs
+    )
+    const headerTimer = setTimeout(
+      () => controller.abort(new Error(`response header timeout after ${headerTimeoutMs}ms`)),
+      headerTimeoutMs
+    )
+    const onAbort = (): void => controller.abort(options.signal?.reason)
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const response = await fetch(parsed, {
+        headers: { 'user-agent': ASSET_USER_AGENT, accept: '*/*' },
+        redirect: 'follow',
+        signal: controller.signal
+      })
+      clearTimeout(headerTimer)
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined)
         const httpError = new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
@@ -294,6 +424,7 @@ export async function fetchBuffer(url: string, options: RequestOptions): Promise
       if (error instanceof NonRetryableHttpError || options.signal?.aborted) throw lastError
       if (attempt >= options.retries) throw lastError
     } finally {
+      clearTimeout(headerTimer)
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', onAbort)
     }

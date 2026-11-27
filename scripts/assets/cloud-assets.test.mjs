@@ -14,7 +14,14 @@ import {
   resolveGlobalBgm,
   resolveStoryCloudAssets
 } from '../../out-host/host/assets/cloudAssets.js'
-import { fetchBuffer } from '../../out-host/host/assets/http.js'
+import {
+  fetchBuffer,
+  markCanonicalOriginFailed,
+  markCanonicalOriginHealthy,
+  orderCanonicalOrigins,
+  resetCanonicalOriginPreference
+} from '../../out-host/host/assets/http.js'
+import { assetBaseCandidates } from '../../out-host/host/assets/media.js'
 import {
   canonicalFallbackUrls,
   resetCanonicalSitePreference
@@ -835,5 +842,110 @@ test('v2_19ena_culture recovers from mid-body texture disconnect, repairs 0-byte
     server.close()
     await once(server, 'close')
     fs.rmSync(resourcesDir, { recursive: true, force: true })
+  }
+})
+
+test('fetchBuffer aborts stalled-before-headers response within headerTimeoutMs and retries cleanly', async () => {
+  const payload = Buffer.from('BGM_HEADER_RECOVERY_PAYLOAD')
+  let attempts = 0
+  const heldResponses = []
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost')
+    if (url.pathname === '/stall-headers') {
+      attempts++
+      if (attempts === 1) {
+        // Intentionally never send response headers — headerTimeoutMs must abort before timeoutMs
+        heldResponses.push(res)
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(payload.length)
+      })
+      res.end(payload)
+      return
+    }
+    res.writeHead(404)
+    res.end('not found')
+  })
+
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const base = `http://127.0.0.1:${server.address().port}`
+
+  try {
+    const t0 = Date.now()
+    const result = await fetchBuffer(`${base}/stall-headers`, {
+      timeoutMs: 10_000,
+      headerTimeoutMs: 120,
+      stallTimeoutMs: 5_000,
+      retries: 2,
+      retryDelayMs: 10
+    })
+    const elapsedMs = Date.now() - t0
+    assert.equal(attempts, 2, 'must abort stalled headers and retry cleanly')
+    assert.deepEqual(result, payload)
+    assert.ok(
+      elapsedMs < 2_000,
+      `expected fast headerTimeoutMs recovery (<2000ms), got ${elapsedMs}ms`
+    )
+  } finally {
+    for (const res of heldResponses) {
+      res.socket?.destroy()
+    }
+    server.closeAllConnections?.()
+    server.close()
+    await once(server, 'close')
+  }
+})
+
+test('shared canonical origin preference propagates between moesekai and media', () => {
+  const sampleUrl =
+    'https://storage.pjsk.moe/cn@6.4.0-24-d031cd79a729/live2d/model/v2_19ena_school01/buildmodeldata/texture/0.png'
+  try {
+    resetCanonicalOriginPreference()
+    assert.deepEqual(assetBaseCandidates('https://storage.pjsk.moe'), [
+      'https://storage.pjsk.moe',
+      'https://storage.exmeaning.com'
+    ])
+    assert.equal(canonicalFallbackUrls(sampleUrl)[0], sampleUrl)
+
+    // Marking primary mirror failed immediately prioritizes backup mirror in both media & moesekai
+    markCanonicalOriginFailed('https://storage.pjsk.moe/cn/live2d/model/foo')
+    assert.deepEqual(assetBaseCandidates('https://storage.pjsk.moe'), [
+      'https://storage.exmeaning.com',
+      'https://storage.pjsk.moe'
+    ])
+    assert.deepEqual(assetBaseCandidates(undefined), [
+      'https://storage.exmeaning.com',
+      'https://storage.pjsk.moe'
+    ])
+    assert.ok(
+      canonicalFallbackUrls(sampleUrl)[0].startsWith('https://storage.exmeaning.com/'),
+      'moesekai canonicalFallbackUrls must prioritize storage.exmeaning.com after pjsk.moe fails'
+    )
+
+    // Marking backup mirror healthy keeps it sticky across both modules
+    markCanonicalOriginHealthy('https://storage.exmeaning.com/sekai-cn-assets/sound/scenario/bgm/')
+    assert.deepEqual(
+      orderCanonicalOrigins(['https://storage.pjsk.moe', 'https://storage.exmeaning.com']),
+      ['https://storage.exmeaning.com', 'https://storage.pjsk.moe']
+    )
+    assert.deepEqual(assetBaseCandidates('https://storage.pjsk.moe'), [
+      'https://storage.exmeaning.com',
+      'https://storage.pjsk.moe'
+    ])
+    assert.ok(canonicalFallbackUrls(sampleUrl)[0].startsWith('https://storage.exmeaning.com/'))
+
+    // Marking primary healthy again restores priority in both modules
+    markCanonicalOriginHealthy('https://storage.pjsk.moe')
+    assert.deepEqual(assetBaseCandidates('https://storage.pjsk.moe'), [
+      'https://storage.pjsk.moe',
+      'https://storage.exmeaning.com'
+    ])
+    assert.equal(canonicalFallbackUrls(sampleUrl)[0], sampleUrl)
+  } finally {
+    resetCanonicalOriginPreference()
   }
 })

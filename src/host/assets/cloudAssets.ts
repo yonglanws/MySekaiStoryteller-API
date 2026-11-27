@@ -13,7 +13,14 @@ import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
 import { DEFAULT_CLOUD_BGM_ID, DEFAULT_LOCAL_BGM_PATH, type AssetsSettings } from '../config'
 import type { StoryData } from '../../common/types/Story'
-import { atomicWrite, fetchBuffer } from './http'
+import {
+  atomicWrite,
+  fetchBuffer,
+  isLikelyOriginFailure,
+  markCanonicalOriginFailed,
+  markCanonicalOriginHealthy,
+  orderCanonicalOrigins
+} from './http'
 import { MOTION_BUNDLES_SIDECAR } from './shared'
 import type {
   CloudBackgroundEntry,
@@ -510,13 +517,16 @@ export async function ensureInappUiAssets(
       const cleanRel = relPath.replace(/^\/+/, '')
       const candidateUrls = explicitBase
         ? [`${explicitBase}/${cleanRel}`]
-        : CANONICAL_ASSET_SITES.flatMap((site) => canonicalInappUrls(site, region, cleanRel))
+        : orderCanonicalOrigins([...CANONICAL_ASSET_SITES]).flatMap((site) =>
+            canonicalInappUrls(site, region, cleanRel)
+          )
 
       let saved = false
       for (const url of candidateUrls) {
         try {
           const buffer = await fetchBuffer(url, { timeoutMs, retries })
           if (buffer.byteLength === 0) throw new Error('empty body')
+          if (!explicitBase) markCanonicalOriginHealthy(url)
           if (localPath.toLowerCase().endsWith('.wav') && url.toLowerCase().endsWith('.mp3')) {
             const mp3Temp = `${localPath}.tmp.mp3`
             atomicWrite(mp3Temp, buffer)
@@ -533,7 +543,10 @@ export async function ensureInappUiAssets(
           }
           saved = true
           break
-        } catch {
+        } catch (error) {
+          if (!explicitBase && isLikelyOriginFailure(error)) {
+            markCanonicalOriginFailed(url)
+          }
           // try next candidate URL / backup mirror
         }
       }

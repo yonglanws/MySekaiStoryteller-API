@@ -4,7 +4,19 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import type { AssetsSettings } from '../config'
 import { ffmpegPath } from '../../shared/ffmpeg'
-import { assertHttpUrl, atomicWrite, fetchBuffer, fetchJson, type RequestOptions } from './http'
+import {
+  assertHttpUrl,
+  atomicWrite,
+  CANONICAL_ASSET_ORIGINS,
+  fetchBuffer,
+  fetchJson,
+  isCanonicalAssetOrigin,
+  isLikelyOriginFailure,
+  markCanonicalOriginFailed,
+  markCanonicalOriginHealthy,
+  orderCanonicalOrigins,
+  type RequestOptions
+} from './http'
 import { mapPool } from './shared'
 import { appendNamedManifest, type NamedManifestEntry } from './manifest'
 import { soundtrackKey, soundtrackLabel, type SoundtrackIndex } from './soundtracks'
@@ -103,8 +115,8 @@ export interface ListMediaResult {
   bundles: MediaBundle[]
 }
 
-const DEFAULT_ASSET_BASE = 'https://storage.pjsk.moe'
-const BACKUP_ASSET_BASE = 'https://storage.exmeaning.com'
+const DEFAULT_ASSET_BASE = CANONICAL_ASSET_ORIGINS[0]
+const BACKUP_ASSET_BASE = CANONICAL_ASSET_ORIGINS[1]
 const DEFAULT_CONCURRENCY = 4
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_RETRIES = 3
@@ -166,16 +178,12 @@ function apiOrigin(assetBase: string): string {
   return new URL(assetBase).origin
 }
 
-function isCanonicalAssetOrigin(origin: string): boolean {
-  return origin === DEFAULT_ASSET_BASE || origin === BACKUP_ASSET_BASE
-}
-
-function assetBaseCandidates(raw: string | undefined): string[] {
+export function assetBaseCandidates(raw: string | undefined): string[] {
   const primary = normalizeAssetBase(raw)
   const origin = apiOrigin(primary)
-  if (!raw || !raw.trim()) return [DEFAULT_ASSET_BASE, BACKUP_ASSET_BASE]
-  if (origin === DEFAULT_ASSET_BASE) return [primary, BACKUP_ASSET_BASE]
-  if (origin === BACKUP_ASSET_BASE) return [primary, DEFAULT_ASSET_BASE]
+  if (!raw || !raw.trim()) return orderCanonicalOrigins([...CANONICAL_ASSET_ORIGINS])
+  if (origin === DEFAULT_ASSET_BASE) return orderCanonicalOrigins([primary, BACKUP_ASSET_BASE])
+  if (origin === BACKUP_ASSET_BASE) return orderCanonicalOrigins([primary, DEFAULT_ASSET_BASE])
   return [primary]
 }
 
@@ -513,8 +521,14 @@ export async function downloadMediaFile(
   let files: MediaFile[] = []
   let picked: MediaFile | null = null
 
-  for (const base of candidates) {
+  for (let baseIdx = 0; baseIdx < candidates.length; baseIdx++) {
+    const base = candidates[baseIdx]
     const baseOrigin = apiOrigin(base)
+    const hasMoreMirrors = baseIdx < candidates.length - 1
+    const mirrorOpts: RequestOptions = {
+      ...requestOpts,
+      retries: hasMoreMirrors ? Math.min(requestOpts.retries, 1) : requestOpts.retries
+    }
     for (const candidatePath of candidatePaths) {
       const bundle: MediaBundle = {
         kind: options.kind,
@@ -525,15 +539,20 @@ export async function downloadMediaFile(
         prefix: `${path.posix.dirname(candidatePath)}/`
       }
       try {
-        files = await bundleFiles(baseOrigin, options.region, bundle, requestOpts)
+        files = await bundleFiles(baseOrigin, options.region, bundle, mirrorOpts)
         picked = pickFile(files, extensions)
         if (picked) {
           origin = baseOrigin
           matchedBundlePath = candidatePath
+          if (candidates.length > 1) markCanonicalOriginHealthy(baseOrigin)
           break
         }
-      } catch {
-        // try next prefix or backup origin
+      } catch (error) {
+        if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+          markCanonicalOriginFailed(baseOrigin)
+          // 镜像站超时/连接异常时直接切备用镜像，避免在同一个死站上继续尝试其余前缀
+          break
+        }
       }
     }
     if (picked) break
@@ -568,6 +587,7 @@ export async function downloadMediaFile(
   }
   let buffer: Buffer | null = null
   let lastDownloadError: unknown = null
+  let activeOrigin = origin
   for (let i = 0; i < downloadUrls.length; i++) {
     const url = downloadUrls[i]
     const hasBackup = i < downloadUrls.length - 1
@@ -578,9 +598,14 @@ export async function downloadMediaFile(
       })
       if (buf.byteLength === 0) throw new Error(`${url}: empty response body`)
       buffer = buf
+      activeOrigin = apiOrigin(url)
+      if (downloadUrls.length > 1) markCanonicalOriginHealthy(url)
       break
     } catch (error) {
       lastDownloadError = error
+      if (downloadUrls.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(url)
+      }
     }
   }
   if (!buffer) {
@@ -589,12 +614,18 @@ export async function downloadMediaFile(
       : new Error(String(lastDownloadError ?? `failed to download ${primaryUrl}`))
   }
   atomicWrite(target, buffer)
+  const metaOpts: RequestOptions = {
+    ...requestOpts,
+    timeoutMs: Math.min(requestOpts.timeoutMs, 30_000),
+    retries: Math.min(requestOpts.retries, 1)
+  }
   let loop = options.kind === 'bgm' ? extractAudioLoopMetadata(buffer) : null
   if (!loop && options.kind === 'bgm') {
     const metaCompanion = files.find((f) => /\.(hca|wav)$/i.test(f.name) && f.name !== picked.name)
     if (metaCompanion) {
       try {
-        const metaBuf = await fetchBuffer(new URL(metaCompanion.url, origin).href, requestOpts)
+        const metaUrl = new URL(metaCompanion.url, activeOrigin).href
+        const metaBuf = await fetchBuffer(metaUrl, metaOpts)
         loop = extractAudioLoopMetadata(metaBuf)
       } catch {
         // best-effort companion loop extraction
@@ -603,11 +634,11 @@ export async function downloadMediaFile(
   }
   if (!loop && options.kind === 'bgm') {
     loop = await fetchCanonicalBgmCuesLoop(
-      origin,
+      activeOrigin,
       options.region,
       matchedBundlePath,
       options.name,
-      requestOpts
+      metaOpts
     )
   }
   if (loop) writeAudioLoopSidecar(target, loop)
@@ -958,14 +989,25 @@ export async function listScenarioSeFiles(options: {
   const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
 
-  for (const base of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const base = candidates[i]
     const origin = apiOrigin(base)
-    let bundles = await listBundles(
-      origin,
-      options.region,
-      'sound/scenario/se/',
-      requestOpts
-    ).catch(() => [])
+    const hasMoreMirrors = i < candidates.length - 1
+    const mirrorOpts: RequestOptions = {
+      ...requestOpts,
+      retries: hasMoreMirrors ? Math.min(requestOpts.retries, 1) : requestOpts.retries
+    }
+    let bundles: MediaBundle[] = []
+    let originFailed = false
+    try {
+      bundles = await listBundles(origin, options.region, 'sound/scenario/se/', mirrorOpts)
+    } catch (error) {
+      if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(origin)
+        originFailed = true
+      }
+    }
+    if (originFailed && hasMoreMirrors) continue
     if (bundles.length === 0) {
       const fallbackNames = options.bundleNames ?? [...SCENARIO_SE_BUNDLES]
       bundles = fallbackNames.map((bundlePath) => ({
@@ -979,7 +1021,15 @@ export async function listScenarioSeFiles(options: {
     }
 
     const perBundle = await mapPool(bundles, 3, async (bundle) => {
-      const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+      let files: MediaFile[] = []
+      try {
+        files = await bundleFiles(origin, options.region, bundle, mirrorOpts)
+      } catch (error) {
+        if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+          markCanonicalOriginFailed(origin)
+        }
+        return []
+      }
       return files
         .filter((file) => SE_EXTS.includes(path.posix.extname(file.name).toLowerCase()))
         .map((file): ScenarioSeEntry => {
@@ -1006,6 +1056,7 @@ export async function listScenarioSeFiles(options: {
       }
     }
     if (deduped.size > 0) {
+      if (candidates.length > 1) markCanonicalOriginHealthy(origin)
       return [...deduped.values()].sort((a, b) => a.id.localeCompare(b.id))
     }
   }
@@ -1047,14 +1098,25 @@ export async function downloadSeFile(options: {
   const candidates = assetBaseCandidates(options.assetBase)
   const requestOpts = requestOptions(options)
 
-  for (const base of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const base = candidates[i]
     const origin = apiOrigin(base)
-    let bundles = await listBundles(
-      origin,
-      options.region,
-      'sound/scenario/se/',
-      requestOpts
-    ).catch(() => [])
+    const hasMoreMirrors = i < candidates.length - 1
+    const mirrorOpts: RequestOptions = {
+      ...requestOpts,
+      retries: hasMoreMirrors ? Math.min(requestOpts.retries, 1) : requestOpts.retries
+    }
+    let bundles: MediaBundle[] = []
+    let originFailed = false
+    try {
+      bundles = await listBundles(origin, options.region, 'sound/scenario/se/', mirrorOpts)
+    } catch (error) {
+      if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(origin)
+        originFailed = true
+      }
+    }
+    if (originFailed && hasMoreMirrors) continue
     if (bundles.length === 0) {
       bundles = SCENARIO_SE_BUNDLES.map((bundlePath) => ({
         kind: 'bgm' as MediaKind,
@@ -1067,7 +1129,16 @@ export async function downloadSeFile(options: {
     }
 
     for (const bundle of bundles) {
-      const files = await bundleFiles(origin, options.region, bundle, requestOpts).catch(() => [])
+      let files: MediaFile[] = []
+      try {
+        files = await bundleFiles(origin, options.region, bundle, mirrorOpts)
+      } catch (error) {
+        if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+          markCanonicalOriginFailed(origin)
+          if (hasMoreMirrors) break
+        }
+        continue
+      }
       const hit =
         files.find((file) => file.name.toLowerCase() === fileName.toLowerCase()) ??
         files.find((file) => {
@@ -1079,9 +1150,14 @@ export async function downloadSeFile(options: {
 
       let buffer: Buffer
       try {
-        buffer = await fetchBuffer(new URL(hit.url, origin).href, requestOpts)
+        buffer = await fetchBuffer(new URL(hit.url, origin).href, mirrorOpts)
         if (buffer.byteLength === 0) throw new Error('empty SE response body')
-      } catch {
+        if (candidates.length > 1) markCanonicalOriginHealthy(origin)
+      } catch (error) {
+        if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+          markCanonicalOriginFailed(origin)
+          if (hasMoreMirrors) break
+        }
         continue
       }
       const hitTarget = path.join(seDir, path.posix.basename(hit.name))
@@ -1119,8 +1195,14 @@ export async function listMedia(options: ListMediaOptions): Promise<ListMediaRes
   const kinds = options.kinds ?? ['background', 'bgm']
 
   let lastError: unknown = null
-  for (const assetBase of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const assetBase = candidates[i]
     const origin = apiOrigin(assetBase)
+    const hasMoreMirrors = i < candidates.length - 1
+    const mirrorOpts: RequestOptions = {
+      ...requestOpts,
+      retries: hasMoreMirrors ? Math.min(requestOpts.retries, 1) : requestOpts.retries
+    }
     try {
       const bundles: MediaBundle[] = []
       for (const kind of kinds) {
@@ -1129,11 +1211,12 @@ export async function listMedia(options: ListMediaOptions): Promise<ListMediaRes
             ? [prefixFor(kind, false), prefixFor(kind, true)]
             : [prefixFor(kind, false)]
         for (const prefix of prefixes) {
-          const found = await listBundles(origin, options.region, prefix, requestOpts)
+          const found = await listBundles(origin, options.region, prefix, mirrorOpts)
           bundles.push(...found)
         }
       }
 
+      if (candidates.length > 1) markCanonicalOriginHealthy(origin)
       const filtered = bundles.filter((bundle) => matchesNames(bundle.name, options.names))
       const limited: MediaBundle[] = []
       for (const kind of kinds) {
@@ -1146,6 +1229,9 @@ export async function listMedia(options: ListMediaOptions): Promise<ListMediaRes
       return { region: options.region, assetBase, bundles: limited }
     } catch (error) {
       lastError = error
+      if (candidates.length > 1 && isLikelyOriginFailure(error)) {
+        markCanonicalOriginFailed(origin)
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'listMedia failed'))
@@ -1153,18 +1239,18 @@ export async function listMedia(options: ListMediaOptions): Promise<ListMediaRes
 
 /** 下载背景/BGM 并追加到 images.yaml / bgm.yaml。 */
 export async function fetchMedia(options: FetchMediaOptions): Promise<FetchMediaResult> {
-  const assetBase = normalizeAssetBase(options.assetBase)
-  const origin = apiOrigin(assetBase)
   const selected = await listMedia({
     region: options.region,
     kinds: options.kinds,
-    assetBase,
+    assetBase: options.assetBase,
     limit: options.limit,
     names: options.names,
     includeAreaBgm: options.includeAreaBgm,
     timeoutMs: options.timeoutMs,
     retries: options.retries
   })
+  const assetBase = selected.assetBase
+  const origin = apiOrigin(assetBase)
 
   const backgrounds = selected.bundles.filter((bundle) => bundle.kind === 'background')
   const bgm = selected.bundles.filter((bundle) => bundle.kind === 'bgm')
