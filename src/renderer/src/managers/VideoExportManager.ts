@@ -558,7 +558,6 @@ export default class VideoExportManager {
       motionSettleFrames: existingSettleFrames,
       silentHoldMs
     })
-    if (!(timingVoiceMs > 0)) return base
     let settleFrames = Math.max(existingSettleFrames, this.talkOwnMotionSettleFrames(talk, base))
     const snippets = this.app.storyManager?.snippets ?? []
     const talkDelayFrames = framesForSeconds(talkDelayMs / 1000)
@@ -1563,6 +1562,15 @@ export default class VideoExportManager {
                 (blackFrameValidationCount > 0 && localFrame % encodeFps === 0) ||
                 localFrame % (encodeFps * 60) === 0
               ) {
+                const intentionalBlackCurtain =
+                  inEndingTail ||
+                  Boolean(
+                    (
+                      this.app.layerSpecialEffect as
+                        | { isBlackCurtainOpaque?: () => boolean }
+                        | undefined
+                    )?.isBlackCurtainOpaque?.()
+                  )
                 const v = frameValidator.validateFrame(canvas, frameIndex)
                 if (!v.isValid && v.error) {
                   VideoExportManager.warmValidatedApps.delete(this.app)
@@ -1571,7 +1579,7 @@ export default class VideoExportManager {
                       `Brightness: ${v.brightness.toFixed(2)}%`
                   )
                 }
-                if (v.isBlackScreen) {
+                if (v.isBlackScreen && !intentionalBlackCurtain) {
                   blackFrameValidationCount++
                   if (blackFrameValidationCount >= 5) {
                     VideoExportManager.warmValidatedApps.delete(this.app)

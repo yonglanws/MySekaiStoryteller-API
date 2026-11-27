@@ -896,6 +896,47 @@ test('VideoExportManager Talk gate/window helpers & episode envelope constants a
   )
   appMock.storyManager.snippets = []
 
+  // 无语音（ttsDurationMs=0 且无 voiceDurationMs，例如关掉 TTS 或部分角色语音失败）时，
+  // Talk gate 仍须与 bakeStoryPlan 一致等待自身与并发动作收尾，避免运行时与 finalPlan 脱节。
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ', ttsText: '', modelId: 1, motion: 'nod' },
+        0,
+        0,
+        0,
+        0,
+        0
+      )
+    ),
+    6033.333
+  )
+  appMock.storyManager.snippets = [
+    { type: 'Talk', wait: true, delay: 0, data: { content: 'あ', modelId: 1 } },
+    {
+      type: 'Motion',
+      wait: false,
+      delay: 1.5,
+      data: { modelId: 1, motion: 'relief' }
+    }
+  ]
+  assert.equal(
+    round(
+      mgr.talkDurationWithMotionGate(
+        { content: 'あ', ttsText: '', modelId: 1 },
+        0,
+        0,
+        0,
+        0,
+        0,
+        undefined,
+        0
+      )
+    ),
+    6550
+  )
+  appMock.storyManager.snippets = []
+
   // talkWindowOpenMs reopens after HideTalk or closeWindowOnFinish
   const seq = [
     { type: 'Talk', delay: 0, data: { speaker: 'a', content: '1', closeWindowOnFinish: true } },

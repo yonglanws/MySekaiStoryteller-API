@@ -140,6 +140,10 @@ export default class SpecialEffectLayer extends BaseLayer {
     this.filterSyncCallback = cb
   }
 
+  public isBlackCurtainOpaque(): boolean {
+    return this.getSpriteAlpha(this.seBlackSprite) >= 0.98
+  }
+
   public getCameraBlurFilter(): CameraBlurFilter | null {
     return this.cameraBlurFilter.spread > 0.001 ? this.cameraBlurFilter : null
   }
