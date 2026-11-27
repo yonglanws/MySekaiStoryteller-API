@@ -423,20 +423,23 @@ export function recommendScenarioCues(
   }
 
   const isDramaticAction =
-    /追逐|奔跑|冲突|争吵|对峙|崩溃|质问|决裂|揭示|惊变|事故|大喊|冲进|危机|高潮/.test(text)
+    /追逐|奔跑|冲突|争吵|对峙|崩溃|质问|决裂|揭示|惊变|事故|大喊|冲进|危机|高潮|Live|演出|舞台|街头对决/.test(
+      text
+    )
   const cameraRestraint: ScenarioCueRecommendation['cameraRestraint'] = isDramaticAction
     ? {
         dramaticIntensity: 'dramatic',
         maxCameraCues: 3,
-        allowCharacterShake: /吓|惊|撞|摔|震|抓|推/.test(text),
-        guidance: '强冲突/动作高潮场可在关键爆点使用 1~3 次 CameraZoom/CameraMove，切忌日常句乱推镜头。'
+        allowCharacterShake: true,
+        guidance:
+          '高潮对峙/动作/Live 演出场可在核心爆发或冲击节点主动使用 1~2 次 CameraZoom/CameraMove 与 1~2 次 CharacterShake/ShakeScreen，其余平静铺垫句保持零运镜。'
       }
     : {
         dramaticIntensity: 'calm',
-        maxCameraCues: 1,
+        maxCameraCues: 0,
         allowCharacterShake: false,
         guidance:
-          '日常/谈心/排练场默认不使用 CameraZoom/CameraMove 与 CharacterShake（最多在情绪拐点用 0~1 次轻推），靠单人 Center <-> 双人 Left/Right 原地淡入淡出切镜推进节奏。'
+          '日常/谈心/后台/排练场默认不使用 CameraZoom/CameraMove 与 CharacterShake（保持 0 镜头 0 震动），靠单人 Center <-> 双人 Left/Right 原地淡入淡出切镜推进节奏。'
       }
 
   return { ambient, transition, seCues, effects, cameraRestraint }

@@ -909,7 +909,7 @@ const EXPLICIT_WRY_SMILE_TEXT_RE =
 const CRY_DESPAIR_CONFRONT_RE =
   /(?:哭|泣|泪|呜咽|嗚咽|别走|再见|窒息|崩溃|绝望|受不了|不行啊|做不到|对不起|抱歉|后悔|没能|不要|别再|少啰嗦|闭嘴|滚|干嘛|为什么)/
 export const GENUINE_HAPPY_OR_RECONCILIATION_RE =
-  /(?:太好了|好耶|太棒了|哈哈|嘻嘻|嘿嘿|和好|原谅|终于放心|松了口气|雨过天晴|真开心|好开心|真高兴|好高兴|最喜欢|谢谢你|真期待|好期待|不愧是|Wonderhoy|よかった)/
+  /(?:太好了|好耶|太棒了|哈哈|嘻嘻|嘿嘿|和好|原谅|终于放心|松了口气|雨过天晴|真开心|好开心|真高兴|好高兴|最喜欢|谢谢你|真期待|好期待|不愧是|Wonderhoy|よかった|答对啦|～♪|♪)/
 const FOOD_CONTEXT_TEXT_RE =
   /(?:吃|喝|尝|味道|美味|好吃|好喝|甜点|甜品|蛋糕|点心|松饼|面包|饼干|咖啡|红茶|绿茶|奶茶|茶|饮料|果汁|拉面|料理|便当|午饭|晚饭|早饭|吃饭|零食|糖|水果|草莓|饿|饱|口渴|干杯|品尝|美食|食堂|餐厅|咖啡厅|甜点店|食|飲|おいしい|スイーツ|ケーキ|パン|コーヒー|紅茶|お茶|食べ|飲み|お腹)/i
 const SLEEP_CONTEXT_TEXT_RE =
@@ -980,14 +980,24 @@ export function isFacialCompatibleWithLine(params: {
   const hasNegCue =
     (NEGATIVE_TEXT_CUE_RE.test(text) || NEGATED_JOY_RE.test(text)) && ctx.mood !== 'gentle_reassure'
   const hasPosCue = POSITIVE_TEXT_CUE_RE.test(text) && !NEGATED_JOY_RE.test(text)
-  const isTenseEmotion = emo === '生气' || emo === '伤心' || emo === '害怕' || emo === '惊讶'
+  const isLightComicListenerSurprise =
+    Boolean(isListener) &&
+    Boolean(cheerfulScene) &&
+    emo === '惊讶' &&
+    !hasNegCue &&
+    !ctx.apologyOrRegret &&
+    !DESPAIR_TEXT_RE.test(text) &&
+    !CRY_DESPAIR_CONFRONT_RE.test(text) &&
+    !/(?:出事|糟了|不好了|怎么会|骗人|吓)/.test(text)
+  const isTenseEmotion =
+    emo === '生气' || emo === '伤心' || emo === '害怕' || (emo === '惊讶' && !isLightComicListenerSurprise)
   const isNegativeOrConfrontation =
     isTenseEmotion ||
     hasNegCue ||
     ctx.apologyOrRegret ||
     ctx.mood === 'sad_regret' ||
     ctx.mood === 'angry_frustration' ||
-    ctx.mood === 'surprise' ||
+    (ctx.mood === 'surprise' && !isLightComicListenerSurprise) ||
     DESPAIR_TEXT_RE.test(text) ||
     CRY_DESPAIR_CONFRONT_RE.test(text)
   const hasPositiveMouth = info.mouthForm !== undefined && info.mouthForm >= 0.2
@@ -1019,7 +1029,14 @@ export function isFacialCompatibleWithLine(params: {
   }
 
   // 2) 紧张对峙打圆场/强装轻松或克制型角色：未真正和好/明确开心时，禁用纯正阳光大笑/闭眼大笑（保留苦笑 wry_smile 给说话者掩饰）
-  const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text)
+  const isCheerfulHappyTurn =
+    Boolean(cheerfulScene) &&
+    emo === '开心' &&
+    !hasNegCue &&
+    !ctx.apologyOrRegret &&
+    !DESPAIR_TEXT_RE.test(text) &&
+    !CRY_DESPAIR_CONFRONT_RE.test(text)
+  const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text) || isCheerfulHappyTurn
   if (
     prevTense &&
     !isGenuineHappyOrReconcile &&
@@ -1510,14 +1527,17 @@ export function updateSceneTenseAfterTalk(
     tracker.calmRun = 0
     return
   }
-  if (options.cheerfulScene && emo === '开心') {
+  if (isCalmReassureResolution(text, emo)) {
     tracker.tense = false
     tracker.calmRun = 0
     return
   }
-  if (isCalmReassureResolution(text, emo)) {
-    tracker.tense = false
-    tracker.calmRun = 0
+  if (emo === '开心' && !NEGATED_JOY_RE.test(text)) {
+    tracker.calmRun += 1
+    if (options.cheerfulScene || POSITIVE_TEXT_CUE_RE.test(text) || tracker.calmRun >= 2) {
+      tracker.tense = false
+      tracker.calmRun = 0
+    }
     return
   }
   if (emo === '平静' || emo === '') {
@@ -1894,6 +1914,7 @@ export function evaluateActingLineMatch(params: {
   prevMotion?: string
   consecutiveSameFacialCount?: number
   consecutiveSameMotionCount?: number
+  cheerfulScene?: boolean
   modelsRoot?: string
 }): ActingLineEvaluation {
   const issues: ActingLineEvaluationIssue[] = []
@@ -1926,6 +1947,7 @@ export function evaluateActingLineMatch(params: {
       isMonologue: params.isMonologue,
       isListener: params.isListener,
       restrainedRole: params.restrainedRole,
+      cheerfulScene: params.cheerfulScene,
       modelsRoot: params.modelsRoot
     })
     if (!fc.ok) {
@@ -1951,6 +1973,7 @@ export function evaluateActingLineMatch(params: {
       prevTense: params.prevTense,
       isListener: params.isListener,
       restrainedRole: params.restrainedRole,
+      cheerfulScene: params.cheerfulScene,
       modelsRoot: params.modelsRoot
     })
     if (!mc.ok) {

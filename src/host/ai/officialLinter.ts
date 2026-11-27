@@ -1571,7 +1571,7 @@ function repairActingHygieneInvariants(
       if (isListener) {
         const lState = actorState.get(actorId) ?? null
         const isLockedTenseListener =
-          !cheerfulScene &&
+          !(cheerfulScene && emotion === '开心') &&
           (lState === 'angry' ||
             lState === 'sad' ||
             lState === 'cry' ||
@@ -2637,6 +2637,18 @@ export function auditStoryActingAndFidelity(
     initialBgmList.length > 0 && typeof initialBgmList[0] === 'string'
       ? initialBgmList[0].trim().toLowerCase()
       : ''
+  const talkRecordsForComedy = collectTalkEmotionRecords(
+    snippets,
+    Array.isArray(story.models) ? (story.models as JsonRecord[]) : undefined,
+    view
+  )
+  const comedyProbeLines = talkRecordsForComedy.map((rec) => ({
+    content: rec.content,
+    emotion: rec.emotion,
+    sceneId: String(rec.sceneId)
+  }))
+  const talkPosBySnippet = new Map<number, number>()
+  talkRecordsForComedy.forEach((rec, pos) => talkPosBySnippet.set(rec.snippetIndex, pos))
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
@@ -2845,6 +2857,10 @@ export function auditStoryActingAndFidelity(
     const content = str(data.content)
     const emotion = str(data.emotion)
     const ttsText = str(data.ttsText)
+    const talkPos = talkPosBySnippet.get(i) ?? -1
+    const cheerfulScene =
+      talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
+    const effectivePrevTense = tenseTracker.tense && !cheerfulScene
 
     if (hasZeroWidthChars(content)) {
       zeroWidthCharCount += 1
@@ -3013,24 +3029,26 @@ export function auditStoryActingAndFidelity(
         emotion,
         prevContent,
         prevEmotion,
-        prevTense: tenseTracker.tense,
+        prevTense: effectivePrevTense,
         isListener,
         restrainedRole: meta?.restrained,
         prevFacial: tracker.prevFacial,
         prevMotion: tracker.prevMotion,
         consecutiveSameFacialCount: nextSameFacial,
-        consecutiveSameMotionCount: nextSameMotion
+        consecutiveSameMotionCount: nextSameMotion,
+        cheerfulScene
       })
 
       let flaggedListenerSmile = false
       if (isListener && act.facial) {
         const lState = actorState.get(act.modelId) ?? null
         const isLockedTenseListener =
-          lState === 'angry' ||
-          lState === 'sad' ||
-          lState === 'cry' ||
-          lState === 'serious' ||
-          (lState === 'trouble' && tenseTracker.tense)
+          !(cheerfulScene && emotion === '开心') &&
+          (lState === 'angry' ||
+            lState === 'sad' ||
+            lState === 'cry' ||
+            lState === 'serious' ||
+            (lState === 'trouble' && effectivePrevTense))
         if (
           isLockedTenseListener &&
           lState &&
@@ -3191,7 +3209,7 @@ export function auditStoryActingAndFidelity(
     }
     prevContent = content
     prevEmotion = emotion
-    updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+    updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
   }
 
   const zeroMotionModelIds: number[] = []
