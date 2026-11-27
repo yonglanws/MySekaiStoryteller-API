@@ -200,8 +200,7 @@ export class SePlan {
           ? Math.max(0, Number((snippet.data as { offsetMs?: number }).offsetMs) || 0)
           : 0
       const base = Math.max(0, startTimesMs[change.snippetIndex] ?? 0)
-      const timeMs =
-        base + (startTimesIncludeDelay ? 0 : change.delayMs) + extraOffset
+      const timeMs = base + (startTimesIncludeDelay ? 0 : change.delayMs) + extraOffset
       cues.push({
         timeMs,
         file: change.file,

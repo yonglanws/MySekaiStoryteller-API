@@ -237,7 +237,11 @@ export class SekaiTransitionParticles extends Container {
   step(dtSec: number): void {
     const dt = Math.max(0, dtSec)
     this.elapsedSec += dt
-    if (this.elapsedSec < this.burstDurationSec && this.totalEmitted < 72 && this.particles.length < 48) {
+    if (
+      this.elapsedSec < this.burstDurationSec &&
+      this.totalEmitted < 72 &&
+      this.particles.length < 48
+    ) {
       const emitCount = Math.min(2, 48 - this.particles.length)
       for (let i = 0; i < emitCount; i++) this.spawnOne()
     }
@@ -400,8 +404,14 @@ export class ScenarioEffectOverlay extends Container {
         const rInner = Math.min(this.widthPx, this.heightPx) * (0.36 + this.rand() * 0.14)
         const rOuter = Math.max(this.widthPx, this.heightPx) * 0.9
         g.lineStyle((2 + this.rand() * 3.5) * scaleRatio, 0xffffff, 0.55)
-        g.moveTo(this.widthPx * 0.5 + Math.cos(angle) * rInner, this.heightPx * 0.5 + Math.sin(angle) * rInner)
-        g.lineTo(this.widthPx * 0.5 + Math.cos(angle) * rOuter, this.heightPx * 0.5 + Math.sin(angle) * rOuter)
+        g.moveTo(
+          this.widthPx * 0.5 + Math.cos(angle) * rInner,
+          this.heightPx * 0.5 + Math.sin(angle) * rInner
+        )
+        g.lineTo(
+          this.widthPx * 0.5 + Math.cos(angle) * rOuter,
+          this.heightPx * 0.5 + Math.sin(angle) * rOuter
+        )
         x = 0
         y = 0
         break
@@ -433,7 +443,24 @@ export class ScenarioEffectOverlay extends Container {
         const r = (4 + this.rand() * 6) * scaleRatio
         const tint = this.preset === 'memories' ? 0xd9e4ff : 0xfff3b8
         g.beginFill(tint, 0.78)
-        g.drawPolygon([0, -r, r * 0.4, -r * 0.4, r, 0, r * 0.4, r * 0.4, 0, r, -r * 0.4, r * 0.4, -r, 0, -r * 0.4, -r * 0.4])
+        g.drawPolygon([
+          0,
+          -r,
+          r * 0.4,
+          -r * 0.4,
+          r,
+          0,
+          r * 0.4,
+          r * 0.4,
+          0,
+          r,
+          -r * 0.4,
+          r * 0.4,
+          -r,
+          0,
+          -r * 0.4,
+          -r * 0.4
+        ])
         g.endFill()
         y = this.rand() * this.heightPx
         vx = (this.rand() - 0.5) * 20 * scaleRatio
@@ -482,7 +509,10 @@ export class ScenarioEffectOverlay extends Container {
         p.g.alpha = 0.25 + 0.55 * Math.abs(Math.sin(this.elapsedSec * 18 + p.phase))
         continue
       }
-      const sway = this.preset === 'snow' || this.preset === 'sakura' ? Math.sin(this.elapsedSec * 2 + p.phase) * 26 * (this.widthPx / 1920) : 0
+      const sway =
+        this.preset === 'snow' || this.preset === 'sakura'
+          ? Math.sin(this.elapsedSec * 2 + p.phase) * 26 * (this.widthPx / 1920)
+          : 0
       p.x += (p.vx + sway) * dt
       p.y += p.vy * dt
       p.g.rotation += p.spin * dt

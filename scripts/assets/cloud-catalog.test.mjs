@@ -348,7 +348,13 @@ test('parseAudioCuesLoop, motion set candidate matching, and ResourceCatalog sea
     assert.equal(search.models?.length, 1)
 
     // When a cloud model IS cached locally on disk, ResourceCatalog must report the real .model3.json motions
-    const cachedModelDir = path.join(resourcesDir, 'models', 'cloud', '05minori_swim', '05minori_swimsuit')
+    const cachedModelDir = path.join(
+      resourcesDir,
+      'models',
+      'cloud',
+      '05minori_swim',
+      '05minori_swimsuit'
+    )
     fs.mkdirSync(path.join(cachedModelDir, 'motions'), { recursive: true })
     fs.writeFileSync(
       path.join(cachedModelDir, 'motions', 'w-cached-only.motion3.json'),
@@ -360,8 +366,12 @@ test('parseAudioCuesLoop, motion set candidate matching, and ResourceCatalog sea
         Version: 3,
         FileReferences: {
           Motions: {
-            'w-cached-only': [{ File: 'motions/w-cached-only.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }],
-            'w-missing-file': [{ File: 'motions/w-missing-file.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }]
+            'w-cached-only': [
+              { File: 'motions/w-cached-only.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }
+            ],
+            'w-missing-file': [
+              { File: 'motions/w-missing-file.motion3.json', FadeInTime: 0.5, FadeOutTime: 0.5 }
+            ]
           }
         }
       })

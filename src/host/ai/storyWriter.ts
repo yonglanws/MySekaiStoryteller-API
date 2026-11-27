@@ -2,13 +2,7 @@ import { ILogObj, Logger } from 'tslog'
 import type { LlmSettings } from '../config'
 import type { CatalogModel, ResourceCatalog } from '../resources/resourceCatalog'
 import type { StoryData } from '../../common/types/Story'
-import {
-  extractJson,
-  LlmClient,
-  type ChatMessage,
-  type ChatResult,
-  type ChatUsage
-} from './llm'
+import { extractJson, LlmClient, type ChatMessage, type ChatResult, type ChatUsage } from './llm'
 import {
   inferUnitFromText,
   loadPersonas,
@@ -67,9 +61,7 @@ import {
   runPhase1Exploration,
   type DirectorReviewRecord
 } from './agentTools'
-import {
-  sanitizeIrodoriCaption
-} from '../../common/tts/irodori'
+import { sanitizeIrodoriCaption } from '../../common/tts/irodori'
 import {
   alignStoryTtsEmotionsAndCaptions,
   ensureJapaneseTtsText,
@@ -1247,11 +1239,7 @@ export class StoryWriter {
       (this.settings.polishDialogue === true && dialogue.lines.length >= 12)
     if (shouldRunDirectorReview) {
       try {
-        const reviewHints = buildLocalizedDirectorReviewHints(
-          validated.story,
-          view,
-          targetMinutes
-        )
+        const reviewHints = buildLocalizedDirectorReviewHints(validated.story, view, targetMinutes)
         const reviewResult = await runStage(
           'director-review',
           buildDirectorReviewPrompt(
@@ -1564,7 +1552,8 @@ export class StoryWriter {
       (() => {
         const storyContext = story.snippets
           .filter(
-            (s): s is Extract<(typeof story.snippets)[number], { type: 'Talk' }> => s.type === 'Talk'
+            (s): s is Extract<(typeof story.snippets)[number], { type: 'Talk' }> =>
+              s.type === 'Talk'
           )
           .slice(0, 10)
           .flatMap((s) => [s.data.speaker ?? '', s.data.content ?? ''])

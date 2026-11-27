@@ -18,7 +18,10 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { Logger } from 'tslog'
 import { loadHostConfig, normalizeCloudOnlyBgmPath } from '../../out-host/host/config.js'
-import { ResourceCatalog, resolveRegisteredSeFile } from '../../out-host/host/resources/resourceCatalog.js'
+import {
+  ResourceCatalog,
+  resolveRegisteredSeFile
+} from '../../out-host/host/resources/resourceCatalog.js'
 import { createStaticRouter } from '../../out-host/host/static/staticRoutes.js'
 import { createOptionalAudioPathResolver } from '../../out-host/host/bridge/bridgeRoutes.js'
 import {
@@ -133,7 +136,9 @@ async function startMockCloudServer() {
         send({ files: [{ path: 'motion/w-normal-nod01.sse-motion.json' }] })
         return
       }
-      if (url.pathname === `/library/live2d/motion/${motionSet}/motion/w-normal-nod01.sse-motion.json`) {
+      if (
+        url.pathname === `/library/live2d/motion/${motionSet}/motion/w-normal-nod01.sse-motion.json`
+      ) {
         send(SSE_MOTION)
         return
       }
@@ -159,7 +164,9 @@ function seedLegacyLocalResources(resourcesDir) {
   })
   fs.mkdirSync(path.join(resourcesDir, 'models', '21mizuki_normal'), { recursive: true })
   fs.mkdirSync(path.join(resourcesDir, 'models', '20mizuki_school'), { recursive: true })
-  fs.mkdirSync(path.join(resourcesDir, 'models', '09kohane', '09kohane_normal'), { recursive: true })
+  fs.mkdirSync(path.join(resourcesDir, 'models', '09kohane', '09kohane_normal'), {
+    recursive: true
+  })
   fs.writeFileSync(
     path.join(resourcesDir, 'models', 'models.yaml'),
     [
@@ -487,8 +494,14 @@ test('resolveGlobalBgm & resolveStoryCloudAssets with cloudOnly=true ignore lega
   }
 
   try {
-    assert.equal(findCloudModel(catalog, '21mizuki_normal/21mizuki_normal.model3.json')?.id, '20mizuki_normal')
-    assert.equal(findCloudModel(catalog, '09kohane/09kohane_normal/09kohane_normal.model3.json')?.id, '09kohane_normal')
+    assert.equal(
+      findCloudModel(catalog, '21mizuki_normal/21mizuki_normal.model3.json')?.id,
+      '20mizuki_normal'
+    )
+    assert.equal(
+      findCloudModel(catalog, '09kohane/09kohane_normal/09kohane_normal.model3.json')?.id,
+      '09kohane_normal'
+    )
 
     const ctx = { settings, resourcesDir, catalog, logger, cloudOnly: true }
     const globalBgm = { enabled: true, path: 'audio/bgm/bg1.mp3' }
@@ -534,8 +547,14 @@ test('resolveGlobalBgm & resolveStoryCloudAssets with cloudOnly=true ignore lega
     assert.equal(res.se, 1)
     assert.deepEqual(res.missing, [])
 
-    assert.equal(story.models[0].model, 'cloud/20mizuki_normal/20mizuki_normal/20mizuki_normal.model3.json')
-    assert.equal(story.models[1].model, 'cloud/09kohane_normal/09kohane_normal/09kohane_normal.model3.json')
+    assert.equal(
+      story.models[0].model,
+      'cloud/20mizuki_normal/20mizuki_normal/20mizuki_normal.model3.json'
+    )
+    assert.equal(
+      story.models[1].model,
+      'cloud/09kohane_normal/09kohane_normal/09kohane_normal.model3.json'
+    )
     assert.equal(
       story.models[0].costumes['20mizuki_school/20mizuki_school.model3.json'],
       'cloud/20mizuki_school/20mizuki_school/20mizuki_school.model3.json'
@@ -649,9 +668,15 @@ test('cloudOnly=true gates /resources static serving, bridge optional audio path
   assert.equal(normalizeCloudOnlyBgmPath('custom.mp3'), 'bgm00003')
   assert.equal(normalizeCloudOnlyBgmPath('C:\\music\\local.mp3'), 'bgm00003')
   assert.equal(normalizeCloudOnlyBgmPath('audio/bgm/bgm00297.mp3'), 'bgm00297')
-  assert.equal(normalizeCloudOnlyBgmPath('https://cdn.example.com/a.mp3'), 'https://cdn.example.com/a.mp3')
+  assert.equal(
+    normalizeCloudOnlyBgmPath('https://cdn.example.com/a.mp3'),
+    'https://cdn.example.com/a.mp3'
+  )
   assert.equal(normalizeCloudOnlyBgmPath('cloud/bgm00003.mp3'), 'cloud/bgm00003.mp3')
-  assert.equal(normalizeCloudOnlyBgmPath('audio/bgm/cloud/bgm00003.mp3'), 'audio/bgm/cloud/bgm00003.mp3')
+  assert.equal(
+    normalizeCloudOnlyBgmPath('audio/bgm/cloud/bgm00003.mp3'),
+    'audio/bgm/cloud/bgm00003.mp3'
+  )
 
   // 4. Offline resolveGlobalBgm checks cached audio/bgm/cloud/<stem>.* before !ctx.catalog
   const offlineGlobal = { enabled: true, path: 'bgm00003' }
@@ -690,5 +715,8 @@ test('cloudOnly=true gates /resources static serving, bridge optional audio path
     file: 'cloud/se00053_b.mp3',
     remapped: false
   })
-  assert.equal(resolveRegisteredSeFile({ seDetails: [], cloudOnly: true }, 'se_legacy_only.mp3'), null)
+  assert.equal(
+    resolveRegisteredSeFile({ seDetails: [], cloudOnly: true }, 'se_legacy_only.mp3'),
+    null
+  )
 })

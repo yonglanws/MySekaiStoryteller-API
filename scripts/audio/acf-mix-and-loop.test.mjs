@@ -100,7 +100,14 @@ function loadTsModule(targetRel, extraMocks = new Map()) {
   return load(targetRel)
 }
 
-function buildSyntheticWavWithSmpl({ sampleRate, channels, bitsPerSample, totalSamples, loopStart, loopEnd }) {
+function buildSyntheticWavWithSmpl({
+  sampleRate,
+  channels,
+  bitsPerSample,
+  totalSamples,
+  loopStart,
+  loopEnd
+}) {
   const blockAlign = channels * (bitsPerSample / 8)
   const dataBytes = totalSamples * blockAlign
   const fmtChunk = Buffer.alloc(24)
@@ -142,8 +149,7 @@ function buildSyntheticHca({
   loopEndBlock,
   bit7Mask = false
 }) {
-  const mask = (tag) =>
-    Buffer.from([...tag].map((ch) => ch.charCodeAt(0) | (bit7Mask ? 0x80 : 0)))
+  const mask = (tag) => Buffer.from([...tag].map((ch) => ch.charCodeAt(0) | (bit7Mask ? 0x80 : 0)))
 
   const fmt = Buffer.alloc(16)
   mask('fmt\0').copy(fmt, 0)
@@ -228,7 +234,9 @@ test('AudioMuxer enforces ACF gains, REACT Voice/SE ducking curves, BgmVolume tw
 
   // SquareReverse(0.5): 1 - (1 - x)^1.5
   assert.equal(muxer.evaluateDuckReleaseCurve('voice', 0), 0)
-  assert.ok(Math.abs(muxer.evaluateDuckReleaseCurve('voice', 0.5) - (1 - Math.pow(0.5, 1.5))) < 1e-6)
+  assert.ok(
+    Math.abs(muxer.evaluateDuckReleaseCurve('voice', 0.5) - (1 - Math.pow(0.5, 1.5))) < 1e-6
+  )
   assert.equal(muxer.evaluateDuckReleaseCurve('voice', 1), 1)
   assert.equal(muxer.evaluateDuckReleaseCurve('se', 0.5), 0.5)
 
@@ -298,9 +306,19 @@ test('BgmPlan and SePlan collect BgmVolume tweens and SekaiOut / SimpleSelectabl
   const { SePlan } = loadTsModule('src/renderer/src/managers/video-export/SePlan.ts', mocks)
 
   const snippets = [
-    { type: 'ChangeBgm', wait: false, delay: 0, data: { file: 'bgm00001.mp3', stop: false, fadeMs: 0, volume: 1 } },
+    {
+      type: 'ChangeBgm',
+      wait: false,
+      delay: 0,
+      data: { file: 'bgm00001.mp3', stop: false, fadeMs: 0, volume: 1 }
+    },
     { type: 'BgmVolume', wait: false, delay: 0.5, data: { volume: 0.3, duration: 1000 } },
-    { type: 'PlaySe', wait: false, delay: 0.25, data: { file: 'se_step.mp3', volume: 0.9, loop: false, fadeMs: 0 } },
+    {
+      type: 'PlaySe',
+      wait: false,
+      delay: 0.25,
+      data: { file: 'se_step.mp3', volume: 0.9, loop: false, fadeMs: 0 }
+    },
     { type: 'SekaiOut', wait: true, delay: 0, data: { duration: 1200, variant: 'v2' } },
     { type: 'SimpleSelectable', wait: true, delay: 0, data: { choices: ['Yes', 'No'] } }
   ]
@@ -351,14 +369,13 @@ test('BgmPlan and SePlan collect BgmVolume tweens and SekaiOut / SimpleSelectabl
 test('SE semantic inference, cloud catalog SE defaults, and inapp offline fallback behave cleanly', async () => {
   const media = loadTsModule('src/host/assets/media.ts')
   const { CloudCatalogService } = loadTsModule('src/host/assets/cloudCatalog.ts')
-  const {
-    INAPP_UI_ASSET_PATHS,
-    ensureInappUiAssets,
-    findCloudSe,
-    resolveInappAssetPath
-  } = loadTsModule('src/host/assets/cloudAssets.ts')
+  const { INAPP_UI_ASSET_PATHS, ensureInappUiAssets, findCloudSe, resolveInappAssetPath } =
+    loadTsModule('src/host/assets/cloudAssets.ts')
 
-  const walkInfo = media.inferSeSemanticInfo('se_walk_women_001_1', 'sound/scenario/se/se_pack00001')
+  const walkInfo = media.inferSeSemanticInfo(
+    'se_walk_women_001_1',
+    'sound/scenario/se/se_pack00001'
+  )
   assert.equal(walkInfo.category, 'footsteps')
   assert.ok(walkInfo.tags.includes('女性'))
   assert.ok(INAPP_UI_ASSET_PATHS.includes('player/loose/Sprite/bg_story_adv.png'))

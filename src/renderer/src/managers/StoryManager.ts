@@ -102,9 +102,7 @@ export default class StoryManager {
           texture = await Texture.fromURL(imageUrl)
         } catch (error) {
           if (error instanceof Event && error.type === 'error') {
-            throw new Error(
-              `Image ${image.id} could not be loaded.\nImage path: ${image.image}\n`
-            )
+            throw new Error(`Image ${image.id} could not be loaded.\nImage path: ${image.image}\n`)
           }
           throw error
         }

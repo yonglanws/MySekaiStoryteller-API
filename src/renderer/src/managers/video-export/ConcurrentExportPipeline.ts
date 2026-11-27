@@ -33,7 +33,9 @@ function buildTtsTelemetrySummary(
   const ttsConfig = ttsManager.getConfig?.()
   if (ttsConfig?.provider !== 'irodori') {
     const specialPart =
-      talk.ttsSpecialScene !== undefined ? `, special=${talk.ttsSpecialScene ? 'true' : 'false'}` : ''
+      talk.ttsSpecialScene !== undefined
+        ? `, special=${talk.ttsSpecialScene ? 'true' : 'false'}`
+        : ''
     const captionRaw = talk.ttsCaption?.replace(/\s+/g, ' ').trim() ?? ''
     const captionPart = captionRaw
       ? `, caption="${captionRaw.length > 48 ? `${captionRaw.slice(0, 48)}…` : captionRaw}"`
@@ -73,7 +75,9 @@ function buildTtsTelemetrySummary(
   const shortRef = formatShortRefPath(rawRef) || 'none'
   const cfgCap = meta.cfg_scale_caption ?? ''
   const special = talk.ttsSpecialScene ? 'true' : 'false'
-  const caption = String(meta.caption ?? '').replace(/\s+/g, ' ').trim()
+  const caption = String(meta.caption ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
   const captionShort = caption.length > 48 ? `${caption.slice(0, 48)}…` : caption
   return `, emo=${emotionLabel}, ref=${shortRef}, cfg_cap=${String(cfgCap)}, special=${special}${captionShort ? `, caption="${captionShort}"` : ''}`
 }

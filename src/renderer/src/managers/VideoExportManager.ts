@@ -150,9 +150,7 @@ export default class VideoExportManager {
 
   private bridgeFetchHeaders(extra?: Record<string, string>): Record<string, string> {
     const token =
-      typeof location !== 'undefined'
-        ? new URLSearchParams(location.search).get('token') || ''
-        : ''
+      typeof location !== 'undefined' ? new URLSearchParams(location.search).get('token') || '' : ''
     return token ? { ...extra, 'x-mss-bridge-token': token } : { ...extra }
   }
 
@@ -610,7 +608,7 @@ export default class VideoExportManager {
   }
 
   /**
-   * fast 模式页内编码路径选择（对齐 ournotes-player 硬件探测与 5 帧测速）：
+   * fast 模式页内编码路径选择（含硬件探测与 5 帧测速）：
    * - 'frames'：直接走 JPEG 帧序列（image2pipe）
    * - 'webcodecs'：尽量走 WebCodecs
    * - 'auto'：拒绝软件 WebGL / Linux+NVIDIA 等软编路径，校验 prefer-hardware 并做 5 帧 <=150ms 测速；
@@ -824,7 +822,10 @@ export default class VideoExportManager {
                       data: new Uint8Array(buf)
                     })
                     .then(() => {
-                      preparedTtsWavs[snippetIndex] = { filePath: wavPath, durationMs: res.duration }
+                      preparedTtsWavs[snippetIndex] = {
+                        filePath: wavPath,
+                        durationMs: res.duration
+                      }
                     })
                   sharedTtsUploadTasks.push(upload)
                 }
@@ -1174,7 +1175,9 @@ export default class VideoExportManager {
           await advanceToStoryStep(baseStoryStep)
 
           const shouldRenderFrame =
-            !segmentPrepareOnly && frameIndex >= startFrame && (endFrame < 0 || frameIndex < endFrame)
+            !segmentPrepareOnly &&
+            frameIndex >= startFrame &&
+            (endFrame < 0 || frameIndex < endFrame)
 
           if (shouldRenderFrame) {
             const localFrame = frameIndex - startFrame
@@ -1191,7 +1194,9 @@ export default class VideoExportManager {
             const isEdgeFrame =
               localFrame === 0 ||
               (endFrame > 0 && frameIndex >= endFrame - 1) ||
-              (pumpDone && pumpTargetVirtualMs >= 0 && nextFrameVirtualMs >= pumpTargetVirtualMs - 1e-6)
+              (pumpDone &&
+                pumpTargetVirtualMs >= 0 &&
+                nextFrameVirtualMs >= pumpTargetVirtualMs - 1e-6)
             const extendedStageApp = this.app as unknown as {
               isFrameVisuallyActive?: () => boolean
               getStaticSceneSignature?: () => string
@@ -1394,10 +1399,7 @@ export default class VideoExportManager {
         endFrame >= 0 ? (endFrame / Math.max(1, encodeFps)) * 1000 : Number.POSITIVE_INFINITY
       const segEndTimelineMs =
         isSegmentWorker && endFrame >= 0
-          ? Math.max(
-              0,
-              (storyStepForFrame(endFrame) - PLAYCORE_WARMUP_FRAMES) * (1000 / STORY_FPS)
-            )
+          ? Math.max(0, (storyStepForFrame(endFrame) - PLAYCORE_WARMUP_FRAMES) * (1000 / STORY_FPS))
           : Number.POSITIVE_INFINITY
 
       for (let i = 0; i < totalSnippets; i++) {
@@ -1763,9 +1765,10 @@ export default class VideoExportManager {
 
         if (sinks.encoder) {
           const actualMbps =
-            segDurationSec >= 2 ? (sinks.encoder.writtenBytes * 8) / (segDurationSec * 1_000_000) : 0
-          const needsRemux =
-            segPlan.transcode || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
+            segDurationSec >= 2
+              ? (sinks.encoder.writtenBytes * 8) / (segDurationSec * 1_000_000)
+              : 0
+          const needsRemux = segPlan.transcode || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
           if (needsRemux) {
             const remuxRes = await window.electron.ipcRenderer.invoke(
               'electron:api-remux-video-from-files',
@@ -1809,14 +1812,17 @@ export default class VideoExportManager {
           segmentConvert = 'ffmpeg'
         } else {
           const framesDir = sinks.framesDir || segVideoRaw
-          const encRes = await window.electron.ipcRenderer.invoke('electron:api-encode-frames-video', {
-            framesDir,
-            outputPath: segmentRange.outputPath,
-            fps: encodeFps,
-            audioBitrate: options.apiAudioBitrate ?? '128k',
-            inputWidth: outW,
-            inputHeight: outH
-          })
+          const encRes = await window.electron.ipcRenderer.invoke(
+            'electron:api-encode-frames-video',
+            {
+              framesDir,
+              outputPath: segmentRange.outputPath,
+              fps: encodeFps,
+              audioBitrate: options.apiAudioBitrate ?? '128k',
+              inputWidth: outW,
+              inputHeight: outH
+            }
+          )
           if (!encRes?.success) {
             throw new Error(encRes?.error || 'Segment frames encode failed')
           }

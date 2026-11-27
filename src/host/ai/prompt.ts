@@ -503,7 +503,9 @@ export class CatalogView {
 
     const isVsPool =
       normalizeUnit(baseModel.unit) === undefined &&
-      (/miku|rin|len|luka|meiko|kaito|初音|镜音|巡音/i.test(`${baseModel.name} ${baseModel.path}`) ||
+      (/miku|rin|len|luka|meiko|kaito|初音|镜音|巡音/i.test(
+        `${baseModel.name} ${baseModel.path}`
+      ) ||
         pool.some(
           (m) =>
             /(?:_night|_wonder|_band|_idol|_street)\b/i.test(m.cloudId ?? '') ||
@@ -512,8 +514,9 @@ export class CatalogView {
     if (isVsPool) {
       const inferredUnit = inferUnitFromText(query)
       const vsMatcher =
-        (inferredUnit ? VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.unit === inferredUnit) : null) ??
-        VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.queryRe.test(query))
+        (inferredUnit
+          ? VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.unit === inferredUnit)
+          : null) ?? VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.queryRe.test(query))
       if (vsMatcher) {
         const vsHit = pool.find(
           (m) =>
@@ -714,9 +717,8 @@ export class CatalogView {
         query
       )
     const isWarmQuery =
-      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(
-        query
-      ) && !isTenseQuery
+      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(query) &&
+      !isTenseQuery
     const scoreOf = (detail: CatalogBgm): number => {
       let score = detail.source === 'local' ? 6 : 0
       const hay =
@@ -728,7 +730,11 @@ export class CatalogView {
         if (detail.unit === u) score += 6
       }
       if (isTenseQuery) {
-        if (/低沉|克制|压抑|悲伤|感伤|忧郁|紧绷|紧张|紧迫|暗涌|悬疑|冲突|告[白别]|沉重|严肃|dramatic|tense|sad|melanchol|thorns/i.test(hay)) {
+        if (
+          /低沉|克制|压抑|悲伤|感伤|忧郁|紧绷|紧张|紧迫|暗涌|悬疑|冲突|告[白别]|沉重|严肃|dramatic|tense|sad|melanchol|thorns/i.test(
+            hay
+          )
+        ) {
           score += 10
         }
         if (/日常|闲聊|温馨|轻松|欢快|搞笑|喜剧|轻缓|居家/i.test(hay)) {
@@ -1044,13 +1050,7 @@ export class CatalogView {
       (name) => !isSpecialOrStandingMotion(name) || motionKind(name) === 'default'
     )
     const source = filtered.length > 0 ? filtered : (model.motions ?? [])
-    return curateNames(
-      source,
-      motionKind,
-      MOTION_PROMPT_KINDS,
-      limit,
-      model.defaultMotion ?? ''
-    )
+    return curateNames(source, motionKind, MOTION_PROMPT_KINDS, limit, model.defaultMotion ?? '')
   }
 
   promptFacials(model: CatalogModel): string[] {
@@ -1223,7 +1223,14 @@ export class CatalogView {
     const curatedIds = new Set(CURATED_SCENARIO_SES.map((c) => c.id.toLowerCase()))
     const scored = this.seDetails
       .map((detail) => {
-        const stem = (detail.id ?? detail.file.split('/').pop()?.replace(/\.[^.]+$/, '') ?? '').toLowerCase()
+        const stem = (
+          detail.id ??
+          detail.file
+            .split('/')
+            .pop()
+            ?.replace(/\.[^.]+$/, '') ??
+          ''
+        ).toLowerCase()
         const hay =
           `${detail.id ?? ''} ${detail.file} ${detail.category ?? ''} ${detail.description} ${(detail.tags ?? []).join(' ')}`.toLowerCase()
         let score = curatedIds.has(stem) ? 6 : 0

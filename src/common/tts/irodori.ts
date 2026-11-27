@@ -235,7 +235,10 @@ function stripSadPositiveCaptionClauses(caption: string): string {
   for (const sentence of sentences) {
     const endsWithPeriod = sentence.trim().endsWith('。')
     const body = endsWithPeriod ? sentence.trim().slice(0, -1) : sentence.trim()
-    const clauses = body.split(/、/u).map((c) => c.trim()).filter(Boolean)
+    const clauses = body
+      .split(/、/u)
+      .map((c) => c.trim())
+      .filter(Boolean)
     const keptClauses: string[] = []
     for (const clause of clauses) {
       if (!SAD_POSITIVE_TOKEN_PATTERN.test(clause)) {
@@ -275,9 +278,7 @@ export function sanitizeIrodoriCaption(caption: string, emotion?: string): strin
   const raw = text(caption)
   if (!raw) return ''
 
-  let cleaned = raw
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(IDENTITY_CONFLICT_PATTERN, '')
+  let cleaned = raw.replace(/[\r\n\t]+/g, ' ').replace(IDENTITY_CONFLICT_PATTERN, '')
 
   if (text(emotion) === '伤心') {
     cleaned = stripSadPositiveCaptionClauses(cleaned)
@@ -377,10 +378,7 @@ function pickNonVerbalCue(
       fallbackCaption: '小さく静かな吐息をもらす。'
     }
   }
-  if (
-    /惊讶|驚|ショック|怯|緊張|急/.test(combined) ||
-    /[!！?？っッ]/.test(rawText)
-  ) {
+  if (/惊讶|驚|ショック|怯|緊張|急/.test(combined) || /[!！?？っッ]/.test(rawText)) {
     return {
       cue: '😮',
       fallbackCaption: '思わず短く息をのむ。'
@@ -422,7 +420,10 @@ export function normalizeIrodoriSpeechText(
   // 若文本已包含安全副语言表情且去掉表情后只有标点，直接保留该副语言表情
   const tokens = cleaned.match(EMOJI_TOKEN_PATTERN) ?? []
   const textWithoutEmojis = cleaned.replace(EMOJI_TOKEN_PATTERN, '').trim()
-  if (tokens.length > 0 && (!textWithoutEmojis || BARE_NON_VERBAL_PATTERN.test(textWithoutEmojis))) {
+  if (
+    tokens.length > 0 &&
+    (!textWithoutEmojis || BARE_NON_VERBAL_PATTERN.test(textWithoutEmojis))
+  ) {
     const safeTokens = tokens.filter((t) => SAFE_EMOJI_SET.has(t))
     if (safeTokens.length > 0) {
       return {
@@ -514,7 +515,11 @@ export function resolveIrodoriVoice(
   if (typeof lineOverride?.ttsSpeed === 'number' && Number.isFinite(lineOverride.ttsSpeed)) {
     merged.speed = lineOverride.ttsSpeed
   }
-  if (typeof merged.speed === 'number' && Number.isFinite(merged.speed) && timbreLockMode !== 'off') {
+  if (
+    typeof merged.speed === 'number' &&
+    Number.isFinite(merged.speed) &&
+    timbreLockMode !== 'off'
+  ) {
     merged.speed = isSpecialScene
       ? clamp(merged.speed, SPECIAL_SPEED_MIN, SPECIAL_SPEED_MAX)
       : clamp(merged.speed, NORMAL_SPEED_MIN, NORMAL_SPEED_MAX)

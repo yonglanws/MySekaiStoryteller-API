@@ -60,11 +60,7 @@ export function quantizeSq8Sym(vec: Float32Array): { scale: number; data: Int8Ar
 }
 
 /** 计算 query (Float32Array) 与 SQ8 矩阵第 row 行的余弦相似度近似值。 */
-export function dotSq8Row(
-  query: Float32Array,
-  matrix: Sq8VectorMatrix,
-  row: number
-): number {
+export function dotSq8Row(query: Float32Array, matrix: Sq8VectorMatrix, row: number): number {
   const dims = matrix.dims
   if (query.length !== dims) return 0
   const scale = matrix.scales[row]
@@ -99,7 +95,10 @@ export function encodePjskSq8Buffer(matrix: Sq8VectorMatrix): Buffer {
 }
 
 /** 解析 PJSK v1 `sq8_sym` 二进制缓冲区。 */
-export function parsePjskSq8Buffer(buf: Buffer): { header: Sq8IndexHeader; matrix: Sq8VectorMatrix } {
+export function parsePjskSq8Buffer(buf: Buffer): {
+  header: Sq8IndexHeader
+  matrix: Sq8VectorMatrix
+} {
   if (buf.byteLength < HEADER_BYTES) {
     throw new Error(`Invalid PJSK SQ8 buffer: too short (${buf.byteLength} bytes)`)
   }
@@ -331,7 +330,8 @@ export class IncrementalSq8Cache {
 
   save(): void {
     if (!this.dirty || this.dims <= 0) return
-    if (this.rows.length === 0 && this.entries.size === 0 && !fs.existsSync(this.resolveDir())) return
+    if (this.rows.length === 0 && this.entries.size === 0 && !fs.existsSync(this.resolveDir()))
+      return
     const dir = this.resolveDir()
     fs.mkdirSync(dir, { recursive: true })
 
@@ -341,7 +341,12 @@ export class IncrementalSq8Cache {
     for (let i = 0; i < count; i++) {
       data.set(this.rows[i], i * this.dims)
     }
-    writePjskSq8File(path.join(dir, 'embed-cache.sq8.bin'), { count, dims: this.dims, scales, data })
+    writePjskSq8File(path.join(dir, 'embed-cache.sq8.bin'), {
+      count,
+      dims: this.dims,
+      scales,
+      data
+    })
 
     const entriesObj: Record<string, number> = {}
     for (const [hash, row] of this.entries) {

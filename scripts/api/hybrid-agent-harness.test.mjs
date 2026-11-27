@@ -473,7 +473,9 @@ test('agentTools: search_official_corpus wires searchStructured, expand, and lis
       })
     )
     assert.equal(searched.mode, 'search')
-    assert.ok(searched.excerpts.includes('深夜的湖畔共鸣') || searched.excerpts.includes('荆棘之道'))
+    assert.ok(
+      searched.excerpts.includes('深夜的湖畔共鸣') || searched.excerpts.includes('荆棘之道')
+    )
     assert.ok(Array.isArray(searched.availableStories) && searched.availableStories.length > 0)
 
     // 3. expand
@@ -586,9 +588,60 @@ test('staged & hybrid prompts maximize rewritten persona share in Stage 1/2/3 an
       topScore: 0.9,
       latencyMs: 1,
       sections: {
-        canonPlot: [{ id: 'p1', sourceKind: 'canon_story', storyId: 's1', story: '荆棘之道', scenarioId: 'e1', type: 'event', chars: ['瑞希'], lineStart: 1, lineEnd: 4, text: '官方剧情线索：湖畔与小树苗。', score: 0.9, denseScore: 0, lexicalScore: 0.9, charScore: 0 }],
-        dialogueVoice: [{ id: 'v1', sourceKind: 'dialogue_voice', storyId: 's2', story: '湖畔共鸣', scenarioId: 'e2', type: 'event', chars: ['奏', '真冬'], lineStart: 1, lineEnd: 4, text: '奏：……無理はしないで。', score: 0.85, denseScore: 0, lexicalScore: 0.85, charScore: 0 }],
-        worldviewLore: [{ id: 'w1', sourceKind: 'worldview_lore', storyId: 'p_mafuyu', story: '朝比奈真冬', scenarioId: 'p_mafuyu', type: 'persona', chars: ['真冬'], lineStart: 1, lineEnd: 4, text: '世界观设定：无人世界湖畔有一扇门。', score: 0.8, denseScore: 0, lexicalScore: 0.8, charScore: 0 }]
+        canonPlot: [
+          {
+            id: 'p1',
+            sourceKind: 'canon_story',
+            storyId: 's1',
+            story: '荆棘之道',
+            scenarioId: 'e1',
+            type: 'event',
+            chars: ['瑞希'],
+            lineStart: 1,
+            lineEnd: 4,
+            text: '官方剧情线索：湖畔与小树苗。',
+            score: 0.9,
+            denseScore: 0,
+            lexicalScore: 0.9,
+            charScore: 0
+          }
+        ],
+        dialogueVoice: [
+          {
+            id: 'v1',
+            sourceKind: 'dialogue_voice',
+            storyId: 's2',
+            story: '湖畔共鸣',
+            scenarioId: 'e2',
+            type: 'event',
+            chars: ['奏', '真冬'],
+            lineStart: 1,
+            lineEnd: 4,
+            text: '奏：……無理はしないで。',
+            score: 0.85,
+            denseScore: 0,
+            lexicalScore: 0.85,
+            charScore: 0
+          }
+        ],
+        worldviewLore: [
+          {
+            id: 'w1',
+            sourceKind: 'worldview_lore',
+            storyId: 'p_mafuyu',
+            story: '朝比奈真冬',
+            scenarioId: 'p_mafuyu',
+            type: 'persona',
+            chars: ['真冬'],
+            lineStart: 1,
+            lineEnd: 4,
+            text: '世界观设定：无人世界湖畔有一扇门。',
+            score: 0.8,
+            denseScore: 0,
+            lexicalScore: 0.8,
+            charScore: 0
+          }
+        ]
       },
       promptBlock: ''
     }
@@ -712,7 +765,17 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
   assert.equal(cfg.llm.pipeline, 'hybrid')
 
   const view = makeCloudCatalogView()
-  const catalog = { get: () => ({ models: view.models, images: view.images, imageDetails: view.imageDetails, voices: [], bgm: [], bgmDetails: view.bgmDetails, seDetails: view.seDetails }) }
+  const catalog = {
+    get: () => ({
+      models: view.models,
+      images: view.images,
+      imageDetails: view.imageDetails,
+      voices: [],
+      bgm: [],
+      bgmDetails: view.bgmDetails,
+      seDetails: view.seDetails
+    })
+  }
 
   const calls = []
   const server = http.createServer(async (req, res) => {
@@ -756,7 +819,10 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
                     type: 'function',
                     function: {
                       name: 'search_assets',
-                      arguments: JSON.stringify({ kinds: ['background', 'bgm'], queries: ['夜晚', '25时'] })
+                      arguments: JSON.stringify({
+                        kinds: ['background', 'bgm'],
+                        queries: ['夜晚', '25时']
+                      })
                     }
                   }
                 ]
@@ -777,7 +843,8 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
               message: {
                 role: 'assistant',
                 content: JSON.stringify({
-                  researchBrief: '已核实：奏与真冬互称「真冬」与「奏」，奏严禁使用波浪号，背景用夜晚房间。'
+                  researchBrief:
+                    '已核实：奏与真冬互称「真冬」与「奏」，奏严禁使用波浪号，背景用夜晚房间。'
                 })
               }
             }
@@ -805,7 +872,11 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
                     { modelId: 2, name: '真冬', role: '低沉接话' }
                   ],
                   outline: ['发现茶凉了', '真冬坦白没睡意', '约定先歇半小时'],
-                  retrievalQueries: { plot: '奏 真冬 深夜 湖畔', voice: '奏 真冬 对话', worldview: '无人世界' }
+                  retrievalQueries: {
+                    plot: '奏 真冬 深夜 湖畔',
+                    voice: '奏 真冬 对话',
+                    worldview: '无人世界'
+                  }
                 })
               }
             }
@@ -832,7 +903,10 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
                     },
                     {
                       speaker: '真冬',
-                      lines: ['……嗯。刚才发了会儿呆，没注意时间。', '（……其实是不想让奏一个人熬到天亮。）']
+                      lines: [
+                        '……嗯。刚才发了会儿呆，没注意时间。',
+                        '（……其实是不想让奏一个人熬到天亮。）'
+                      ]
                     },
                     {
                       speaker: '奏',
@@ -878,11 +952,36 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
                 role: 'assistant',
                 content: JSON.stringify({
                   lines: [
-                    { id: 'l1', emotion: '平静', ttsCaption: '静かで優しい声で話している。', ttsSpeed: 0.96 },
-                    { id: 'l2', emotion: '平静', ttsCaption: '控えめに落ち着いて話している。', ttsSpeed: 0.96 },
-                    { id: 'l3', emotion: '平静', ttsCaption: '少し眠そうに、淡々と話している。', ttsSpeed: 0.94 },
-                    { id: 'l4', emotion: '伤心', ttsCaption: '小さな声で独り言のように囁く。', ttsSpeed: 0.92 },
-                    { id: 'l5', emotion: '平静', ttsCaption: '柔らかく静かに息を吐きながら話す。', ttsSpeed: 0.95 }
+                    {
+                      id: 'l1',
+                      emotion: '平静',
+                      ttsCaption: '静かで優しい声で話している。',
+                      ttsSpeed: 0.96
+                    },
+                    {
+                      id: 'l2',
+                      emotion: '平静',
+                      ttsCaption: '控えめに落ち着いて話している。',
+                      ttsSpeed: 0.96
+                    },
+                    {
+                      id: 'l3',
+                      emotion: '平静',
+                      ttsCaption: '少し眠そうに、淡々と話している。',
+                      ttsSpeed: 0.94
+                    },
+                    {
+                      id: 'l4',
+                      emotion: '伤心',
+                      ttsCaption: '小さな声で独り言のように囁く。',
+                      ttsSpeed: 0.92
+                    },
+                    {
+                      id: 'l5',
+                      emotion: '平静',
+                      ttsCaption: '柔らかく静かに息を吐きながら話す。',
+                      ttsSpeed: 0.95
+                    }
                   ]
                 })
               }
@@ -951,7 +1050,12 @@ test('config & StoryWriter: LlmSchema accepts hybrid, getRagRetriever passes per
       )
       return
     }
-    res.end(JSON.stringify({ model: 'mock-hybrid', choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }] }))
+    res.end(
+      JSON.stringify({
+        model: 'mock-hybrid',
+        choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: '{}' } }]
+      })
+    )
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -1009,7 +1113,17 @@ test('hybrid pipeline gracefully falls back when LLM returns toolCallingUnsuppor
   t.after(() => fs.rmSync(personaDir, { recursive: true, force: true }))
   const cfg = loadHostConfig()
   const view = makeCloudCatalogView()
-  const catalog = { get: () => ({ models: view.models, images: view.images, imageDetails: view.imageDetails, voices: [], bgm: [], bgmDetails: view.bgmDetails, seDetails: view.seDetails }) }
+  const catalog = {
+    get: () => ({
+      models: view.models,
+      images: view.images,
+      imageDetails: view.imageDetails,
+      voices: [],
+      bgm: [],
+      bgmDetails: view.bgmDetails,
+      seDetails: view.seDetails
+    })
+  }
 
   const server = http.createServer(async (req, res) => {
     const chunks = []
@@ -1024,18 +1138,101 @@ test('hybrid pipeline gracefully falls back when LLM returns toolCallingUnsuppor
     }
     res.setHeader('Content-Type', 'application/json')
     if (sys.includes('Episode Beat Sheet')) {
-      res.end(JSON.stringify({ model: 'mock', choices: [{ message: { role: 'assistant', content: JSON.stringify({ title: '夜谈', event: '夜谈', cast: [{ modelId: 1, name: '奏', role: '倾听' }, { modelId: 2, name: '真冬', role: '诉说' }] }) } }] }))
+      res.end(
+        JSON.stringify({
+          model: 'mock',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  title: '夜谈',
+                  event: '夜谈',
+                  cast: [
+                    { modelId: 1, name: '奏', role: '倾听' },
+                    { modelId: 2, name: '真冬', role: '诉说' }
+                  ]
+                })
+              }
+            }
+          ]
+        })
+      )
       return
     }
     if (sys.includes('第二轮：只写台词稿')) {
-      res.end(JSON.stringify({ model: 'mock', choices: [{ message: { role: 'assistant', content: JSON.stringify({ title: '夜谈', turns: [{ speaker: '奏', lines: ['真冬，先喝杯水。'] }, { speaker: '真冬', lines: ['……嗯。'] }] }) } }] }))
+      res.end(
+        JSON.stringify({
+          model: 'mock',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  title: '夜谈',
+                  turns: [
+                    { speaker: '奏', lines: ['真冬，先喝杯水。'] },
+                    { speaker: '真冬', lines: ['……嗯。'] }
+                  ]
+                })
+              }
+            }
+          ]
+        })
+      )
       return
     }
     if (sys.includes('directStaging')) {
-      res.end(JSON.stringify({ model: 'mock', choices: [{ message: { role: 'assistant', content: JSON.stringify({ scenes: [{ id: 's1', fromLineId: 'l1', background: 'cloud/bg_e000101.webp', ambient: 'night', transitionIn: 'black', activeCast: ['奏', '真冬'], bgm: 'cloud/bgm00090.mp3' }], events: [] }) } }] }))
+      res.end(
+        JSON.stringify({
+          model: 'mock',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  scenes: [
+                    {
+                      id: 's1',
+                      fromLineId: 'l1',
+                      background: 'cloud/bg_e000101.webp',
+                      ambient: 'night',
+                      transitionIn: 'black',
+                      activeCast: ['奏', '真冬'],
+                      bgm: 'cloud/bgm00090.mp3'
+                    }
+                  ],
+                  events: []
+                })
+              }
+            }
+          ]
+        })
+      )
       return
     }
-    res.end(JSON.stringify({ model: 'mock', choices: [{ message: { role: 'assistant', content: JSON.stringify({ background: 'cloud/bg_e000101.webp', ambient: 'night', bgm: 'cloud/bgm00090.mp3', bgmStop: false, lines: [{ id: 'l1', facial: 'face_smallmouth_01' }, { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }] }) } }] }))
+    res.end(
+      JSON.stringify({
+        model: 'mock',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: JSON.stringify({
+                background: 'cloud/bg_e000101.webp',
+                ambient: 'night',
+                bgm: 'cloud/bgm00090.mp3',
+                bgmStop: false,
+                lines: [
+                  { id: 'l1', facial: 'face_smallmouth_01' },
+                  { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }
+                ]
+              })
+            }
+          }
+        ]
+      })
+    )
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -1054,8 +1251,18 @@ test('hybrid pipeline gracefully falls back when LLM returns toolCallingUnsuppor
     personaDirs: [personaDir],
     rag: { ...cfg.llm.rag, enabled: false }
   }
-  const writer = new StoryWriter(new LlmClient(settings, logger, 'k'), settings, catalog, logger, [])
-  const res = await writer.generate({ prompt: '奏和真冬在房间聊两句', pipeline: 'hybrid', targetMinutes: 0.2 })
+  const writer = new StoryWriter(
+    new LlmClient(settings, logger, 'k'),
+    settings,
+    catalog,
+    logger,
+    []
+  )
+  const res = await writer.generate({
+    prompt: '奏和真冬在房间聊两句',
+    pipeline: 'hybrid',
+    targetMinutes: 0.2
+  })
 
   assert.equal(res.meta.pipeline, 'hybrid')
   assert.equal(res.meta.agentMode, 'staged-fallback')
@@ -1124,8 +1331,13 @@ test('cast-only persona scoping prevents variant OOC false positives on base 真
         turningPoint: '真冬想起茶杯还没洗',
         openingMotif: '温热苹果茶',
         closingCallback: '杯底还留着一点温度',
-        cast: [{ modelId: 1, name: '奏' }, { modelId: 2, name: '真冬' }],
-        scenes: [{ id: 's1', background: '奏的房间·夜晚', ambient: 'night', activeCast: ['奏', '真冬'] }]
+        cast: [
+          { modelId: 1, name: '奏' },
+          { modelId: 2, name: '真冬' }
+        ],
+        scenes: [
+          { id: 's1', background: '奏的房间·夜晚', ambient: 'night', activeCast: ['奏', '真冬'] }
+        ]
       })
     )
     assert.equal(planned.ok, true)
@@ -1158,15 +1370,15 @@ test('cast-only persona scoping prevents variant OOC false positives on base 真
       })
     )
     assert.equal(compiled.compiled, true)
-    assert.equal(
-      compiled.dialogueLintIssues.filter((i) => i.code === 'persona_ooc').length,
-      0
-    )
+    assert.equal(compiled.dialogueLintIssues.filter((i) => i.code === 'persona_ooc').length, 0)
     assert.equal(toolkit.getSavedPlan()?.understanding?.turningPoint, '真冬想起茶杯还没洗')
 
     const draftBeforePatch = toolkit.getSavedDraft()
     const talkIdx = draftBeforePatch.snippets.findIndex((s) => s.type === 'Talk')
-    assert.equal(draftBeforePatch.snippets[talkIdx].data.ttsCaption, '静かで穏やかな声で話している。')
+    assert.equal(
+      draftBeforePatch.snippets[talkIdx].data.ttsCaption,
+      '静かで穏やかな声で話している。'
+    )
     assert.equal(draftBeforePatch.snippets[talkIdx].data.ttsSpeed, 0.95)
 
     // Simulate existing ttsText, then patch content via update_talk -> stale ttsText cleared

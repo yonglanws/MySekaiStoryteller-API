@@ -302,7 +302,9 @@ export class App {
     ])
     this.models = models
     this.textures = textures
-    this.logger.info(`Loaded ${this.models.length} models, ${this.textures.length} textures & fonts`)
+    this.logger.info(
+      `Loaded ${this.models.length} models, ${this.textures.length} textures & fonts`
+    )
     preloadCommonInappTextures()
 
     this.logger.info('Preloaded story assets')
@@ -929,9 +931,8 @@ export class App {
    * 绝不冻结任何可见角色的眨眼、呼吸、物理摆动或口型动画。
    */
   public isFrameVisuallyActive(): boolean {
-    const handlers = (
-      AnimationManager as unknown as { exportStepHandlers?: Set<unknown> }
-    ).exportStepHandlers
+    const handlers = (AnimationManager as unknown as { exportStepHandlers?: Set<unknown> })
+      .exportStepHandlers
     if (handlers && handlers.size > 0) return true
     if (this.currentTalkLipSync !== null) return true
     if (this.cameraMoveTarget !== null || this.cameraZoomTarget !== null) return true
@@ -964,7 +965,7 @@ export class App {
       }
       isOccluded = Boolean(
         (seBlackSprite?.visible && getCurtainAlpha(seBlackSprite) >= 0.999) ||
-          (seWhiteSprite?.visible && getCurtainAlpha(seWhiteSprite) >= 0.999)
+        (seWhiteSprite?.visible && getCurtainAlpha(seWhiteSprite) >= 0.999)
       )
     }
 

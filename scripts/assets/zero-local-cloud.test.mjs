@@ -150,7 +150,10 @@ async function startCloudAssetServer() {
       send({ files: [{ path: 'motion/w-normal-nod01.sse-motion.json' }] })
       return
     }
-    if (url.pathname === '/library/live2d/motion/01ichika_motion_base/motion/w-normal-nod01.sse-motion.json') {
+    if (
+      url.pathname ===
+      '/library/live2d/motion/01ichika_motion_base/motion/w-normal-nod01.sse-motion.json'
+    ) {
       send(SSE_MOTION)
       return
     }
@@ -336,7 +339,15 @@ test('zero-local resolveGlobalBgm & resolveStoryCloudAssets handle bg1 fallback,
   try {
     // 1. 空目录 + legacy audio/bgm/bg1.mp3 -> 自动落到 bgm00003，不触发查 bg1
     const legacyBgm = { enabled: true, path: 'audio/bgm/bg1.mp3' }
-    assert.equal(await resolveGlobalBgm(legacyBgm, { settings, resourcesDir: emptyResources, catalog, logger }), true)
+    assert.equal(
+      await resolveGlobalBgm(legacyBgm, {
+        settings,
+        resourcesDir: emptyResources,
+        catalog,
+        logger
+      }),
+      true
+    )
     assert.equal(legacyBgm.path, 'audio/bgm/cloud/bgm00003.mp3')
     assert.ok(fs.existsSync(path.join(emptyResources, 'audio', 'bgm', 'cloud', 'bgm00003.mp3')))
 
@@ -344,7 +355,10 @@ test('zero-local resolveGlobalBgm & resolveStoryCloudAssets handle bg1 fallback,
     fs.mkdirSync(path.join(localResources, 'audio', 'bgm'), { recursive: true })
     fs.writeFileSync(path.join(localResources, 'audio', 'bgm', 'bg1.mp3'), Buffer.from('LOCAL'))
     const localBgm = { enabled: true, path: 'audio/bgm/bg1.mp3' }
-    assert.equal(await resolveGlobalBgm(localBgm, { settings, resourcesDir: localResources, catalog, logger }), false)
+    assert.equal(
+      await resolveGlobalBgm(localBgm, { settings, resourcesDir: localResources, catalog, logger }),
+      false
+    )
     assert.equal(localBgm.path, 'audio/bgm/bg1.mp3')
 
     // 3. 多时段背景按时段精确匹配
@@ -377,7 +391,10 @@ test('zero-local resolveGlobalBgm & resolveStoryCloudAssets handle bg1 fallback,
     assert.equal(result.models, 1)
     assert.equal(result.images, 1)
     assert.equal(result.bgm, 1)
-    assert.equal(story.models[0].model, 'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json')
+    assert.equal(
+      story.models[0].model,
+      'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json'
+    )
     assert.equal(story.images[0].image, 'cloud/bg_a000102.webp')
     assert.equal(story.snippets[0].data.file, 'cloud/normal_area.mp3')
     assert.ok(fs.existsSync(path.join(emptyResources, 'audio', 'bgm', 'cloud', 'normal_area.mp3')))
@@ -539,8 +556,22 @@ test('ResourceCatalog + StoryWriter + AI harness operate cleanly over large zero
     backgrounds,
     bgm,
     se: [
-      { id: 'se00001', file: 'se00001.mp3', name: '开门声（木门/室内）', category: '门窗', tags: ['开门'], description: '门窗音效' },
-      { id: 'se00002', file: 'se00002.mp3', name: '学校下课铃声', category: '校园', tags: ['下课铃'], description: '校园钟声' }
+      {
+        id: 'se00001',
+        file: 'se00001.mp3',
+        name: '开门声（木门/室内）',
+        category: '门窗',
+        tags: ['开门'],
+        description: '门窗音效'
+      },
+      {
+        id: 'se00002',
+        file: 'se00002.mp3',
+        name: '学校下课铃声',
+        category: '校园',
+        tags: ['下课铃'],
+        description: '校园钟声'
+      }
     ]
   }
 
@@ -557,7 +588,10 @@ test('ResourceCatalog + StoryWriter + AI harness operate cleanly over large zero
       reply = { cast: ['星乃一歌', '天马咲希'] }
     } else {
       // 验证 prompt 没有把全部 160 条背景和 125 条 BGM 塞进去，同时命中黄昏天台与校服
-      assert.ok(user.includes('神山高校 天台（黄昏）'), 'expected query-matched sunset rooftop in prompt')
+      assert.ok(
+        user.includes('神山高校 天台（黄昏）'),
+        'expected query-matched sunset rooftop in prompt'
+      )
       assert.ok(user.includes('校服'), 'expected outfit options in prompt')
       assert.ok(user.length < 25000, `prompt should stay compact, got ${user.length}`)
       reply = {
@@ -633,7 +667,12 @@ test('ResourceCatalog + StoryWriter + AI harness operate cleanly over large zero
             type: 'Talk',
             wait: true,
             delay: 0,
-            data: { speaker: '咲希', content: '嗯！放学后穿校服在这里聊天最棒了！', modelId: 2, closeWindowOnFinish: true }
+            data: {
+              speaker: '咲希',
+              content: '嗯！放学后穿校服在这里聊天最棒了！',
+              modelId: 2,
+              closeWindowOnFinish: true
+            }
           },
           { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
         ]
@@ -658,7 +697,11 @@ test('ResourceCatalog + StoryWriter + AI harness operate cleanly over large zero
 
   try {
     const testLogger = new Logger({ minLevel: 6 })
-    const catalog = new ResourceCatalog(testLogger, { paths: { resources: emptyResources } }, () => cloudSnapshot)
+    const catalog = new ResourceCatalog(
+      testLogger,
+      { paths: { resources: emptyResources } },
+      () => cloudSnapshot
+    )
     const data = catalog.get()
 
     // 无本地 yaml 时全量暴露：无 80 条上限，无背景碰撞丢弃
@@ -703,14 +746,22 @@ test('ResourceCatalog + StoryWriter + AI harness operate cleanly over large zero
       personaDirs: [],
       personas: []
     }
-    const writer = new StoryWriter(new LlmClient(settings, new Logger({ minLevel: 6 })), settings, catalog, new Logger({ minLevel: 6 }))
+    const writer = new StoryWriter(
+      new LlmClient(settings, new Logger({ minLevel: 6 })),
+      settings,
+      catalog,
+      new Logger({ minLevel: 6 })
+    )
     const generated = await writer.generate({
       prompt: '放学后穿着校服和咲希在黄昏的天台聊天',
       mode: 'story',
       pipeline: 'single'
     })
 
-    assert.equal(generated.story.models[0].model, 'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json')
+    assert.equal(
+      generated.story.models[0].model,
+      'cloud/01ichika_school/01ichika_school/01ichika_school.model3.json'
+    )
     assert.equal(generated.story.images[0].image, 'cloud/bg_a000102')
     const changeBgm = generated.story.snippets.find((s) => s.type === 'ChangeBgm')
     assert.equal(changeBgm?.data.file, 'cloud/normal_area.mp3')
@@ -747,7 +798,11 @@ test('CloudCatalogService.waitReady waits for cold refresh when snapshot is null
 
   try {
     const service = new CloudCatalogService(testLogger, settings, { cacheFile, ttlMs: 1 })
-    const resourceCatalog = new ResourceCatalog(testLogger, { paths: { resources: emptyDir } }, () => service.get())
+    const resourceCatalog = new ResourceCatalog(
+      testLogger,
+      { paths: { resources: emptyDir } },
+      () => service.get()
+    )
 
     // 先读一次空的 ResourceCatalog，确认它不会锁死 30 秒空缓存
     assert.equal(resourceCatalog.get().models.length, 0)
@@ -800,7 +855,10 @@ test('CloudCatalogService.waitReady waits for cold refresh when snapshot is null
 
     // 1. 冷启动时 snapshot 为 null：即使 staleTimeoutMs 很短(10ms)，也应走 coldTimeoutMs(2000ms) 等完首轮刷新
     const coldResult = await service.waitReady({ coldTimeoutMs: 2_000, staleTimeoutMs: 10 })
-    assert.ok(coldResult, 'cold waitReady must wait for initial catalog instead of timing out at staleTimeoutMs')
+    assert.ok(
+      coldResult,
+      'cold waitReady must wait for initial catalog instead of timing out at staleTimeoutMs'
+    )
     assert.equal(coldResult.models.length, 1)
     assert.equal(resourceCatalog.get().models.length, 1)
 
@@ -819,7 +877,10 @@ test('CloudCatalogService.waitReady waits for cold refresh when snapshot is null
     const controller = new AbortController()
     setTimeout(() => controller.abort(), 15)
     const abortedStart = Date.now()
-    const abortedResult = await service.waitReady({ coldTimeoutMs: 2_000, signal: controller.signal })
+    const abortedResult = await service.waitReady({
+      coldTimeoutMs: 2_000,
+      signal: controller.signal
+    })
     const abortedElapsed = Date.now() - abortedStart
     assert.equal(abortedResult, null)
     assert.ok(abortedElapsed < 50, `expected early abort exit, got ${abortedElapsed}ms`)

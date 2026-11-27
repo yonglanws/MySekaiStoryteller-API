@@ -450,12 +450,10 @@ test('pjsk-scenario maps all 45 SpecialEffect types, Layout depth/shake/over/und
 test('layout transition barriers, split Duo->Center clear coalescing, thinking cut hoisting, and emotion continuity in crying scenes', async () => {
   const { CatalogView } = await import('../../out-host/host/ai/prompt.js')
   const { validateAndFixStory } = await import('../../out-host/host/ai/validate.js')
-  const { enforceOfficialStoryInvariants, lintOfficialStory } = await import(
-    '../../out-host/host/ai/officialLinter.js'
-  )
-  const { composeStory, normalizeDirection, normalizeStaging, stabilizeEmotions } = await import(
-    '../../out-host/host/ai/staged.js'
-  )
+  const { enforceOfficialStoryInvariants, lintOfficialStory } =
+    await import('../../out-host/host/ai/officialLinter.js')
+  const { composeStory, normalizeDirection, normalizeStaging, stabilizeEmotions } =
+    await import('../../out-host/host/ai/staged.js')
 
   const view = new CatalogView({
     models: [
@@ -481,7 +479,12 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         name: '东云绘名',
         shortName: '绘名',
         path: '19ena_normal/19ena_normal.model3.json',
-        motions: ['w-normal-default01', 'w-normal-sad01', 'w-normal-trouble01', 'w-normal-shakehead01'],
+        motions: [
+          'w-normal-default01',
+          'w-normal-sad01',
+          'w-normal-trouble01',
+          'w-normal-shakehead01'
+        ],
         facials: [
           'face_normal_01',
           'face_sad_04',
@@ -509,21 +512,45 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
     ],
     images: [{ id: 1, image: 'bg_corridor.jpg' }],
     snippets: [
-      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
-      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      {
+        type: 'ChangeLayoutMode',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { mode: 'Normal' }
+      },
+      {
+        type: 'ChangeBackgroundImage',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { imageId: 1 }
+      },
       {
         type: 'LayoutAppear',
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_sad_01' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_sad_01'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: false,
         progressBehavior: 'Now',
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_sad_04' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_sad_04'
+        }
       },
       {
         type: 'Talk',
@@ -561,21 +588,37 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         wait: false,
         progressBehavior: 'Now',
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Fast' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          moveSpeed: 'Fast'
+        }
       },
       {
         type: 'LayoutClear',
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Fast' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          moveSpeed: 'Fast'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: false,
         progressBehavior: 'Now',
         delay: 0,
-        data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-sigh01', facial: 'face_closeeye_01' }
+        data: {
+          modelId: 1,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          motion: 'w-normal-sigh01',
+          facial: 'face_closeeye_01'
+        }
       },
       // BUG B: emotion dropped back to 平静 in crying/sad sequence
       {
@@ -630,14 +673,26 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_sad_06' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_sad_06'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: false,
         progressBehavior: 'Now',
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_cry_03' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_cry_03'
+        }
       },
       {
         type: 'Talk',
@@ -659,23 +714,51 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Fast' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          moveSpeed: 'Fast'
+        }
       },
-      { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se_run_men_002_1.mp3', volume: 1 } },
-      { type: 'Wait', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 700 } },
+      {
+        type: 'PlaySe',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { file: 'se_run_men_002_1.mp3', volume: 1 }
+      },
+      {
+        type: 'Wait',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { duration: 700 }
+      },
       {
         type: 'LayoutClear',
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Fast' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          moveSpeed: 'Fast'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: true,
         progressBehavior: 'WaitFinished',
         delay: 0,
-        data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, motion: 'w-normal-trouble01', facial: 'face_shock_01' }
+        data: {
+          modelId: 2,
+          from: { side: 'Center', offset: 0 },
+          to: { side: 'Center', offset: 0 },
+          motion: 'w-normal-trouble01',
+          facial: 'face_shock_01'
+        }
       },
       {
         type: 'Talk',
@@ -698,7 +781,13 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         delay: 0,
         data: { modelId: 2, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } }
       },
-      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+      {
+        type: 'BlackOut',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { duration: 600 }
+      }
     ]
   }
 
@@ -757,19 +846,34 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
         type: 'LayoutAppear',
         wait: true,
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, facial: 'face_normal_01' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          facial: 'face_normal_01'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: false,
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, facial: 'face_normal_01' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          facial: 'face_normal_01'
+        }
       },
       {
         type: 'Talk',
         wait: true,
         delay: 0,
-        data: { speaker: '绘名', content: '瑞希，你听我说。', modelId: 2, closeWindowOnFinish: true }
+        data: {
+          speaker: '绘名',
+          content: '瑞希，你听我说。',
+          modelId: 2,
+          closeWindowOnFinish: true
+        }
       },
       {
         type: 'Talk',
@@ -838,7 +942,9 @@ test('layout transition barriers, split Duo->Center clear coalescing, thinking c
   // Delayed stageGroup on l3 instead of l2 must be hoisted to l2 (line 1 of thinking run)
   const staging = normalizeStaging(
     {
-      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_corridor.jpg', activeCast: ['瑞希', '绘名'] }],
+      scenes: [
+        { id: 's1', fromLineId: 'l1', background: 'bg_corridor.jpg', activeCast: ['瑞希', '绘名'] }
+      ],
       events: [{ lineId: 'l3', stageGroup: { activeCast: ['瑞希'] } }]
     },
     view,
@@ -946,7 +1052,11 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
     bgm: ['bg1.mp3', 'bgm00297.mp3'],
     bgmDetails: [
       { file: 'bg1.mp3', name: '日常轻音乐', description: '轻缓居家，适合日常闲聊、温馨轻松' },
-      { file: 'bgm00297.mp3', name: 'event_thorns_2024', description: '情绪低沉、克制，适合冲突后的告白告别压抑对话' }
+      {
+        file: 'bgm00297.mp3',
+        name: 'event_thorns_2024',
+        description: '情绪低沉、克制，适合冲突后的告白告别压抑对话'
+      }
     ]
   })
 
@@ -988,7 +1098,13 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
     { id: 'l2', speaker: '瑞希', content: '……绘名？怎么跑这么急呀～', emotion: '开心' },
     { id: 'l3', speaker: '瑞希', content: '今天风好大，我们下去吧！', emotion: '开心' },
     { id: 'l4', speaker: '绘名', content: '别开玩笑了！', emotion: '生气' },
-    { id: 'l5', speaker: '瑞希', content: '（……胃里一阵阵往上翻。）', emotion: '伤心', windowDisplayMode: 'Thinking' },
+    {
+      id: 'l5',
+      speaker: '瑞希',
+      content: '（……胃里一阵阵往上翻。）',
+      emotion: '伤心',
+      windowDisplayMode: 'Thinking'
+    },
     { id: 'l6', speaker: '绘名', content: '……你还在发抖。', emotion: '伤心' },
     { id: 'l7', speaker: '瑞希', content: '对不起，绘名……', emotion: '伤心' },
     { id: 'l8', speaker: '绘名', content: '……别再一个人躲着了。', emotion: '伤心' }
@@ -996,9 +1112,21 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
   const dialogue = { title: '天台对峙', lines }
   const noOpenBgmStaging = normalizeStaging(
     {
-      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', activeCast: ['瑞希', '绘名'], bgm: 'silence' }],
+      scenes: [
+        {
+          id: 's1',
+          fromLineId: 'l1',
+          background: 'bg_rooftop.jpg',
+          activeCast: ['瑞希', '绘名'],
+          bgm: 'silence'
+        }
+      ],
       events: [
-        { lineId: 'l5', stageGroup: { activeCast: ['瑞希'] }, silentReaction: { modelId: 1, motion: 'w-normal-sigh01' } },
+        {
+          lineId: 'l5',
+          stageGroup: { activeCast: ['瑞希'] },
+          silentReaction: { modelId: 1, motion: 'w-normal-sigh01' }
+        },
         { lineId: 'l6', stageGroup: { activeCast: ['瑞希', '绘名'] } },
         { lineId: 'l8', bgmCut: { action: 'play', file: 'bgm00297.mp3' } }
       ]
@@ -1007,18 +1135,34 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
     plan,
     dialogue
   )
-  assert.equal(noOpenBgmStaging.scenes[0].bgm, 'bgm00297.mp3', 'tense drama scene0 fills fitting dramatic opening BGM instead of long silence')
+  assert.equal(
+    noOpenBgmStaging.scenes[0].bgm,
+    'bgm00297.mp3',
+    'tense drama scene0 fills fitting dramatic opening BGM instead of long silence'
+  )
 
   const coldOpenStaging = normalizeStaging(
     {
-      scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', activeCast: ['瑞希', '绘名'], bgm: 'silence' }],
+      scenes: [
+        {
+          id: 's1',
+          fromLineId: 'l1',
+          background: 'bg_rooftop.jpg',
+          activeCast: ['瑞希', '绘名'],
+          bgm: 'silence'
+        }
+      ],
       events: [{ lineId: 'l3', bgmCut: { action: 'play', file: 'bgm00297.mp3' } }]
     },
     view,
     plan,
     dialogue
   )
-  assert.equal(coldOpenStaging.scenes[0].bgm, 'silence', 'intentional 2-line cold open entering BGM at l3 is preserved')
+  assert.equal(
+    coldOpenStaging.scenes[0].bgm,
+    'silence',
+    'intentional 2-line cold open entering BGM at l3 is preserved'
+  )
 
   // 3) Trailing standalone Motion before LayoutClear is suppressed, w-adult-delicious01 is blocked on non-food lines,
   //    and angry listener Ena never flips to face_smile_01 when Mizuki puts on fake cheer (l2)
@@ -1063,7 +1207,9 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
   }
 
   // Check l2 listener Ena did not get face_smile_01 after her angry l1
-  const l2Talk = story.snippets.find((s) => s.type === 'Talk' && s.data.content.includes('跑这么急'))
+  const l2Talk = story.snippets.find(
+    (s) => s.type === 'Talk' && s.data.content.includes('跑这么急')
+  )
   const enaListenerAct = (l2Talk.data.actions ?? []).find((a) => a.modelId === 2)
   if (enaListenerAct?.facial) {
     assert.notEqual(enaListenerAct.facial, 'face_smile_01', 'angry listener must not flip to smile')
@@ -1071,7 +1217,11 @@ test('Round 7 pacing, opening BGM fallback, trailing Motion suppression before L
 
   // Check w-adult-delicious01 was stripped/replaced on non-food rooftop wind line
   const serialized = JSON.stringify(story.snippets)
-  assert.equal(serialized.includes('w-adult-delicious01'), false, 'non-food line must never emit delicious motion')
+  assert.equal(
+    serialized.includes('w-adult-delicious01'),
+    false,
+    'non-food line must never emit delicious motion'
+  )
 })
 
 test('ResourceCatalog scans local audio/se + audio/se/cloud when cloudCatalog=false and remaps missing SEs by category', async () => {
@@ -1084,7 +1234,13 @@ test('ResourceCatalog scans local audio/se + audio/se/cloud when cloudCatalog=fa
     for (const f of ['se00053_b.mp3', 'se_run_women_002_1.mp3']) {
       fs.writeFileSync(path.join(tmpRes, 'audio', 'se', f), '')
     }
-    for (const f of ['se_run_women_001_1.mp3', 'se00028_b.mp3', 'se00097.mp3', 'se00055_b.mp3', 'se_walk_women_001_1.mp3']) {
+    for (const f of [
+      'se_run_women_001_1.mp3',
+      'se00028_b.mp3',
+      'se00097.mp3',
+      'se00055_b.mp3',
+      'se_walk_women_001_1.mp3'
+    ]) {
       fs.writeFileSync(path.join(tmpRes, 'audio', 'se', 'cloud', f), '')
     }
     const noop = { info: () => undefined, warn: () => undefined, error: () => undefined }
@@ -1117,18 +1273,106 @@ test('ResourceCatalog scans local audio/se + audio/se/cloud when cloudCatalog=fa
       models: [{ id: 1, model: view.models[0].path }],
       images: [{ id: 1, image: 'bg_room.jpg' }],
       snippets: [
-        { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
-        { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se_run_women_001_1.mp3', volume: 0.9 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00037.mp3', volume: 0.9 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00028_b.mp3', volume: 0.9 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00097.mp3', volume: 0.9 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00055_b.mp3', volume: 0.9 } },
-        { type: 'PlaySe', wait: false, progressBehavior: 'Now', delay: 0, data: { file: 'se00004_b.mp3', volume: 0.9 } },
-        { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 }, facial: 'face_normal_01' } },
-        { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '瑞希', content: '大家好。', emotion: '平静', modelId: 1, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 1, facial: 'face_normal_01' }] } },
-        { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Center', offset: 0 }, to: { side: 'Center', offset: 0 } } },
-        { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+        {
+          type: 'ChangeLayoutMode',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { mode: 'Normal' }
+        },
+        {
+          type: 'ChangeBackgroundImage',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { imageId: 1 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se_run_women_001_1.mp3', volume: 0.9 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se00037.mp3', volume: 0.9 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se00028_b.mp3', volume: 0.9 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se00097.mp3', volume: 0.9 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se00055_b.mp3', volume: 0.9 }
+        },
+        {
+          type: 'PlaySe',
+          wait: false,
+          progressBehavior: 'Now',
+          delay: 0,
+          data: { file: 'se00004_b.mp3', volume: 0.9 }
+        },
+        {
+          type: 'LayoutAppear',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: {
+            modelId: 1,
+            from: { side: 'Center', offset: 0 },
+            to: { side: 'Center', offset: 0 },
+            facial: 'face_normal_01'
+          }
+        },
+        {
+          type: 'Talk',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: {
+            speaker: '瑞希',
+            content: '大家好。',
+            emotion: '平静',
+            modelId: 1,
+            closeWindowOnFinish: true,
+            actions: [{ at: 0, modelId: 1, facial: 'face_normal_01' }]
+          }
+        },
+        {
+          type: 'LayoutClear',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: {
+            modelId: 1,
+            from: { side: 'Center', offset: 0 },
+            to: { side: 'Center', offset: 0 }
+          }
+        },
+        {
+          type: 'BlackOut',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: { duration: 600 }
+        }
       ]
     }
     const { story: fixedSe } = validateAndFixStory(seTestStory, view)
@@ -1138,7 +1382,10 @@ test('ResourceCatalog scans local audio/se + audio/se/cloud when cloudCatalog=fa
     assert.equal(seFiles[2], 'cloud/se00028_b.mp3')
     assert.equal(seFiles[3], 'cloud/se00097.mp3')
     assert.equal(seFiles[4], 'cloud/se00055_b.mp3')
-    assert.ok(seFiles.every((f) => allowedLocalFiles.has(f)), `every emitted SE must exist locally, got ${JSON.stringify(seFiles)}`)
+    assert.ok(
+      seFiles.every((f) => allowedLocalFiles.has(f)),
+      `every emitted SE must exist locally, got ${JSON.stringify(seFiles)}`
+    )
   } finally {
     fs.rmSync(tmpRes, { recursive: true, force: true })
   }

@@ -8,9 +8,7 @@ export default class ChangeBackgroundImageSnippet extends BaseSnippet {
 
     const img = this.app.getTextureById(this.data.data.imageId)
     const durationMs =
-      this.data.data.duration !== undefined
-        ? normalizeEffectDurationMs(this.data.data.duration)
-        : 0
+      this.data.data.duration !== undefined ? normalizeEffectDurationMs(this.data.data.duration) : 0
 
     const bg = this.app.layerBackground as unknown as ExtendedBackgroundLayer
     if (typeof bg.changeBackground === 'function') {

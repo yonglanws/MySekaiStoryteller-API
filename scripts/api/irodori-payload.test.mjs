@@ -280,11 +280,17 @@ test('buildIrodoriSpeechRequest with timbreLockMode=off selects sad.wav and appl
     lineOverride: { ttsCaption: '声を震わせて控えめに話す。', ttsSpeed: 0.94 }
   })
   assert.equal(normalSadVoice.refAudioPath, '/models/mizuki/emotion_refs/sad.wav')
-  const normalPayload = buildIrodoriSpeechRequest('🥺 ……もう戻れないんだよ。', normalSadVoice, cfg, 1.0, {
-    ttsCaption: '声を震わせて控えめに話す。',
-    ttsSpeed: 0.94,
-    emotion: '伤心'
-  })
+  const normalPayload = buildIrodoriSpeechRequest(
+    '🥺 ……もう戻れないんだよ。',
+    normalSadVoice,
+    cfg,
+    1.0,
+    {
+      ttsCaption: '声を震わせて控えめに話す。',
+      ttsSpeed: 0.94,
+      emotion: '伤心'
+    }
+  )
   assert.equal(normalPayload.irodori.ref_wav, '/models/mizuki/emotion_refs/sad.wav')
   assert.equal(normalPayload.irodori.cfg_scale_caption, 3.5)
   assert.equal(normalPayload.irodori.speaker_kv_scale, 1.15)

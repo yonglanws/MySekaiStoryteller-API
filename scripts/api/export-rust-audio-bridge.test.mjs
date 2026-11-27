@@ -130,7 +130,10 @@ test('Bridge exposes Rust/Node binary WS stream endpoint, /bridge/ws-bin fallbac
       ws.send(JSON.stringify(obj))
     })
 
-  assert.equal((await ctrl({ op: 'open-file', streamId: 1, path: wsBinFile, truncate: true })).ok, true)
+  assert.equal(
+    (await ctrl({ op: 'open-file', streamId: 1, path: wsBinFile, truncate: true })).ok,
+    true
+  )
   const hdr = Buffer.alloc(16)
   hdr.writeUInt32LE(1, 0)
   hdr.writeUInt8(1, 4)
@@ -167,7 +170,15 @@ test('Bridge exposes Rust/Node binary WS stream endpoint, /bridge/ws-bin fallbac
       bgm: {
         enabled: true,
         volume: 0.5,
-        cues: [{ timeMs: 0, fadeMs: 0, stop: false, relPath: '/resources/audio/bgm/bgm001.wav', volume: 1.0 }],
+        cues: [
+          {
+            timeMs: 0,
+            fadeMs: 0,
+            stop: false,
+            relPath: '/resources/audio/bgm/bgm001.wav',
+            volume: 1.0
+          }
+        ],
         volumeTweens: []
       },
       voices: [

@@ -61,9 +61,9 @@ function loadRendererModule(relPath, mocks = new Map(), globals = {}) {
       }
       throw new Error(`Unexpected dependency "${spec}" from ${norm}`)
     }
-    new vm.Script(`(function(exports, require, module) {\n${out}\n})`, { filename: norm }).runInContext(
-      context
-    )(mod.exports, req, mod)
+    new vm.Script(`(function(exports, require, module) {\n${out}\n})`, {
+      filename: norm
+    }).runInContext(context)(mod.exports, req, mod)
     cache.set(norm, mod.exports)
     return mod.exports
   }
@@ -392,10 +392,19 @@ test('WebCodecsMp4Encoder streams chunks over binary WebSocket and encodes Video
           }
         }
       ],
-      [path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'), { GpuYuv420Converter: {} }],
+      [
+        path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'),
+        { GpuYuv420Converter: {} }
+      ],
       [
         path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
-        { ExportLogger: class { info() {} warn() {} error() {} } }
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+            error() {}
+          }
+        }
       ]
     ]),
     {
@@ -404,7 +413,11 @@ test('WebCodecsMp4Encoder streams chunks over binary WebSocket and encodes Video
       WebSocket: FakeWs,
       fetch: async () => ({
         ok: true,
-        json: async () => ({ ok: true, backend: 'rust', wsUrl: 'ws://127.0.0.1:50000/bridge/rs-stream?token=tok1' })
+        json: async () => ({
+          ok: true,
+          backend: 'rust',
+          wsUrl: 'ws://127.0.0.1:50000/bridge/rs-stream?token=tok1'
+        })
       }),
       VideoFrame: MockVideoFrame,
       VideoEncoder: MockVideoEncoder
@@ -424,7 +437,11 @@ test('WebCodecsMp4Encoder streams chunks over binary WebSocket and encodes Video
   await enc.finish()
 
   assert.equal(videoFrameInits[0]?.alpha, 'discard')
-  assert.equal(ipcCalls.includes('electron:write-file-at'), false, 'zero HTTP write-file-at when WS is active')
+  assert.equal(
+    ipcCalls.includes('electron:write-file-at'),
+    false,
+    'zero HTTP write-file-at when WS is active'
+  )
   assert.equal(ctrlMessages[0]?.op, 'open-file')
   assert.equal(ctrlMessages[1]?.op, 'close')
   assert.equal(sentFrames.length, 1)
@@ -439,16 +456,35 @@ test('BgmPlan.getRustCues & SePlan.getRustCues emit path cues and UI SE timings 
   const { BgmPlan } = loadRendererModule(
     'managers/video-export/BgmPlan.ts',
     new Map([
-      [path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'), { ExportLogger: class { info() {} warn() {} } }],
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+          }
+        }
+      ],
       [path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveBgmUrl: (p) => `/resources/${p}` }]
     ])
   )
   const { SePlan } = loadRendererModule(
     'managers/video-export/SePlan.ts',
     new Map([
-      [path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'), { ExportLogger: class { info() {} warn() {} } }],
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+          }
+        }
+      ],
       [path.join(rendererRoot, 'utils/ResourceUrl.ts'), { resolveSeUrl: (p) => `/resources/${p}` }],
-      [path.join(rendererRoot, 'effects/InappTextures.ts'), { inappUrl: (p) => `/resources/inapp/jp-7.0.0/${p}` }],
+      [
+        path.join(rendererRoot, 'effects/InappTextures.ts'),
+        { inappUrl: (p) => `/resources/inapp/jp-7.0.0/${p}` }
+      ],
       [
         path.join(rendererRoot, 'managers/video-export/AudioMuxer.ts'),
         { resampleChannelLinear: (a) => a }
@@ -459,7 +495,11 @@ test('BgmPlan.getRustCues & SePlan.getRustCues emit path cues and UI SE timings 
   const snippets = [
     { type: 'ChangeBgm', delay: 0.5, data: { file: 'bgm00001.mp3', fadeMs: 500, volume: 0.8 } },
     { type: 'BgmVolume', delay: 0, data: { volume: 0.4, duration: 300 } },
-    { type: 'PlaySe', delay: 0, data: { file: 'se00001.mp3', offsetMs: 120, volume: 0.9, loop: false } },
+    {
+      type: 'PlaySe',
+      delay: 0,
+      data: { file: 'se00001.mp3', offsetMs: 120, volume: 0.9, loop: false }
+    },
     { type: 'SekaiOut', delay: 0, data: {} }
   ]
   const starts = [0, 1000, 2000, 3000]
@@ -481,40 +521,76 @@ test('ModelLayer.hasActiveModelsOrShaders protects visible models from static-fr
   const { default: ModelLayer } = loadRendererModule(
     'layers/ModelLayer.ts',
     new Map([
-      ['pixi.js', { Container: class { constructor() { this.children = []; this.sortableChildren = false } } }],
+      [
+        'pixi.js',
+        {
+          Container: class {
+            constructor() {
+              this.children = []
+              this.sortableChildren = false
+            }
+          }
+        }
+      ],
       ['pixi-live2d-display-advanced', { MotionPriority: { NORMAL: 2 } }],
-      [path.join(root, 'src/common/types/Story.ts'), { LayoutModes: { Normal: 'Normal', Three: 'Three' } }],
-      [path.join(rendererRoot, 'utils/Logger.ts'), { default: () => ({ info() {}, warn() {}, debug() {} }) }],
+      [
+        path.join(root, 'src/common/types/Story.ts'),
+        { LayoutModes: { Normal: 'Normal', Three: 'Three' } }
+      ],
+      [
+        path.join(rendererRoot, 'utils/Logger.ts'),
+        { default: () => ({ info() {}, warn() {}, debug() {} }) }
+      ],
       [path.join(rendererRoot, 'model/AdvancedModel.ts'), { default: class {} }],
       [path.join(rendererRoot, 'effects/Ease.ts'), { runEasedTween: async () => {} }],
-      [path.join(rendererRoot, 'effects/OfficialFilters.ts'), {
-        HologramFilter: class {},
-        MonitorFilter: class {},
-        createColorMatrixFilter: () => ({})
-      }],
-      [path.join(rendererRoot, 'managers/AnimationManager.ts'), { default: { registerExportStep: () => () => {} } }],
+      [
+        path.join(rendererRoot, 'effects/OfficialFilters.ts'),
+        {
+          HologramFilter: class {},
+          MonitorFilter: class {},
+          createColorMatrixFilter: () => ({})
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/AnimationManager.ts'),
+        { default: { registerExportStep: () => () => {} } }
+      ],
       [path.join(rendererRoot, 'snippets/stageTiming.ts'), { resolveElapsedMs: () => 0 }],
-      [path.join(rendererRoot, 'common/official/timing.ts'), {
-        LayoutModes: { Normal: 'Normal', Three: 'Three' },
-        MODEL_APPEAR_OUT_MS: 200,
-        SHAKE_STEP_MS: 50,
-        SHAKE_STEPS: 4
-      }],
-      [path.join(root, 'src/common/official/timing.ts'), {
-        LayoutModes: { Normal: 'Normal', Three: 'Three' },
-        MODEL_APPEAR_OUT_MS: 200,
-        SHAKE_STEP_MS: 50,
-        SHAKE_STEPS: 4
-      }],
+      [
+        path.join(rendererRoot, 'common/official/timing.ts'),
+        {
+          LayoutModes: { Normal: 'Normal', Three: 'Three' },
+          MODEL_APPEAR_OUT_MS: 200,
+          SHAKE_STEP_MS: 50,
+          SHAKE_STEPS: 4
+        }
+      ],
+      [
+        path.join(root, 'src/common/official/timing.ts'),
+        {
+          LayoutModes: { Normal: 'Normal', Three: 'Three' },
+          MODEL_APPEAR_OUT_MS: 200,
+          SHAKE_STEP_MS: 50,
+          SHAKE_STEPS: 4
+        }
+      ],
       [path.join(rendererRoot, 'common/official/characterColors.ts'), { AMBIENT_RGB: {} }],
       [path.join(root, 'src/common/official/characterColors.ts'), { AMBIENT_RGB: {} }]
     ])
   )
 
-  const layer = new ModelLayer({ stage: { addChild() {} }, renderer: { screen: { width: 1920, height: 1080 } }, screen: { width: 1920, height: 1080 } })
+  const layer = new ModelLayer({
+    stage: { addChild() {} },
+    renderer: { screen: { width: 1920, height: 1080 } },
+    screen: { width: 1920, height: 1080 }
+  })
   assert.equal(layer.hasActiveModelsOrShaders(), false)
   layer.getContainer().children.push({ visible: true, destroyed: false, alpha: 1 })
-  assert.equal(layer.hasActiveModelsOrShaders(), true, 'visible model must prevent static-frame skip')
+  assert.equal(
+    layer.hasActiveModelsOrShaders(),
+    true,
+    'visible model must prevent static-frame skip'
+  )
   layer.getContainer().children[0].visible = false
   assert.equal(layer.hasActiveModelsOrShaders(), false)
 })
@@ -581,7 +657,13 @@ test('WebCodecsMp4Encoder.repeatLastFrame drains pending PBOs and emits CFR fram
       ],
       [
         path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
-        { ExportLogger: class { info() {} warn() {} error() {} } }
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+            error() {}
+          }
+        }
       ],
       [
         path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'),
@@ -742,13 +824,17 @@ test('GpuYuv420Converter submits frame N DMA and flushes before harvesting oldes
     }
   }
 
-  const { GpuYuv420Converter } = loadRendererModule('managers/video-export/GpuYuv420Converter.ts', new Map(), {
-    OffscreenCanvas: class {
-      getContext() {
-        return fakeGl
+  const { GpuYuv420Converter } = loadRendererModule(
+    'managers/video-export/GpuYuv420Converter.ts',
+    new Map(),
+    {
+      OffscreenCanvas: class {
+        getContext() {
+          return fakeGl
+        }
       }
     }
-  })
+  )
 
   const conv = GpuYuv420Converter.create(16, 16, 3)
   assert.ok(conv)
@@ -758,7 +844,13 @@ test('GpuYuv420Converter submits frame N DMA and flushes before harvesting oldes
   const out = await conv.enqueueAsync({})
   assert.ok(out)
   assert.equal(out[0], 42)
-  assert.deepEqual(ops, ['readPixels_pbo', 'fenceSync', 'flush', 'clientWaitSync', 'getBufferSubData'])
+  assert.deepEqual(ops, [
+    'readPixels_pbo',
+    'fenceSync',
+    'flush',
+    'clientWaitSync',
+    'getBufferSubData'
+  ])
   conv.dispose()
 })
 
@@ -776,14 +868,17 @@ test('normalizeExportVideoCodec & resolveRemuxCodecPlan treat hevc and h265 iden
     encoderCodecKind: 'h264',
     requiresColorConversion: false
   })
-  assert.deepEqual({ ...hevcFromH264 }, {
-    targetCodec: 'hevc',
-    encoderCodec: 'h264',
-    finalCodec: 'hevc',
-    needsColorConversion: false,
-    needsCodecTranscode: true,
-    transcode: true
-  })
+  assert.deepEqual(
+    { ...hevcFromH264 },
+    {
+      targetCodec: 'hevc',
+      encoderCodec: 'h264',
+      finalCodec: 'hevc',
+      needsColorConversion: false,
+      needsCodecTranscode: true,
+      transcode: true
+    }
+  )
 
   const h265FromH264 = resolveRemuxCodecPlan('h265', {
     encoderCodecKind: 'h264',
@@ -821,23 +916,47 @@ test('App.isFrameVisuallyActive and getStaticSceneSignature read filters[0].alph
   const noop = () => {}
   const noopClass = class {}
   const req = (spec) => {
-    if (spec === '@pixi/unsafe-eval' || spec === 'fontfaceobserver' || spec === 'pixi-live2d-display-advanced') {
+    if (
+      spec === '@pixi/unsafe-eval' ||
+      spec === 'fontfaceobserver' ||
+      spec === 'pixi-live2d-display-advanced'
+    ) {
       return { configureCubism4: noop }
     }
     if (spec === 'pixi.js') {
-      return { Application: noopClass, Container: noopClass, Texture: noopClass, Ticker: { shared: { stop: noop } } }
+      return {
+        Application: noopClass,
+        Container: noopClass,
+        Texture: noopClass,
+        Ticker: { shared: { stop: noop } }
+      }
     }
     if (spec.endsWith('/AnimationManager')) {
-      return { __esModule: true, default: class { static exportStepHandlers = new Set() } }
+      return {
+        __esModule: true,
+        default: class {
+          static exportStepHandlers = new Set()
+        }
+      }
     }
     return new Proxy({}, { get: (_t, prop) => (prop === '__esModule' ? true : noopClass) })
   }
-  const ctx = vm.createContext({ console, Math, Set, Map, Array, Object, String, Number, Boolean, Promise, window: undefined })
-  new vm.Script(`(function(exports, require, module) {\n${out}\n})`, { filename: appPath }).runInContext(ctx)(
-    mod.exports,
-    req,
-    mod
-  )
+  const ctx = vm.createContext({
+    console,
+    Math,
+    Set,
+    Map,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    Promise,
+    window: undefined
+  })
+  new vm.Script(`(function(exports, require, module) {\n${out}\n})`, {
+    filename: appPath
+  }).runInContext(ctx)(mod.exports, req, mod)
   const { App } = mod.exports
 
   const seBlackSprite = { visible: true, alpha: 1, filters: [{ alpha: 0.5 }], x: 0, y: 0 }
@@ -923,7 +1042,11 @@ test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close with
       if (typeof payload === 'string') {
         const msg = JSON.parse(payload)
         if (msg.op === 'open-file') {
-          queueMicrotask(() => this.emit('message', { data: JSON.stringify({ ok: true, op: 'ack', streamId: msg.streamId }) }))
+          queueMicrotask(() =>
+            this.emit('message', {
+              data: JSON.stringify({ ok: true, op: 'ack', streamId: msg.streamId })
+            })
+          )
         }
         return
       }
@@ -961,7 +1084,9 @@ test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close with
         {
           ExportLogger: class {
             info() {}
-            warn(m) { warnings.push(m) }
+            warn(m) {
+              warnings.push(m)
+            }
             error() {}
           }
         }
@@ -979,7 +1104,9 @@ test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close with
         async flush() {}
         close() {}
       },
-      VideoFrame: class { close() {} },
+      VideoFrame: class {
+        close() {}
+      },
       WebSocket: MockWebSocket,
       location: { protocol: 'http:', host: '127.0.0.1:9999', search: '' },
       fetch: async () => ({ ok: true, json: async () => ({ ok: true, wsUrl: '/bridge/ws-bin' }) }),
@@ -1001,7 +1128,13 @@ test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close with
     height: 64,
     fps: 30,
     bitrate: 1_000_000,
-    encoderConfig: { codec: 'avc1.640028', width: 64, height: 64, bitrate: 1_000_000, framerate: 30 },
+    encoderConfig: {
+      codec: 'avc1.640028',
+      width: 64,
+      height: 64,
+      bitrate: 1_000_000,
+      framerate: 30
+    },
     useGpuYuvReadback: false
   })
   await enc.initialize('C:\\temp\\ws-close.mp4')
@@ -1023,30 +1156,94 @@ test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close with
 test('GpuYuv420Converter.waitSync logs rate-limited warning on WAIT_FAILED', async () => {
   const warnLogs = []
   const fakeGl = {
-    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4,
-    ARRAY_BUFFER: 5, STATIC_DRAW: 6, TEXTURE0: 7, TEXTURE_2D: 8,
-    TEXTURE_MIN_FILTER: 9, TEXTURE_MAG_FILTER: 10, TEXTURE_WRAP_S: 11, TEXTURE_WRAP_T: 12,
-    LINEAR: 13, NEAREST: 14, CLAMP_TO_EDGE: 15, RGBA8: 16, RGBA: 17, UNSIGNED_BYTE: 18,
-    FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20, FRAMEBUFFER_COMPLETE: 21,
-    PIXEL_PACK_BUFFER: 22, STREAM_READ: 23, TRIANGLE_STRIP: 24, FLOAT: 25,
-    UNPACK_FLIP_Y_WEBGL: 26, SYNC_GPU_COMMANDS_COMPLETE: 27,
-    ALREADY_SIGNALED: 28, CONDITION_SATISFIED: 29, WAIT_FAILED: 30,
-    createShader: () => ({}), shaderSource: () => {}, compileShader: () => {}, getShaderParameter: () => true, deleteShader: () => {},
-    createProgram: () => ({}), attachShader: () => {}, linkProgram: () => {}, getProgramParameter: () => true, deleteProgram: () => {},
-    createVertexArray: () => ({}), bindVertexArray: () => {}, deleteVertexArray: () => {},
-    createBuffer: () => ({}), bindBuffer: () => {}, bufferData: () => {}, deleteBuffer: () => {},
-    getAttribLocation: () => 0, enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
-    createTexture: () => ({}), activeTexture: () => {}, bindTexture: () => {}, texParameteri: () => {}, texImage2D: () => {}, deleteTexture: () => {},
-    createFramebuffer: () => ({}), bindFramebuffer: () => {}, framebufferTexture2D: () => {}, checkFramebufferStatus: () => 21, deleteFramebuffer: () => {},
-    useProgram: () => {}, getUniformLocation: () => ({}), uniform1i: () => {}, viewport: () => {}, pixelStorei: () => {}, drawArrays: () => {},
-    readPixels: () => {}, fenceSync: () => ({}), flush: () => {},
+    VERTEX_SHADER: 1,
+    FRAGMENT_SHADER: 2,
+    COMPILE_STATUS: 3,
+    LINK_STATUS: 4,
+    ARRAY_BUFFER: 5,
+    STATIC_DRAW: 6,
+    TEXTURE0: 7,
+    TEXTURE_2D: 8,
+    TEXTURE_MIN_FILTER: 9,
+    TEXTURE_MAG_FILTER: 10,
+    TEXTURE_WRAP_S: 11,
+    TEXTURE_WRAP_T: 12,
+    LINEAR: 13,
+    NEAREST: 14,
+    CLAMP_TO_EDGE: 15,
+    RGBA8: 16,
+    RGBA: 17,
+    UNSIGNED_BYTE: 18,
+    FRAMEBUFFER: 19,
+    COLOR_ATTACHMENT0: 20,
+    FRAMEBUFFER_COMPLETE: 21,
+    PIXEL_PACK_BUFFER: 22,
+    STREAM_READ: 23,
+    TRIANGLE_STRIP: 24,
+    FLOAT: 25,
+    UNPACK_FLIP_Y_WEBGL: 26,
+    SYNC_GPU_COMMANDS_COMPLETE: 27,
+    ALREADY_SIGNALED: 28,
+    CONDITION_SATISFIED: 29,
+    WAIT_FAILED: 30,
+    createShader: () => ({}),
+    shaderSource: () => {},
+    compileShader: () => {},
+    getShaderParameter: () => true,
+    deleteShader: () => {},
+    createProgram: () => ({}),
+    attachShader: () => {},
+    linkProgram: () => {},
+    getProgramParameter: () => true,
+    deleteProgram: () => {},
+    createVertexArray: () => ({}),
+    bindVertexArray: () => {},
+    deleteVertexArray: () => {},
+    createBuffer: () => ({}),
+    bindBuffer: () => {},
+    bufferData: () => {},
+    deleteBuffer: () => {},
+    getAttribLocation: () => 0,
+    enableVertexAttribArray: () => {},
+    vertexAttribPointer: () => {},
+    createTexture: () => ({}),
+    activeTexture: () => {},
+    bindTexture: () => {},
+    texParameteri: () => {},
+    texImage2D: () => {},
+    deleteTexture: () => {},
+    createFramebuffer: () => ({}),
+    bindFramebuffer: () => {},
+    framebufferTexture2D: () => {},
+    checkFramebufferStatus: () => 21,
+    deleteFramebuffer: () => {},
+    useProgram: () => {},
+    getUniformLocation: () => ({}),
+    uniform1i: () => {},
+    viewport: () => {},
+    pixelStorei: () => {},
+    drawArrays: () => {},
+    readPixels: () => {},
+    fenceSync: () => ({}),
+    flush: () => {},
     clientWaitSync: () => 30, // WAIT_FAILED
-    deleteSync: () => {}, getBufferSubData: (_t, _o, dst) => { dst[0] = 7 }
+    deleteSync: () => {},
+    getBufferSubData: (_t, _o, dst) => {
+      dst[0] = 7
+    }
   }
-  const { GpuYuv420Converter } = loadRendererModule('managers/video-export/GpuYuv420Converter.ts', new Map(), {
-    OffscreenCanvas: class { getContext() { return fakeGl } },
-    console: { warn: (m) => warnLogs.push(m), info: () => {}, error: () => {} }
-  })
+  const { GpuYuv420Converter } = loadRendererModule(
+    'managers/video-export/GpuYuv420Converter.ts',
+    new Map(),
+    {
+      OffscreenCanvas: class {
+        getContext() {
+          return fakeGl
+        }
+      },
+      console: { warn: (m) => warnLogs.push(m), info: () => {}, error: () => {} }
+    }
+  )
   const conv = GpuYuv420Converter.create(16, 16, 1)
   await conv.enqueueAsync({})
   await conv.enqueueAsync({})

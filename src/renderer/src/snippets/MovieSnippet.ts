@@ -8,11 +8,7 @@ export default class MovieSnippet extends BaseSnippet {
 
     const rawDuration = this.data.data.duration
     const durationMs =
-      rawDuration !== undefined
-        ? rawDuration > 300
-          ? rawDuration
-          : rawDuration * 1000
-        : undefined
+      rawDuration !== undefined ? (rawDuration > 300 ? rawDuration : rawDuration * 1000) : undefined
     const fx = this.app.layerSpecialEffect as unknown as ExtendedSpecialEffectLayer
     if (typeof fx.playMovie === 'function') {
       await fx.playMovie(this.data.data.file, durationMs)

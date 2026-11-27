@@ -2,8 +2,8 @@
  * PJSK 官方 BGM 曲名索引（musicSoundTracks）。
  *
  * 云端拉下来的剧情 BGM 文件名是 bgm00003 这类无语义 id。sekai-master-db 的
- * musicSoundTracks.json 把它们映射到曲名与分类，作用等价于 ournotes-player
- * 里 sound_bgm_adv_* 这类可读 cue 名：AI 按曲名/分类感知氛围，而不是猜 id。
+ * musicSoundTracks.json 把它们映射到曲名与分类，生成类 sound_bgm_adv_* 的
+ * 可读 cue 名：AI 按曲名/分类感知氛围，而不是猜 id。
  *
  * 宿主只缓存精简后的映射（resources/audio/bgm/soundtracks.json），
  * 不把整份 master data 写进仓库；缓存缺失或网络失败时退回人工描述。

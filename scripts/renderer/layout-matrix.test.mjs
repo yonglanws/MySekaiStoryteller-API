@@ -81,7 +81,11 @@ test('LayoutClear in place is 21 smooth frames; sliding ends exactly when the 6-
   const fadeFrames = timing.framesForSeconds(timing.CHARACTER_FADE_MS / 1000)
   for (const speed of speeds) {
     const inPlace = run('LayoutClear', speed, 'inPlace')
-    assert.equal(inPlace.durationFrames, timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES, `${speed}/in-place`)
+    assert.equal(
+      inPlace.durationFrames,
+      timing.HIDE_IN_PLACE_SMOOTH_TOTAL_FRAMES,
+      `${speed}/in-place`
+    )
     assert.equal(inPlace.layout.moveEndFrame, inPlace.startFrame, `${speed}/in-place`)
     assert.equal(
       inPlace.layout.fadeStartFrame - inPlace.startFrame,

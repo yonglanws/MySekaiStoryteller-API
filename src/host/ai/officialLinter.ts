@@ -27,10 +27,7 @@ import {
 } from '../../common/official/timing'
 import type { StoryData } from '../../common/types/Story'
 import type { CatalogView } from './prompt'
-import {
-  enforceIrodoriEmojiBudget,
-  sanitizeIrodoriCaption
-} from '../../common/tts/irodori'
+import { enforceIrodoriEmojiBudget, sanitizeIrodoriCaption } from '../../common/tts/irodori'
 import { hasSpokenStageDirectionLeak, isStageDirectionParenthetical } from './dialogueLinter'
 import {
   evaluateActingLineMatch,
@@ -151,7 +148,12 @@ function setSnippetPreFence(snippet: JsonRecord, preFence: boolean): boolean {
 function prevNonInstantShaderIndex(snippets: JsonRecord[], idx: number): number {
   for (let j = idx - 1; j >= 0; j--) {
     const cur = snippets[j]
-    if (str(cur?.type) === 'AttachCharacterShader' && !snippetHasPreFence(cur as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' })) {
+    if (
+      str(cur?.type) === 'AttachCharacterShader' &&
+      !snippetHasPreFence(
+        cur as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+    ) {
       continue
     }
     return j
@@ -194,7 +196,11 @@ function findSplitDuoClearRun(
     if (k === 'Wait' || k === 'PlaySe') sawNonShaderPauseOrSe = true
     scan += 1
   }
-  if (!sawNonShaderPauseOrSe || scan >= snippets.length || str(snippets[scan]?.type) !== 'LayoutClear') {
+  if (
+    !sawNonShaderPauseOrSe ||
+    scan >= snippets.length ||
+    str(snippets[scan]?.type) !== 'LayoutClear'
+  ) {
     return null
   }
   const nextClearStart = scan
@@ -219,9 +225,7 @@ function findSplitDuoClearRun(
   const nextType = str(afterSnippet?.type)
   const afterData = afterSnippet && isRecord(afterSnippet.data) ? afterSnippet.data : null
   const nextSide =
-    nextType === 'LayoutAppear' && afterData && isRecord(afterData.to)
-      ? str(afterData.to.side)
-      : ''
+    nextType === 'LayoutAppear' && afterData && isRecord(afterData.to) ? str(afterData.to.side) : ''
   if ((nextType === 'LayoutAppear' && nextSide === 'Center') || nextType === 'BlackOut') {
     return { clearEnd, nextClearStart, nextClearEnd }
   }
@@ -245,13 +249,18 @@ export function normalizeLayoutTransitionBarriers(
     if (str(snippets[i]?.type) !== 'LayoutClear') continue
     const split = findSplitDuoClearRun(snippets, i)
     if (!split) continue
-    const moved = snippets.splice(split.nextClearStart, split.nextClearEnd - split.nextClearStart + 1)
+    const moved = snippets.splice(
+      split.nextClearStart,
+      split.nextClearEnd - split.nextClearStart + 1
+    )
     snippets.splice(split.clearEnd + 1, 0, ...moved)
     coalescedCount += moved.length
     i = split.clearEnd + moved.length
   }
   if (coalescedCount > 0) {
-    warn?.(`[Linter] 已合并 ${coalescedCount} 处 Duo->Center 中间被 Wait/PlaySe 拆散的 LayoutClear，确保双人同时先淡出`)
+    warn?.(
+      `[Linter] 已合并 ${coalescedCount} 处 Duo->Center 中间被 Wait/PlaySe 拆散的 LayoutClear，确保双人同时先淡出`
+    )
   }
 
   // 2) 将延迟到第二句才切 Center 的内心独白切镜前置到第一句独白之前
@@ -301,7 +310,10 @@ export function normalizeLayoutTransitionBarriers(
           str(appearTo.side) === 'Center'
         ) {
           let nextTalkIdx = scan + 1
-          while (nextTalkIdx < snippets.length && isSplitClearInterveningCue(snippets[nextTalkIdx])) {
+          while (
+            nextTalkIdx < snippets.length &&
+            isSplitClearInterveningCue(snippets[nextTalkIdx])
+          ) {
             nextTalkIdx += 1
           }
           const nextTalk = snippets[nextTalkIdx]
@@ -332,7 +344,9 @@ export function normalizeLayoutTransitionBarriers(
     }
   }
   if (hoistedThinkingCuts > 0) {
-    warn?.(`[Linter] 已将 ${hoistedThinkingCuts} 处延迟切单人 Center 的思考模式切镜前置到第一句独白之前`)
+    warn?.(
+      `[Linter] 已将 ${hoistedThinkingCuts} 处延迟切单人 Center 的思考模式切镜前置到第一句独白之前`
+    )
   }
 
   // 3) 强制 LayoutClear / LayoutAppear 的 WaitFinished / Now 栅栏语义
@@ -348,7 +362,9 @@ export function normalizeLayoutTransitionBarriers(
     }
   }
   if (fixedBarriers > 0) {
-    warn?.(`[Linter] 已修正 ${fixedBarriers} 处 LayoutClear/LayoutAppear 栅栏（首条 WaitFinished、成对次条 Now）`)
+    warn?.(
+      `[Linter] 已修正 ${fixedBarriers} 处 LayoutClear/LayoutAppear 栅栏（首条 WaitFinished、成对次条 Now）`
+    )
   }
 }
 
@@ -401,7 +417,9 @@ function inferPromotedEmotionForTalk(
   for (let b = talkPos - 1; b >= Math.max(0, talkPos - 5); b--) {
     const prev = talks[b]
     if (prev.sceneId !== rec.sceneId || prev.emotion === '开心' || prev.emotion === '生气') break
-    const pRole = prev.speakerFacial ? inspectModelFacial(prev.speakerPath, prev.speakerFacial).role : 'other'
+    const pRole = prev.speakerFacial
+      ? inspectModelFacial(prev.speakerPath, prev.speakerFacial).role
+      : 'other'
     const isSadBeat = prev.emotion === '伤心' || pRole === 'cry' || pRole === 'sad'
     if (isSadBeat) {
       hasSadBefore = true
@@ -415,7 +433,9 @@ function inferPromotedEmotionForTalk(
   for (let f = talkPos + 1; f <= Math.min(talks.length - 1, talkPos + 5); f++) {
     const nxt = talks[f]
     if (nxt.sceneId !== rec.sceneId || nxt.emotion === '开心' || nxt.emotion === '生气') break
-    const nRole = nxt.speakerFacial ? inspectModelFacial(nxt.speakerPath, nxt.speakerFacial).role : 'other'
+    const nRole = nxt.speakerFacial
+      ? inspectModelFacial(nxt.speakerPath, nxt.speakerFacial).role
+      : 'other'
     const isSadBeat = nxt.emotion === '伤心' || nRole === 'cry' || nRole === 'sad'
     if (isSadBeat) {
       hasSadAfter = true
@@ -434,11 +454,7 @@ function inferPromotedEmotionForTalk(
   if (speakerRole === 'cry' || speakerRole === 'tearful_smile') {
     return canUse('伤心') ? '伤心' : null
   }
-  if (
-    speakerRole === 'sad' ||
-    speakerRole === 'cold_hollow' ||
-    speakerRole === 'closed_troubled'
-  ) {
+  if (speakerRole === 'sad' || speakerRole === 'cold_hollow' || speakerRole === 'closed_troubled') {
     if (hasSadBefore || hasSadAfter || hasPartnerCryOrSad || hasSadTextCue) {
       return canUse('伤心') ? '伤心' : null
     }
@@ -489,8 +505,7 @@ function collectTalkEmotionRecords(
       if (id !== -1 && str(m.model)) pathById.set(id, str(m.model))
     }
   }
-  const getPath = (id: number): string | undefined =>
-    pathById.get(id) ?? view?.modelById(id)?.path
+  const getPath = (id: number): string | undefined => pathById.get(id) ?? view?.modelById(id)?.path
 
   const onStageFacial = new Map<number, string>()
   const records: TalkEmotionRecord[] = []
@@ -574,7 +589,10 @@ export function syncTalkEmotionContinuity(
   const canUse = (label: string): boolean => {
     if (explicitLabels.length > 0) return explicitLabels.includes(label)
     if (usedEmotions.has(label)) return true
-    return [...usedEmotions].some((e) => STANDARD_CHINESE_EMOTIONS.has(e)) && STANDARD_CHINESE_EMOTIONS.has(label)
+    return (
+      [...usedEmotions].some((e) => STANDARD_CHINESE_EMOTIONS.has(e)) &&
+      STANDARD_CHINESE_EMOTIONS.has(label)
+    )
   }
 
   let fixed = 0
@@ -694,7 +712,13 @@ export function isTrailingInterruptedMotionSnippet(snippets: JsonRecord[], index
     for (let k = index - 1; k >= 0; k--) {
       const prev = snippets[k]
       const pKind = str(prev?.type)
-      if (pKind === 'Motion' || pKind === 'PlaySe' || pKind === 'StopSe' || pKind === 'ChangeBgm' || pKind === 'BgmVolume') {
+      if (
+        pKind === 'Motion' ||
+        pKind === 'PlaySe' ||
+        pKind === 'StopSe' ||
+        pKind === 'ChangeBgm' ||
+        pKind === 'BgmVolume'
+      ) {
         continue
       }
       if (pKind === 'Talk' && isRecord(prev.data) && prev.data.closeWindowOnFinish !== true) {
@@ -1197,9 +1221,10 @@ function resolveActorCatalogInfo(
     const promptF = view!.promptFacials(catalogModel)
     const promptM = view!.promptMotions(catalogModel)
     const facials = [...promptF, ...catalogModel.facials.filter((f) => !promptF.includes(f))]
-    const motions = [...promptM, ...catalogModel.motions.filter((m) => !promptM.includes(m))].filter(
-      (m) => isMotionAutoPickAllowed(m, catalogModel.path)
-    )
+    const motions = [
+      ...promptM,
+      ...catalogModel.motions.filter((m) => !promptM.includes(m))
+    ].filter((m) => isMotionAutoPickAllowed(m, catalogModel.path))
     return {
       path: catalogModel.path,
       facials,
@@ -1268,7 +1293,9 @@ function pickVerifiedReplacementMotion(
   },
   view?: CatalogView
 ): string {
-  const pool = actorInfo.motions.filter((m) => m !== params.avoidMotion && !isSpecialOrStandingMotion(m))
+  const pool = actorInfo.motions.filter(
+    (m) => m !== params.avoidMotion && !isSpecialOrStandingMotion(m)
+  )
   const rec = recommendActingForLine({
     facials: actorInfo.facials,
     motions: pool,
@@ -1281,19 +1308,20 @@ function pickVerifiedReplacementMotion(
     isListener: params.isListener,
     restrainedRole: actorInfo.restrained
   })
-  const compat = rec.motions.find((m) =>
-    isMotionCompatibleWithLine({
-      motion: m,
-      modelPath: actorInfo.path,
-      emotion: params.emotion,
-      content: params.content,
-      prevContent: params.prevContent,
-      prevEmotion: params.prevEmotion,
-      prevTense: params.prevTense,
-      isListener: params.isListener,
-      restrainedRole: actorInfo.restrained,
-      cheerfulScene: params.cheerfulScene
-    }).ok
+  const compat = rec.motions.find(
+    (m) =>
+      isMotionCompatibleWithLine({
+        motion: m,
+        modelPath: actorInfo.path,
+        emotion: params.emotion,
+        content: params.content,
+        prevContent: params.prevContent,
+        prevEmotion: params.prevEmotion,
+        prevTense: params.prevTense,
+        isListener: params.isListener,
+        restrainedRole: actorInfo.restrained,
+        cheerfulScene: params.cheerfulScene
+      }).ok
   )
   const compatFromPool =
     compat ||
@@ -1315,13 +1343,9 @@ function pickVerifiedReplacementMotion(
     )
   const rawPick =
     compatFromPool ||
-    pickMoodMatchedMotion(
-      pool,
-      params.fallbackMood,
-      actorInfo.path,
-      actorInfo.restrained,
-      [params.avoidMotion]
-    )
+    pickMoodMatchedMotion(pool, params.fallbackMood, actorInfo.path, actorInfo.restrained, [
+      params.avoidMotion
+    ])
   if (!rawPick) return ''
   if (view && params.modelId !== -1) {
     const choices = view.animationChoices(params.modelId, 'motion')
@@ -1560,8 +1584,7 @@ function repairActingHygieneInvariants(
     const emotion = str(data.emotion)
     const isMonologue = isThinkingTalkSnippet(snippet)
     const talkPos = talkPosBySnippet.get(i) ?? -1
-    const cheerfulScene =
-      talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
+    const cheerfulScene = talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
     const effectivePrevTense = tenseTracker.tense && !cheerfulScene
 
     const fixTarget = (target: JsonRecord, actorId: number, isListener: boolean): void => {
@@ -2055,7 +2078,9 @@ function ensureEveryActorHasBodyMotion(
   }
 
   if (fixedActors > 0) {
-    warn(`[Linter] 已为 ${fixedActors} 名零动作在场角色补充贴合语境的身体动作（消除 actor_zero_motions）`)
+    warn(
+      `[Linter] 已为 ${fixedActors} 名零动作在场角色补充贴合语境的身体动作（消除 actor_zero_motions）`
+    )
   }
 }
 
@@ -2122,10 +2147,7 @@ export function enforceOfficialStoryInvariants(
       const next = snippets[j]
       const nKind = str(next?.type)
       const nData = isRecord(next?.data) ? next.data : {}
-      if (
-        nKind === 'Wait' &&
-        num(nData.duration, 0) >= 300
-      ) {
+      if (nKind === 'Wait' && num(nData.duration, 0) >= 300) {
         hasRealBreakBeforeNextTalk = true
         break
       }
@@ -2274,7 +2296,16 @@ export function enforceOfficialStoryInvariants(
         const appearInfo = lastAppearMotion.get(mid)
         if (appearInfo && appearInfo.motion && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
           const neededDelay = appearInfo.timeSec + 0.45 - cursorSec
-          if (!snippetHasPreFence(snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }) && neededDelay <= 0.65) {
+          if (
+            !snippetHasPreFence(
+              snippet as {
+                type?: string
+                wait?: boolean
+                progressBehavior?: 'Now' | 'WaitFinished'
+              }
+            ) &&
+            neededDelay <= 0.65
+          ) {
             snippet.delay = Number(Math.max(num(snippet.delay, 0), neededDelay).toFixed(2))
           } else {
             data.motion = ''
@@ -2835,7 +2866,12 @@ export function auditStoryActingAndFidelity(
         resetListenerState(mid)
       }
       if (str(data.facial).trim() && mid !== -1) {
-        updateActorStateOnTalkOrStage(actorState, mid, modelMeta.get(mid)?.path, str(data.facial).trim())
+        updateActorStateOnTalkOrStage(
+          actorState,
+          mid,
+          modelMeta.get(mid)?.path,
+          str(data.facial).trim()
+        )
       }
       for (const act of actions) {
         if (!isRecord(act)) continue
@@ -2847,7 +2883,12 @@ export function auditStoryActingAndFidelity(
           resetListenerState(aid)
         }
         if (str(act.facial).trim() && aid !== -1) {
-          updateActorStateOnTalkOrStage(actorState, aid, modelMeta.get(aid)?.path, str(act.facial).trim())
+          updateActorStateOnTalkOrStage(
+            actorState,
+            aid,
+            modelMeta.get(aid)?.path,
+            str(act.facial).trim()
+          )
         }
       }
       continue
@@ -2861,8 +2902,7 @@ export function auditStoryActingAndFidelity(
     const emotion = str(data.emotion)
     const ttsText = str(data.ttsText)
     const talkPos = talkPosBySnippet.get(i) ?? -1
-    const cheerfulScene =
-      talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
+    const cheerfulScene = talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
     const effectivePrevTense = tenseTracker.tense && !cheerfulScene
 
     if (hasZeroWidthChars(content)) {
@@ -3060,10 +3100,9 @@ export function auditStoryActingAndFidelity(
         ) {
           flaggedListenerSmile = true
           facialMismatchCount += 1
-          const listenerFallbacks =
-            meta?.facials.length
-              ? [pickListenerFallbackFacial(meta.facials, lState, meta.path, meta.restrained)]
-              : []
+          const listenerFallbacks = meta?.facials.length
+            ? [pickListenerFallbackFacial(meta.facials, lState, meta.path, meta.restrained)]
+            : []
           diagnostics.push({
             snippetIndex: i,
             lineNumber: talkCount,
@@ -3074,7 +3113,8 @@ export function auditStoryActingAndFidelity(
             emotion,
             facial: act.facial,
             motion: act.motion,
-            inferredMood: lState === 'angry' || lState === 'serious' ? 'angry_frustration' : 'sad_regret',
+            inferredMood:
+              lState === 'angry' || lState === 'serious' ? 'angry_frustration' : 'sad_regret',
             field: 'facial',
             code: 'listener_forced_smile',
             severity: 'high',
@@ -3207,7 +3247,12 @@ export function auditStoryActingAndFidelity(
     )
     for (const act of actions) {
       if (act.modelId !== -1 && act.modelId !== speakerId && act.facial) {
-        updateActorStateOnTalkOrStage(actorState, act.modelId, modelMeta.get(act.modelId)?.path, act.facial)
+        updateActorStateOnTalkOrStage(
+          actorState,
+          act.modelId,
+          modelMeta.get(act.modelId)?.path,
+          act.facial
+        )
       }
     }
     prevContent = content

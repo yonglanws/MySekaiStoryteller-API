@@ -228,7 +228,11 @@ function getOrCreateShaderSets(gl: WebGL2RenderingContext): ShaderSetLike[] | nu
 
   const p0 = compileProgram(gl, src.vertexShaderSrcSetupMask, src.fragmentShaderSrcsetupMask)
   const p1 = compileProgram(gl, src.vertexShaderSrc, src.fragmentShaderSrcPremultipliedAlpha)
-  const p2 = compileProgram(gl, src.vertexShaderSrcMasked, src.fragmentShaderSrcMaskPremultipliedAlpha)
+  const p2 = compileProgram(
+    gl,
+    src.vertexShaderSrcMasked,
+    src.fragmentShaderSrcMaskPremultipliedAlpha
+  )
   const p3 = compileProgram(
     gl,
     src.vertexShaderSrcMasked,
@@ -409,7 +413,10 @@ function syncVertexPositions(
     if (forceAll || model.getDrawableDynamicFlagVertexPositionsDidChange(d)) {
       const s = state.slots[d]
       const verts = model.getDrawableVertices(d)
-      posData.set(verts.length > s.vCount * 2 ? verts.subarray(0, s.vCount * 2) : verts, s.vBase * 2)
+      posData.set(
+        verts.length > s.vCount * 2 ? verts.subarray(0, s.vCount * 2) : verts,
+        s.vBase * 2
+      )
       dirty = true
     }
   }
@@ -441,7 +448,7 @@ function releaseBatchState(renderer: CubismRendererInternal): void {
 
 /**
  * Installs WebGL2 shared-VBO/static-UV/static-IBO, cached-VAO, and redundant GL-state
- * elision optimizations onto `CubismRenderer_WebGL` (inspired by `ournotes-player/src/live2d/drawing.js`).
+ * elision optimizations onto `CubismRenderer_WebGL`.
  * Eliminates ~810+ `gl.bufferData` reallocations and ~18 `gl.getParameter` stalls per model per frame.
  */
 function patchRendererPrototype(proto: Record<string, unknown>): boolean {
@@ -698,7 +705,9 @@ function patchRendererPrototype(proto: Record<string, unknown>): boolean {
       } else {
         const clipDrawBuf = this.getClippingContextBufferForDraw()
         if (clipDrawBuf != null) {
-          const maskTex = clipDrawBuf.getClippingManager().getColorBuffer()[clipDrawBuf._bufferIndex]
+          const maskTex = clipDrawBuf.getClippingManager().getColorBuffer()[
+            clipDrawBuf._bufferIndex
+          ]
           if (lastTex1 !== maskTex) {
             if (lastActiveTexUnit !== 1) {
               gl.activeTexture(gl.TEXTURE1)
@@ -911,7 +920,7 @@ function patchRendererPrototype(proto: Record<string, unknown>): boolean {
 
 /**
  * Installs WebGL2 shared-VBO/static-UV/static-IBO, cached-VAO, and redundant GL-state
- * elision optimizations onto `CubismRenderer_WebGL` (inspired by `ournotes-player/src/live2d/drawing.js`).
+ * elision optimizations onto `CubismRenderer_WebGL`.
  * Hooks `Cubism4InternalModel.prototype.updateWebGLContext` so the first live renderer
  * instance installs the prototype patch without depending on unexported library classes.
  */

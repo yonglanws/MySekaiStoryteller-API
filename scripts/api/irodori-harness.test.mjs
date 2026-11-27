@@ -101,7 +101,11 @@ test('normalizeVoiceDirectionPlan parses per-line voice direction, strips identi
     .filter(([, entry]) => entry.ttsSpecialScene)
     .map(([id]) => id)
   assert.equal(specialIds.length, 1, 'specialScene must be deterministically capped to <= 15%')
-  assert.equal(specialIds[0], 'l8', 'highest-priority dramatic climax line should keep specialScene')
+  assert.equal(
+    specialIds[0],
+    'l8',
+    'highest-priority dramatic climax line should keep specialScene'
+  )
 
   const climax = normalized.get('l8')
   assert.ok(!/若い女性|低い声/.test(climax.ttsCaption))
@@ -127,10 +131,25 @@ test('applyVoiceDirectionPlan preserves per-line ttsCaption while stabilizing co
   const voicePlan = normalizeVoiceDirectionPlan(
     {
       lines: [
-        { id: 'l1', emotion: '平静', ttsCaption: '少し寂しげに遠くを見ながら呟く。', ttsSpeed: 0.96 },
-        { id: 'l2', emotion: '开心', ttsCaption: 'ぶっきらぼうだが気遣う口調で話す。', ttsSpeed: 1.02 },
+        {
+          id: 'l1',
+          emotion: '平静',
+          ttsCaption: '少し寂しげに遠くを見ながら呟く。',
+          ttsSpeed: 0.96
+        },
+        {
+          id: 'l2',
+          emotion: '开心',
+          ttsCaption: 'ぶっきらぼうだが気遣う口調で話す。',
+          ttsSpeed: 1.02
+        },
         { id: 'l3', emotion: '平静', ttsCaption: '控えめに引き止めるように話す。', ttsSpeed: 0.95 },
-        { id: 'l4', emotion: '生气', ttsCaption: '切羽詰まった様子で必死に呼び止める。', ttsSpeed: 1.07 }
+        {
+          id: 'l4',
+          emotion: '生气',
+          ttsCaption: '切羽詰まった様子で必死に呼び止める。',
+          ttsSpeed: 1.07
+        }
       ]
     },
     dialogue,
@@ -414,10 +433,7 @@ test('TTSService forwards ttsCaption/ttsSpeed/ttsSpecialScene and invalidates ca
   }
   const mocks = new Map([
     [path.join(renderer, 'utils/Logger.ts'), { default: () => new MockLogger() }],
-    [
-      path.join(common, 'tts/irodori.ts'),
-      { buildIrodoriSpeechRequest, resolveIrodoriVoice }
-    ]
+    [path.join(common, 'tts/irodori.ts'), { buildIrodoriSpeechRequest, resolveIrodoriVoice }]
   ])
   const modules = new Map()
   const compiled = new Map()
@@ -502,8 +518,20 @@ test('alignStoryTtsEmotionsAndCaptions repairs crying-scene emotion, emojis, cap
   const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
   const story = {
     models: [
-      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
-      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+      {
+        id: 1,
+        model: '20mizuki_normal/20mizuki_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      },
+      {
+        id: 2,
+        model: '21ena_normal/21ena_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      }
     ],
     images: [{ id: 1, image: 'bg_room.jpg' }],
     snippets: [
@@ -818,7 +846,10 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
   const { story, meta } = await writer.generate({ prompt: '瑞希和绘名哭戏', pipeline: 'agent' })
   assert.equal(meta.pipeline, 'agent')
   assert.equal(meta.agentMode, 'native')
-  assert.ok(translatePrompt.includes('ttsCaption'), 'pre-translation alignment passes ttsCaption to translator')
+  assert.ok(
+    translatePrompt.includes('ttsCaption'),
+    'pre-translation alignment passes ttsCaption to translator'
+  )
 
   const talks = story.snippets.filter((s) => s.type === 'Talk')
   assert.equal(talks.length, 7)
@@ -829,15 +860,29 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
   // Climax line promoted to ttsSpecialScene (<= floor(7 * 0.15) = 1)
   assert.equal(talks[6].data.ttsSpecialScene, true)
   assert.ok(talks[6].data.ttsText.includes('😭'))
-  assert.ok(talks.every((tk) => typeof tk.data.ttsCaption === 'string' && tk.data.ttsCaption.length > 0))
+  assert.ok(
+    talks.every((tk) => typeof tk.data.ttsCaption === 'string' && tk.data.ttsCaption.length > 0)
+  )
 })
 
 test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to frame 0, strips sad-caption positive tokens, and keeps happy lines lively', () => {
   const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
   const story = {
     models: [
-      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
-      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+      {
+        id: 1,
+        model: '20mizuki_normal/20mizuki_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      },
+      {
+        id: 2,
+        model: '21ena_normal/21ena_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      }
     ],
     images: [{ id: 1, image: 'bg_room.jpg' }],
     snippets: [
@@ -864,7 +909,8 @@ test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to
           modelId: 1,
           content: '嘴上说着没关系，知道以后还是会变得小心翼翼吧？连开玩笑都会顾忌……',
           emotion: '伤心',
-          ttsText: '口では大丈夫って言ってても、知ったら気を遣うようになるんでしょ？😭 冗談も言いづらくなって……',
+          ttsText:
+            '口では大丈夫って言ってても、知ったら気を遣うようになるんでしょ？😭 冗談も言いづらくなって……',
           ttsCaption: '涙で声を詰まらせ、追い詰められたように訴える。',
           ttsSpeed: 1.02
         }
@@ -925,7 +971,15 @@ test('alignStoryTtsEmotionsAndCaptions anchors trailing/mid-clause sad emojis to
 test('alignStoryTtsEmotionsAndCaptions strips fast-pace ⏩ and caps tricky-sad ttsSpeed <= 0.94 (Scenario 1 #56 regression)', () => {
   const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
   const story = {
-    models: [{ id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }],
+    models: [
+      {
+        id: 1,
+        model: '20mizuki_normal/20mizuki_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      }
+    ],
     images: [{ id: 1, image: 'bg_room.jpg' }],
     snippets: [
       {

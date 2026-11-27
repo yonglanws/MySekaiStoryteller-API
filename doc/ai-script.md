@@ -26,7 +26,7 @@ llm:
   timeoutMs: 120000
   retries: 2
   repairRounds: 2
-  pipeline: staged # staged（schema 默认） | hybrid（.env.example 默认） | agent | single
+  pipeline: staged # staged（默认） | hybrid（工具驱动三段式） | agent | single
   agentMaxSteps: 16
   jsonMode: auto # auto | on | off
   translateForTts: true
@@ -43,7 +43,7 @@ llm:
 - **`baseUrl`**：填根地址就行（兼容 OpenAI、new-api、one-api、Ollama、vLLM），宿主会自动拼 `/chat/completions`，别自己再写一遍。
 - **`pipeline`**：
   - `hybrid` / `agent`（二者内部已合并为同一套**统一三段式上下文隔离 + 工具驱动管线**，`agent` 和 `agentic: true` 均作为向后兼容别名路由到此路径）：Phase 1 允许 1~4 轮只读工具自主核实重写人设、官方跨话剧情与云端素材并锁定 `StagedCastPlan` + `researchBrief`；Phase 2 **彻底丢弃 Phase 1 工具对话历史**，仅注入精炼规划与高占比重写人设写台词并做 `dialogueLinter` + 人设 Critic 自检；Phase 3 走确定性编译并由单一轻量导演终审做局部 `operations` 修补。详见下文 [统一三段式管线架构](#统一三段式上下文隔离与工具驱动架构hybrid--agent)。
-  - `staged`（`config.ts` / `config.example.yaml` 默认）：与上述共享 Phase 2/3 核心编译骨干，跳过 Phase 1 工具循环，直接用 `buildCastPrompt` + 预取 RAG 选角定纲。
+  - `staged`（`config.ts` / `config.example.yaml` / `.env.example` / `npm run init` 默认）：与上述共享 Phase 2/3 核心编译骨干，跳过 Phase 1 工具循环，直接用 `buildCastPrompt` + 预取 RAG 选角定纲。
   - `single`：快速选角后让模型一次把整份剧本写完（`mode: chat` 固定走 `single`），适合极速省流场景。
 - **`agentMaxSteps`**：统一管线 Phase 1 允许的最大工具探索/迭代步数（`2~40`，默认 `16`）。
 - **`jsonMode`**：`auto` 会先试着带 `response_format: { type: "json_object" }`，如果接口报错不支持就自动去掉重发。

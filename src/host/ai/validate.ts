@@ -434,7 +434,8 @@ function pickCompatibleFacialFallback(
   options: { isMonologue?: boolean; isListener?: boolean; avoidFacial?: string } = {}
 ): string {
   const model = view.modelById(modelId)
-  if (!model) return ensureRealCatalogAnimation(view, modelId, 'facial', view.neutralFacial(modelId))
+  if (!model)
+    return ensureRealCatalogAnimation(view, modelId, 'facial', view.neutralFacial(modelId))
   const promptSet = new Set(view.promptFacials(model))
   const facials = [
     ...view.promptFacials(model),
@@ -444,9 +445,7 @@ function pickCompatibleFacialFallback(
   const targetMood: facialSemanticsMod.TargetMood =
     options.isListener && prevTense
       ? 'serious'
-      : prevTense &&
-          mood === 'smile' &&
-          !facialSemanticsMod.isGenuineHappyOrReconciliation(content)
+      : prevTense && mood === 'smile' && !facialSemanticsMod.isGenuineHappyOrReconciliation(content)
         ? 'wry_smile'
         : mood
   const picked = facialSemanticsMod.pickMoodMatchedFacial(
@@ -760,7 +759,9 @@ function repairActingMismatches(
     const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
     const effectivePrevTense = tenseTracker.tense && !cheerfulScene
     if (speakerId === -1) {
-      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
+      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, {
+        cheerfulScene
+      })
       continue
     }
 
@@ -951,7 +952,14 @@ function repairActingMismatches(
         if (!isRecord(act)) continue
         const aid = toNumber(act.modelId, speakerId)
         if (aid !== speakerId && toStr(act.facial)) {
-          updateActorState(aid, view.modelById(aid)?.path, toStr(act.facial), undefined, undefined, cheerfulScene)
+          updateActorState(
+            aid,
+            view.modelById(aid)?.path,
+            toStr(act.facial),
+            undefined,
+            undefined,
+            cheerfulScene
+          )
         }
       }
     }
@@ -1289,7 +1297,12 @@ function distributeTextParts(
     let index = 0
     for (let i = 0; i < groupCount; i++) {
       const take = base + (i < extra ? 1 : 0)
-      buckets.push(parts.slice(index, index + take).join(joiner).trim())
+      buckets.push(
+        parts
+          .slice(index, index + take)
+          .join(joiner)
+          .trim()
+      )
       index += take
     }
     return buckets
@@ -1373,7 +1386,9 @@ function splitTtsText(tts: string, groupCount: number, weights?: number[]): stri
 
   const graphemes = segmentGraphemes(clean)
   const effectiveWeights =
-    weights && weights.length === groupCount ? weights.map((w) => Math.max(1, w)) : Array.from({ length: groupCount }, () => 1)
+    weights && weights.length === groupCount
+      ? weights.map((w) => Math.max(1, w))
+      : Array.from({ length: groupCount }, () => 1)
   const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0)
   const buckets: string[] = []
   let cursor = 0
@@ -1740,9 +1755,7 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
         rewrittenSnippets.push(snippet)
       } else {
         const toRaw = parsePosition(data.to, currentSide)
-        const targetSide = ON_STAGE_SIDES.has(toStr(toRaw.side))
-          ? toStr(toRaw.side)
-          : currentSide
+        const targetSide = ON_STAGE_SIDES.has(toStr(toRaw.side)) ? toStr(toRaw.side) : currentSide
         checkSlotAvailable(targetSide, modelId, label)
         if (targetSide !== currentSide) {
           // 严禁槽位间滑动（如 Center <-> Left/Right）：改为原地渐变淡出 -> 目标槽位原地渐变淡入
@@ -1915,7 +1928,9 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
     warn?.(`已将 ${normalizedSlides} 处滑动入出场/偏移规范化为槽位原地渐变（offset: 0）`)
   }
   if (convertedMoves > 0) {
-    warn?.(`已将 ${convertedMoves} 处跨槽位 Move 滑动转换为原地渐变切镜（LayoutClear + LayoutAppear）`)
+    warn?.(
+      `已将 ${convertedMoves} 处跨槽位 Move 滑动转换为原地渐变切镜（LayoutClear + LayoutAppear）`
+    )
   }
   if (normalizedThinkingCuts > 0) {
     warn?.(`已将 ${normalizedThinkingCuts} 处思考模式段落自动转为双人先退场、再单人 Center 淡入`)
@@ -1925,7 +1940,10 @@ function normalizeScene(story: JsonRecord, warn?: (message: string) => void): vo
 /**
  * 节制镜头/震动与开场字幕套路化（仅在长场次 >=14 句 Talk 上抑制无端堆砌；并清理孤立的 CameraMove(0,0) 复位）。
  */
-function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: string) => void): void {
+function enforceCameraShakeOpeningRestraint(
+  story: JsonRecord,
+  warn: (message: string) => void
+): void {
   const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
   if (snippets.length === 0) return
 
@@ -1948,7 +1966,8 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
         zoomActive = true
       }
     } else if (s.type === 'CameraMove') {
-      const isReset = Math.abs(toNumber(s.data.x, 0)) <= 0.5 && Math.abs(toNumber(s.data.y, 0)) <= 0.5
+      const isReset =
+        Math.abs(toNumber(s.data.x, 0)) <= 0.5 && Math.abs(toNumber(s.data.y, 0)) <= 0.5
       if (isReset) {
         if (!moveActive) orphanResets.add(i)
         moveActive = false
@@ -1964,7 +1983,8 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
   if (talkCount < 14) return
 
   const work = story.snippets as JsonRecord[]
-  const STARTLE_OR_JOLT_RE = /(?:吓|一震|猛地|撞上|撞到|撞进|相撞|摔|抓|推|痛|啊！|呜哇|糟了|追|轰|咚|啪)/
+  const STARTLE_OR_JOLT_RE =
+    /(?:吓|一震|猛地|撞上|撞到|撞进|相撞|摔|抓|推|痛|啊！|呜哇|糟了|追|轰|咚|啪)/
   const DRAMATIC_LINE_RE =
     /(?:追|撞上|撞到|撞进|相撞|摔|抓|窒息|崩溃|争执|对峙|决裂|滚|住手|休想|到底怎么|爆发|哭喊|全速|绝不|舞台|聚光灯|一、二|倒数|欢呼)/
 
@@ -2116,7 +2136,8 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
         zOn = true
       }
     } else if (s.type === 'CameraMove' && isRecord(s.data)) {
-      const isReset = Math.abs(toNumber(s.data.x, 0)) <= 0.5 && Math.abs(toNumber(s.data.y, 0)) <= 0.5
+      const isReset =
+        Math.abs(toNumber(s.data.x, 0)) <= 0.5 && Math.abs(toNumber(s.data.y, 0)) <= 0.5
       if (isReset) {
         if (!mOn) continue
         mOn = false
@@ -2324,7 +2345,12 @@ function enrichDynamicFocusStaging(
       const prevTalkIndex = lastTalkIdxSeen
       lastTalkIdxSeen = i
 
-      if (speakerId === -1 || layoutMode !== 'Normal' || onStage.size !== 2 || !onStage.has(speakerId)) {
+      if (
+        speakerId === -1 ||
+        layoutMode !== 'Normal' ||
+        onStage.size !== 2 ||
+        !onStage.has(speakerId)
+      ) {
         continue
       }
       if (talkCounter - lastAppearTalk < 2) continue
@@ -2332,7 +2358,9 @@ function enrichDynamicFocusStaging(
       if (i + 3 >= lastTalkIdx) continue
 
       const acts = Array.isArray(d.actions) ? (d.actions as JsonRecord[]) : []
-      const hasListenerAct = acts.some((a) => isRecord(a) && toNumber(a.modelId, speakerId) !== speakerId)
+      const hasListenerAct = acts.some(
+        (a) => isRecord(a) && toNumber(a.modelId, speakerId) !== speakerId
+      )
       const isThinking = isThinkingTalkSnippet(s)
       const emo = toStr(d.emotion).trim()
       const isEmotionalBeat =
@@ -2348,8 +2376,14 @@ function enrichDynamicFocusStaging(
         if (isCutBoundary(sj)) break
         if (sj.type === 'Motion') {
           const mMid = toNumber(isRecord(sj.data) ? sj.data.modelId : -1, -1)
-          const mActs = isRecord(sj.data) && Array.isArray(sj.data.actions) ? (sj.data.actions as JsonRecord[]) : []
-          if ((mMid !== -1 && mMid !== speakerId) || mActs.some((a) => isRecord(a) && toNumber(a.modelId, mMid) !== speakerId)) {
+          const mActs =
+            isRecord(sj.data) && Array.isArray(sj.data.actions)
+              ? (sj.data.actions as JsonRecord[])
+              : []
+          if (
+            (mMid !== -1 && mMid !== speakerId) ||
+            mActs.some((a) => isRecord(a) && toNumber(a.modelId, mMid) !== speakerId)
+          ) {
             break
           }
         }
@@ -2447,7 +2481,9 @@ function enrichDynamicFocusStaging(
   }
 
   if (addedCuts > 0) {
-    warn(`已补充 ${addedCuts} 处「双人同框 <-> 单人 Center 特写」原地淡入淡出切镜，提升 PJSK 镜头节奏`)
+    warn(
+      `已补充 ${addedCuts} 处「双人同框 <-> 单人 Center 特写」原地淡入淡出切镜，提升 PJSK 镜头节奏`
+    )
   }
 }
 
@@ -2570,7 +2606,10 @@ function diversifyActingAndPreTalkMotions(
         let score = 0
         if (rec.facials.includes(f)) score += 12 - rec.facials.indexOf(f) * 2
         if (role === currentRole && currentRole !== 'neutral') score += 6
-        else if (/^face_normal/i.test(currentFacial) && (role === 'serious' || role === 'closed_neutral' || role === 'genuine_smile')) {
+        else if (
+          /^face_normal/i.test(currentFacial) &&
+          (role === 'serious' || role === 'closed_neutral' || role === 'genuine_smile')
+        ) {
           score += 4
         }
         score -= (fCounts.get(f) ?? 0) * 4
@@ -2782,7 +2821,9 @@ function diversifyActingAndPreTalkMotions(
     if (speakerId === -1) {
       prevContent = content
       prevEmotion = emotion
-      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
+      facialSemanticsMod.updateSceneTenseAfterTalk(tenseTracker, content, emotion, {
+        cheerfulScene
+      })
       continue
     }
 
@@ -2853,7 +2894,8 @@ function diversifyActingAndPreTalkMotions(
           !facialSemanticsMod.isCharacterSignatureMotionAllowed(motion, model.path) ||
           /animal/i.test(motion)
         const needsVariety =
-          forbiddenMot || (!isSignatureComedy && (motion === prevM || usedExact >= 1 || usedStem >= 2))
+          forbiddenMot ||
+          (!isSignatureComedy && (motion === prevM || usedExact >= 1 || usedStem >= 2))
         if (needsVariety) {
           const freshM = pickFreshMotion(
             actorId,
@@ -2946,8 +2988,7 @@ function diversifyActingAndPreTalkMotions(
           const partnerWithoutAction = partners.find(
             (pid) => !acts.some((a) => isRecord(a) && toNumber(a.modelId, speakerId) === pid)
           )
-          const isPivotOrLong =
-            Array.from(content).length >= 16 || /[……——！？!?]/.test(content)
+          const isPivotOrLong = Array.from(content).length >= 16 || /[……——！？!?]/.test(content)
           const chosenId =
             partnerWithoutAction !== undefined &&
             tIdx - (lastMotionAtTalk.get(partnerWithoutAction) ?? -10) >= 2 &&

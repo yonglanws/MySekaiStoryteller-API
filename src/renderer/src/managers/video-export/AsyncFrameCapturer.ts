@@ -83,7 +83,9 @@ export class AsyncFrameCapturer {
     this.onFrame = options.onFrame
   }
 
-  setFrameHandler(handler: ((frameIndex: number, data: Uint8Array) => Promise<void>) | undefined): void {
+  setFrameHandler(
+    handler: ((frameIndex: number, data: Uint8Array) => Promise<void>) | undefined
+  ): void {
     this.onFrame = handler
   }
 

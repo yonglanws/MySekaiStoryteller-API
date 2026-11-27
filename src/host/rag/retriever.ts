@@ -219,7 +219,10 @@ export function buildQueries(req: RagRetrieveRequest): string[] {
 }
 
 function buildPrimaryRerankQuery(req: RagRetrieveRequest): string {
-  const castNames = (req.cast ?? []).map((c) => c.name).filter(Boolean).join('、')
+  const castNames = (req.cast ?? [])
+    .map((c) => c.name)
+    .filter(Boolean)
+    .join('、')
   return [req.prompt, req.event, castNames ? `角色:${castNames}` : '', req.location]
     .filter(Boolean)
     .join(' | ')
@@ -585,7 +588,8 @@ export class AdaptiveRagRetriever {
     for (let i = 0; i < this.chunks.length; i++) {
       const chunk = this.chunks[i]
       this.recencyFactors[i] = computeRecencyFactor(chunk)
-      const hay = `${chunk.chars.join(' ')} ${chunk.story} ${chunk.text.slice(0, 180)}`.toLowerCase()
+      const hay =
+        `${chunk.chars.join(' ')} ${chunk.story} ${chunk.text.slice(0, 180)}`.toLowerCase()
       this.chunkHaystacks[i] = hay
       this.chunkCharKeySets[i] = buildChunkCharKeySet(chunk, hay)
       let list = this.scenarioChunksMap.get(chunk.scenarioId)
@@ -693,7 +697,12 @@ export class AdaptiveRagRetriever {
   listAvailableStories(filter: ListStoriesFilter = {}): StoryCatalogSummary[] {
     const byStory = new Map<
       string,
-      StoryCatalogSummary & { _scenarioMap: Map<string, { scenarioId: string; ep?: string; epTitle?: string; chunkCount: number }> }
+      StoryCatalogSummary & {
+        _scenarioMap: Map<
+          string,
+          { scenarioId: string; ep?: string; epTitle?: string; chunkCount: number }
+        >
+      }
     >()
 
     for (const chunk of this.chunks) {
@@ -714,7 +723,8 @@ export class AdaptiveRagRetriever {
         byStory.set(chunk.storyId, item)
       } else {
         if (!item.unit && chunk.unit) item.unit = chunk.unit
-        if (item.eventNum === undefined && chunk.eventNum !== undefined) item.eventNum = chunk.eventNum
+        if (item.eventNum === undefined && chunk.eventNum !== undefined)
+          item.eventNum = chunk.eventNum
         if (!item.isRecent2025_2026 && chunk.isRecent2025_2026) item.isRecent2025_2026 = true
       }
 
@@ -809,7 +819,9 @@ export class AdaptiveRagRetriever {
       options.includeAvailableStories === false
         ? []
         : this.listAvailableStories({
-            query: [req.event, ...(req.cast ?? []).map((c) => c.name)].filter(Boolean).join(' ') || req.prompt,
+            query:
+              [req.event, ...(req.cast ?? []).map((c) => c.name)].filter(Boolean).join(' ') ||
+              req.prompt,
             limit: options.storyCatalogLimit ?? 20
           })
 
@@ -913,10 +925,7 @@ export class AdaptiveRagRetriever {
             } else {
               uncachedScored.push({
                 i,
-                pre:
-                  0.78 * lexScores[i] +
-                  0.16 * charScores[i] +
-                  0.06 * this.recencyFactors[i]
+                pre: 0.78 * lexScores[i] + 0.16 * charScores[i] + 0.06 * this.recencyFactors[i]
               })
             }
           }

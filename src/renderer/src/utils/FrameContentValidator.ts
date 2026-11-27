@@ -147,7 +147,11 @@ export class FrameContentValidator {
           }
         }
         // 早退：已检测到有效亮像素且当前均亮高于黑屏阈值，无需再做额外 readPixels 同步停顿
-        if (hasContent && validPixelCount > 0 && (totalBrightness / validPixelCount) * 100 >= this.BLACK_THRESHOLD) {
+        if (
+          hasContent &&
+          validPixelCount > 0 &&
+          (totalBrightness / validPixelCount) * 100 >= this.BLACK_THRESHOLD
+        ) {
           break
         }
       }

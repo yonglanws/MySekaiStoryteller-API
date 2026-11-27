@@ -455,7 +455,15 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
       message = {
         role: 'assistant',
         content: JSON.stringify({
-          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+          scenes: [
+            {
+              id: 's1',
+              fromLineId: 'l1',
+              background: 'bg_room.jpg',
+              ambient: 'night',
+              activeCast: ['瑞希']
+            }
+          ],
           events: []
         })
       }
@@ -559,7 +567,15 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
       })
     } else if (sys.includes('directStaging')) {
       content = JSON.stringify({
-        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+        scenes: [
+          {
+            id: 's1',
+            fromLineId: 'l1',
+            background: 'bg_room.jpg',
+            ambient: 'night',
+            activeCast: ['瑞希']
+          }
+        ],
         events: []
       })
     } else {
@@ -856,17 +872,26 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
             {
               id: 'tc_1',
               type: 'function',
-              function: { name: 'lookup_character', arguments: JSON.stringify({ characters: ['瑞希', '绘名'] }) }
+              function: {
+                name: 'lookup_character',
+                arguments: JSON.stringify({ characters: ['瑞希', '绘名'] })
+              }
             },
             {
               id: 'tc_2',
               type: 'function',
-              function: { name: 'search_assets', arguments: JSON.stringify({ kinds: ['background', 'se'], queries: ['天台'] }) }
+              function: {
+                name: 'search_assets',
+                arguments: JSON.stringify({ kinds: ['background', 'se'], queries: ['天台'] })
+              }
             },
             {
               id: 'tc_3',
               type: 'function',
-              function: { name: 'search_official_corpus', arguments: JSON.stringify({ query: '天台 瑞希 绘名', stage: 'dialogue' }) }
+              function: {
+                name: 'search_official_corpus',
+                arguments: JSON.stringify({ query: '天台 瑞希 绘名', stage: 'dialogue' })
+              }
             }
           ]
         }
@@ -902,7 +927,15 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
       message = {
         role: 'assistant',
         content: JSON.stringify({
-          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'evening', activeCast: ['瑞希', '绘名'] }],
+          scenes: [
+            {
+              id: 's1',
+              fromLineId: 'l1',
+              background: 'bg_rooftop.jpg',
+              ambient: 'evening',
+              activeCast: ['瑞希', '绘名']
+            }
+          ],
           events: []
         })
       }
@@ -959,7 +992,11 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
     logger
   })
   assert.equal(multiRes.modeUsed, 'native')
-  assert.deepEqual(multiRes.toolCallsUsed, ['lookup_character', 'search_assets', 'search_official_corpus'])
+  assert.deepEqual(multiRes.toolCallsUsed, [
+    'lookup_character',
+    'search_assets',
+    'search_official_corpus'
+  ])
   const talks = multiRes.story.snippets.filter((s) => s.type === 'Talk')
   assert.equal(talks.length, 2)
   assert.equal(talks[0].data.actions[0].facial, 'face_sad_01')
@@ -1327,12 +1364,21 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
             {
               id: 'c1',
               type: 'function',
-              function: { name: 'lookup_character', arguments: JSON.stringify({ characters: ['瑞希', '绘名'] }) }
+              function: {
+                name: 'lookup_character',
+                arguments: JSON.stringify({ characters: ['瑞希', '绘名'] })
+              }
             },
             {
               id: 'c2',
               type: 'function',
-              function: { name: 'search_assets', arguments: JSON.stringify({ kinds: ['background', 'bgm', 'se'], queries: ['天台', '脚步'] }) }
+              function: {
+                name: 'search_assets',
+                arguments: JSON.stringify({
+                  kinds: ['background', 'bgm', 'se'],
+                  queries: ['天台', '脚步']
+                })
+              }
             }
           ]
         }
@@ -1368,7 +1414,15 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
       message = {
         role: 'assistant',
         content: JSON.stringify({
-          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'evening', activeCast: ['瑞希', '绘名'] }],
+          scenes: [
+            {
+              id: 's1',
+              fromLineId: 'l1',
+              background: 'bg_rooftop.jpg',
+              ambient: 'evening',
+              activeCast: ['瑞希', '绘名']
+            }
+          ],
           events: []
         })
       }
@@ -1461,7 +1515,13 @@ test('agentic harness: rejects food/sleep prop motions without cues, flags angry
         name: '晓山瑞希',
         shortName: '瑞希',
         path: '20mizuki_normal/20mizuki_normal.model3.json',
-        motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01', 'w-adult-delicious01', 'w-normal-sleep01'],
+        motions: [
+          'w-normal-default01',
+          'w-normal-nod01',
+          'w-normal-sigh01',
+          'w-adult-delicious01',
+          'w-normal-sleep01'
+        ],
         facials: ['face_normal_01', 'face_smile_01', 'face_sad_01', 'face_trouble_01'],
         defaultMotion: 'w-normal-default01',
         defaultFacial: 'face_normal_01'
@@ -1505,13 +1565,27 @@ test('agentic harness: rejects food/sleep prop motions without cues, flags angry
         type: 'LayoutAppear',
         wait: true,
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: '', facial: 'face_normal_01', moveSpeed: 'Normal' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          motion: '',
+          facial: 'face_normal_01',
+          moveSpeed: 'Normal'
+        }
       },
       {
         type: 'LayoutAppear',
         wait: false,
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: '', facial: 'face_angry_01', moveSpeed: 'Normal' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          motion: '',
+          facial: 'face_angry_01',
+          moveSpeed: 'Normal'
+        }
       },
       {
         type: 'Talk',
@@ -1550,26 +1624,45 @@ test('agentic harness: rejects food/sleep prop motions without cues, flags angry
           emotion: '平静',
           modelId: idx % 2 === 0 ? 1 : 2,
           ...(idx === 41 ? { closeWindowOnFinish: true } : {}),
-          actions: [{ at: 0, modelId: idx % 2 === 0 ? 1 : 2, motion: 'w-normal-nod01', facial: 'face_normal_01' }]
+          actions: [
+            {
+              at: 0,
+              modelId: idx % 2 === 0 ? 1 : 2,
+              motion: 'w-normal-nod01',
+              facial: 'face_normal_01'
+            }
+          ]
         }
       })),
       {
         type: 'LayoutClear',
         wait: true,
         delay: 0,
-        data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, moveSpeed: 'Normal' }
+        data: {
+          modelId: 1,
+          from: { side: 'Left', offset: 0 },
+          to: { side: 'Left', offset: 0 },
+          moveSpeed: 'Normal'
+        }
       },
       {
         type: 'LayoutClear',
         wait: false,
         delay: 0,
-        data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, moveSpeed: 'Normal' }
+        data: {
+          modelId: 2,
+          from: { side: 'Right', offset: 0 },
+          to: { side: 'Right', offset: 0 },
+          moveSpeed: 'Normal'
+        }
       },
       { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
     ]
   }
 
-  const critique = JSON.parse(await toolkit.execute('critique_story_draft', { story: bloatedWithPropLeak }))
+  const critique = JSON.parse(
+    await toolkit.execute('critique_story_draft', { story: bloatedWithPropLeak })
+  )
   assert.ok(
     critique.diagnostics.some((d) => d.code === 'prop_food_motion_without_food_cue'),
     'delicious motion without food cue must be flagged'

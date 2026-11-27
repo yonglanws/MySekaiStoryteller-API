@@ -155,7 +155,9 @@ function resolveMotion3File(
   const clean = modelPath.replace(/\\/g, '/').replace(/^\/+/, '')
   const modelDir = path.dirname(clean)
   if (!modelDir || modelDir === '.') return null
-  const dirCandidates = clean.startsWith('cloud/') ? [modelDir] : [modelDir, path.posix.join('cloud', modelDir)]
+  const dirCandidates = clean.startsWith('cloud/')
+    ? [modelDir]
+    : [modelDir, path.posix.join('cloud', modelDir)]
   for (const dir of dirCandidates) {
     for (const sub of ['motions', 'motion']) {
       const full = path.join(modelsRoot, dir, sub, `${clipName}.motion3.json`)
@@ -659,12 +661,7 @@ function classifyMotionByName(motionName: string): MotionInspection {
       fromMotion3: false
     }
   }
-  if (
-    stem === 'think' ||
-    stem.startsWith('look') ||
-    stem === 'guruguru' ||
-    stem === 'yurayura'
-  ) {
+  if (stem === 'think' || stem.startsWith('look') || stem === 'guruguru' || stem === 'yurayura') {
     return {
       role: 'think',
       label:
@@ -833,7 +830,11 @@ export function inferDramaticContext(params: {
   const questionOrDoubt = /[？?]/.test(text) || /(?:难道|为什么|怎么|是不是)/.test(text)
   const resolve = RESOLVE_TEXT_RE.test(text) && !hasNegCue
   const suppressMockPrevAngry =
-    Boolean(params.cheerfulScene) && emo !== '伤心' && emo !== '害怕' && !apologyOrRegret && !isDespair
+    Boolean(params.cheerfulScene) &&
+    emo !== '伤心' &&
+    emo !== '害怕' &&
+    !apologyOrRegret &&
+    !isDespair
   const tense =
     emo === '生气' ||
     emo === '伤心' ||
@@ -990,7 +991,10 @@ export function isFacialCompatibleWithLine(params: {
     !CRY_DESPAIR_CONFRONT_RE.test(text) &&
     !/(?:出事|糟了|不好了|怎么会|骗人|吓)/.test(text)
   const isTenseEmotion =
-    emo === '生气' || emo === '伤心' || emo === '害怕' || (emo === '惊讶' && !isLightComicListenerSurprise)
+    emo === '生气' ||
+    emo === '伤心' ||
+    emo === '害怕' ||
+    (emo === '惊讶' && !isLightComicListenerSurprise)
   const isNegativeOrConfrontation =
     isTenseEmotion ||
     hasNegCue ||
@@ -1455,9 +1459,7 @@ export function facialRoleToTenseState(role: FacialSemanticRole): ActorTenseStat
 }
 
 export function isGenuineHappyOrReconciliation(content: string): boolean {
-  return (
-    GENUINE_HAPPY_OR_RECONCILIATION_RE.test(content) && !NEGATIVE_TEXT_CUE_RE.test(content)
-  )
+  return GENUINE_HAPPY_OR_RECONCILIATION_RE.test(content) && !NEGATIVE_TEXT_CUE_RE.test(content)
 }
 
 export function isCalmReassureResolution(content: string, emotion: string): boolean {
@@ -1577,10 +1579,7 @@ export function updateSceneTenseAfterTalk(
   }
   if (emo === '平静' || emo === '') {
     tracker.calmRun += 1
-    if (
-      tracker.calmRun >= 2 ||
-      /陪你|吹一会儿|多陪|走吧|涂鸦|明天.*再说/.test(text)
-    ) {
+    if (tracker.calmRun >= 2 || /陪你|吹一会儿|多陪|走吧|涂鸦|明天.*再说/.test(text)) {
       tracker.tense = false
     }
   } else {

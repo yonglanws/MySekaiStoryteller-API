@@ -1217,7 +1217,13 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
           'w-normal-relief01',
           'w-adult-think01'
         ],
-        facials: ['face_normal_01', 'face_smile_01', 'face_smile_02', 'face_smallmouth_01', 'face_closeeye_01'],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_smile_02',
+          'face_smallmouth_01',
+          'face_closeeye_01'
+        ],
         defaultMotion: 'w-normal-default01',
         defaultFacial: 'face_normal_01'
       },
@@ -1237,7 +1243,13 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
           'w-normal-sigh01',
           'w-normal-trouble01'
         ],
-        facials: ['face_normal_01', 'face_smile_01', 'face_smallmouth_01', 'face_trouble_01', 'face_closeeye_01'],
+        facials: [
+          'face_normal_01',
+          'face_smile_01',
+          'face_smallmouth_01',
+          'face_trouble_01',
+          'face_closeeye_01'
+        ],
         defaultMotion: 'w-normal-default01',
         defaultFacial: 'face_normal_01'
       }
@@ -1250,21 +1262,98 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
   })
 
   const snippets = [
-    { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
-    { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
-    { type: 'Telop', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { content: '放学后' } },
+    {
+      type: 'ChangeLayoutMode',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { mode: 'Normal' }
+    },
+    {
+      type: 'ChangeBackgroundImage',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { imageId: 1 }
+    },
+    {
+      type: 'Telop',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: { content: '放学后' }
+    },
     { type: 'PlaceInfo', wait: false, progressBehavior: 'Now', delay: 0, data: { text: '甜品店' } },
-    { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_smile_01' } },
-    { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normal-nod01', facial: 'face_normal_01' } }
+    {
+      type: 'LayoutAppear',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: {
+        modelId: 1,
+        from: { side: 'Left', offset: 0 },
+        to: { side: 'Left', offset: 0 },
+        motion: 'w-normal-nod01',
+        facial: 'face_smile_01'
+      }
+    },
+    {
+      type: 'LayoutAppear',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: {
+        modelId: 2,
+        from: { side: 'Right', offset: 0 },
+        to: { side: 'Right', offset: 0 },
+        motion: 'w-normal-nod01',
+        facial: 'face_normal_01'
+      }
+    }
   ]
 
   // Build 16 calm conversational lines with intentional camera/shake spam and repeated w-normal-nod01 + face_smile_01
   for (let idx = 0; idx < 16; idx++) {
-    if (idx === 2) snippets.push({ type: 'CameraZoom', wait: false, progressBehavior: 'Now', delay: 0, data: { scale: 1.06, duration: 400 } })
-    if (idx === 4) snippets.push({ type: 'CharacterShake', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, axis: 'Y' } })
-    if (idx === 5) snippets.push({ type: 'CameraZoom', wait: false, progressBehavior: 'Now', delay: 0, data: { scale: 1, duration: 400 } })
-    if (idx === 10) snippets.push({ type: 'CameraMove', wait: false, progressBehavior: 'Now', delay: 0, data: { x: 40, y: 0, duration: 400 } })
-    if (idx === 12) snippets.push({ type: 'CameraMove', wait: false, progressBehavior: 'Now', delay: 0, data: { x: 0, y: 0, duration: 400 } })
+    if (idx === 2)
+      snippets.push({
+        type: 'CameraZoom',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { scale: 1.06, duration: 400 }
+      })
+    if (idx === 4)
+      snippets.push({
+        type: 'CharacterShake',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { modelId: 2, axis: 'Y' }
+      })
+    if (idx === 5)
+      snippets.push({
+        type: 'CameraZoom',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { scale: 1, duration: 400 }
+      })
+    if (idx === 10)
+      snippets.push({
+        type: 'CameraMove',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { x: 40, y: 0, duration: 400 }
+      })
+    if (idx === 12)
+      snippets.push({
+        type: 'CameraMove',
+        wait: false,
+        progressBehavior: 'Now',
+        delay: 0,
+        data: { x: 0, y: 0, duration: 400 }
+      })
 
     const isDuoSoloPair = idx === 6 || idx === 7
     const spkId = isDuoSoloPair || idx % 2 === 0 ? 1 : 2
@@ -1284,21 +1373,58 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
               ? '（要是能借着今天的夕阳再找找灵感就好了，肯定没问题的。）'
               : `今天点单的甜品看起来不错，要不要一起再聊聊刚才的设计稿${idx}？`,
         modelId: spkId,
-        actions: [{ at: 0, modelId: spkId, motion: 'w-normal-nod01', facial: spkId === 1 ? 'face_smile_01' : 'face_normal_01' }],
+        actions: [
+          {
+            at: 0,
+            modelId: spkId,
+            motion: 'w-normal-nod01',
+            facial: spkId === 1 ? 'face_smile_01' : 'face_normal_01'
+          }
+        ],
         ...(idx === 15 ? { closeWindowOnFinish: true } : {})
       }
     })
   }
   snippets.push(
-    { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
-    { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
-    { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    {
+      type: 'LayoutClear',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: { modelId: 1, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } }
+    },
+    {
+      type: 'LayoutClear',
+      wait: false,
+      progressBehavior: 'Now',
+      delay: 0,
+      data: { modelId: 2, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } }
+    },
+    {
+      type: 'BlackOut',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: { duration: 600 }
+    }
   )
 
   const raw = {
     models: [
-      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
-      { id: 2, model: '19ena_normal/19ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+      {
+        id: 1,
+        model: '20mizuki_normal/20mizuki_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      },
+      {
+        id: 2,
+        model: '19ena_normal/19ena_normal.model3.json',
+        normal_scale: 2.1,
+        small_scale: 1.8,
+        anchor: 0.5
+      }
     ],
     images: [{ id: 1, image: 'bg_cafe.jpg' }],
     bgm: ['bgm00003.mp3'],
@@ -1307,9 +1433,17 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
 
   const { story, lint } = validateAndFixStory(raw, richView)
   assert.equal(lint.passed, true, `expected lint pass, got: ${lint.issues.join('; ')}`)
-  assert.equal(lint.metrics.slideEntryExitCount, 0, 'dynamic focus cuts must stay 100% in-place fade (no slides)')
+  assert.equal(
+    lint.metrics.slideEntryExitCount,
+    0,
+    'dynamic focus cuts must stay 100% in-place fade (no slides)'
+  )
   assert.equal(lint.metrics.inPlaceAppearShare, 1, 'all LayoutAppear cuts must be in-place fade')
-  assert.equal(lint.metrics.appearMotionClashCount, 0, 'enriched Motion beats must not clash <0.4s after LayoutAppear')
+  assert.equal(
+    lint.metrics.appearMotionClashCount,
+    0,
+    'enriched Motion beats must not clash <0.4s after LayoutAppear'
+  )
 
   assert.equal(
     story.snippets.filter((s) => s.type === 'CameraZoom' || s.type === 'CameraMove').length,
@@ -1330,7 +1464,10 @@ test('C2: calm-scene restraint trims excess camera/shake/opening PlaceInfo, enri
   const centerAppears = story.snippets.filter(
     (s) => s.type === 'LayoutAppear' && s.data?.to?.side === 'Center'
   )
-  assert.ok(centerAppears.length >= 1, 'static duo scene should gain dynamic Center in-place fade cuts')
+  assert.ok(
+    centerAppears.length >= 1,
+    'static duo scene should gain dynamic Center in-place fade cuts'
+  )
 
   const nod01Count = story.snippets.filter(
     (s) =>

@@ -300,9 +300,7 @@ test('config loads agentMaxSteps with MSS_LLM_AGENT_MAX_STEPS override and passe
                 role: 'assistant',
                 content: JSON.stringify({
                   title: '夜晚聊天',
-                  turns: [
-                    { speaker: '瑞希', lines: ['多步代理完成。', '晚安。'] }
-                  ]
+                  turns: [{ speaker: '瑞希', lines: ['多步代理完成。', '晚安。'] }]
                 })
               }
             }
@@ -321,7 +319,15 @@ test('config loads agentMaxSteps with MSS_LLM_AGENT_MAX_STEPS override and passe
               message: {
                 role: 'assistant',
                 content: JSON.stringify({
-                  scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+                  scenes: [
+                    {
+                      id: 's1',
+                      fromLineId: 'l1',
+                      background: 'bg_room.jpg',
+                      ambient: 'night',
+                      activeCast: ['瑞希']
+                    }
+                  ],
                   events: []
                 })
               }
@@ -369,12 +375,18 @@ test('config loads agentMaxSteps with MSS_LLM_AGENT_MAX_STEPS override and passe
     catalog,
     new Logger({ type: 'hidden' })
   )
-  const out = await writer.generate({ prompt: '晚上在房间里聊天', translateForTts: false, targetMinutes: 0.2 })
+  const out = await writer.generate({
+    prompt: '晚上在房间里聊天',
+    translateForTts: false,
+    targetMinutes: 0.2
+  })
   assert.equal(out.meta.pipeline, 'agent')
   assert.equal(out.meta.agentMode, 'native')
   assert.equal(out.meta.agentSteps, 3)
   assert.equal(out.meta.toolCalls.length, 2)
-  assert.ok(out.story.snippets.some((s) => s.type === 'Talk' && s.data.content === '多步代理完成。'))
+  assert.ok(
+    out.story.snippets.some((s) => s.type === 'Talk' && s.data.content === '多步代理完成。')
+  )
 })
 
 test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-char 3-minute scripts', async (t) => {
@@ -440,7 +452,16 @@ test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-cha
       }
     } else if (system.includes('舞台监督')) {
       payload = {
-        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'normal', activeCast: ['瑞希', '绘名'], bgm: 'bgm00003.mp3' }],
+        scenes: [
+          {
+            id: 's1',
+            fromLineId: 'l1',
+            background: 'bg_room.jpg',
+            ambient: 'normal',
+            activeCast: ['瑞希', '绘名'],
+            bgm: 'bgm00003.mp3'
+          }
+        ],
         events: []
       }
     } else if (system.includes('精细演技导演')) {
@@ -453,7 +474,12 @@ test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-cha
       throw new Error(`unexpected stage: ${system.slice(0, 40)}`)
     }
     res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ model: 'mock', choices: [{ message: { content: JSON.stringify(payload) } }] }))
+    res.end(
+      JSON.stringify({
+        model: 'mock',
+        choices: [{ message: { content: JSON.stringify(payload) } }]
+      })
+    )
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -471,8 +497,15 @@ test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-cha
     twoCastCatalog,
     new Logger({ type: 'hidden' })
   )
-  const out = await writer.generate({ prompt: '夜晚瑞希和绘名聊天', targetMinutes: 3, translateForTts: false })
-  assert.ok(!out.meta.stages.some((s) => s.stage === 'dialogue-expand'), '34 lines / 680 chars must not trigger dialogue-expand')
+  const out = await writer.generate({
+    prompt: '夜晚瑞希和绘名聊天',
+    targetMinutes: 3,
+    translateForTts: false
+  })
+  assert.ok(
+    !out.meta.stages.some((s) => s.stage === 'dialogue-expand'),
+    '34 lines / 680 chars must not trigger dialogue-expand'
+  )
   assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 34)
 })
 
@@ -512,10 +545,34 @@ test('staged StoryWriter clears false 伤心 emotion on teasing praise before fa
   }
 
   const lines = [
-    { id: 'l1', speaker: '司', content: '『别难过，我的伙伴们！就算奔向更遥远的舞台！』', emotion: '伤心', caption: '力強く芝居調で語る。' },
-    { id: 'l2', speaker: '司', content: '『所以，笑着送我出发吧！！』', emotion: '伤心', caption: '熱く叫び上げる。' },
-    { id: 'l3', speaker: '类', content: '呵呵呵，很有远行的气势嘛，司。', emotion: '伤心', caption: '感心した様子で柔らかく労う。' },
-    { id: 'l4', speaker: '司', content: '哈哈哈！那是当然的！', emotion: '开心', caption: '晴れやかに笑う。' }
+    {
+      id: 'l1',
+      speaker: '司',
+      content: '『别难过，我的伙伴们！就算奔向更遥远的舞台！』',
+      emotion: '伤心',
+      caption: '力強く芝居調で語る。'
+    },
+    {
+      id: 'l2',
+      speaker: '司',
+      content: '『所以，笑着送我出发吧！！』',
+      emotion: '伤心',
+      caption: '熱く叫び上げる。'
+    },
+    {
+      id: 'l3',
+      speaker: '类',
+      content: '呵呵呵，很有远行的气势嘛，司。',
+      emotion: '伤心',
+      caption: '感心した様子で柔らかく労う。'
+    },
+    {
+      id: 'l4',
+      speaker: '司',
+      content: '哈哈哈！那是当然的！',
+      emotion: '开心',
+      caption: '晴れやかに笑う。'
+    }
   ]
 
   const server = http.createServer(async (req, res) => {
@@ -544,11 +601,25 @@ test('staged StoryWriter clears false 伤心 emotion on teasing praise before fa
       }
     } else if (system.includes('配音导演兼情绪标注员')) {
       payload = {
-        lines: lines.map((l) => ({ id: l.id, emotion: l.emotion, ttsCaption: l.caption, ttsSpeed: 0.95 }))
+        lines: lines.map((l) => ({
+          id: l.id,
+          emotion: l.emotion,
+          ttsCaption: l.caption,
+          ttsSpeed: 0.95
+        }))
       }
     } else if (system.includes('舞台监督')) {
       payload = {
-        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'normal', activeCast: ['类', '司'], bgm: 'bgm00003.mp3' }],
+        scenes: [
+          {
+            id: 's1',
+            fromLineId: 'l1',
+            background: 'bg_room.jpg',
+            ambient: 'normal',
+            activeCast: ['类', '司'],
+            bgm: 'bgm00003.mp3'
+          }
+        ],
         events: []
       }
     } else if (system.includes('精细演技导演')) {
@@ -566,7 +637,12 @@ test('staged StoryWriter clears false 伤心 emotion on teasing praise before fa
       throw new Error(`unexpected stage: ${system.slice(0, 40)}`)
     }
     res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify({ model: 'mock', choices: [{ message: { content: JSON.stringify(payload) } }] }))
+    res.end(
+      JSON.stringify({
+        model: 'mock',
+        choices: [{ message: { content: JSON.stringify(payload) } }]
+      })
+    )
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -585,13 +661,21 @@ test('staged StoryWriter clears false 伤心 emotion on teasing praise before fa
     new Logger({ type: 'hidden' }),
     ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
   )
-  const out = await writer.generate({ prompt: '奇幻舞台排练', targetMinutes: 0.2, translateForTts: false })
+  const out = await writer.generate({
+    prompt: '奇幻舞台排练',
+    targetMinutes: 0.2,
+    translateForTts: false
+  })
   const talks = out.story.snippets.filter((s) => s.type === 'Talk')
   const ruiLine = talks.find((t) => t.data.content.includes('很有远行的气势嘛'))
   assert.ok(ruiLine)
   assert.equal(ruiLine.data.emotion, '开心')
   const ruiAction = ruiLine.data.actions?.find((a) => a.modelId === 9)
-  assert.notEqual(ruiAction?.facial, 'face_cry_01', 'facial must not be forced into face_cry_01 after clearing false 伤心 emotion')
+  assert.notEqual(
+    ruiAction?.facial,
+    'face_cry_01',
+    'facial must not be forced into face_cry_01 after clearing false 伤心 emotion'
+  )
 })
 
 test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2 context, and runs single onlyIssues directorReview', async (t) => {
@@ -643,9 +727,7 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
         role: 'assistant',
         content: JSON.stringify({
           title: '夜谈',
-          turns: [
-            { speaker: '瑞希', lines: ['其实今天有点难过……', '……还是先睡吧。'] }
-          ]
+          turns: [{ speaker: '瑞希', lines: ['其实今天有点难过……', '……还是先睡吧。'] }]
         })
       }
     } else if (sys.includes('情绪标注员')) {
@@ -654,7 +736,12 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
         content: JSON.stringify({
           lines: [
             { id: 'l1', emotion: '伤心', ttsCaption: '少し沈んだ声で話している。', ttsSpeed: 0.94 },
-            { id: 'l2', emotion: '平静', ttsCaption: '静かに落ち着いて話している。', ttsSpeed: 0.98 }
+            {
+              id: 'l2',
+              emotion: '平静',
+              ttsCaption: '静かに落ち着いて話している。',
+              ttsSpeed: 0.98
+            }
           ]
         })
       }
@@ -662,7 +749,15 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
       message = {
         role: 'assistant',
         content: JSON.stringify({
-          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+          scenes: [
+            {
+              id: 's1',
+              fromLineId: 'l1',
+              background: 'bg_room.jpg',
+              ambient: 'night',
+              activeCast: ['瑞希']
+            }
+          ],
           events: []
         })
       }
@@ -705,7 +800,9 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
     } else {
       throw new Error(`unexpected stage: ${sys.slice(0, 60)}`)
     }
-    res.end(JSON.stringify({ model: 'mock-unified', choices: [{ finish_reason: 'stop', message }] }))
+    res.end(
+      JSON.stringify({ model: 'mock-unified', choices: [{ finish_reason: 'stop', message }] })
+    )
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -779,7 +876,9 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
 
   // Verify strict Phase 2 context isolation & single onlyIssues director review
   const reqs = capturedByRun[0]
-  const dialogueReq = reqs.find((r) => (r.messages?.[0]?.content ?? '').includes('第二轮：只写台词稿'))
+  const dialogueReq = reqs.find((r) =>
+    (r.messages?.[0]?.content ?? '').includes('第二轮：只写台词稿')
+  )
   assert.ok(dialogueReq)
   assert.equal(dialogueReq.tools, undefined, 'Phase 2 dialogue request must not expose tools')
   assert.ok(
@@ -794,7 +893,10 @@ test('unified pipeline routes agent/hybrid/agentic identically, isolates Phase 2
   const reviewReqs = reqs.filter((r) => (r.messages?.[0]?.content ?? '').includes('总导演'))
   assert.equal(reviewReqs.length, 1, 'exactly one unified director-review LLM call')
   const reviewUser = reviewReqs[0].messages[1].content
-  assert.ok(reviewUser.includes('onlyIssues'), 'director review includes localized onlyIssues acting hints')
+  assert.ok(
+    reviewUser.includes('onlyIssues'),
+    'director review includes localized onlyIssues acting hints'
+  )
 })
 
 test('CatalogView enforces cloudOnly SE prefix fallback, token-by-token outfit resolution, and AbortSignal propagation', async (t) => {
@@ -892,7 +994,8 @@ test('CatalogView enforces cloudOnly SE prefix fallback, token-by-token outfit r
   )
   await assert.rejects(
     abortWriter.generate({ prompt: '取消测试', pipeline: 'hybrid', signal: ac.signal }),
-    (err) => err instanceof Error && (err.name === 'AbortError' || /abort|cancel/i.test(err.message))
+    (err) =>
+      err instanceof Error && (err.name === 'AbortError' || /abort|cancel/i.test(err.message))
   )
 })
 
@@ -933,7 +1036,15 @@ test('main.ts /api/v1/script/generate forwards directorReview boolean for hybrid
       })
     } else if (sys.includes('directStaging')) {
       content = JSON.stringify({
-        scenes: [{ id: 's1', fromLineId: 'l1', background: 'cloud/bg_01.webp', ambient: 'normal', activeCast: ['瑞希'] }],
+        scenes: [
+          {
+            id: 's1',
+            fromLineId: 'l1',
+            background: 'cloud/bg_01.webp',
+            ambient: 'normal',
+            activeCast: ['瑞希']
+          }
+        ],
         events: []
       })
     } else if (sys.includes('总导演')) {

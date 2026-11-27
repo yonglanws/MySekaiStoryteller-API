@@ -1452,10 +1452,7 @@ export class FramesPipeSession {
         )
       )
     }
-    if (
-      framesInChunk !== undefined &&
-      (!Number.isInteger(framesInChunk) || framesInChunk <= 0)
-    ) {
+    if (framesInChunk !== undefined && (!Number.isInteger(framesInChunk) || framesInChunk <= 0)) {
       return Promise.reject(
         new ExportValidationError(`Invalid frameCount in pipe chunk: ${framesInChunk}`)
       )
@@ -1476,8 +1473,7 @@ export class FramesPipeSession {
           else resolve()
         })
       })
-      this.frames +=
-        this.frameBytes > 0 ? chunk.length / this.frameBytes : (framesInChunk ?? 1)
+      this.frames += this.frameBytes > 0 ? chunk.length / this.frameBytes : (framesInChunk ?? 1)
     })
     this.queue = task.catch((err) => {
       this.error ??= err instanceof Error ? err : new Error(String(err))

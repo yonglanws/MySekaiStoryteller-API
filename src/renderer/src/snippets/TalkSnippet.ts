@@ -314,7 +314,9 @@ export default class TalkSnippet extends BaseSnippet {
       if (!ui.UITalkShowed) {
         await ui.showTextBackground?.()
       } else {
-        ;(ui as ExtendedUILayer & { ensureTalkWindowVisible?: () => void }).ensureTalkWindowVisible?.()
+        ;(
+          ui as ExtendedUILayer & { ensureTalkWindowVisible?: () => void }
+        ).ensureTalkWindowVisible?.()
       }
       await ui.startDisplayContent?.(
         visibleTextLength(talkData.data.typingText || talkData.data.content)

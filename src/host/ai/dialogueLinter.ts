@@ -424,11 +424,7 @@ function personaOocIssues(
         .join('\n')
     : ''
 
-  const isModeActive = (
-    speaker: string,
-    keywordRe: RegExp,
-    roleKeywordRe: RegExp
-  ): boolean => {
+  const isModeActive = (speaker: string, keywordRe: RegExp, roleKeywordRe: RegExp): boolean => {
     if (keywordRe.test(speaker)) return true
     const member = cast.find(
       (m) => m.name === speaker || m.fullName === speaker || (m.role && m.role.includes(speaker))
@@ -439,7 +435,11 @@ function personaOocIssues(
 
     // 当传入全量 personas（同时含基础形态与变体形态）时，绝不能用 canonicalName 回退误激活变体规则；
     // 仅当解析出的目标人设本身是该变体（无基础形态或上下文明确触发变体模式）时才激活。
-    const resolved = resolvePersonaByName(personas, speaker, contextText ? { contextText } : undefined)
+    const resolved = resolvePersonaByName(
+      personas,
+      speaker,
+      contextText ? { contextText } : undefined
+    )
     if (resolved?.isVariant && keywordRe.test(resolved.name)) {
       return true
     }

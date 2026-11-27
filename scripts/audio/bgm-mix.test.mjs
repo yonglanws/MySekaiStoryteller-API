@@ -74,9 +74,9 @@ function loadRendererModule(relPath, mocks = new Map()) {
       }
       throw new Error(`Unexpected dependency "${spec}" from ${norm}`)
     }
-    new vm.Script(`(function(exports, require, module) {\n${out}\n})`, { filename: norm }).runInContext(
-      context
-    )(mod.exports, req, mod)
+    new vm.Script(`(function(exports, require, module) {\n${out}\n})`, {
+      filename: norm
+    }).runInContext(context)(mod.exports, req, mod)
     cache.set(norm, mod.exports)
     return mod.exports
   }
@@ -209,12 +209,23 @@ test('BgmPlan.build and getRustCues honor startTimesIncludeDelay without double-
     new Map([
       [
         path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
-        { ExportLogger: class { info() {} warn() {} error() {} } }
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+            error() {}
+          }
+        }
       ]
     ])
   )
   const snippets = [
-    { type: 'ChangeBgm', wait: false, delay: 0.5, data: { file: 'bgm00003.mp3', stop: false, fadeMs: 400, volume: 0.8 } },
+    {
+      type: 'ChangeBgm',
+      wait: false,
+      delay: 0.5,
+      data: { file: 'bgm00003.mp3', stop: false, fadeMs: 400, volume: 0.8 }
+    },
     { type: 'BgmVolume', wait: false, delay: 0.25, data: { volume: 0.5, duration: 300 } }
   ]
   const plan = new BgmPlan(snippets)
@@ -243,7 +254,13 @@ test('AudioMuxer clamps voice track endTime and floors loop-region BGM cue start
     new Map([
       [
         path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
-        { ExportLogger: class { info() {} warn() {} error() {} } }
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+            error() {}
+          }
+        }
       ]
     ])
   )
@@ -296,7 +313,14 @@ test('AudioMuxer clamps voice track endTime and floors loop-region BGM cue start
   ])
   const bgmLeft = new Float32Array(100)
   const bgmRight = new Float32Array(100)
-  muxer.mixStoryBGM(bgmLeft, bgmRight, 100, 1000, new Float32Array(100).fill(1), new Float32Array(100).fill(1))
+  muxer.mixStoryBGM(
+    bgmLeft,
+    bgmRight,
+    100,
+    1000,
+    new Float32Array(100).fill(1),
+    new Float32Array(100).fill(1)
+  )
   assert.equal(bgmLeft[9], 0)
   assert.ok(bgmLeft[10] > 0, 'Math.floor(10.9) = 10 must receive BGM sample')
 })

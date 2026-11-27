@@ -72,7 +72,14 @@ function createRendererLoader(extraMocks = new Map(), globals = {}) {
       this.filters = [new AlphaFilter(0)]
       this.anchor = { x: 0, y: 0 }
       this.position = { x: 0, y: 0 }
-      this.scale = { x: 1, y: 1, set(v) { this.x = v; this.y = v } }
+      this.scale = {
+        x: 1,
+        y: 1,
+        set(v) {
+          this.x = v
+          this.y = v
+        }
+      }
     }
     update(dt) {
       this.deltaTime += dt
@@ -90,7 +97,9 @@ function createRendererLoader(extraMocks = new Map(), globals = {}) {
   }
 
   const animation = {
-    linear: async (cb) => { cb(1) },
+    linear: async (cb) => {
+      cb(1)
+    },
     delay: async () => {},
     in_ticker: async () => {},
     isExporting: () => exporting,
@@ -149,8 +158,12 @@ function createRendererLoader(extraMocks = new Map(), globals = {}) {
   return {
     load,
     Cubism4InternalModel,
-    setNow: (v) => { nowMs = v },
-    setExporting: (v) => { exporting = v }
+    setNow: (v) => {
+      nowMs = v
+    },
+    setExporting: (v) => {
+      exporting = v
+    }
   }
 }
 
@@ -172,7 +185,9 @@ test('AdvancedModel tryUpdatePlayableBlend advances at 1.0x speed under both 30f
       getParameterIndex: (id) => paramIds.indexOf(id),
       getParameterDefaultValue: (idx) => defaults[idx],
       getParameterValueByIndex: (idx) => values[idx],
-      setParameterValueByIndex: (idx, val) => { values[idx] = val }
+      setParameterValueByIndex: (idx, val) => {
+        values[idx] = val
+      }
     }
 
     const makeEntry = (curveMap) => {
@@ -184,8 +199,12 @@ test('AdvancedModel tryUpdatePlayableBlend advances at 1.0x speed under both 30f
         _fadeOutSeconds: 0.5,
         _motionData: { duration: 2.0, loop: false },
         getDuration: () => 2.0,
-        setFadeInTime(s) { this._fadeInSeconds = s },
-        setFadeOutTime(s) { this._fadeOutSeconds = s },
+        setFadeInTime(s) {
+          this._fadeInSeconds = s
+        },
+        setFadeOutTime(s) {
+          this._fadeOutSeconds = s
+        },
         doUpdateParameters(target, _t, weight) {
           for (const [id, val] of Object.entries(curveMap)) {
             target.setParameterValueByIndex(target.getParameterIndex(id), val, weight)
@@ -196,14 +215,20 @@ test('AdvancedModel tryUpdatePlayableBlend advances at 1.0x speed under both 30f
       return {
         _motion: motion,
         isStarted: () => started,
-        setIsStarted: (v) => { started = v },
+        setIsStarted: (v) => {
+          started = v
+        },
         isFinished: () => false,
         isTriggeredFadeOut: () => false,
         getStartTime: () => startTime,
-        setStartTime: (t) => { startTime = t },
+        setStartTime: (t) => {
+          startTime = t
+        },
         setFadeInStartTime() {},
         getEndTime: () => endTime,
-        setEndTime: (t) => { endTime = t },
+        setEndTime: (t) => {
+          endTime = t
+        },
         getLastCheckEventSeconds: () => 0,
         setLastCheckEventSeconds() {},
         setState() {},
@@ -218,7 +243,9 @@ test('AdvancedModel tryUpdatePlayableBlend advances at 1.0x speed under both 30f
         this._motions.push(motion._entry)
         return this._motions.length
       },
-      stopAllMotions() { this._motions = [] },
+      stopAllMotions() {
+        this._motions = []
+      },
       doUpdateMotion: () => true
     }
     const manager = {
@@ -266,14 +293,24 @@ test('AdvancedModel tryUpdatePlayableBlend advances at 1.0x speed under both 30f
   const res30 = runCrossfadeAtFps(30)
 
   // At t=0.2s (40% of 0.5s): 10 + 0.4 * (30 - 10) = 18.0 at BOTH 30fps and 60fps!
-  assert.ok(Math.abs(res60.angleAt02s - 18) < 1e-5, `60fps @0.2s expected 18, got ${res60.angleAt02s}`)
-  assert.ok(Math.abs(res30.angleAt02s - 18) < 1e-5, `30fps @0.2s expected 18, got ${res30.angleAt02s}`)
+  assert.ok(
+    Math.abs(res60.angleAt02s - 18) < 1e-5,
+    `60fps @0.2s expected 18, got ${res60.angleAt02s}`
+  )
+  assert.ok(
+    Math.abs(res30.angleAt02s - 18) < 1e-5,
+    `30fps @0.2s expected 18, got ${res30.angleAt02s}`
+  )
   // At t=0.5s: blend completes and prunes outgoing entry at BOTH 30fps (15 frames) and 60fps (30 frames)!
   assert.ok(Math.abs(res60.finalAngle - 30) < 1e-5)
   assert.ok(Math.abs(res30.finalAngle - 30) < 1e-5)
   assert.ok(Math.abs(res30.finalArm - 20) < 1e-5)
   assert.equal(res60.remainingEntries, 1)
-  assert.equal(res30.remainingEntries, 1, '30fps 0.5s blend must complete in 15 frames and prune old entry')
+  assert.equal(
+    res30.remainingEntries,
+    1,
+    '30fps 0.5s blend must complete in 15 frames and prune old entry'
+  )
 })
 
 test('AdvancedModel tryUpdatePlayableBlend handles backwards clock reset cleanly during export', () => {
@@ -287,7 +324,9 @@ test('AdvancedModel tryUpdatePlayableBlend handles backwards clock reset cleanly
     getParameterIndex: (id) => (id === 'ParamAngleX' ? 0 : -1),
     getParameterDefaultValue: () => 0,
     getParameterValueByIndex: () => values[0],
-    setParameterValueByIndex: (_idx, val) => { values[0] = val }
+    setParameterValueByIndex: (_idx, val) => {
+      values[0] = val
+    }
   }
   const makeEntry = (val) => {
     let started = false
@@ -306,7 +345,9 @@ test('AdvancedModel tryUpdatePlayableBlend handles backwards clock reset cleanly
     return {
       _motion: motion,
       isStarted: () => started,
-      setIsStarted: (v) => { started = v },
+      setIsStarted: (v) => {
+        started = v
+      },
       isFinished: () => false,
       isTriggeredFadeOut: () => false,
       getStartTime: () => 0,
@@ -323,8 +364,13 @@ test('AdvancedModel tryUpdatePlayableBlend handles backwards clock reset cleanly
   }
   const queue = {
     _motions: [],
-    startMotion(m) { this._motions.push(m._entry); return this._motions.length },
-    stopAllMotions() { this._motions = [] },
+    startMotion(m) {
+      this._motions.push(m._entry)
+      return this._motions.length
+    },
+    stopAllMotions() {
+      this._motions = []
+    },
     doUpdateMotion: () => true
   }
   const manager = { queueManager: queue, _startMotion() {}, isFinished: () => false }
@@ -368,7 +414,9 @@ test('AdvancedModel beforeModelUpdate natural blink and breath run at exact 1.0x
       getParameterIndex: (id) => ['ParamEyeLOpen', 'ParamEyeROpen', 'ParamBreath'].indexOf(id),
       getParameterDefaultValue: () => 1,
       getParameterValueById: (id) => params.get(id) ?? 1,
-      setParameterValueById: (id, val) => { params.set(id, val) },
+      setParameterValueById: (id, val) => {
+        params.set(id, val)
+      },
       getDrawableCount: () => 0,
       getMultiplyColor: () => ({ R: 1, G: 1, B: 1, A: 1 }),
       getScreenColor: () => ({ R: 0, G: 0, B: 0, A: 0 })
@@ -388,7 +436,13 @@ test('AdvancedModel beforeModelUpdate natural blink and breath run at exact 1.0x
       ]
     }
     model.internalModel = internal
-    model.initialize({ id: 21, model: 'test.model3.json', normal_scale: 2, small_scale: 1.8, anchor: 0.5 })
+    model.initialize({
+      id: 21,
+      model: 'test.model3.json',
+      normal_scale: 2,
+      small_scale: 1.8,
+      anchor: 0.5
+    })
     model.parent = {}
     model.visible = true
     model.resetClockBaselines(0)
@@ -427,8 +481,14 @@ test('AdvancedModel beforeModelUpdate natural blink and breath run at exact 1.0x
   assert.ok(Math.abs(r30.breathDelta - 120) < 1e-6, `30fps breathDelta=${r30.breathDelta}`)
 
   // Natural blink completes in ~0.333s (20/60s at 60fps, 10/30s at 30fps), NOT 0.667s!
-  assert.ok(Math.abs(r60.blinkFinishedAtSec - 20 / 60) < 1e-6, `60fps blink=${r60.blinkFinishedAtSec}`)
-  assert.ok(Math.abs(r30.blinkFinishedAtSec - 10 / 30) < 1e-6, `30fps blink=${r30.blinkFinishedAtSec}`)
+  assert.ok(
+    Math.abs(r60.blinkFinishedAtSec - 20 / 60) < 1e-6,
+    `60fps blink=${r60.blinkFinishedAtSec}`
+  )
+  assert.ok(
+    Math.abs(r30.blinkFinishedAtSec - 10 / 30) < 1e-6,
+    `30fps blink=${r30.blinkFinishedAtSec}`
+  )
 })
 
 // ============================================================================
@@ -506,9 +566,29 @@ test('JpegFrameSink reuses batch buffers, lowers raw batch size, and coalesces s
 
   const loader = createRendererLoader(
     new Map([
-      [path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'), { ExportLogger: class { info() {} warn() {} error() {} } }],
-      [path.join(rendererRoot, 'managers/video-export/AsyncFrameCapturer.ts'), { AsyncFrameCapturer: class { async initialize() {} async dispose() {} } }],
-      [path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'), { GpuYuv420Converter: { create: () => fakeConverter } }]
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        {
+          ExportLogger: class {
+            info() {}
+            warn() {}
+            error() {}
+          }
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/AsyncFrameCapturer.ts'),
+        {
+          AsyncFrameCapturer: class {
+            async initialize() {}
+            async dispose() {}
+          }
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'),
+        { GpuYuv420Converter: { create: () => fakeConverter } }
+      ]
     ]),
     { window: fakeWindow }
   )
@@ -538,7 +618,11 @@ test('JpegFrameSink reuses batch buffers, lowers raw batch size, and coalesces s
   const outPath = await sink.finish()
 
   assert.equal(outPath, '/tmp/pipe-1.mp4')
-  assert.equal(enqueueCount, 9, 'GPU enqueueAsync only called for 9 active frames, not 7 static repeats')
+  assert.equal(
+    enqueueCount,
+    9,
+    'GPU enqueueAsync only called for 9 active frames, not 7 static repeats'
+  )
   assert.equal(sink.frames, 16, '9 captured + 5 + 2 repeated = 16 total frames')
   assert.ok(drainCount >= 2)
 
@@ -581,7 +665,15 @@ test('bridgeRoutes electron:frames-stream-repeat repeats only the last single ra
     logger: new Logger({ minLevel: 6 }),
     config: {
       paths: { resources: tmpdir(), output: tmpdir() },
-      video: { fps: 30, width: 4, height: 4, crf: 23, encoder: 'cpu', codec: 'h264', useRustExporter: false },
+      video: {
+        fps: 30,
+        width: 4,
+        height: 4,
+        crf: 23,
+        encoder: 'cpu',
+        codec: 'h264',
+        useRustExporter: false
+      },
       tts: { apiBaseUrl: 'http://127.0.0.1:9880', timeoutMs: 10000 },
       llm: { enabled: false },
       bgm: {},
@@ -742,10 +834,7 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
       format: 'ripper-unpack',
       version: 3,
       bundle: modelBundle,
-      files: [
-        { path: 'v2_01test_normal.model3.json' },
-        { path: 'v2_01test_normal.moc3' }
-      ]
+      files: [{ path: 'v2_01test_normal.model3.json' }, { path: 'v2_01test_normal.moc3' }]
     })
   )
   writeFile(
@@ -771,7 +860,12 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
   }
   writeFile(
     path.join(libDir, primaryMotionBundle, '_ripper.json'),
-    JSON.stringify({ format: 'ripper-unpack', version: 3, bundle: primaryMotionBundle, files: primaryFiles })
+    JSON.stringify({
+      format: 'ripper-unpack',
+      version: 3,
+      bundle: primaryMotionBundle,
+      files: primaryFiles
+    })
   )
 
   // Secondary/fallback motion bundle: 1 overlapping clip (value = 99 -> must lose to primary!) + 5 unique clips
@@ -789,7 +883,12 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
   )
   writeFile(
     path.join(libDir, fallbackMotionBundle, '_ripper.json'),
-    JSON.stringify({ format: 'ripper-unpack', version: 3, bundle: fallbackMotionBundle, files: fallbackFiles })
+    JSON.stringify({
+      format: 'ripper-unpack',
+      version: 3,
+      bundle: fallbackMotionBundle,
+      files: fallbackFiles
+    })
   )
 
   const server = http.createServer((req, res) => {
@@ -841,14 +940,23 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
   assert.equal(resB.motions + resB.facials, 31)
 
   const model3A = JSON.parse(
-    fs.readFileSync(path.join(outA, 'v2_01test_normal/v2_01test_normal/v2_01test_normal.model3.json'), 'utf8')
+    fs.readFileSync(
+      path.join(outA, 'v2_01test_normal/v2_01test_normal/v2_01test_normal.model3.json'),
+      'utf8'
+    )
   )
   const model3B = JSON.parse(
-    fs.readFileSync(path.join(outB, 'v2_01test_normal/v2_01test_normal/v2_01test_normal.model3.json'), 'utf8')
+    fs.readFileSync(
+      path.join(outB, 'v2_01test_normal/v2_01test_normal/v2_01test_normal.model3.json'),
+      'utf8'
+    )
   )
 
   // Key order in model3.json must be strictly deterministic across runs
-  assert.deepEqual(Object.keys(model3A.FileReferences.Motions), Object.keys(model3B.FileReferences.Motions))
+  assert.deepEqual(
+    Object.keys(model3A.FileReferences.Motions),
+    Object.keys(model3B.FileReferences.Motions)
+  )
 
   // Primary v2 bundle must win over optional v1 fallback bundle on overlapping clip name
   const overlapClip = JSON.parse(
@@ -857,7 +965,11 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
       'utf8'
     )
   )
-  assert.equal(overlapClip.Curves[0].Segments[1], 10, 'primary bundle clip value (10) must win over fallback (99)')
+  assert.equal(
+    overlapClip.Curves[0].Segments[1],
+    10,
+    'primary bundle clip value (10) must win over fallback (99)'
+  )
 
   // Fallback-only clip must also be included
   const extraClip = JSON.parse(
@@ -870,5 +982,8 @@ test('moesekai downloadModel parallel async clip writes produce deterministic mo
 
   // No leftover .tmp files in motions directory
   const motionFiles = fs.readdirSync(path.join(outA, 'v2_01test_normal/v2_01test_normal/motions'))
-  assert.equal(motionFiles.some((f) => f.endsWith('.tmp')), false)
+  assert.equal(
+    motionFiles.some((f) => f.endsWith('.tmp')),
+    false
+  )
 })

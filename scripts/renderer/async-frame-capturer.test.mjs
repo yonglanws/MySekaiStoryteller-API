@@ -159,7 +159,14 @@ test('JpegFrameSink uses image2pipe stream when supported and cancels unfinished
   const mocks = new Map([
     [
       './ExportLogger',
-      { ExportLogger: class { info() {} warn() {} error() {} debug() {} } }
+      {
+        ExportLogger: class {
+          info() {}
+          warn() {}
+          error() {}
+          debug() {}
+        }
+      }
     ]
   ])
 
@@ -343,12 +350,21 @@ test('OfficialFilters callers destroy filters and detach tickers cleanly on laye
       ['pixi.js', pixiMock],
       ['../../assets/ui/ui_se_black.svg', 'black.svg'],
       ['../components/SEBlack', { default: FakeSprite }],
-      ['../managers/AnimationManager', { default: { delay: async () => {}, linear: async () => {} } }],
+      [
+        '../managers/AnimationManager',
+        { default: { delay: async () => {}, linear: async () => {} } }
+      ],
       ['../effects/Ease', { runEasedTween: async () => {} }],
       ['../effects/InappTextures', { inappUrl: (p) => p, loadInappTexture: async () => null }],
       ['../effects/OfficialFilters', filtersMock],
-      ['../effects/TriangleParticleEffect', { ScenarioEffectOverlay: FakeContainer, SekaiTransitionParticles: FakeContainer }],
-      [path.join(root, 'src/common/official/timing'), { SEKAI_IN_FADE_DELAY_MS: 250, SEKAI_OUT_FADE_DELAY_MS: 500 }]
+      [
+        '../effects/TriangleParticleEffect',
+        { ScenarioEffectOverlay: FakeContainer, SekaiTransitionParticles: FakeContainer }
+      ],
+      [
+        path.join(root, 'src/common/official/timing'),
+        { SEKAI_IN_FADE_DELAY_MS: 250, SEKAI_OUT_FADE_DELAY_MS: 500 }
+      ]
     ])
   ).default
   const fx = new FxLayer(fakeApp)
@@ -359,8 +375,14 @@ test('OfficialFilters callers destroy filters and detach tickers cleanly on laye
     new Map([
       ['pixi.js', pixiMock],
       ['pixi-live2d-display-advanced', { Cubism2InternalModel: class {} }],
-      [path.join(root, 'src/common/types/Story'), { LayoutModes: { Normal: 'Normal', Three: 'Three' } }],
-      [path.join(root, 'src/common/official/timing'), { MODEL_COLOR_EVENING: [1, 1, 1], MODEL_COLOR_NIGHT: [1, 1, 1] }],
+      [
+        path.join(root, 'src/common/types/Story'),
+        { LayoutModes: { Normal: 'Normal', Three: 'Three' } }
+      ],
+      [
+        path.join(root, 'src/common/official/timing'),
+        { MODEL_COLOR_EVENING: [1, 1, 1], MODEL_COLOR_NIGHT: [1, 1, 1] }
+      ],
       ['../effects/Ease', { evaluateEase: (x) => x }],
       ['../effects/InappTextures', { loadInappTexture: async () => null }],
       ['../effects/OfficialFilters', filtersMock],

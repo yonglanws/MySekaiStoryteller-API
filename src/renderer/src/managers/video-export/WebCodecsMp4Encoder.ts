@@ -240,7 +240,7 @@ export class WebCodecsMp4Encoder {
   }
 
   /**
-   * 探测并验证可用且满足速度阈值的 WebCodecs H.264 编码配置（对齐 ournotes-player）：
+   * 探测并验证可用且满足速度阈值的 WebCodecs H.264 编码配置：
    * - 在 `auto` 模式下拒绝 SwiftShader / llvmpipe / softpipe 等软件 WebGL、CPU 渲染或 Linux+NVIDIA 软编路径；
    * - 优先严格校验 `hardwareAcceleration === 'prefer-hardware'`；
    * - 对候选配置执行 5 帧合成帧编码测速，`auto` 下超过 150ms 自动回落到宿主 frames 管道。

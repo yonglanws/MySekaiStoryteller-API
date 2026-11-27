@@ -123,7 +123,8 @@ const UNIT_PREFIX_LABELS: Array<{ unit: string; prefixes: string[] }> = [
 const UNIT_KEYWORD_PATTERNS: Array<{ unit: string; pattern: RegExp }> = [
   {
     unit: CANONICAL_UNITS.N25,
-    pattern: /25时|25点|25時|nightcord|ニーゴ|无人[的]?世界|没有人的世界|誰もいないセカイ|_night\b|night_/i
+    pattern:
+      /25时|25点|25時|nightcord|ニーゴ|无人[的]?世界|没有人的世界|誰もいないセカイ|_night\b|night_/i
   },
   {
     unit: CANONICAL_UNITS.LN,
@@ -132,11 +133,13 @@ const UNIT_KEYWORD_PATTERNS: Array<{ unit: string; pattern: RegExp }> = [
   },
   {
     unit: CANONICAL_UNITS.MMJ,
-    pattern: /more[\s_-]*more[\s_-]*jump|mmj|モモジャン|舞台[的]?世界|ステージのセカイ|_idol\b|idol_/i
+    pattern:
+      /more[\s_-]*more[\s_-]*jump|mmj|モモジャン|舞台[的]?世界|ステージのセカイ|_idol\b|idol_/i
   },
   {
     unit: CANONICAL_UNITS.VBS,
-    pattern: /vivid[\s_-]*bad[\s_-]*squad|vbs|ビビバス|街头[的]?世界|ストリートのセカイ|_street\b|street_/i
+    pattern:
+      /vivid[\s_-]*bad[\s_-]*squad|vbs|ビビバス|街头[的]?世界|ストリートのセカイ|_street\b|street_/i
   },
   {
     unit: CANONICAL_UNITS.WXS,

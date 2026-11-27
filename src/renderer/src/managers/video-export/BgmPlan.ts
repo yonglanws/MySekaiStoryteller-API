@@ -141,8 +141,12 @@ export class BgmPlan {
         return {
           loopStartMs: parsed.loopStartMs,
           loopEndMs: parsed.loopEndMs,
-          ...(typeof parsed.loopStartSample === 'number' ? { loopStartSample: parsed.loopStartSample } : {}),
-          ...(typeof parsed.loopEndSample === 'number' ? { loopEndSample: parsed.loopEndSample } : {}),
+          ...(typeof parsed.loopStartSample === 'number'
+            ? { loopStartSample: parsed.loopStartSample }
+            : {}),
+          ...(typeof parsed.loopEndSample === 'number'
+            ? { loopEndSample: parsed.loopEndSample }
+            : {}),
           ...(typeof parsed.sampleRate === 'number' ? { sampleRate: parsed.sampleRate } : {})
         }
       }

@@ -111,26 +111,67 @@ ${longRelations}
   - 和司、笑梦、宁宁、类一起排练《巡回剧团的故事》，让所有人绽放笑容。`
 
   const chunks = chunkPersonasToLore([
-    { name: '晓山瑞希', aliases: ['瑞希'], group: '25时', source: '晓山瑞希.md', prompt: mizukiPrompt },
-    { name: '25时初音未来', aliases: [], group: '25时', source: '25时_Nightcord/25时初音未来.md', prompt: mikuN25Prompt },
-    { name: 'WS初音未来', aliases: [], group: 'WS', source: 'Wonderlands_Showtime/WS初音未来.md', prompt: mikuWsPrompt }
+    {
+      name: '晓山瑞希',
+      aliases: ['瑞希'],
+      group: '25时',
+      source: '晓山瑞希.md',
+      prompt: mizukiPrompt
+    },
+    {
+      name: '25时初音未来',
+      aliases: [],
+      group: '25时',
+      source: '25时_Nightcord/25时初音未来.md',
+      prompt: mikuN25Prompt
+    },
+    {
+      name: 'WS初音未来',
+      aliases: [],
+      group: 'WS',
+      source: 'Wonderlands_Showtime/WS初音未来.md',
+      prompt: mikuWsPrompt
+    }
   ])
 
   const mizukiChunks = chunks.filter((c) => c.storyId === 'persona:晓山瑞希')
-  assert.ok(mizukiChunks.length >= 4, 'long memories & relations should split into coherent subsections')
+  assert.ok(
+    mizukiChunks.length >= 4,
+    'long memories & relations should split into coherent subsections'
+  )
 
   const joined = mizukiChunks.map((c) => c.text).join('\n')
-  assert.ok(joined.includes('记忆片段1：') && joined.includes('记忆片段8：'), 'all 重要记忆 items preserved')
-  assert.ok(joined.includes('伙伴1：') && joined.includes('伙伴8：'), 'all 人际关系 items preserved')
+  assert.ok(
+    joined.includes('记忆片段1：') && joined.includes('记忆片段8：'),
+    'all 重要记忆 items preserved'
+  )
+  assert.ok(
+    joined.includes('伙伴1：') && joined.includes('伙伴8：'),
+    'all 人际关系 items preserved'
+  )
   assert.ok(joined.includes('绘名名'), '语言与风格 preserved')
   assert.ok(joined.includes('伙伴困境话题处理方式'), '伙伴困境 preserved')
-  assert.ok(!/安全与防御协议|身份防御|注入防御|核心禁忌|特殊输入处理|IF 用户输入乱码|隐私保护|格式限制|打字聊天感|长度控制/.test(joined), 'chatbot defense & IF-THEN boilerplate skipped')
-  assert.ok(!mizukiChunks.some((c) => c.text.endsWith('…')), 'memories should not be hard-truncated mid-thought')
-  assert.ok(mizukiChunks.every((c) => c.text.length <= 1600), 'persona chunks stay within coherent size window')
+  assert.ok(
+    !/安全与防御协议|身份防御|注入防御|核心禁忌|特殊输入处理|IF 用户输入乱码|隐私保护|格式限制|打字聊天感|长度控制/.test(
+      joined
+    ),
+    'chatbot defense & IF-THEN boilerplate skipped'
+  )
+  assert.ok(
+    !mizukiChunks.some((c) => c.text.endsWith('…')),
+    'memories should not be hard-truncated mid-thought'
+  )
+  assert.ok(
+    mizukiChunks.every((c) => c.text.length <= 1600),
+    'persona chunks stay within coherent size window'
+  )
 
   const n25Miku = chunks.filter((c) => c.storyId === 'persona:25时初音未来')
   const wsMiku = chunks.filter((c) => c.storyId === 'persona:WS初音未来')
-  assert.ok(n25Miku.length >= 1 && wsMiku.length >= 1, 'unit-specific Virtual Singers get distinct storyIds')
+  assert.ok(
+    n25Miku.length >= 1 && wsMiku.length >= 1,
+    'unit-specific Virtual Singers get distinct storyIds'
+  )
   assert.equal(n25Miku[0].unit, '25时')
   assert.equal(wsMiku[0].unit, 'WS')
   assert.ok(n25Miku[0].chars.includes('初音未来') && n25Miku[0].chars.includes('25时初音未来'))
@@ -147,7 +188,11 @@ test('loadPersonaMarkdownDir handles built-in rewritten PJSK persona folder with
   )
   assert.ok(fs.existsSync(builtinDir), `built-in personas/pjsk missing at ${builtinDir}`)
   const personas = loadPersonaMarkdownDir([builtinDir])
-  assert.equal(personas.length, 58, `expected 58 built-in rewritten PJSK persona files, got ${personas.length}`)
+  assert.equal(
+    personas.length,
+    58,
+    `expected 58 built-in rewritten PJSK persona files, got ${personas.length}`
+  )
   const chunks = chunkPersonasToLore(personas)
   assert.ok(chunks.length >= 200)
   for (const c of chunks) {
@@ -164,14 +209,32 @@ test('loadStoryCorpus indexes rich event/episode/unit/synopsis metadata, staging
     fs.writeFileSync(
       path.join(tmpDir, 'events_cn.json'),
       JSON.stringify([
-        { id: 145, name: '荆棘之路通往何处', assetbundleName: 'event_thorns_2024', unit: 'school_refusal', startAt: Date.UTC(2025, 9, 11) }
+        {
+          id: 145,
+          name: '荆棘之路通往何处',
+          assetbundleName: 'event_thorns_2024',
+          unit: 'school_refusal',
+          startAt: Date.UTC(2025, 9, 11)
+        }
       ])
     )
     fs.writeFileSync(
       path.join(tmpDir, 'events_jp.json'),
       JSON.stringify([
-        { id: 145, name: '荊棘の道は何処へ', assetbundleName: 'event_thorns_2024', unit: 'school_refusal', startAt: Date.UTC(2024, 9, 11) },
-        { id: 210, name: '褪せない今を、彩って', assetbundleName: 'event_addcolor_2026', unit: 'school_refusal', startAt: Date.UTC(2026, 6, 9) }
+        {
+          id: 145,
+          name: '荊棘の道は何処へ',
+          assetbundleName: 'event_thorns_2024',
+          unit: 'school_refusal',
+          startAt: Date.UTC(2024, 9, 11)
+        },
+        {
+          id: 210,
+          name: '褪せない今を、彩って',
+          assetbundleName: 'event_addcolor_2026',
+          unit: 'school_refusal',
+          startAt: Date.UTC(2026, 6, 9)
+        }
       ])
     )
     fs.writeFileSync(
@@ -226,7 +289,11 @@ test('loadStoryCorpus indexes rich event/episode/unit/synopsis metadata, staging
           { Action: 1, ReferenceIndex: 0, Delay: 0 }
         ],
         TalkData: [
-          { WindowDisplayName: '瑞希', Body: '对不起，绘绘。', TalkCharacters: [{ Character2dId: 20 }] }
+          {
+            WindowDisplayName: '瑞希',
+            Body: '对不起，绘绘。',
+            TalkCharacters: [{ Character2dId: 20 }]
+          }
         ]
       })
     )
@@ -234,10 +301,21 @@ test('loadStoryCorpus indexes rich event/episode/unit/synopsis metadata, staging
     fs.writeFileSync(
       path.join(tmpDir, 'jp_new_stories', 'event_addcolor_2026__event_210_01.json'),
       JSON.stringify({
-        Snippets: [{ Action: 1, ReferenceIndex: 0, Delay: 0 }, { Action: 1, ReferenceIndex: 1, Delay: 0 }],
+        Snippets: [
+          { Action: 1, ReferenceIndex: 0, Delay: 0 },
+          { Action: 1, ReferenceIndex: 1, Delay: 0 }
+        ],
         TalkData: [
-          { WindowDisplayName: '絵名', Body: '瑞希、ちょっと話があるんだけど', TalkCharacters: [{ Character2dId: 296 }] },
-          { WindowDisplayName: '瑞希', Body: 'えー、なにかな絵名名♪', TalkCharacters: [{ Character2dId: 297 }] }
+          {
+            WindowDisplayName: '絵名',
+            Body: '瑞希、ちょっと話があるんだけど',
+            TalkCharacters: [{ Character2dId: 296 }]
+          },
+          {
+            WindowDisplayName: '瑞希',
+            Body: 'えー、なにかな絵名名♪',
+            TalkCharacters: [{ Character2dId: 297 }]
+          }
         ]
       })
     )
@@ -247,7 +325,13 @@ test('loadStoryCorpus indexes rich event/episode/unit/synopsis metadata, staging
       JSON.stringify({
         AppearCharacters: [{ Character2dId: 19, CostumeType: '19ena_night' }],
         Snippets: [{ Action: 1, ReferenceIndex: 0 }],
-        TalkData: [{ WindowDisplayName: '绘名', Body: '买完画材去喝杯咖啡吧。', TalkCharacters: [{ Character2dId: 19 }] }]
+        TalkData: [
+          {
+            WindowDisplayName: '绘名',
+            Body: '买完画材去喝杯咖啡吧。',
+            TalkCharacters: [{ Character2dId: 19 }]
+          }
+        ]
       })
     )
 
@@ -269,7 +353,12 @@ test('loadStoryCorpus indexes rich event/episode/unit/synopsis metadata, staging
     assert.equal(cnEv.epTitle, '无法传达到的心声')
     assert.equal(cnEv.eventNum, 145)
     assert.ok(cnEv.text.includes('场景:神山高校 天台'))
-    assert.ok(cnEv.text.includes('[BlackOut]') && cnEv.text.includes('[Flashback]') && cnEv.text.includes('[SE]') && cnEv.text.includes('[Wait]'))
+    assert.ok(
+      cnEv.text.includes('[BlackOut]') &&
+        cnEv.text.includes('[Flashback]') &&
+        cnEv.text.includes('[SE]') &&
+        cnEv.text.includes('[Wait]')
+    )
 
     assert.ok(jpEv)
     assert.equal(jpEv.lang, 'jp')
@@ -486,7 +575,11 @@ test('AdaptiveRagRetriever boosts 2025/2026 recency + multi-cast co-occurrence, 
 
   // Recency + co-occurrence: 2026 event_210 outranks 2020 event_02
   const topPlot = structured.sections.canonPlot[0]
-  assert.equal(topPlot.storyId, 'event_210', '2026 JP multi-cast story should rank above 2020 single-cast')
+  assert.equal(
+    topPlot.storyId,
+    'event_210',
+    '2026 JP multi-cast story should rank above 2020 single-cast'
+  )
   assert.ok((topPlot.recencyBoost ?? 0) > 0)
 
   // expandScenarioContext drills down cleanly without duplicate overlap lines
@@ -568,7 +661,8 @@ test('IncrementalSq8Cache reuses unchanged chunkHashes and embeds only new/chang
   seedCache.save()
 
   // Update chunk #1 (changed text) -> 2049 cached + 1 uncached!
-  const changedText = '[活动: 褪せない今を、彩って | 25时 | 2026 | 瑞希, 绘名]\n瑞希: 天台的风好舒服，绘名名！'
+  const changedText =
+    '[活动: 褪せない今を、彩って | 25时 | 2026 | 瑞希, 绘名]\n瑞希: 天台的风好舒服，绘名名！'
   chunks[1] = {
     ...chunks[1],
     storyId: 'event_210',
@@ -610,11 +704,20 @@ test('IncrementalSq8Cache reuses unchanged chunkHashes and embeds only new/chang
   })
 
   assert.equal(res.mode, 'hybrid')
-  assert.ok(res.selectedCount >= 2, 'both pre-cached chunk #0 and newly embedded chunk #1 should be retrieved')
+  assert.ok(
+    res.selectedCount >= 2,
+    'both pre-cached chunk #0 and newly embedded chunk #1 should be retrieved'
+  )
   // Only query vectors + the 1 changed chunk should be embedded (never the 2049 cached chunks!)
-  const docEmbedCall = embedCalls.find((inputs) => inputs.some((t) => t.includes('褪せない今を、彩って')))
+  const docEmbedCall = embedCalls.find((inputs) =>
+    inputs.some((t) => t.includes('褪せない今を、彩って'))
+  )
   assert.ok(docEmbedCall, 'changed chunk should be incrementally embedded')
-  assert.equal(docEmbedCall.length, 1, 'should only embed the 1 changed chunk, reusing 2049 cached chunks')
+  assert.equal(
+    docEmbedCall.length,
+    1,
+    'should only embed the 1 changed chunk, reusing 2049 cached chunks'
+  )
 })
 
 test('AdaptiveRagRetriever propagates AbortError instead of lexical fallback, respects configured dimensions, and safely prunes stale hashes only on full corpus', async (t) => {

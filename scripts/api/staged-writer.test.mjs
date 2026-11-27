@@ -1700,7 +1700,11 @@ test('ResourceCatalog unlocks on-disk audio/bgm/cloud/*.mp3 and audio/se/cloud/*
     fs.writeFileSync(path.join(root, 'audio', 'se', 'cloud', 'se00028_b.mp3'), 'x')
     fs.writeFileSync(path.join(root, 'audio', 'se', 'cloud', 'se00122_b.mp3'), 'x')
 
-    const rc = new ResourceCatalog(new Logger({ type: 'hidden' }), { paths: { resources: root } }, null)
+    const rc = new ResourceCatalog(
+      new Logger({ type: 'hidden' }),
+      { paths: { resources: root } },
+      null
+    )
     const data = rc.get()
 
     assert.ok(data.bgm.includes('cloud/bgm00016.mp3'))
@@ -1754,7 +1758,9 @@ test('applyDirectorReviewPatches preserves ttsText when update_talk content is u
       stageRhythm: 'ok',
       actingNaturalness: 'ok',
       concreteFixes: [],
-      operations: [{ op: 'update_talk', index: 0, content: '今天也一起练吧。', closeWindowOnFinish: true }]
+      operations: [
+        { op: 'update_talk', index: 0, content: '今天也一起练吧。', closeWindowOnFinish: true }
+      ]
     }
   )
   assert.equal(patched.story.snippets[0].data.ttsText, '今日も一緒に練習しよう。😊')
@@ -1771,7 +1777,13 @@ test('applyDirectorReviewPatches preserves ttsText when update_talk content is u
     ]
   }
   const direction = normalizeDirection(
-    { background: 'bg_room.jpg', lines: [{ id: 'l1', facial: 'face_smile_01' }, { id: 'l2', facial: 'face_normal_01' }] },
+    {
+      background: 'bg_room.jpg',
+      lines: [
+        { id: 'l1', facial: 'face_smile_01' },
+        { id: 'l2', facial: 'face_normal_01' }
+      ]
+    },
     view,
     plan,
     dialogue
@@ -1788,11 +1800,16 @@ test('applyDirectorReviewPatches preserves ttsText when update_talk content is u
         activeCast: [1, 2]
       }
     ],
-    events: [{ lineId: 'l1', lineIndex: 0, camera: { kind: 'zoomIn', scale: 1.1, durationMs: 400 } }]
+    events: [
+      { lineId: 'l1', lineIndex: 0, camera: { kind: 'zoomIn', scale: 1.1, durationMs: 400 } }
+    ]
   }
   const story = composeStory(view, plan, dialogue, direction, staging)
   assert.ok(story.snippets.some((s) => s.type === 'CameraZoom' && s.data.scale === 1))
-  assert.ok(!story.snippets.some((s) => s.type === 'CameraMove'), 'zoom reset must not emit spurious CameraMove')
+  assert.ok(
+    !story.snippets.some((s) => s.type === 'CameraMove'),
+    'zoom reset must not emit spurious CameraMove'
+  )
 })
 
 test('buildCastPrompt recognizes 1-char PJSK shortNames in 02_wxs and 04_mmj prompts while rejecting Chinese compound false positives', () => {
@@ -1927,8 +1944,15 @@ test('sharp reprimand lines override stale 开心 emotion across stabilizeEmotio
   })
   assert.equal(aligned.updatedEmotions, 1)
   assert.equal(story.snippets[1].data.emotion, '生气')
-  assert.equal(story.snippets[1].data.ttsText.includes('😊'), false, 'happy emoji stripped from reprimand')
-  assert.ok(!/明る|軽やか/.test(story.snippets[1].data.ttsCaption), 'stale happy ttsCaption replaced')
+  assert.equal(
+    story.snippets[1].data.ttsText.includes('😊'),
+    false,
+    'happy emoji stripped from reprimand'
+  )
+  assert.ok(
+    !/明る|軽やか/.test(story.snippets[1].data.ttsCaption),
+    'stale happy ttsCaption replaced'
+  )
   assert.equal(story.snippets[0].data.emotion, '开心', 'genuine teasing line stays 开心')
 })
 
@@ -2087,7 +2111,11 @@ test('lighthearted teasing praise clears false carryover 伤心 while bitter N25
   assert.equal(story.snippets[0].data.ttsText.includes('🥺'), false)
   assert.equal(story.snippets[0].data.ttsSpecialScene, undefined)
   assert.ok(story.snippets[0].data.ttsSpeed >= 1.0)
-  assert.equal(story.snippets[1].data.emotion, '伤心', 'bitter apology in N25 context must stay 伤心')
+  assert.equal(
+    story.snippets[1].data.emotion,
+    '伤心',
+    'bitter apology in N25 context must stay 伤心'
+  )
 })
 
 test('all 6 staged prompt builders serialize multiline dialogue with escaped \\n instead of " / "', () => {
@@ -2202,10 +2230,7 @@ test('applyDialoguePolish and applyDirectorReviewPatches unescape \\n and clean 
     new Set(['l1', 'l2', 'l3'])
   )
 
-  assert.equal(
-    polished.lines[0].content,
-    '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）'
-  )
+  assert.equal(polished.lines[0].content, '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）')
   assert.equal(polished.lines[1].content, '今天听了 Leo/need 的新歌，\n简直 24/7 循环！')
   assert.equal(polished.lines[2].content, '嗯……\n真的吗？\n那太好了。')
 
@@ -2271,24 +2296,21 @@ test('sanitizeDisplayText and normalizeDialogueLineBreaks clean CJK slash leaks 
     sanitizeDisplayText('（……一聊起画画， / 绘名名的眼神果然跟以前不一样了呢。）'),
     '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）'
   )
-  assert.equal(
-    sanitizeDisplayText('嗯，／原来如此！\\n明天见。'),
-    '嗯，\n原来如此！\n明天见。'
-  )
+  assert.equal(sanitizeDisplayText('嗯，／原来如此！\\n明天见。'), '嗯，\n原来如此！\n明天见。')
   assert.equal(
     sanitizeDisplayText('今天去看 Leo/need 演出，24/7 循环，大概 1/2 票卖完了'),
     '今天去看 Leo/need 演出，24/7 循环，大概 1/2 票卖完了'
   )
   assert.equal(
-    sanitizeDisplayText('选 A/B 方案，链接 https://example.com/a/b 和 http://localhost/test', false),
+    sanitizeDisplayText(
+      '选 A/B 方案，链接 https://example.com/a/b 和 http://localhost/test',
+      false
+    ),
     '选 A/B 方案，链接 https://example.com/a/b 和 http://localhost/test'
   )
   assert.equal(
     normalizeDialogueLineBreaks('cloud/bg_rooftop.jpg 与 早/晚 选项'),
     'cloud/bg_rooftop.jpg 与 早/晚 选项'
   )
-  assert.equal(
-    normalizeDialogueLineBreaks('啊 / 嗯 / 好'),
-    '啊\n嗯\n好'
-  )
+  assert.equal(normalizeDialogueLineBreaks('啊 / 嗯 / 好'), '啊\n嗯\n好')
 })

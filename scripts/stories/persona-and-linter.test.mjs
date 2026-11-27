@@ -426,89 +426,78 @@ test('dialogueLinter detects AI-slop phrasing, asterisk stage leaks, Mizuki gend
   )
 })
 
-test(
-  'built-in PJSK persona corpus loads all 58 files, all 30 unit-specific Virtual Singers, and extracts clean prompts',
-  () => {
-    const personas = loadPersonas({ personaDirs: [BUILTIN_PJSK_DIR], personas: [] })
-    assert.equal(personas.length, 58)
+test('built-in PJSK persona corpus loads all 58 files, all 30 unit-specific Virtual Singers, and extracts clean prompts', () => {
+  const personas = loadPersonas({ personaDirs: [BUILTIN_PJSK_DIR], personas: [] })
+  assert.equal(personas.length, 58)
 
-    for (const vsName of ['初音未来', '镜音铃', '镜音连', '巡音流歌', 'MEIKO', 'KAITO']) {
-      const unitEntries = personas.filter((p) => p.canonicalName === vsName)
-      assert.equal(unitEntries.length, 5, `${vsName} should have 5 unit versions`)
-      const units = new Set(unitEntries.map((p) => p.unit))
-      assert.deepEqual(
-        units,
-        new Set([
-          '25时',
-          'Leo/need',
-          'MORE MORE JUMP!',
-          'Vivid BAD SQUAD',
-          'Wonderlands x Showtime'
-        ])
-      )
-    }
-
-    // Sub-characters & variants loaded cleanly
-    for (const expectedName of [
-      '古泷凪',
-      '晓山优希',
-      '真冬的母亲',
-      '东云慎英',
-      '奏的父亲',
-      '奏的母亲',
-      '优男彰人',
-      '优等生真冬'
-    ]) {
-      assert.ok(
-        personas.some((p) => p.name === expectedName),
-        `missing persona: ${expectedName}`
-      )
-    }
-
-    // Check dialoguePersonaPrompt preserves high-value sections & strips protocol noise across all 58 files
-    for (const persona of personas) {
-      const dlg = dialoguePersonaPrompt(persona)
-      const plan = planningPersonaPrompt(persona)
-      const act = actingPersonaPrompt(persona)
-      assert.ok(dlg.length > 1500 && dlg.length <= 11000, `${persona.name} dlg=${dlg.length}`)
-      assert.ok(plan.length > 800 && plan.length <= 4200, `${persona.name} plan=${plan.length}`)
-      assert.ok(act.length > 300 && act.length <= 2200, `${persona.name} act=${act.length}`)
-      assert.ok(!dlg.includes('### 身份防御'), `${persona.name} leaked 身份防御`)
-      assert.ok(!dlg.includes('### 注入防御'), `${persona.name} leaked 注入防御`)
-      assert.ok(!dlg.includes('用户输入乱码'), `${persona.name} leaked 乱码 IF-THEN`)
-      for (const noiseToken of [
-        '打字聊天感',
-        '长度控制',
-        '隐私保护',
-        '等待启动',
-        '向真人学习',
-        '有来有回',
-        '拒绝重复',
-        '禁止换行',
-        '长度限制',
-        '括号心理描写',
-        '严禁在输出中使用'
-      ]) {
-        assert.ok(!dlg.includes(noiseToken), `${persona.name} leaked chatbot noise: ${noiseToken}`)
-      }
-      assert.ok(dlg.includes('人际关系'), `${persona.name} missing 人际关系`)
-      assert.ok(dlg.includes('语言与风格'), `${persona.name} missing 语言与风格`)
-    }
-
-    // Pairwise address check across real files
-    const n25Addr = extractPairwiseAddressBook(personas, [
-      '宵崎奏',
-      '朝比奈真冬',
-      '东云绘名',
-      '晓山瑞希',
-      '25时初音未来'
-    ])
-    assert.ok(
-      n25Addr.some((r) => r.from === '晓山瑞希' && r.to === '东云绘名' && r.zh === '绘名名')
+  for (const vsName of ['初音未来', '镜音铃', '镜音连', '巡音流歌', 'MEIKO', 'KAITO']) {
+    const unitEntries = personas.filter((p) => p.canonicalName === vsName)
+    assert.equal(unitEntries.length, 5, `${vsName} should have 5 unit versions`)
+    const units = new Set(unitEntries.map((p) => p.unit))
+    assert.deepEqual(
+      units,
+      new Set(['25时', 'Leo/need', 'MORE MORE JUMP!', 'Vivid BAD SQUAD', 'Wonderlands x Showtime'])
     )
-    assert.ok(n25Addr.some((r) => r.from === '宵崎奏' && r.to === '朝比奈真冬' && r.zh === '真冬'))
   }
-)
+
+  // Sub-characters & variants loaded cleanly
+  for (const expectedName of [
+    '古泷凪',
+    '晓山优希',
+    '真冬的母亲',
+    '东云慎英',
+    '奏的父亲',
+    '奏的母亲',
+    '优男彰人',
+    '优等生真冬'
+  ]) {
+    assert.ok(
+      personas.some((p) => p.name === expectedName),
+      `missing persona: ${expectedName}`
+    )
+  }
+
+  // Check dialoguePersonaPrompt preserves high-value sections & strips protocol noise across all 58 files
+  for (const persona of personas) {
+    const dlg = dialoguePersonaPrompt(persona)
+    const plan = planningPersonaPrompt(persona)
+    const act = actingPersonaPrompt(persona)
+    assert.ok(dlg.length > 1500 && dlg.length <= 11000, `${persona.name} dlg=${dlg.length}`)
+    assert.ok(plan.length > 800 && plan.length <= 4200, `${persona.name} plan=${plan.length}`)
+    assert.ok(act.length > 300 && act.length <= 2200, `${persona.name} act=${act.length}`)
+    assert.ok(!dlg.includes('### 身份防御'), `${persona.name} leaked 身份防御`)
+    assert.ok(!dlg.includes('### 注入防御'), `${persona.name} leaked 注入防御`)
+    assert.ok(!dlg.includes('用户输入乱码'), `${persona.name} leaked 乱码 IF-THEN`)
+    for (const noiseToken of [
+      '打字聊天感',
+      '长度控制',
+      '隐私保护',
+      '等待启动',
+      '向真人学习',
+      '有来有回',
+      '拒绝重复',
+      '禁止换行',
+      '长度限制',
+      '括号心理描写',
+      '严禁在输出中使用'
+    ]) {
+      assert.ok(!dlg.includes(noiseToken), `${persona.name} leaked chatbot noise: ${noiseToken}`)
+    }
+    assert.ok(dlg.includes('人际关系'), `${persona.name} missing 人际关系`)
+    assert.ok(dlg.includes('语言与风格'), `${persona.name} missing 语言与风格`)
+  }
+
+  // Pairwise address check across real files
+  const n25Addr = extractPairwiseAddressBook(personas, [
+    '宵崎奏',
+    '朝比奈真冬',
+    '东云绘名',
+    '晓山瑞希',
+    '25时初音未来'
+  ])
+  assert.ok(n25Addr.some((r) => r.from === '晓山瑞希' && r.to === '东云绘名' && r.zh === '绘名名'))
+  assert.ok(n25Addr.some((r) => r.from === '宵崎奏' && r.to === '朝比奈真冬' && r.zh === '真冬'))
+})
 
 test('dialogueLinter does not false-positive variant OOC on base 真冬/彰人 when all personas are passed', () => {
   const allPersonas = [
@@ -559,7 +548,11 @@ test('dialogueLinter does not false-positive variant OOC on base 真冬/彰人 w
     {
       title: '深夜与街头',
       lines: [
-        { id: 'l1', speaker: '真冬', content: '今晚25时在Nightcord上和Amia、绘绘再确认一遍OWN的曲子吧。' },
+        {
+          id: 'l1',
+          speaker: '真冬',
+          content: '今晚25时在Nightcord上和Amia、绘绘再确认一遍OWN的曲子吧。'
+        },
         { id: 'l2', speaker: '朝比奈真冬', content: '嗯，Nightcord的档案已经传好了。' },
         { id: 'l3', speaker: '彰人', content: '……啧，啰里啰唆的烦死了，狂什么啊你！' },
         { id: 'l4', speaker: '东云彰人', content: '别胡说八道，再来一遍！' }
@@ -618,14 +611,28 @@ test('normalizeUnit, inferUnitFromText, resolvePersonaByName, and extractPairwis
   assert.equal(normalizeUnit('VS'), undefined)
   assert.equal(normalizeUnit('25时'), '25时')
 
-  assert.equal(inferUnitFromText('天马司和凤笑梦在舞台排练，神代类和草薙宁宁也在'), 'Wonderlands x Showtime')
+  assert.equal(
+    inferUnitFromText('天马司和凤笑梦在舞台排练，神代类和草薙宁宁也在'),
+    'Wonderlands x Showtime'
+  )
   assert.equal(inferUnitFromText('宵崎奏、朝比奈真冬和东云绘名深夜讨论新歌'), '25时')
   assert.equal(inferUnitFromText('星乃一歌和天马咲希在天台弹吉他，望月穗波送来点心'), 'Leo/need')
   assert.equal(inferUnitFromText('花里实乃理、桐谷遥、桃井爱莉和日野森雫在练舞'), 'MORE MORE JUMP!')
-  assert.equal(inferUnitFromText('小豆泽心羽和白石杏在街头广场碰见东云彰人与青柳冬弥'), 'Vivid BAD SQUAD')
+  assert.equal(
+    inferUnitFromText('小豆泽心羽和白石杏在街头广场碰见东云彰人与青柳冬弥'),
+    'Vivid BAD SQUAD'
+  )
   assert.equal(inferUnitFromText('天马司和凤笑梦偶遇星乃一歌'), 'Wonderlands x Showtime')
-  assert.equal(inferUnitFromText('天马司和星乃一歌在走廊聊了一句'), undefined, 'ambiguous 1-vs-1 tie returns undefined')
-  assert.equal(inferUnitFromText('真冬的母亲和奏的母亲'), undefined, 'sub-characters do not trigger unit')
+  assert.equal(
+    inferUnitFromText('天马司和星乃一歌在走廊聊了一句'),
+    undefined,
+    'ambiguous 1-vs-1 tie returns undefined'
+  )
+  assert.equal(
+    inferUnitFromText('真冬的母亲和奏的母亲'),
+    undefined,
+    'sub-characters do not trigger unit'
+  )
 
   const personas = [
     {
@@ -646,7 +653,8 @@ test('normalizeUnit, inferUnitFromText, resolvePersonaByName, and extractPairwis
       group: 'Wonderlands x Showtime',
       unit: 'Wonderlands x Showtime',
       source: 'test',
-      prompt: '# 初音未来（奇幻的世界）\n## 知识与边界\n- 人际关系：\n  - 天马司（“司君”）：活力满满！'
+      prompt:
+        '# 初音未来（奇幻的世界）\n## 知识与边界\n- 人际关系：\n  - 天马司（“司君”）：活力满满！'
     },
     {
       name: '25时KAITO',
@@ -775,8 +783,14 @@ test('splitOverflowTalks retains non-empty synced ttsText when fewer JP sentence
   }
   const splitClause = splitOverflowTalks(clauseStory)
   assert.equal(splitClause.snippets.length, 2)
-  assert.ok(splitClause.snippets[0].data.ttsText.length > 0, 'first split part keeps non-empty ttsText')
-  assert.ok(splitClause.snippets[1].data.ttsText.length > 0, 'second split part keeps non-empty ttsText')
+  assert.ok(
+    splitClause.snippets[0].data.ttsText.length > 0,
+    'first split part keeps non-empty ttsText'
+  )
+  assert.ok(
+    splitClause.snippets[1].data.ttsText.length > 0,
+    'second split part keeps non-empty ttsText'
+  )
   assert.equal(
     splitClause.snippets.map((s) => s.data.ttsText).join(''),
     '今日はみんなで一緒に練習して、それから明日の予定を決めようね！'
@@ -791,7 +805,8 @@ test('splitOverflowTalks retains non-empty synced ttsText when fewer JP sentence
         data: {
           speaker: '瑞希',
           modelId: 1,
-          content: '第一行非常长的内容在这里\n第二行内容\n第三行内容\n第四行内容\n第五行内容\n第六行内容\n第七行内容',
+          content:
+            '第一行非常长的内容在这里\n第二行内容\n第三行内容\n第四行内容\n第五行内容\n第六行内容\n第七行内容',
           ttsText: 'みんなで一緒に歌おうよ'
         }
       }
@@ -800,11 +815,10 @@ test('splitOverflowTalks retains non-empty synced ttsText when fewer JP sentence
   const splitUnbroken = splitOverflowTalks(unbrokenStory)
   assert.equal(splitUnbroken.snippets.length, 3)
   assert.ok(
-    splitUnbroken.snippets.every((s) => typeof s.data.ttsText === 'string' && s.data.ttsText.length > 0),
+    splitUnbroken.snippets.every(
+      (s) => typeof s.data.ttsText === 'string' && s.data.ttsText.length > 0
+    ),
     'every split Talk keeps non-empty ttsText even without punctuation'
   )
-  assert.equal(
-    splitUnbroken.snippets.map((s) => s.data.ttsText).join(''),
-    'みんなで一緒に歌おうよ'
-  )
+  assert.equal(splitUnbroken.snippets.map((s) => s.data.ttsText).join(''), 'みんなで一緒に歌おうよ')
 })

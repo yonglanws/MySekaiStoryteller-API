@@ -730,7 +730,11 @@ test('FadableSprite, UIText, UISpeakerText, and AdvancedModel eliminate steady-s
   model.cancelPendingActions = () => {}
   model.isVisibilityCurrent = () => true
   model.syncModelFilters()
-  assert.equal(model.filters.length, 2, 'initial alpha=0 with visible=true keeps AlphaFilter + shaderFilter')
+  assert.equal(
+    model.filters.length,
+    2,
+    'initial alpha=0 with visible=true keeps AlphaFilter + shaderFilter'
+  )
 
   const modelShow = model.show(200, false)
   const modelShowTweens = activeTweens.splice(0)

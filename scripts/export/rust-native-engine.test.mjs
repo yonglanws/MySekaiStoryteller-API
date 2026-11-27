@@ -665,7 +665,9 @@ test('WsHub /bridge/ws-bin guards duplicate streamId, surfaces async write error
     const targetStr = String(target)
     if (targetStr.includes('mss-wshub-async-err-')) {
       return {
-        write: async () => { throw new Error('disk full EIO') },
+        write: async () => {
+          throw new Error('disk full EIO')
+        },
         close: async () => {}
       }
     }
@@ -673,7 +675,9 @@ test('WsHub /bridge/ws-bin guards duplicate streamId, surfaces async write error
       await new Promise((r) => setTimeout(r, 30))
       return {
         write: async () => ({ bytesWritten: 0 }),
-        close: async () => { midAwaitCloseCalled = true }
+        close: async () => {
+          midAwaitCloseCalled = true
+        }
       }
     }
     return origOpen.call(fs.promises, target, flags)

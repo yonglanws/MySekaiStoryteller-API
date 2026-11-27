@@ -90,7 +90,11 @@ test('catalog builds from cloud only and resolves names for images and bgm', () 
   assert.equal(data.images[0], 'cloud/bg_a000301')
   assert.equal(data.images[1], 'cloud/bg_unknown')
 
-  assert.equal(data.bgmDetails.length, 2, 'all cloud bgm remain addressable without soundtracks-only drop')
+  assert.equal(
+    data.bgmDetails.length,
+    2,
+    'all cloud bgm remain addressable without soundtracks-only drop'
+  )
   assert.equal(data.bgmDetails[0].name, 'Slapstick!!')
   assert.ok(data.cloud)
 
@@ -185,7 +189,10 @@ test('cloud names attach to matching local background and bgm files without drop
   )
   const data = catalog.get()
   assert.equal(data.images[0], 'bg_a000301.webp')
-  assert.ok(!data.images.includes('cloud/bg_a000301'), 'no cloud/ duplicate for matching local stem')
+  assert.ok(
+    !data.images.includes('cloud/bg_a000301'),
+    'no cloud/ duplicate for matching local stem'
+  )
   assert.ok(data.images.includes('cloud/bg_unknown'), 'other cloud backgrounds stay available')
   assert.equal(data.imageDetails[0].name, '教室')
   assert.equal(data.imageDetails[0].id, 'bg_a000301')

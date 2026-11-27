@@ -103,7 +103,8 @@ export function calibrateRerankScores(
 export function parseRerankResponse(json: unknown): Array<{ index: number; rawScore: number }> {
   if (!json || typeof json !== 'object') return []
   const obj = json as Record<string, unknown>
-  const output = obj.output && typeof obj.output === 'object' ? (obj.output as Record<string, unknown>) : null
+  const output =
+    obj.output && typeof obj.output === 'object' ? (obj.output as Record<string, unknown>) : null
   const rows = Array.isArray(obj.results)
     ? obj.results
     : Array.isArray(obj.data)

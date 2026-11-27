@@ -11,7 +11,7 @@ const WINDOW_SIZE = 8
 const WINDOW_STRIDE = 6
 const PERSONA_CHUNK_MAX_CHARS = 1200
 const PERSONA_CHUNK_HARD_CHARS = 1450
-const FOREIGN_DOMAIN_MARKER = /\b(?:bdon\.moe|ournotes|ournotes-player)\b/i
+const FOREIGN_DOMAIN_MARKER = /\b(?:bdon\.moe|ournotes)\b/i
 
 export interface LoadStoryCorpusOptions {
   localDirs?: string[]
@@ -65,32 +65,327 @@ export interface PjskCharacterLexiconEntry {
 }
 
 export const PJSK_CHARACTER_LEXICON: readonly PjskCharacterLexiconEntry[] = [
-  { key: 'ichika', charIds: [1, 278], cnFull: '星乃一歌', cnShort: '一歌', jpFull: '星乃一歌', jpShort: '一歌', jpKana: 'いちか', romaji: 'ichika', unit: 'L/n', extraAliases: [] },
-  { key: 'saki', charIds: [2, 279], cnFull: '天马咲希', cnShort: '咲希', jpFull: '天馬咲希', jpShort: '咲希', jpKana: 'さき', romaji: 'saki', unit: 'L/n', extraAliases: [] },
-  { key: 'honami', charIds: [3, 280], cnFull: '望月穗波', cnShort: '穗波', jpFull: '望月穂波', jpShort: '穂波', jpKana: 'ほなみ', romaji: 'honami', unit: 'L/n', extraAliases: [] },
-  { key: 'shiho', charIds: [4, 281], cnFull: '日野森志步', cnShort: '志步', jpFull: '日野森志歩', jpShort: '志歩', jpKana: 'しほ', romaji: 'shiho', unit: 'L/n', extraAliases: [] },
-  { key: 'minori', charIds: [5, 282], cnFull: '花里实乃理', cnShort: '实乃理', jpFull: '花里みのり', jpShort: 'みのり', jpKana: 'みのり', romaji: 'minori', unit: 'MMJ', extraAliases: [] },
-  { key: 'haruka', charIds: [6, 283], cnFull: '桐谷遥', cnShort: '遥', jpFull: '桐谷遥', jpShort: '遥', jpKana: 'はるか', romaji: 'haruka', unit: 'MMJ', extraAliases: [], singleCharStrict: true },
-  { key: 'airi', charIds: [7, 284], cnFull: '桃井爱莉', cnShort: '爱莉', jpFull: '桃井愛莉', jpShort: '愛莉', jpKana: 'あいり', romaji: 'airi', unit: 'MMJ', extraAliases: [] },
-  { key: 'shizuku', charIds: [8, 285], cnFull: '日野森雫', cnShort: '雫', jpFull: '日野森雫', jpShort: '雫', jpKana: 'しずく', romaji: 'shizuku', unit: 'MMJ', extraAliases: [], singleCharStrict: true },
-  { key: 'kohane', charIds: [9, 286], cnFull: '小豆泽心羽', cnShort: '心羽', jpFull: '小豆沢こはね', jpShort: 'こはね', jpKana: 'こはね', romaji: 'kohane', unit: 'VBS', extraAliases: [] },
-  { key: 'an', charIds: [10, 287], cnFull: '白石杏', cnShort: '杏', jpFull: '白石杏', jpShort: '杏', jpKana: 'あん', romaji: 'an', unit: 'VBS', extraAliases: [], singleCharStrict: true },
-  { key: 'akito', charIds: [11, 288], cnFull: '东云彰人', cnShort: '彰人', jpFull: '東雲彰人', jpShort: '彰人', jpKana: 'あきと', romaji: 'akito', unit: 'VBS', extraAliases: ['弟弟君'] },
-  { key: 'toya', charIds: [12, 289], cnFull: '青柳冬弥', cnShort: '冬弥', jpFull: '青柳冬弥', jpShort: '冬彌', jpKana: 'とうや', romaji: 'toya', unit: 'VBS', extraAliases: ['touya'] },
-  { key: 'tsukasa', charIds: [13, 290], cnFull: '天马司', cnShort: '司', jpFull: '天馬司', jpShort: '司', jpKana: 'つかさ', romaji: 'tsukasa', unit: 'WS', extraAliases: ['司前辈'], singleCharStrict: true },
-  { key: 'emu', charIds: [14, 291], cnFull: '凤笑梦', cnShort: '笑梦', jpFull: '鳳えむ', jpShort: 'えむ', jpKana: 'えむ', romaji: 'emu', unit: 'WS', extraAliases: ['小梦'] },
-  { key: 'nene', charIds: [15, 292], cnFull: '草薙宁宁', cnShort: '宁宁', jpFull: '草薙寧々', jpShort: '寧々', jpKana: 'ねね', romaji: 'nene', unit: 'WS', extraAliases: ['小宁宁', '草薙同学'] },
-  { key: 'rui', charIds: [16, 293], cnFull: '神代类', cnShort: '类', jpFull: '神代類', jpShort: '類', jpKana: 'るい', romaji: 'rui', unit: 'WS', extraAliases: [], singleCharStrict: true },
-  { key: 'kanade', charIds: [17, 294], cnFull: '宵崎奏', cnShort: '奏', jpFull: '宵崎奏', jpShort: '奏', jpKana: 'かなで', romaji: 'kanade', unit: '25时', extraAliases: [], singleCharStrict: true },
-  { key: 'mafuyu', charIds: [18, 295], cnFull: '朝比奈真冬', cnShort: '真冬', jpFull: '朝比奈まふゆ', jpShort: 'まふゆ', jpKana: 'まふゆ', romaji: 'mafuyu', unit: '25时', extraAliases: [] },
-  { key: 'ena', charIds: [19, 296], cnFull: '东云绘名', cnShort: '绘名', jpFull: '東雲絵名', jpShort: '絵名', jpKana: 'えな', romaji: 'ena', unit: '25时', extraAliases: ['绘绘', '绘名名', 'えななん'] },
-  { key: 'mizuki', charIds: [20, 297], cnFull: '晓山瑞希', cnShort: '瑞希', jpFull: '暁山瑞希', jpShort: '瑞希', jpKana: 'みずき', romaji: 'mizuki', unit: '25时', extraAliases: ['amia'] },
-  { key: 'miku', charIds: [21, 22, 23, 24, 25, 26, 298, 299, 300, 301, 302, 303], cnFull: '初音未来', cnShort: '未来', jpFull: '初音ミク', jpShort: 'ミク', jpKana: 'みく', romaji: 'miku', unit: 'VS', extraAliases: ['初音'], singleCharStrict: true },
-  { key: 'rin', charIds: [27, 304, 305, 306, 307, 308, 309], cnFull: '镜音铃', cnShort: '铃', jpFull: '鏡音リン', jpShort: 'リン', jpKana: 'りん', romaji: 'rin', unit: 'VS', extraAliases: [], singleCharStrict: true },
-  { key: 'len', charIds: [28, 310, 311, 312, 313, 314, 315], cnFull: '镜音连', cnShort: '连', jpFull: '鏡音レン', jpShort: 'レン', jpKana: 'れん', romaji: 'len', unit: 'VS', extraAliases: [], singleCharStrict: true },
-  { key: 'luka', charIds: [29, 316, 317, 318, 319, 320, 321], cnFull: '巡音流歌', cnShort: '流歌', jpFull: '巡音ルカ', jpShort: 'ルカ', jpKana: 'るか', romaji: 'luka', unit: 'VS', extraAliases: [] },
-  { key: 'meiko', charIds: [30, 322, 323, 324, 325, 326, 327], cnFull: 'MEIKO', cnShort: 'MEIKO', jpFull: 'MEIKO', jpShort: 'MEIKO', jpKana: 'めいこ', romaji: 'meiko', unit: 'VS', extraAliases: [] },
-  { key: 'kaito', charIds: [31, 328, 329, 330, 331, 332, 333], cnFull: 'KAITO', cnShort: 'KAITO', jpFull: 'KAITO', jpShort: 'KAITO', jpKana: 'かいと', romaji: 'kaito', unit: 'VS', extraAliases: [] }
+  {
+    key: 'ichika',
+    charIds: [1, 278],
+    cnFull: '星乃一歌',
+    cnShort: '一歌',
+    jpFull: '星乃一歌',
+    jpShort: '一歌',
+    jpKana: 'いちか',
+    romaji: 'ichika',
+    unit: 'L/n',
+    extraAliases: []
+  },
+  {
+    key: 'saki',
+    charIds: [2, 279],
+    cnFull: '天马咲希',
+    cnShort: '咲希',
+    jpFull: '天馬咲希',
+    jpShort: '咲希',
+    jpKana: 'さき',
+    romaji: 'saki',
+    unit: 'L/n',
+    extraAliases: []
+  },
+  {
+    key: 'honami',
+    charIds: [3, 280],
+    cnFull: '望月穗波',
+    cnShort: '穗波',
+    jpFull: '望月穂波',
+    jpShort: '穂波',
+    jpKana: 'ほなみ',
+    romaji: 'honami',
+    unit: 'L/n',
+    extraAliases: []
+  },
+  {
+    key: 'shiho',
+    charIds: [4, 281],
+    cnFull: '日野森志步',
+    cnShort: '志步',
+    jpFull: '日野森志歩',
+    jpShort: '志歩',
+    jpKana: 'しほ',
+    romaji: 'shiho',
+    unit: 'L/n',
+    extraAliases: []
+  },
+  {
+    key: 'minori',
+    charIds: [5, 282],
+    cnFull: '花里实乃理',
+    cnShort: '实乃理',
+    jpFull: '花里みのり',
+    jpShort: 'みのり',
+    jpKana: 'みのり',
+    romaji: 'minori',
+    unit: 'MMJ',
+    extraAliases: []
+  },
+  {
+    key: 'haruka',
+    charIds: [6, 283],
+    cnFull: '桐谷遥',
+    cnShort: '遥',
+    jpFull: '桐谷遥',
+    jpShort: '遥',
+    jpKana: 'はるか',
+    romaji: 'haruka',
+    unit: 'MMJ',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'airi',
+    charIds: [7, 284],
+    cnFull: '桃井爱莉',
+    cnShort: '爱莉',
+    jpFull: '桃井愛莉',
+    jpShort: '愛莉',
+    jpKana: 'あいり',
+    romaji: 'airi',
+    unit: 'MMJ',
+    extraAliases: []
+  },
+  {
+    key: 'shizuku',
+    charIds: [8, 285],
+    cnFull: '日野森雫',
+    cnShort: '雫',
+    jpFull: '日野森雫',
+    jpShort: '雫',
+    jpKana: 'しずく',
+    romaji: 'shizuku',
+    unit: 'MMJ',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'kohane',
+    charIds: [9, 286],
+    cnFull: '小豆泽心羽',
+    cnShort: '心羽',
+    jpFull: '小豆沢こはね',
+    jpShort: 'こはね',
+    jpKana: 'こはね',
+    romaji: 'kohane',
+    unit: 'VBS',
+    extraAliases: []
+  },
+  {
+    key: 'an',
+    charIds: [10, 287],
+    cnFull: '白石杏',
+    cnShort: '杏',
+    jpFull: '白石杏',
+    jpShort: '杏',
+    jpKana: 'あん',
+    romaji: 'an',
+    unit: 'VBS',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'akito',
+    charIds: [11, 288],
+    cnFull: '东云彰人',
+    cnShort: '彰人',
+    jpFull: '東雲彰人',
+    jpShort: '彰人',
+    jpKana: 'あきと',
+    romaji: 'akito',
+    unit: 'VBS',
+    extraAliases: ['弟弟君']
+  },
+  {
+    key: 'toya',
+    charIds: [12, 289],
+    cnFull: '青柳冬弥',
+    cnShort: '冬弥',
+    jpFull: '青柳冬弥',
+    jpShort: '冬彌',
+    jpKana: 'とうや',
+    romaji: 'toya',
+    unit: 'VBS',
+    extraAliases: ['touya']
+  },
+  {
+    key: 'tsukasa',
+    charIds: [13, 290],
+    cnFull: '天马司',
+    cnShort: '司',
+    jpFull: '天馬司',
+    jpShort: '司',
+    jpKana: 'つかさ',
+    romaji: 'tsukasa',
+    unit: 'WS',
+    extraAliases: ['司前辈'],
+    singleCharStrict: true
+  },
+  {
+    key: 'emu',
+    charIds: [14, 291],
+    cnFull: '凤笑梦',
+    cnShort: '笑梦',
+    jpFull: '鳳えむ',
+    jpShort: 'えむ',
+    jpKana: 'えむ',
+    romaji: 'emu',
+    unit: 'WS',
+    extraAliases: ['小梦']
+  },
+  {
+    key: 'nene',
+    charIds: [15, 292],
+    cnFull: '草薙宁宁',
+    cnShort: '宁宁',
+    jpFull: '草薙寧々',
+    jpShort: '寧々',
+    jpKana: 'ねね',
+    romaji: 'nene',
+    unit: 'WS',
+    extraAliases: ['小宁宁', '草薙同学']
+  },
+  {
+    key: 'rui',
+    charIds: [16, 293],
+    cnFull: '神代类',
+    cnShort: '类',
+    jpFull: '神代類',
+    jpShort: '類',
+    jpKana: 'るい',
+    romaji: 'rui',
+    unit: 'WS',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'kanade',
+    charIds: [17, 294],
+    cnFull: '宵崎奏',
+    cnShort: '奏',
+    jpFull: '宵崎奏',
+    jpShort: '奏',
+    jpKana: 'かなで',
+    romaji: 'kanade',
+    unit: '25时',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'mafuyu',
+    charIds: [18, 295],
+    cnFull: '朝比奈真冬',
+    cnShort: '真冬',
+    jpFull: '朝比奈まふゆ',
+    jpShort: 'まふゆ',
+    jpKana: 'まふゆ',
+    romaji: 'mafuyu',
+    unit: '25时',
+    extraAliases: []
+  },
+  {
+    key: 'ena',
+    charIds: [19, 296],
+    cnFull: '东云绘名',
+    cnShort: '绘名',
+    jpFull: '東雲絵名',
+    jpShort: '絵名',
+    jpKana: 'えな',
+    romaji: 'ena',
+    unit: '25时',
+    extraAliases: ['绘绘', '绘名名', 'えななん']
+  },
+  {
+    key: 'mizuki',
+    charIds: [20, 297],
+    cnFull: '晓山瑞希',
+    cnShort: '瑞希',
+    jpFull: '暁山瑞希',
+    jpShort: '瑞希',
+    jpKana: 'みずき',
+    romaji: 'mizuki',
+    unit: '25时',
+    extraAliases: ['amia']
+  },
+  {
+    key: 'miku',
+    charIds: [21, 22, 23, 24, 25, 26, 298, 299, 300, 301, 302, 303],
+    cnFull: '初音未来',
+    cnShort: '未来',
+    jpFull: '初音ミク',
+    jpShort: 'ミク',
+    jpKana: 'みく',
+    romaji: 'miku',
+    unit: 'VS',
+    extraAliases: ['初音'],
+    singleCharStrict: true
+  },
+  {
+    key: 'rin',
+    charIds: [27, 304, 305, 306, 307, 308, 309],
+    cnFull: '镜音铃',
+    cnShort: '铃',
+    jpFull: '鏡音リン',
+    jpShort: 'リン',
+    jpKana: 'りん',
+    romaji: 'rin',
+    unit: 'VS',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'len',
+    charIds: [28, 310, 311, 312, 313, 314, 315],
+    cnFull: '镜音连',
+    cnShort: '连',
+    jpFull: '鏡音レン',
+    jpShort: 'レン',
+    jpKana: 'れん',
+    romaji: 'len',
+    unit: 'VS',
+    extraAliases: [],
+    singleCharStrict: true
+  },
+  {
+    key: 'luka',
+    charIds: [29, 316, 317, 318, 319, 320, 321],
+    cnFull: '巡音流歌',
+    cnShort: '流歌',
+    jpFull: '巡音ルカ',
+    jpShort: 'ルカ',
+    jpKana: 'るか',
+    romaji: 'luka',
+    unit: 'VS',
+    extraAliases: []
+  },
+  {
+    key: 'meiko',
+    charIds: [30, 322, 323, 324, 325, 326, 327],
+    cnFull: 'MEIKO',
+    cnShort: 'MEIKO',
+    jpFull: 'MEIKO',
+    jpShort: 'MEIKO',
+    jpKana: 'めいこ',
+    romaji: 'meiko',
+    unit: 'VS',
+    extraAliases: []
+  },
+  {
+    key: 'kaito',
+    charIds: [31, 328, 329, 330, 331, 332, 333],
+    cnFull: 'KAITO',
+    cnShort: 'KAITO',
+    jpFull: 'KAITO',
+    jpShort: 'KAITO',
+    jpKana: 'かいと',
+    romaji: 'kaito',
+    unit: 'VS',
+    extraAliases: []
+  }
 ]
 
 export interface PjskUnitLexiconEntry {
@@ -165,12 +460,20 @@ const PJSK_DOMAIN_SYNONYMS: ReadonlyArray<{
   terms: string[]
   jpBridge: string
 }> = [
-  { token: 'kw:school_festival', terms: ['文化祭', '文化节', '学園祭', '学园祭'], jpBridge: '学園祭' },
+  {
+    token: 'kw:school_festival',
+    terms: ['文化祭', '文化节', '学園祭', '学园祭'],
+    jpBridge: '学園祭'
+  },
   { token: 'kw:rooftop', terms: ['天台', '屋上'], jpBridge: '屋上' },
   { token: 'kw:sekai', terms: ['世界', 'セカイ', 'sekai'], jpBridge: 'セカイ' },
   { token: 'kw:kamiyama', terms: ['神山高校', '神高'], jpBridge: '神山高校' },
   { token: 'kw:miyamasuzaka', terms: ['宫益坂', '宮益坂', '宫女', '宮女'], jpBridge: '宮益坂' },
-  { token: 'kw:phoenix', terms: ['凤凰乐园', 'フェニックスワンダーランド', '奇幻舞台', 'ワンダーステージ'], jpBridge: 'フェニックスワンダーランド' },
+  {
+    token: 'kw:phoenix',
+    terms: ['凤凰乐园', 'フェニックスワンダーランド', '奇幻舞台', 'ワンダーステージ'],
+    jpBridge: 'フェニックスワンダーランド'
+  },
   { token: 'kw:famires', terms: ['家庭餐厅', 'ファミレス'], jpBridge: 'ファミレス' },
   { token: 'kw:stage_live', terms: ['演出', '公演', 'ライブ', '演唱会'], jpBridge: 'ライブ' },
   { token: 'kw:rehearsal', terms: ['排练', '练习', '練習', 'リハーサル'], jpBridge: '練習' },
@@ -188,11 +491,56 @@ for (const entry of PJSK_CHARACTER_LEXICON) {
 
 /** 21..26 / 298..303 等虚拟歌手分组合 ID -> 组合标签 */
 function resolveVsUnitByCharId(charId: number): string {
-  if (charId === 22 || charId === 299 || charId === 305 || charId === 311 || charId === 317 || charId === 323 || charId === 329) return 'L/n'
-  if (charId === 23 || charId === 300 || charId === 306 || charId === 312 || charId === 318 || charId === 324 || charId === 330) return 'MMJ'
-  if (charId === 24 || charId === 301 || charId === 307 || charId === 313 || charId === 319 || charId === 325 || charId === 331) return 'VBS'
-  if (charId === 25 || charId === 302 || charId === 308 || charId === 314 || charId === 320 || charId === 326 || charId === 332) return 'WS'
-  if (charId === 26 || charId === 303 || charId === 309 || charId === 315 || charId === 321 || charId === 327 || charId === 333) return '25时'
+  if (
+    charId === 22 ||
+    charId === 299 ||
+    charId === 305 ||
+    charId === 311 ||
+    charId === 317 ||
+    charId === 323 ||
+    charId === 329
+  )
+    return 'L/n'
+  if (
+    charId === 23 ||
+    charId === 300 ||
+    charId === 306 ||
+    charId === 312 ||
+    charId === 318 ||
+    charId === 324 ||
+    charId === 330
+  )
+    return 'MMJ'
+  if (
+    charId === 24 ||
+    charId === 301 ||
+    charId === 307 ||
+    charId === 313 ||
+    charId === 319 ||
+    charId === 325 ||
+    charId === 331
+  )
+    return 'VBS'
+  if (
+    charId === 25 ||
+    charId === 302 ||
+    charId === 308 ||
+    charId === 314 ||
+    charId === 320 ||
+    charId === 326 ||
+    charId === 332
+  )
+    return 'WS'
+  if (
+    charId === 26 ||
+    charId === 303 ||
+    charId === 309 ||
+    charId === 315 ||
+    charId === 321 ||
+    charId === 327 ||
+    charId === 333
+  )
+    return '25时'
   return ''
 }
 
@@ -360,7 +708,12 @@ export function resolveCharKeysFromHint(hint: {
         entry.romaji,
         ...entry.extraAliases
       ]
-      if (candidates.some((c) => c && (lower === c.toLowerCase() || (c.length >= 2 && lower.includes(c.toLowerCase()))))) {
+      if (
+        candidates.some(
+          (c) =>
+            c && (lower === c.toLowerCase() || (c.length >= 2 && lower.includes(c.toLowerCase())))
+        )
+      ) {
         keys.add(entry.key)
       }
     }
@@ -467,7 +820,8 @@ export function parseSekaiJsonlBuffer(buf: Buffer, isBrotli = false, filePath = 
           ? obj.is_recent
           : isRecentEvent(eventNum, eventYear, filePath)
       const lang: 'cn' | 'jp' =
-        obj.lang ?? (/[\u3040-\u30ff]/.test(text) && !/[\u4e00-\u9fff]{6,}/.test(text) ? 'jp' : 'cn')
+        obj.lang ??
+        (/[\u3040-\u30ff]/.test(text) && !/[\u4e00-\u9fff]{6,}/.test(text) ? 'jp' : 'cn')
       chunks.push({
         id,
         domain: PJSK_DOMAIN,
@@ -561,7 +915,9 @@ function extractTalkLinesFromJson(doc: unknown): TalkLine[] {
       if (action !== 1) continue
       const talk = talkData[refIdx]
       if (!talk) continue
-      const body = String(talk.Body ?? '').replace(/\r?\n+/g, ' ').trim()
+      const body = String(talk.Body ?? '')
+        .replace(/\r?\n+/g, ' ')
+        .trim()
       if (!body) continue
       if (delay >= 0.8) pendingCues.add('Wait')
 
@@ -596,7 +952,8 @@ function extractTalkLinesFromJson(doc: unknown): TalkLine[] {
     let pendingLocation = ''
     for (const snip of record.snippets as Array<Record<string, unknown>>) {
       const stype = String(snip?.type ?? '')
-      const data = snip?.data && typeof snip.data === 'object' ? (snip.data as Record<string, unknown>) : null
+      const data =
+        snip?.data && typeof snip.data === 'object' ? (snip.data as Record<string, unknown>) : null
       if (stype === 'BlackOut') {
         pendingCues.add('BlackOut')
         continue
@@ -619,7 +976,9 @@ function extractTalkLinesFromJson(doc: unknown): TalkLine[] {
         continue
       }
       if (stype !== 'Talk' || !data) continue
-      const body = String(data.content ?? '').replace(/\r?\n+/g, ' ').trim()
+      const body = String(data.content ?? '')
+        .replace(/\r?\n+/g, ' ')
+        .trim()
       if (!body) continue
       const speaker = String(data.speaker ?? '').trim() || '旁白'
       lines.push({
@@ -658,7 +1017,10 @@ export function chunkPjskScenario(doc: unknown, meta: ChunkScenarioMeta): RagChu
   const lines = extractTalkLinesFromJson(doc)
   if (lines.length === 0) return []
 
-  const allTextSample = lines.slice(0, 12).map((l) => l.body).join(' ')
+  const allTextSample = lines
+    .slice(0, 12)
+    .map((l) => l.body)
+    .join(' ')
   const detectedLang: 'cn' | 'jp' =
     meta.lang ??
     (/[\u3040-\u30ff]/.test(allTextSample) && !/[\u4e00-\u9fff]{6,}/.test(allTextSample)
@@ -696,8 +1058,7 @@ export function chunkPjskScenario(doc: unknown, meta: ChunkScenarioMeta): RagChu
       : meta.epTitle
         ? ` · ${meta.epTitle}`
         : ''
-    const typePrefix =
-      meta.type === 'event' ? '活动: ' : meta.type === 'talk' ? '日常对话: ' : ''
+    const typePrefix = meta.type === 'event' ? '活动: ' : meta.type === 'talk' ? '日常对话: ' : ''
     const headerParts = [`${typePrefix}${meta.story}${epTag}`]
     if (meta.unit) headerParts.push(meta.unit)
     if (meta.eventYear) headerParts.push(String(meta.eventYear))
@@ -767,7 +1128,10 @@ function resolvePersonaIdentity(persona: PersonaEntry): PersonaIdentity {
   // 识别虚拟歌手并按所属世界区分（如 25时初音未来 vs WS初音未来）
   const vsNames = ['初音未来', '镜音铃', '镜音连', '巡音流歌', 'MEIKO', 'KAITO']
   const baseVs = vsNames.find(
-    (v) => persona.name.includes(v) || h1.includes(v) || (v === '初音未来' && persona.name.includes('初音'))
+    (v) =>
+      persona.name.includes(v) ||
+      h1.includes(v) ||
+      (v === '初音未来' && persona.name.includes('初音'))
   )
 
   let canonicalName = persona.name.trim()
@@ -778,9 +1142,10 @@ function resolvePersonaIdentity(persona: PersonaEntry): PersonaIdentity {
     baseName = baseVs
     const cleanUnitPrefix = unit === 'L/n' ? 'LN' : unit
     if (unit && unit !== 'VS') {
-      canonicalName = canonicalName.startsWith(cleanUnitPrefix) || canonicalName.startsWith(unit)
-        ? canonicalName
-        : `${cleanUnitPrefix}${baseVs}`
+      canonicalName =
+        canonicalName.startsWith(cleanUnitPrefix) || canonicalName.startsWith(unit)
+          ? canonicalName
+          : `${cleanUnitPrefix}${baseVs}`
       displayName = sekaiName ? `${canonicalName}（${sekaiName}）` : canonicalName
     } else if (sekaiName) {
       displayName = `${canonicalName}（${sekaiName}）`
@@ -844,7 +1209,10 @@ function cleanPersonaSectionBody(rawSection: string): string {
     if (cleanedLine.trim()) kept.push(cleanedLine)
   }
 
-  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  return kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function splitAtSentenceBoundary(text: string, maxChars: number): string[] {
@@ -889,7 +1257,10 @@ function splitPersonaSectionCoherently(
     return [{ subLabel: '', body: cleaned }]
   }
 
-  const topBlocks = bodyOnly.split(/\n(?=- )/).map((b) => b.trim()).filter(Boolean)
+  const topBlocks = bodyOnly
+    .split(/\n(?=- )/)
+    .map((b) => b.trim())
+    .filter(Boolean)
   const atomicChunks: Array<{ subLabel: string; body: string }> = []
 
   for (const block of topBlocks) {
@@ -906,7 +1277,10 @@ function splitPersonaSectionCoherently(
     const headerLine = subLines[0].trim()
     const subBody = subLines.slice(1).join('\n').trim()
     const subItems = subBody
-      ? subBody.split(/\n(?=\s{2,}-\s+)/).map((s) => s.trimEnd()).filter(Boolean)
+      ? subBody
+          .split(/\n(?=\s{2,}-\s+)/)
+          .map((s) => s.trimEnd())
+          .filter(Boolean)
       : []
 
     if (subItems.length <= 1) {
@@ -938,7 +1312,8 @@ function splitPersonaSectionCoherently(
       if (item.length > PERSONA_CHUNK_HARD_CHARS) {
         flushGroup()
         for (const piece of splitAtSentenceBoundary(item, maxChars)) {
-          const prefix = partIdx === 0 ? headerLine : `${headerLine.replace(/[：:]\s*$/, '')}（续）：`
+          const prefix =
+            partIdx === 0 ? headerLine : `${headerLine.replace(/[：:]\s*$/, '')}（续）：`
           atomicChunks.push({ subLabel: blockLabel, body: `${prefix}\n${piece}` })
           partIdx += 1
         }
@@ -1089,11 +1464,7 @@ function inferYearFromText(...candidates: Array<string | undefined>): number | u
   return undefined
 }
 
-function isRecentEvent(
-  eventNum?: number,
-  eventYear?: number,
-  hintText = ''
-): boolean {
+function isRecentEvent(eventNum?: number, eventYear?: number, hintText = ''): boolean {
   if (eventYear !== undefined && eventYear >= 2025) return true
   if (eventNum !== undefined && eventNum >= 154) return true
   if (/jp_new_stories|2025|2026|5th_anniversary|6th_anniversary/i.test(hintText)) return true
@@ -1125,7 +1496,10 @@ export function loadPjskTitleMaps(rootDir: string): PjskTitleMaps {
   }
 
   // JP 先装（保留真实 JP 开服年份与 201+ 活动），CN 后装以中文标题覆盖
-  for (const [evFile, isCn] of [['events_jp.json', false], ['events_cn.json', true]] as const) {
+  for (const [evFile, isCn] of [
+    ['events_jp.json', false],
+    ['events_cn.json', true]
+  ] as const) {
     for (const item of readJsonArray(evFile)) {
       const name = typeof item.name === 'string' ? item.name.trim() : ''
       if (!name || item.id === undefined || item.id === null) continue
@@ -1143,7 +1517,11 @@ export function loadPjskTitleMaps(rootDir: string): PjskTitleMaps {
       } else if (eventYear === undefined) {
         eventYear = inferYearFromText(asset)
       }
-      if (eventYear === undefined && typeof item.startAt === 'number' && Number.isFinite(item.startAt)) {
+      if (
+        eventYear === undefined &&
+        typeof item.startAt === 'number' &&
+        Number.isFinite(item.startAt)
+      ) {
         // 无 JP 数据时从 CN startAt 近似推算（CN 通常比 JP 晚约 1 年）
         const cnYear = new Date(item.startAt).getUTCFullYear()
         eventYear = cnYear > 2024 ? cnYear - 1 : cnYear
@@ -1173,11 +1551,14 @@ export function loadPjskTitleMaps(rootDir: string): PjskTitleMaps {
       const eventId = Number(item.eventId ?? item.id)
       if (!Number.isFinite(eventId)) continue
       const idStr = String(eventId)
-      const outline = typeof item.outline === 'string' ? item.outline.replace(/\s+/g, ' ').trim() : ''
+      const outline =
+        typeof item.outline === 'string' ? item.outline.replace(/\s+/g, ' ').trim() : ''
       const assetbundleName =
         typeof item.assetbundleName === 'string' ? item.assetbundleName.trim().toLowerCase() : ''
       const bannerCharId =
-        typeof item.bannerGameCharacterUnitId === 'number' ? item.bannerGameCharacterUnitId : undefined
+        typeof item.bannerGameCharacterUnitId === 'number'
+          ? item.bannerGameCharacterUnitId
+          : undefined
       const rawEps = Array.isArray(item.eventStoryEpisodes)
         ? (item.eventStoryEpisodes as Array<Record<string, unknown>>)
         : []
@@ -1225,11 +1606,7 @@ export function loadPjskTitleMaps(rootDir: string): PjskTitleMaps {
   }
 }
 
-export function resolvePjskTitle(
-  baseName: string,
-  type: string,
-  titleMaps: PjskTitleMaps
-): string {
+export function resolvePjskTitle(baseName: string, type: string, titleMaps: PjskTitleMaps): string {
   const lower = baseName.toLowerCase()
   const bundlePrefix = lower.split('__')[0]
   const byBundle = titleMaps.eventByBundle.get(bundlePrefix) ?? titleMaps.eventByBundle.get(lower)
@@ -1335,7 +1712,14 @@ function resolveUnitAndSpecialStoryMeta(
     }
     const epMatch = /_(\d+)$/.exec(tail)
     const ep = epMatch ? String(Number(epMatch[1])) : undefined
-    return { storyId: tail.replace(/_\d+$/, '') || tail, story: unitName, scenarioId: tail, ep, unit, type: 'unit' }
+    return {
+      storyId: tail.replace(/_\d+$/, '') || tail,
+      story: unitName,
+      scenarioId: tail,
+      ep,
+      unit,
+      type: 'unit'
+    }
   }
 
   if (lower.includes('special')) {
@@ -1353,7 +1737,13 @@ function resolveUnitAndSpecialStoryMeta(
       story,
       scenarioId: tail,
       type: 'special',
-      eventYear: year ?? (lower.includes('5th_anniversary') ? 2025 : lower.includes('6th_anniversary') ? 2026 : undefined),
+      eventYear:
+        year ??
+        (lower.includes('5th_anniversary')
+          ? 2025
+          : lower.includes('6th_anniversary')
+            ? 2026
+            : undefined),
       isRecent2025_2026: isRecentEvent(undefined, year, lower),
       unit: resolveUnitLabel(lower) || undefined
     }
@@ -1369,7 +1759,11 @@ function resolveUnitAndSpecialStoryMeta(
   if (eventMeta) {
     const epInfo = titleMaps.episodeByScenarioId.get(tail)
     const epMatch = /_(\d+)$/.exec(tail)
-    const ep = epInfo?.episodeNo ? String(epInfo.episodeNo) : epMatch ? String(Number(epMatch[1])) : undefined
+    const ep = epInfo?.episodeNo
+      ? String(epInfo.episodeNo)
+      : epMatch
+        ? String(Number(epMatch[1]))
+        : undefined
     return {
       storyId: `event_${eventMeta.id}`,
       story: eventMeta.name,
@@ -1397,7 +1791,9 @@ function buildEventSynopsisChunks(
     if (!storyMeta || !storyMeta.outline) continue
     const evMeta =
       titleMaps.eventMetaById.get(String(eventId)) ??
-      (storyMeta.assetbundleName ? titleMaps.eventMetaByBundle.get(storyMeta.assetbundleName) : undefined)
+      (storyMeta.assetbundleName
+        ? titleMaps.eventMetaByBundle.get(storyMeta.assetbundleName)
+        : undefined)
     const eventName = evMeta?.name ?? `event_${eventId}`
     const unit = evMeta?.unit || ''
     const eventYear = evMeta?.eventYear
@@ -1581,7 +1977,9 @@ export function loadPersonaMarkdownDir(dirs: string[]): PersonaEntry[] {
     if (!fs.existsSync(dir) || FOREIGN_DOMAIN_MARKER.test(dir)) return
     let items: fs.Dirent[]
     try {
-      items = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+      items = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name))
     } catch {
       return
     }

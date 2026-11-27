@@ -223,7 +223,11 @@ test('PJSK domain isolation rejects Ournotes schemas/caches and resolves events_
     const chunks = loadStoryCorpus({ localDirs: [tmpDir], includePersonas: false })
     assert.equal(chunks.length, 1, 'only PJSK event should load; Ournotes files must be rejected')
     assert.equal(chunks[0].domain, 'pjsk')
-    assert.equal(chunks[0].story, '荆棘之路', 'events_cn.json title map should resolve human-readable title')
+    assert.equal(
+      chunks[0].story,
+      '荆棘之路',
+      'events_cn.json title map should resolve human-readable title'
+    )
 
     // Cache dir isolates by domain and rejects mismatched domain metadata
     const cacheDir = path.join(tmpDir, 'cache')
@@ -580,7 +584,11 @@ test('AdaptiveRagRetriever performs hybrid retrieval, merges adjacent scenes, en
     stage: 'dialogue',
     cast: [{ name: '瑞希' }, { name: '绘名' }]
   })
-  assert.equal(mockEmbed.requests.length, callsBefore, 'disk SQ8 cache + query LRU should avoid re-embedding')
+  assert.equal(
+    mockEmbed.requests.length,
+    callsBefore,
+    'disk SQ8 cache + query LRU should avoid re-embedding'
+  )
 
   // Unrelated query returns 0 hits (no noise!)
   const unrelated = await retriever.retrieve({
@@ -845,15 +853,24 @@ test('StoryWriter integrates Pass A/B RAG grounding, pairwiseAddress into transl
     retriever
   )
 
-  const result = await writer.generate({ prompt: '放学后瑞希和绘名在天台吹风聊天', targetMinutes: 0.2 })
+  const result = await writer.generate({
+    prompt: '放学后瑞希和绘名在天台吹风聊天',
+    targetMinutes: 0.2
+  })
   assert.ok(captured.castUser.includes('天台的微风'), 'Pass A RAG injected into Stage 1')
   assert.ok(captured.dialogueUser.includes('绘绘'), 'pairwiseAddress injected into Stage 2')
   assert.ok(captured.dialogueUser.includes('天台的微风'), 'Pass B RAG injected into Stage 2')
-  assert.ok(captured.translateSystem.includes('えななん'), 'JP pairwiseAddress injected into ttsTranslator')
+  assert.ok(
+    captured.translateSystem.includes('えななん'),
+    'JP pairwiseAddress injected into ttsTranslator'
+  )
   assert.equal(captured.polishCalled, true, 'dialogue-polish triggered on therapy cliche')
 
   const talks = result.story.snippets.filter((s) => s.type === 'Talk')
-  assert.ok(talks[0].data.content.includes('熬夜画画'), 'accepted surgical polish replaced cliché line')
+  assert.ok(
+    talks[0].data.content.includes('熬夜画画'),
+    'accepted surgical polish replaced cliché line'
+  )
   assert.equal(result.meta.rag?.mode, 'lexical_fallback')
   assert.equal(result.meta.rag?.selectedCount, 1)
 })
