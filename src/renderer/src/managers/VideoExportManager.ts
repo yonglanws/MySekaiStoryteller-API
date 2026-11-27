@@ -27,7 +27,11 @@ import { WebCodecsMp4Encoder, type WebCodecsProbeResult } from './video-export/W
 import { JpegFrameSink } from './video-export/JpegFrameSink'
 import { FrameInterpolator, type FrameSnapshot } from './video-export/FrameInterpolator'
 import { applyTalkPatch } from './video-export/talkPatch'
-import type { VideoExportOptions } from './video-export'
+import {
+  normalizeExportVideoCodec,
+  resolveRemuxCodecPlan,
+  type VideoExportOptions
+} from './video-export/types'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
 import { snippetHasPreFence } from '../../../common/export/snippetSemantics'
@@ -1142,7 +1146,7 @@ export default class VideoExportManager {
             bitrate,
             options.exportFastEncoder ?? 'auto',
             options.gpuRenderer ?? 'auto',
-            options.codec === 'h265' ? 'hevc' : 'h264'
+            normalizeExportVideoCodec(options.codec) ?? 'h264'
           ),
       isSegmentWorker ? Promise.resolve(false) : this.probeRustBackendAvailable()
     ])
@@ -2021,17 +2025,18 @@ export default class VideoExportManager {
         const invokeStart = virtualClock.realTimeMs()
         let finalSegmentPath = segVideoRaw
         let segmentConvert: 'browser' | 'ffmpeg' = 'browser'
-        const segCodec: 'h264' | 'hevc' = sinks.encoder
-          ? sinks.encoder.encoderCodecKind
+        const segPlan = resolveRemuxCodecPlan(options.codec, sinks.encoder)
+        let segCodec: 'h264' | 'hevc' = sinks.encoder
+          ? segPlan.encoderCodec
           : options.codec === 'h264'
             ? 'h264'
             : 'hevc'
 
         if (sinks.encoder) {
-          const needsColorConversion = sinks.encoder.requiresColorConversion === true
           const actualMbps =
             segDurationSec >= 2 ? (sinks.encoder.writtenBytes * 8) / (segDurationSec * 1_000_000) : 0
-          const needsRemux = needsColorConversion || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
+          const needsRemux =
+            segPlan.transcode || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
           if (needsRemux) {
             const remuxRes = await window.electron.ipcRenderer.invoke(
               'electron:api-remux-video-from-files',
@@ -2041,19 +2046,21 @@ export default class VideoExportManager {
                 audioBitrate: options.apiAudioBitrate ?? '128k',
                 frameCount: segFrames,
                 fps: encodeFps,
-                transcode: needsColorConversion,
+                ...(segPlan.targetCodec ? { codec: segPlan.targetCodec } : {}),
+                transcode: segPlan.transcode,
                 inputWidth: outW,
                 inputHeight: outH,
                 crf: options.apiCrf ?? options.crf ?? 23,
                 recordedBitrate: bitrate,
-                inputCodec: segCodec
+                inputCodec: segPlan.encoderCodec
               }
             )
             if (!remuxRes?.success) {
               throw new Error(remuxRes?.error || 'Segment video remux failed')
             }
             finalSegmentPath = segmentRange.outputPath
-            segmentConvert = 'ffmpeg'
+            segCodec = segPlan.finalCodec
+            segmentConvert = segPlan.needsColorConversion ? 'ffmpeg' : 'browser'
           }
         } else if (sinks.jpegSink?.isPipeMode) {
           const remuxRes = await window.electron.ipcRenderer.invoke(
@@ -2493,11 +2500,7 @@ export default class VideoExportManager {
       if (sinks.encoder || sinks.jpegSink?.isPipeMode) {
         // WebCodecs 的硬件编码器经常输出 full-range/yuvj420p 且带 sRGB TRC；
         // 此时必须让宿主按统一 BT.709/tv 滤镜链重编码，不能直接 copy 容器。
-        const needsColorConversion = sinks.encoder?.requiresColorConversion === true
-        const encoderCodec = sinks.encoder?.encoderCodecKind ?? (options.codec === 'h265' ? 'hevc' : 'h264')
-        const targetCodec = options.codec === 'h265' ? 'hevc' : options.codec === 'h264' ? 'h264' : undefined
-        const needsCodecTranscode = !!targetCodec && !!sinks.encoder && encoderCodec !== targetCodec
-        const needsTranscode = needsColorConversion || needsCodecTranscode
+        const codecPlan = resolveRemuxCodecPlan(options.codec, sinks.encoder)
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -2507,25 +2510,24 @@ export default class VideoExportManager {
             audioBitrate,
             frameCount: finalFrameCount,
             fps: encodeFps,
-            ...(targetCodec ? { codec: targetCodec } : {}),
+            ...(codecPlan.targetCodec ? { codec: codecPlan.targetCodec } : {}),
             ...(sinks.encoder
               ? {
-                  transcode: needsTranscode,
+                  transcode: codecPlan.transcode,
                   inputWidth: outW,
                   inputHeight: outH,
                   crf: options.apiCrf ?? options.crf ?? 23,
                   recordedBitrate: bitrate,
-                  inputCodec: encoderCodec
+                  inputCodec: codecPlan.encoderCodec
                 }
               : {})
           }
         )
         if (sinks.encoder) {
-          const finalCodec = targetCodec ?? encoderCodec
-          this.lastEncoderLabel = needsTranscode
-            ? `webcodecs-${encoderCodec}+${finalCodec === 'hevc' ? 'hevc_qsv' : 'ffmpeg'}`
-            : `webcodecs-${encoderCodec}`
-          this.lastConvert = needsColorConversion ? 'ffmpeg' : 'browser'
+          this.lastEncoderLabel = codecPlan.transcode
+            ? `webcodecs-${codecPlan.encoderCodec}+${codecPlan.finalCodec === 'hevc' ? 'hevc_qsv' : 'ffmpeg'}`
+            : `webcodecs-${codecPlan.encoderCodec}`
+          this.lastConvert = codecPlan.needsColorConversion ? 'ffmpeg' : 'browser'
         }
       } else {
         const framesDir = sinks.framesDir || videoFilePath

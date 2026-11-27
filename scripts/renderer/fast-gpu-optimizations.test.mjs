@@ -761,3 +761,47 @@ test('GpuYuv420Converter submits frame N DMA and flushes before harvesting oldes
   assert.deepEqual(ops, ['readPixels_pbo', 'fenceSync', 'flush', 'clientWaitSync', 'getBufferSubData'])
   conv.dispose()
 })
+
+test('normalizeExportVideoCodec & resolveRemuxCodecPlan treat hevc and h265 identically', () => {
+  const { normalizeExportVideoCodec, resolveRemuxCodecPlan } = loadRendererModule(
+    'managers/video-export/types.ts'
+  )
+
+  assert.equal(normalizeExportVideoCodec('hevc'), 'hevc')
+  assert.equal(normalizeExportVideoCodec('h265'), 'hevc')
+  assert.equal(normalizeExportVideoCodec('h264'), 'h264')
+  assert.equal(normalizeExportVideoCodec(undefined), undefined)
+
+  const hevcFromH264 = resolveRemuxCodecPlan('hevc', {
+    encoderCodecKind: 'h264',
+    requiresColorConversion: false
+  })
+  assert.deepEqual({ ...hevcFromH264 }, {
+    targetCodec: 'hevc',
+    encoderCodec: 'h264',
+    finalCodec: 'hevc',
+    needsColorConversion: false,
+    needsCodecTranscode: true,
+    transcode: true
+  })
+
+  const h265FromH264 = resolveRemuxCodecPlan('h265', {
+    encoderCodecKind: 'h264',
+    requiresColorConversion: false
+  })
+  assert.deepEqual({ ...h265FromH264 }, { ...hevcFromH264 })
+
+  const h264Copy = resolveRemuxCodecPlan('h264', {
+    encoderCodecKind: 'h264',
+    requiresColorConversion: false
+  })
+  assert.equal(h264Copy.transcode, false)
+  assert.equal(h264Copy.finalCodec, 'h264')
+
+  const hevcNative = resolveRemuxCodecPlan('hevc', {
+    encoderCodecKind: 'hevc',
+    requiresColorConversion: false
+  })
+  assert.equal(hevcNative.transcode, false)
+  assert.equal(hevcNative.finalCodec, 'hevc')
+})
