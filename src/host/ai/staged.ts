@@ -45,6 +45,9 @@ import {
   isSmileLikeFacial,
   pickMoodMatchedFacial
 } from './facialSemantics'
+import { normalizeDialogueLineBreaks } from './validate'
+
+export { normalizeDialogueLineBreaks }
 
 /**
  * 五阶段 Project SEKAI 导演流水线：
@@ -335,11 +338,12 @@ const oneLine = (value: unknown, limit: number): string =>
 const displayWidth = (text: string): number =>
   Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0)! >= 0x2e80 ? 1 : 0.5), 0)
 
+const formatDialogueLineForPrompt = (text: string): string =>
+  text.replace(/\r\n?/g, '\n').replace(/\n/g, '\\n')
+
 const cleanText = (value: unknown): string => {
   const text = normalizePjskTerminology(
-    str(value)
-      .replace(/\r\n?/g, '\n')
-      .replace(/\\n/g, '\n')
+    normalizeDialogueLineBreaks(str(value))
       .replace(/[ \t]+$/gm, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim()
@@ -2679,7 +2683,7 @@ export function buildEmotionPrompt(
   const defaultEmotion = labels.includes('平静') ? '平静' : (labels[0] ?? '平静')
   const strongLabels = labels.filter((label) => label !== defaultEmotion)
   const lineLines = dialogue.lines
-    .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
+    .map((line) => `- ${line.id} ${line.speaker}：${formatDialogueLineForPrompt(line.content)}`)
     .join('\n')
 
   const cast = plan.cast
@@ -3283,9 +3287,9 @@ export function buildDialoguePolishPrompt(
       const reasons = (issueMap.get(id) ?? []).join('；')
       return [
         `### 目标句 ${curr.id}（${curr.speaker}）`,
-        prev ? `前一句（${prev.speaker}）：${prev.content.replace(/\n/g, ' / ')}` : '',
-        `原句：${curr.content.replace(/\n/g, ' / ')}`,
-        next ? `后一句（${next.speaker}）：${next.content.replace(/\n/g, ' / ')}` : '',
+        prev ? `前一句（${prev.speaker}）：${formatDialogueLineForPrompt(prev.content)}` : '',
+        `原句：${formatDialogueLineForPrompt(curr.content)}`,
+        next ? `后一句（${next.speaker}）：${formatDialogueLineForPrompt(next.content)}` : '',
         `问题：${reasons}`
       ]
         .filter(Boolean)
@@ -3338,6 +3342,7 @@ ${lineBlocks}
 - 若问题写着「用户明确要求」或「官方钩子」，就把缺失的人/物/事自然带进这一句（用具体名词，不要另起一段解释）。
 - 若问题是结尾说教，就用开场意象或日常小约定轻巧回扣，不作总结陈词。
 - 严格遵守称呼表，每行不超过 30 字宽，最多 3 行。
+- 多行台词的换行统一使用 \`\\n\`，严禁用 \`/\` 或 \` / \` 表示换行。
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
@@ -3377,7 +3382,7 @@ export function buildPersonaCriticPrompt(
           .join('\n')}\n`
       : ''
   const linesBlock = dialogue.lines
-    .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
+    .map((line) => `- ${line.id} ${line.speaker}：${formatDialogueLineForPrompt(line.content)}`)
     .join('\n')
 
   return {
@@ -3393,6 +3398,7 @@ ${linesBlock}
 1. 核对每句用词是否符合该角色的「语言与风格」「会说与绝不会说」（如奏禁用～/♪、真冬低平破碎留白、瑞希表面轻快暗藏闪避、优男/优等生面具边界）。
 2. 核对称呼是否严格符合「角色两两称呼表」，不得把姓氏/网名/正式称呼混用。
 3. 将直白说教或平淡应付的台词改写为更有潜台词、动作留白或真实记忆呼应的对白（禁止夹带括号动作描写；每行 <=30 字宽、最多 3 行）。
+4. 多行台词的换行统一使用 \`\\n\`，严禁用 \`/\` 或 \` / \` 表示换行。
 
 只输出 JSON 对象：{"critique":"...","replacements":[...]}`
   }
@@ -3418,9 +3424,7 @@ export function applyDialoguePolish(
     const id = str(item.id ?? item.lineId).trim()
     if (!id || !allowedIds.has(id)) continue
     const content = normalizePjskTerminology(
-      str(item.content ?? item.text ?? item.line)
-        .replace(/\\n/g, '\n')
-        .trim()
+      normalizeDialogueLineBreaks(str(item.content ?? item.text ?? item.line)).trim()
     )
     if (!content) continue
     replacementMap.set(id, content)
@@ -3512,7 +3516,7 @@ export function buildStagingPrompt(
   const lineList = dialogue.lines
     .map(
       (line) =>
-        `- ${line.id}${line.sceneId ? `[${line.sceneId}]` : ''} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`
+        `- ${line.id}${line.sceneId ? `[${line.sceneId}]` : ''} ${line.speaker}：${formatDialogueLineForPrompt(line.content)}`
     )
     .join('\n')
 
@@ -4273,7 +4277,7 @@ export function buildDirectionPrompt(
       ]
         .filter(Boolean)
         .join('')
-      return `- ${line.id} ${line.speaker}${ctxTags}：${line.content.replace(/\n/g, ' / ')}`
+      return `- ${line.id} ${line.speaker}${ctxTags}：${formatDialogueLineForPrompt(line.content)}`
     })
     .join('\n')
 
@@ -6553,7 +6557,7 @@ export function buildDirectorReviewPrompt(
             )
             .join(',')
         : ''
-      const text = str(d.content).replace(/\n/g, ' / ').slice(0, 46)
+      const text = formatDialogueLineForPrompt(str(d.content)).slice(0, 46).replace(/\\$/, '')
       const emo = str(d.emotion)
       const delayTag = num(s.delay, 0) > 0 ? ` delay=${num(s.delay, 0)}` : ''
       compactTimeline.push(
@@ -6632,7 +6636,8 @@ export function buildDirectorReviewPrompt(
       '3. 音频设计（开场 BGM、高潮静音切停 ChangeBgm stop:true、PlaySe 物理/情绪音效）',
       '4. 舞台节奏（Wait 呼吸留白、独立 Motion 静默反应、原地单双人焦点淡入淡出切镜；日常/谈心保持 CameraZoom 与 CharacterShake 克制不滥用）',
       '5. 表情与动作自然度（避免机械循环，也不要无故频繁乱动；自然不死板）',
-      '若发现具体薄弱处，请在 operations 中输出精准局部修补（最多 12 条）；若成稿已经精良，operations 可为空数组。严禁编造不在清单中的动作/表情/音效，严禁输出 markdown。'
+      '若发现具体薄弱处，请在 operations 中输出精准局部修补（最多 12 条）；若成稿已经精良，operations 可为空数组。严禁编造不在清单中的动作/表情/音效，严禁输出 markdown。',
+      '若通过 update_talk 修改台词正文，多行换行统一使用 \\n，严禁用 / 或 " / " 表示换行。'
     ].join('\n'),
     user: `## 场景与大纲
 场景：${options.scene}
@@ -6648,7 +6653,7 @@ ${castMotionHints}${reviewAddressBlock}${issueHintsBlock}
 ## 常用 PlaySe 参考
 ${seChoices}
 
-## 紧凑时间线（[index]）
+## 紧凑时间线（[index]，多行台词以 \\n 表示换行）
 ${compactTimeline.join('\n')}
 
 ## 输出 JSON
@@ -6808,12 +6813,16 @@ export function applyDirectorReviewPatches<T extends { snippets: Array<Record<st
     }
     if (op.op === 'update_talk' && str(target.type) === 'Talk') {
       if (typeof op.content === 'string' && op.content.trim()) {
-        const nextContent = op.content.trim()
-        const prevContent = str(d.content).trim()
-        if (nextContent !== prevContent) {
+        const nextContent = normalizePjskTerminology(
+          normalizeDialogueLineBreaks(op.content).trim()
+        )
+        const prevContent = normalizeDialogueLineBreaks(str(d.content)).trim()
+        if (nextContent && nextContent !== prevContent) {
           d.content = nextContent
           // 仅当中文正文发生实质改写时清空旧 ttsText 以便后续重翻；未改正文时完整保留含 Irodori Emoji 的 ttsText
           if (typeof d.ttsText === 'string' && d.ttsText) delete d.ttsText
+        } else if (nextContent && nextContent !== str(d.content).trim()) {
+          d.content = nextContent
         }
       }
       if (typeof op.emotion === 'string') d.emotion = op.emotion
