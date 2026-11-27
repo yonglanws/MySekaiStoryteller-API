@@ -13,7 +13,7 @@ import path from 'node:path'
 import type { ILogObj, Logger } from 'tslog'
 import { DEFAULT_CLOUD_BGM_ID, DEFAULT_LOCAL_BGM_PATH, type AssetsSettings } from '../config'
 import type { StoryData } from '../../common/types/Story'
-import { atomicWrite, request } from './http'
+import { atomicWrite, fetchBuffer } from './http'
 import { MOTION_BUNDLES_SIDECAR } from './shared'
 import type {
   CloudBackgroundEntry,
@@ -344,7 +344,11 @@ export function findCloudModel(
   const bySubstring = catalog.models.filter((entry) => entry.id.toLowerCase().includes(lower))
   if (bySubstring.length === 1) return bySubstring[0]
 
-  if (segments.length > 1 || /\.model3\.json$/i.test(noCloud) || /^(?:v2_)?(?:\d{2})?[a-z]+_/i.test(noCloud)) {
+  if (
+    segments.length > 1 ||
+    /\.model3\.json$/i.test(noCloud) ||
+    /^(?:v2_)?(?:\d{2})?[a-z]+_/i.test(noCloud)
+  ) {
     return findCharacterModelFallback(catalog, segments)
   }
   return null
@@ -511,8 +515,7 @@ export async function ensureInappUiAssets(
       let saved = false
       for (const url of candidateUrls) {
         try {
-          const resp = await request(url, { timeoutMs, retries })
-          const buffer = Buffer.from(await resp.arrayBuffer())
+          const buffer = await fetchBuffer(url, { timeoutMs, retries })
           if (buffer.byteLength === 0) throw new Error('empty body')
           if (localPath.toLowerCase().endsWith('.wav') && url.toLowerCase().endsWith('.mp3')) {
             const mp3Temp = `${localPath}.tmp.mp3`
@@ -673,12 +676,12 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
 }
 
 function isLegacyDefaultBgmRef(ref: string): boolean {
-  const lower = ref.trim().replace(/^\/+/, '').replace(/^resources\//i, '').toLowerCase()
-  return (
-    lower === DEFAULT_LOCAL_BGM_PATH.toLowerCase() ||
-    lower === 'bg1.mp3' ||
-    lower === 'bg1'
-  )
+  const lower = ref
+    .trim()
+    .replace(/^\/+/, '')
+    .replace(/^resources\//i, '')
+    .toLowerCase()
+  return lower === DEFAULT_LOCAL_BGM_PATH.toLowerCase() || lower === 'bg1.mp3' || lower === 'bg1'
 }
 
 function findDefaultCloudBgmEntry(catalog: CloudCatalogData): CloudBgmEntry | null {
@@ -719,8 +722,7 @@ export async function resolveGlobalBgm(
   }
 
   const cloudBgmDir = path.join(ctx.resourcesDir, 'audio', 'bgm', 'cloud')
-  const lookupStem =
-    isCloudOnly && isLegacyDefaultBgmRef(ref) ? DEFAULT_CLOUD_BGM_ID : stem(bgmRel)
+  const lookupStem = isCloudOnly && isLegacyDefaultBgmRef(ref) ? DEFAULT_CLOUD_BGM_ID : stem(bgmRel)
   const cachedCloud = lookupStem
     ? existsWithExtensions(cloudBgmDir, lookupStem, AUDIO_EXTENSIONS)
     : null
@@ -767,31 +769,60 @@ function expectedModelBundles(entry: CloudModelEntry): string[] {
   return bundles
 }
 
-function modelNeedsRepair(entry: CloudModelEntry, modelJsonPath: string): boolean {
-  if (!fs.existsSync(modelJsonPath)) return true
+function isNonEmptyFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath)
+    return stat.isFile() && stat.size > 0
+  } catch {
+    return false
+  }
+}
+
+function isModelCoreComplete(modelJsonPath: string): boolean {
+  if (!isNonEmptyFile(modelJsonPath)) return false
   const modelDir = path.dirname(modelJsonPath)
   try {
     const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
       FileReferences?: {
         Moc?: string
+        Physics?: string
         Textures?: string[]
+      }
+    }
+    const refs = model3?.FileReferences
+    if (!refs) return false
+    if (refs.Moc && !isNonEmptyFile(path.join(modelDir, ...refs.Moc.split('/')))) {
+      return false
+    }
+    if (refs.Physics && !isNonEmptyFile(path.join(modelDir, ...refs.Physics.split('/')))) {
+      return false
+    }
+    for (const tex of refs.Textures ?? []) {
+      if (tex && !isNonEmptyFile(path.join(modelDir, ...tex.split('/')))) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function modelNeedsRepair(entry: CloudModelEntry, modelJsonPath: string): boolean {
+  if (!isModelCoreComplete(modelJsonPath)) return true
+  const modelDir = path.dirname(modelJsonPath)
+  try {
+    const model3 = JSON.parse(fs.readFileSync(modelJsonPath, 'utf-8')) as {
+      FileReferences?: {
         Motions?: Record<string, Array<{ File?: string }>>
       }
     }
     const refs = model3?.FileReferences
     if (!refs) return true
-    if (refs.Moc && !fs.existsSync(path.join(modelDir, ...refs.Moc.split('/')))) {
-      return true
-    }
-    for (const tex of refs.Textures ?? []) {
-      if (tex && !fs.existsSync(path.join(modelDir, ...tex.split('/')))) {
-        return true
-      }
-    }
     const indexed = refs.Motions ?? {}
     for (const motionName of entry.motions ?? []) {
       const fileRel = Array.isArray(indexed[motionName]) ? indexed[motionName][0]?.File : undefined
-      if (!fileRel || !fs.existsSync(path.join(modelDir, ...fileRel.split('/')))) {
+      if (!fileRel || !isNonEmptyFile(path.join(modelDir, ...fileRel.split('/')))) {
         return true
       }
     }
@@ -799,7 +830,7 @@ function modelNeedsRepair(entry: CloudModelEntry, modelJsonPath: string): boolea
     const expectedRequired = (entry.motionBundles ?? []).filter(Boolean)
     if (expectedRequired.length > 0 || entry.id.startsWith('v2_')) {
       const sidecarPath = path.join(modelDir, MOTION_BUNDLES_SIDECAR)
-      if (!fs.existsSync(sidecarPath)) return true
+      if (!isNonEmptyFile(sidecarPath)) return true
       const sidecar = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8')) as { bundles?: string[] }
       const recorded = new Set(Array.isArray(sidecar?.bundles) ? sidecar.bundles : [])
       for (const bundle of expectedRequired) {
@@ -810,6 +841,67 @@ function modelNeedsRepair(entry: CloudModelEntry, modelJsonPath: string): boolea
   } catch {
     return true
   }
+}
+
+/**
+ * 当指定服装云端模型在重试与镜像切换后仍无法物化时，按同角色降级回退：
+ * 1. 优先复用本地已完整缓存的同角色其他服装（同世代 v2/v1 与默认服装优先），零网络即可恢复；
+ * 2. 其次尝试拉取同角色默认服装（最多尝试 2 个候选），避免单个活动服装异常导致整条导出失败。
+ */
+async function tryFallbackCharacterModel(
+  failedEntry: CloudModelEntry,
+  ctx: CloudAssetContext
+): Promise<{ id: string; path: string } | null> {
+  if (!ctx.catalog || typeof failedEntry.characterId !== 'number') return null
+  const wantV2 = failedEntry.id.startsWith('v2_')
+  const sameCharacter = ctx.catalog.models.filter(
+    (entry) =>
+      entry.characterId === failedEntry.characterId &&
+      entry.id !== failedEntry.id &&
+      !isBackViewCloudId(entry.id) &&
+      !/black\d*$/i.test(entry.id)
+  )
+  if (sameCharacter.length === 0) return null
+
+  const cachedReady: Array<{ entry: CloudModelEntry; full: boolean }> = []
+  const uncached: CloudModelEntry[] = []
+  for (const candidate of sameCharacter) {
+    const candidatePath = path.join(ctx.resourcesDir, 'models', ...candidate.path.split('/'))
+    if (isModelCoreComplete(candidatePath)) {
+      cachedReady.push({ entry: candidate, full: !modelNeedsRepair(candidate, candidatePath) })
+    } else {
+      uncached.push(candidate)
+    }
+  }
+
+  if (cachedReady.length > 0) {
+    cachedReady.sort(
+      (a, b) =>
+        Number(b.full) - Number(a.full) ||
+        Number(b.entry.id.startsWith('v2_') === wantV2) -
+          Number(a.entry.id.startsWith('v2_') === wantV2) ||
+        Number(Boolean(b.entry.isDefault)) - Number(Boolean(a.entry.isDefault)) ||
+        a.entry.id.localeCompare(b.entry.id)
+    )
+    const picked = cachedReady[0].entry
+    return { id: picked.id, path: picked.path }
+  }
+
+  uncached.sort(
+    (a, b) =>
+      Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) ||
+      Number(b.id.startsWith('v2_') === wantV2) - Number(a.id.startsWith('v2_') === wantV2) ||
+      a.id.localeCompare(b.id)
+  )
+  for (const candidate of uncached.slice(0, 2)) {
+    try {
+      const resolvedPath = await ensureModel(candidate, ctx)
+      return { id: candidate.id, path: resolvedPath }
+    } catch {
+      // try next fallback candidate
+    }
+  }
+  return null
 }
 
 async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Promise<string> {
@@ -859,15 +951,15 @@ async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Prom
 }
 
 function localModelExists(resourcesDir: string, ref: string): boolean {
-  return fs.existsSync(path.join(resourcesDir, 'models', ...ref.split('/')))
+  return isNonEmptyFile(path.join(resourcesDir, 'models', ...ref.split('/')))
 }
 
 function localImageExists(resourcesDir: string, ref: string): boolean {
-  return fs.existsSync(path.join(resourcesDir, 'images', ...ref.split('/')))
+  return isNonEmptyFile(path.join(resourcesDir, 'images', ...ref.split('/')))
 }
 
 function localAudioExists(resourcesDir: string, kind: 'bgm' | 'se', ref: string): boolean {
-  return fs.existsSync(path.join(resourcesDir, 'audio', kind, ...ref.split('/')))
+  return isNonEmptyFile(path.join(resourcesDir, 'audio', kind, ...ref.split('/')))
 }
 
 /**
@@ -884,7 +976,9 @@ export async function resolveStoryCloudAssets(
   const isCloudOnly = Boolean(ctx.cloudOnly ?? ctx.settings?.cloudOnly)
   if (!ctx.catalog) {
     if (isCloudOnly) {
-      ctx.logger.warn('[Cloud] catalog unavailable in cloudOnly mode; legacy local assets are ignored')
+      ctx.logger.warn(
+        '[Cloud] catalog unavailable in cloudOnly mode; legacy local assets are ignored'
+      )
       for (const model of story.models) {
         const norm = stripResourcePrefix(model.model, 'models')
         if (!isCloudSubdirRef(model.model, 'models') || !localModelExists(ctx.resourcesDir, norm)) {
@@ -900,12 +994,18 @@ export async function resolveStoryCloudAssets(
       for (const snippet of story.snippets) {
         if (snippet.type === 'ChangeBgm' && !snippet.data.stop && snippet.data.file) {
           const norm = stripResourcePrefix(snippet.data.file, 'audio/bgm')
-          if (!isCloudSubdirRef(snippet.data.file, 'audio/bgm') || !localAudioExists(ctx.resourcesDir, 'bgm', norm)) {
+          if (
+            !isCloudSubdirRef(snippet.data.file, 'audio/bgm') ||
+            !localAudioExists(ctx.resourcesDir, 'bgm', norm)
+          ) {
             result.missing.push(`bgm:${snippet.data.file}`)
           }
         } else if ((snippet.type === 'PlaySe' || snippet.type === 'StopSe') && snippet.data.file) {
           const norm = stripResourcePrefix(snippet.data.file, 'audio/se')
-          if (!isCloudSubdirRef(snippet.data.file, 'audio/se') || !localAudioExists(ctx.resourcesDir, 'se', norm)) {
+          if (
+            !isCloudSubdirRef(snippet.data.file, 'audio/se') ||
+            !localAudioExists(ctx.resourcesDir, 'se', norm)
+          ) {
             result.missing.push(`se:${snippet.data.file}`)
           }
         }
@@ -930,12 +1030,13 @@ export async function resolveStoryCloudAssets(
       : findCloudModel(ctx.catalog, normRef)
 
     if ((!isCloudOnly || isCloudRef) && localModelExists(ctx.resourcesDir, normRef)) {
-      if (isCloudRef && rawRef !== normRef) {
-        model.model = normRef
-      }
-      if (isCloudRef && cloudEntry) {
-        const localPath = path.join(ctx.resourcesDir, 'models', ...normRef.split('/'))
-        if (modelNeedsRepair(cloudEntry, localPath)) {
+      const localPath = path.join(ctx.resourcesDir, 'models', ...normRef.split('/'))
+      const coreComplete = !isCloudRef || isModelCoreComplete(localPath)
+      if (coreComplete) {
+        if (isCloudRef && rawRef !== normRef) {
+          model.model = normRef
+        }
+        if (isCloudRef && cloudEntry && modelNeedsRepair(cloudEntry, localPath)) {
           try {
             model.model = await ensureModel(cloudEntry, ctx)
             result.models++
@@ -943,8 +1044,9 @@ export async function resolveStoryCloudAssets(
             ctx.logger.warn(`[Cloud] 模型 ${rawRef} 动作补全失败，保留本地缓存：${String(error)}`)
           }
         }
+        continue
       }
-      continue
+      ctx.logger.warn(`[Cloud] 本地缓存模型 ${rawRef} 缺少核心文件或已损坏，将重新物化`)
     }
     if (!cloudEntry) {
       result.missing.push(`model:${rawRef}`)
@@ -954,8 +1056,17 @@ export async function resolveStoryCloudAssets(
       model.model = await ensureModel(cloudEntry, ctx)
       result.models++
     } catch (error) {
-      ctx.logger.error(`[Cloud] 模型 ${rawRef} 物化失败：${String(error)}`)
-      result.missing.push(`model:${rawRef}`)
+      const fallback = await tryFallbackCharacterModel(cloudEntry, ctx)
+      if (fallback) {
+        ctx.logger.warn(
+          `[Cloud] 模型 ${rawRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
+        )
+        model.model = fallback.path
+        result.models++
+      } else {
+        ctx.logger.error(`[Cloud] 模型 ${rawRef} 物化失败：${String(error)}`)
+        result.missing.push(`model:${rawRef}`)
+      }
     }
   }
 
@@ -999,7 +1110,8 @@ export async function resolveStoryCloudAssets(
         }
         continue
       }
-      let entry = findCloudBgm(ctx.catalog, normRef) ?? findCloudBgm(ctx.catalog, path.basename(normRef))
+      let entry =
+        findCloudBgm(ctx.catalog, normRef) ?? findCloudBgm(ctx.catalog, path.basename(normRef))
       if (!entry && isCloudOnly && isLegacyDefaultBgmRef(rawRef)) {
         entry = findDefaultCloudBgmEntry(ctx.catalog)
       }
@@ -1056,7 +1168,10 @@ export async function resolveStoryCloudAssets(
           entry &&
           (!canReuseLocal ||
             (isCloudRef &&
-              modelNeedsRepair(entry, path.join(ctx.resourcesDir, 'models', ...normCostume.split('/')))))
+              modelNeedsRepair(
+                entry,
+                path.join(ctx.resourcesDir, 'models', ...normCostume.split('/'))
+              )))
         ) {
           try {
             const resolved = await ensureModel(entry, ctx)
@@ -1068,7 +1183,19 @@ export async function resolveStoryCloudAssets(
             }
             result.models++
           } catch (error) {
-            ctx.logger.error(`[Cloud] 服装模型 ${costumeRef} 物化失败：${String(error)}`)
+            const fallback = await tryFallbackCharacterModel(entry, ctx)
+            if (fallback && targetModel) {
+              ctx.logger.warn(
+                `[Cloud] 服装模型 ${costumeRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
+              )
+              targetModel.costumes = {
+                ...(targetModel.costumes ?? {}),
+                [snippet.data.costume]: fallback.path
+              }
+              result.models++
+            } else {
+              ctx.logger.error(`[Cloud] 服装模型 ${costumeRef} 物化失败：${String(error)}`)
+            }
           }
         }
       }

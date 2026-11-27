@@ -14,6 +14,11 @@ import {
   resolveGlobalBgm,
   resolveStoryCloudAssets
 } from '../../out-host/host/assets/cloudAssets.js'
+import { fetchBuffer } from '../../out-host/host/assets/http.js'
+import {
+  canonicalFallbackUrls,
+  resetCanonicalSitePreference
+} from '../../out-host/host/assets/moesekai.js'
 
 const SSE_MOTION = {
   format: 'sse-motion',
@@ -345,7 +350,10 @@ test('ensureModel repairs cached v2 model3.json missing base motionBundle and me
     fs.writeFileSync(path.join(modelDir, '20mizuki_uniform2_4_t11.moc3'), 'moc')
     fs.writeFileSync(
       path.join(modelDir, 'motions', 'w-normal07-sad.motion3.json'),
-      JSON.stringify({ Version: 3, Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0] }] })
+      JSON.stringify({
+        Version: 3,
+        Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0] }]
+      })
     )
     // Simulate an incomplete cached model3.json (only v2_20mizuki_motion_base, missing w-normal-sad01)
     const modelJsonPath = path.join(modelDir, '20mizuki_uniform2_4_t11.model3.json')
@@ -357,7 +365,9 @@ test('ensureModel repairs cached v2 model3.json missing base motionBundle and me
           Moc: '20mizuki_uniform2_4_t11.moc3',
           Textures: [],
           Motions: {
-            'w-normal07-sad': [{ File: 'motions/w-normal07-sad.motion3.json', FadeInTime: 0.25, FadeOutTime: 0.3 }]
+            'w-normal07-sad': [
+              { File: 'motions/w-normal07-sad.motion3.json', FadeInTime: 0.25, FadeOutTime: 0.3 }
+            ]
           }
         }
       })
@@ -425,6 +435,403 @@ test('ensureModel repairs cached v2 model3.json missing base motionBundle and me
     const second = await resolveStoryCloudAssets(story, ctx)
     assert.equal(second.models, 0, 'complete cached cloud model must not re-download')
   } finally {
+    server.close()
+    await once(server, 'close')
+    fs.rmSync(resourcesDir, { recursive: true, force: true })
+  }
+})
+
+test('fetchBuffer retries mid-body socket termination, stalled streams, and truncated bodies', async () => {
+  const payload = Buffer.alloc(64 * 1024, 0x41)
+  let dropAttempts = 0
+  let stallAttempts = 0
+  let truncAttempts = 0
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost')
+    if (url.pathname === '/drop-mid-body') {
+      dropAttempts++
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(payload.length)
+      })
+      if (dropAttempts === 1) {
+        res.write(payload.subarray(0, 4096))
+        setTimeout(() => res.socket?.destroy(), 15)
+        return
+      }
+      res.end(payload)
+      return
+    }
+    if (url.pathname === '/stall-body') {
+      stallAttempts++
+      res.writeHead(200, { 'content-type': 'application/octet-stream' })
+      if (stallAttempts === 1) {
+        res.flushHeaders()
+        // Intentionally never write body or end — stall timeout must abort & retry
+        return
+      }
+      res.end(payload)
+      return
+    }
+    if (url.pathname === '/truncated-body') {
+      truncAttempts++
+      if (truncAttempts === 1) {
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(payload.length)
+        })
+        res.end(payload.subarray(0, 1024))
+        return
+      }
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(payload.length)
+      })
+      res.end(payload)
+      return
+    }
+    res.writeHead(404)
+    res.end('not found')
+  })
+
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const base = `http://127.0.0.1:${server.address().port}`
+
+  try {
+    const dropped = await fetchBuffer(`${base}/drop-mid-body`, {
+      timeoutMs: 3_000,
+      stallTimeoutMs: 500,
+      retries: 2,
+      retryDelayMs: 10
+    })
+    assert.equal(dropAttempts, 2, 'must retry after mid-body socket reset')
+    assert.equal(dropped.length, payload.length)
+
+    const stalled = await fetchBuffer(`${base}/stall-body`, {
+      timeoutMs: 3_000,
+      stallTimeoutMs: 120,
+      retries: 2,
+      retryDelayMs: 10
+    })
+    assert.equal(stallAttempts, 2, 'must abort stalled body read and retry')
+    assert.equal(stalled.length, payload.length)
+
+    const truncated = await fetchBuffer(`${base}/truncated-body`, {
+      timeoutMs: 3_000,
+      stallTimeoutMs: 500,
+      retries: 2,
+      retryDelayMs: 10
+    })
+    assert.equal(truncAttempts, 2, 'must detect truncated Content-Length body and retry')
+    assert.equal(truncated.length, payload.length)
+  } finally {
+    server.closeAllConnections?.()
+    server.close()
+    await once(server, 'close')
+  }
+})
+
+test('canonicalFallbackUrls builds mirror failover and unversioned fallback for pjsk.moe assets', () => {
+  resetCanonicalSitePreference()
+  const primary =
+    'https://storage.pjsk.moe/cn@6.4.0-24-d031cd79a729/live2d/model/v2_19ena_culture/live2d/model/v2/main/19_ena/v2_19ena_culture/buildmodeldata/texture/0.png'
+  const urls = canonicalFallbackUrls(primary)
+  assert.equal(urls[0], primary)
+  assert.equal(
+    urls[1],
+    'https://storage.exmeaning.com/cn@6.4.0-24-d031cd79a729/live2d/model/v2_19ena_culture/live2d/model/v2/main/19_ena/v2_19ena_culture/buildmodeldata/texture/0.png'
+  )
+  assert.equal(
+    urls[2],
+    'https://storage.exmeaning.com/cn/live2d/model/v2_19ena_culture/live2d/model/v2/main/19_ena/v2_19ena_culture/buildmodeldata/texture/0.png'
+  )
+  assert.deepEqual(canonicalFallbackUrls('http://127.0.0.1:9999/library/file.png'), [
+    'http://127.0.0.1:9999/library/file.png'
+  ])
+})
+
+test('v2_19ena_culture recovers from mid-body texture disconnect, repairs 0-byte corrupt cache, and falls back to same-character model when unrecoverable', async () => {
+  const textureBytes = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    Buffer.alloc(16 * 1024, 0x7f)
+  ])
+  const mocBytes = Buffer.from('MOC3_VALID_BINARY_PAYLOAD')
+  const physicsBytes = Buffer.from(JSON.stringify({ Version: 3, Meta: {} }))
+  let mode = 'drop-once'
+  let textureAttempts = 0
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost')
+    const send = (value, type = 'application/json') => {
+      const buf = Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value))
+      res.writeHead(200, { 'content-type': type, 'content-length': String(buf.length) })
+      res.end(buf)
+    }
+
+    if (url.pathname === '/library/live2d/model/v2_19ena_culture/_ripper.json') {
+      if (mode === 'always-fail') {
+        res.writeHead(500)
+        res.end('upstream error')
+        return
+      }
+      send({
+        files: [
+          { path: 'v2_19ena_culture_t04.model3.json' },
+          { path: 'v2_19ena_culture_t04.moc3' },
+          { path: 'v2_19ena_culture_t04.physics3.json' },
+          { path: 'v2_19ena_culture_t04.2048/texture_00.png' }
+        ]
+      })
+      return
+    }
+    if (
+      url.pathname === '/library/live2d/model/v2_19ena_culture/v2_19ena_culture_t04.model3.json'
+    ) {
+      send({
+        Version: 3,
+        FileReferences: {
+          Moc: 'v2_19ena_culture_t04.moc3',
+          Physics: 'v2_19ena_culture_t04.physics3.json',
+          Textures: ['v2_19ena_culture_t04.2048/texture_00.png']
+        }
+      })
+      return
+    }
+    if (url.pathname === '/library/live2d/model/v2_19ena_culture/v2_19ena_culture_t04.moc3') {
+      send(mocBytes, 'application/octet-stream')
+      return
+    }
+    if (
+      url.pathname === '/library/live2d/model/v2_19ena_culture/v2_19ena_culture_t04.physics3.json'
+    ) {
+      send(physicsBytes)
+      return
+    }
+    if (
+      url.pathname ===
+      '/library/live2d/model/v2_19ena_culture/v2_19ena_culture_t04.2048/texture_00.png'
+    ) {
+      textureAttempts++
+      if (mode === 'drop-once' && textureAttempts === 1) {
+        // Reproduce live production failure: headers sent, partial body, then socket destroyed (TypeError: terminated)
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'content-length': String(textureBytes.length)
+        })
+        res.write(textureBytes.subarray(0, 1024))
+        setTimeout(() => res.socket?.destroy(), 15)
+        return
+      }
+      send(textureBytes, 'image/png')
+      return
+    }
+    if (url.pathname === '/library/live2d/motion/v2_19ena_motion_base/_ripper.json') {
+      send({ files: [{ path: 'motion/w-normal-nod01.sse-motion.json' }] })
+      return
+    }
+    if (
+      url.pathname ===
+      '/library/live2d/motion/v2_19ena_motion_base/motion/w-normal-nod01.sse-motion.json'
+    ) {
+      send(SSE_MOTION)
+      return
+    }
+    res.writeHead(404)
+    res.end('not found')
+  })
+
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const base = `http://127.0.0.1:${server.address().port}`
+  const resourcesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-ena-culture-'))
+
+  const settings = {
+    source: 'moesekai',
+    region: 'cn',
+    indexBase: `${base}/models/`,
+    libraryBase: `${base}/library/`,
+    assetBase: base,
+    soundtrackBase: `${base}/master/`,
+    cacheDir: path.join(resourcesDir, 'cache'),
+    concurrency: 2,
+    timeoutMs: 5_000,
+    retries: 2,
+    cloudCatalog: true,
+    cloudOnly: true,
+    cloudCatalogTtlHours: 6
+  }
+
+  const catalog = {
+    format: 'msst.cloud-catalog/1',
+    schemaVersion: 2,
+    generatedAt: new Date().toISOString(),
+    region: 'cn',
+    sources: {
+      indexUrl: `${base}/models/cn/models.json`,
+      libraryRoot: `${base}/library/`,
+      assetBase: base,
+      soundtrack: ''
+    },
+    models: [
+      {
+        id: 'v2_19ena_culture',
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        isDefault: false,
+        bundle: 'live2d/model/v2_19ena_culture',
+        motionBundles: ['live2d/motion/v2_19ena_motion_base'],
+        path: 'cloud/v2_19ena_culture/v2_19ena_culture_t04/v2_19ena_culture_t04.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: [],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: ''
+      },
+      {
+        id: 'v2_19ena_school01',
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        isDefault: false,
+        bundle: 'live2d/model/v2_19ena_school01',
+        motionBundles: ['live2d/motion/v2_19ena_motion_base'],
+        path: 'cloud/v2_19ena_school01/v2_19ena_school_t07/v2_19ena_school_t07.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: [],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: ''
+      }
+    ],
+    backgrounds: [],
+    bgm: []
+  }
+
+  const logger = { info: () => undefined, warn: () => undefined, error: () => undefined }
+  const ctx = { settings, resourcesDir, catalog, logger, cloudOnly: true }
+
+  try {
+    // Case 1: Partial cache on disk (moc3 + physics3.json, missing texture & model3.json)
+    // plus mid-body socket termination on first texture attempt -> retries and succeeds cleanly.
+    const cultureDir = path.join(
+      resourcesDir,
+      'models',
+      'cloud',
+      'v2_19ena_culture',
+      'v2_19ena_culture_t04'
+    )
+    fs.mkdirSync(cultureDir, { recursive: true })
+    fs.writeFileSync(path.join(cultureDir, 'v2_19ena_culture_t04.moc3'), mocBytes)
+    fs.writeFileSync(path.join(cultureDir, 'v2_19ena_culture_t04.physics3.json'), physicsBytes)
+
+    const story1 = {
+      models: [
+        {
+          id: 2285,
+          model: 'cloud/v2_19ena_culture/v2_19ena_culture_t04/v2_19ena_culture_t04.model3.json'
+        }
+      ],
+      images: [],
+      snippets: []
+    }
+    const res1 = await resolveStoryCloudAssets(story1, ctx)
+    assert.equal(res1.models, 1)
+    assert.deepEqual(res1.missing, [])
+    assert.equal(textureAttempts, 2, 'texture download must recover after first mid-body drop')
+    assert.ok(fs.existsSync(path.join(cultureDir, 'v2_19ena_culture_t04.model3.json')))
+    assert.equal(
+      fs.statSync(path.join(cultureDir, 'v2_19ena_culture_t04.2048', 'texture_00.png')).size,
+      textureBytes.length
+    )
+
+    // Case 2: Corrupt 0-byte cached texture must be detected and repaired instead of passing broken cache
+    mode = 'ok'
+    fs.writeFileSync(
+      path.join(cultureDir, 'v2_19ena_culture_t04.2048', 'texture_00.png'),
+      Buffer.alloc(0)
+    )
+    const res2 = await resolveStoryCloudAssets(story1, ctx)
+    assert.equal(res2.models, 1)
+    assert.deepEqual(res2.missing, [])
+    assert.equal(
+      fs.statSync(path.join(cultureDir, 'v2_19ena_culture_t04.2048', 'texture_00.png')).size,
+      textureBytes.length
+    )
+
+    // Case 3: Unrecoverable failure on v2_19ena_culture falls back to cached same-character model v2_19ena_school01
+    fs.rmSync(cultureDir, { recursive: true, force: true })
+    const schoolDir = path.join(
+      resourcesDir,
+      'models',
+      'cloud',
+      'v2_19ena_school01',
+      'v2_19ena_school_t07'
+    )
+    fs.mkdirSync(path.join(schoolDir, 'motions'), { recursive: true })
+    fs.mkdirSync(path.join(schoolDir, 'v2_19ena_school_t07.2048'), { recursive: true })
+    fs.writeFileSync(path.join(schoolDir, 'v2_19ena_school_t07.moc3'), mocBytes)
+    fs.writeFileSync(
+      path.join(schoolDir, 'v2_19ena_school_t07.2048', 'texture_00.png'),
+      textureBytes
+    )
+    fs.writeFileSync(
+      path.join(schoolDir, 'motions', 'w-normal-nod01.motion3.json'),
+      JSON.stringify({ Version: 3, Curves: [] })
+    )
+    fs.writeFileSync(
+      path.join(schoolDir, '.motion-bundles.json'),
+      JSON.stringify({ version: 1, bundles: ['live2d/motion/v2_19ena_motion_base'] })
+    )
+    fs.writeFileSync(
+      path.join(schoolDir, 'v2_19ena_school_t07.model3.json'),
+      JSON.stringify({
+        Version: 3,
+        FileReferences: {
+          Moc: 'v2_19ena_school_t07.moc3',
+          Textures: ['v2_19ena_school_t07.2048/texture_00.png'],
+          Motions: {
+            'w-normal-nod01': [
+              { File: 'motions/w-normal-nod01.motion3.json', FadeInTime: 0.25, FadeOutTime: 0.3 }
+            ]
+          }
+        }
+      })
+    )
+
+    mode = 'always-fail'
+    const story3 = {
+      models: [
+        {
+          id: 2285,
+          model: 'cloud/v2_19ena_culture/v2_19ena_culture_t04/v2_19ena_culture_t04.model3.json'
+        },
+        {
+          id: 9999,
+          model: 'cloud/nonexistent_unknown_model/x/x.model3.json'
+        }
+      ],
+      images: [],
+      snippets: []
+    }
+    const res3 = await resolveStoryCloudAssets(story3, {
+      ...ctx,
+      settings: { ...settings, retries: 0 }
+    })
+    assert.equal(
+      story3.models[0].model,
+      'cloud/v2_19ena_school01/v2_19ena_school_t07/v2_19ena_school_t07.model3.json',
+      'failed cloud costume must fall back to cached same-character model'
+    )
+    assert.deepEqual(
+      res3.missing,
+      ['model:cloud/nonexistent_unknown_model/x/x.model3.json'],
+      'genuinely unknown model must still report missing'
+    )
+  } finally {
+    server.closeAllConnections?.()
     server.close()
     await once(server, 'close')
     fs.rmSync(resourcesDir, { recursive: true, force: true })
