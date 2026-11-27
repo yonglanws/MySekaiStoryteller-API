@@ -2,17 +2,15 @@
 
 > [!NOTE]
 > **历史对齐记录（已被现行实现整合/取代）**：本文件为早期与 Moesekai 对齐动作时序、入场站桩、双人舞台与 Irodori 日语预检的开发记录。
-> 当前演出语义、60fps 时序与 5 阶段 AI 调度规格请以 [故事文件格式](story-format.md)、[导出模式](export-modes.md) 和 [宿主内置 AI 剧本生成](ai-script.md) 为准。
+> 当前演出语义、60fps 时序与统一三段式 AI 调度规格请以 [故事文件格式](story-format.md)、[导出模式](export-modes.md) 和 [宿主内置 AI 剧本生成](ai-script.md) 为准。
 
-> 上下文被压缩后先读这份文件，再读 `scripts/renderer/moesekai-parity.test.mjs` 顶部的
-> “PLAN SNAPSHOT”。2026-11-08 起，帧级时序/混合/自然动作的后续工作见
+> 配合契约测试 `scripts/renderer/moesekai-parity.test.mjs` 维护。2026-11-08 起，帧级时序/混合/自然动作的后续工作见
 > [SekaiStoryExporter 对齐计划](sekai-exporter-parity-plan.md)。目标不是“能出片”，而是让演出语义与官方 scenario 播放一致，并且每次
 > 导出都留下可复查的逐句/逐动作日志。
 
 ## 1. 参考与官方语义
 
-参考 `https://github.com/StarMoe-org/Moesekai` 的剧情浏览器（本地 checkout：
-`D:/Users/桌面/人格设定/_tmp2/moesekai`）与官方 `scenario/*.json`：
+参考 `https://github.com/StarMoe-org/Moesekai` 的剧情浏览器与官方 `scenario/*.json`：
 
 - 浏览器按 `Snippets` 顺序推进；`Talk` 的停留时间由语音长度决定，没有语音时按文本长度估算。
 - 官方 29,057 条 `TalkData` 中：

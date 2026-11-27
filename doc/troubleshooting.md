@@ -10,16 +10,19 @@ curl http://127.0.0.1:9881/api/v1/health
 
 ## 常见现象速查
 
-| 现象                            | 先看哪里                                                                                                        |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 连不上 9881 端口                | 进程有没有跑起来、监听的 `host` 是不是 `127.0.0.1` 导致局域网连不上                                             |
-| `/health` 返回 200 但导出报 503 | 看 `renderPool.readyWorkers` 是不是 `0`、浏览器有没有拉起来、是不是忘了先 `npm run build`                       |
-| 一直排队不动                    | 看 `GET /api/v1/status` 里的 `activeTaskIds`，或者是不是设了 `minFreeMemoryMb` 导致可用内存不够暂缓派发         |
-| 任务中途突然被取消              | 检查是不是客户端/反代 HTTP 超时断开了连接（`wait: true` 断连会自动取消），建议改用 `wait: false` 轮询           |
-| 导出慢如蜗牛                    | 看 `/health` 里 `webglRenderers` 是不是 `SwiftShader`/`llvmpipe`，以及 `renderScale` 有没有设成 `1.5`           |
-| 有画面没配音                    | 看 `tts.enabled`、`tts.apiBaseUrl` 能不能连通、参考音频路径是不是在 **TTS 服务端**磁盘上                        |
-| 有配音但嘴不动                  | 看这句 `Talk` 的 `modelId` 是不是 `-1`，或者该句音频下载/WAV 解码失败了                                         |
-| 改了配置没反应                  | 看改的是不是 `config.yaml`（别改错成 `config.example.yaml`）、有没有被 `MSS_*` 环境变量覆盖、改完有没有重启宿主 |
+| 现象                                    | 先看哪里                                                                                                                                      |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| 连不上 9881 端口                        | 进程有没有跑起来、监听的 `host` 是不是 `127.0.0.1` 导致局域网连不上                                                                           |
+| `/health` 返回 200 但导出报 503         | 看 `renderPool.readyWorkers` 是不是 `0`、浏览器有没有拉起来、是不是忘了先 `npm run build`，或服务正处于优雅停机排空阶段                       |
+| 一直排队不动                            | 看 `GET /api/v1/status` 里的 `activeTaskIds`，或者是不是设了 `minFreeMemoryMb` 导致可用内存不够暂缓派发                                       |
+| 任务中途突然被取消                      | 检查是不是客户端/反代 HTTP 超时断开了连接（`wait: true` 断连会自动取消），建议改用 `wait: false` 轮询                                         |
+| 导出慢如蜗牛                            | 看 `/health` 里 `webglRenderers` 是不是 `SwiftShader`/`llvmpipe`、`rustExporter.available` 是不是 `true`，以及 `renderScale` 有没有设成 `1.5` |
+| 放在 `resources/` 的本地素材没生效      | 默认模板启用了 `assets.cloudOnly: true`（纯云端隔离），需改为 `assets.cloudOnly: false`（或 `MSS_ASSETS_CLOUD_ONLY=false`）并重启             |
+| AI 生成报 `MSS_LLM_API_KEY 未设置`      | 确认 `.env` 在仓库根目录（或通过 `MSS_ENV_FILE` 指定），且 `npm start` 启动目录正确；检查 `.env` 中变量名与 `llm.apiKeyEnv` 一致              |
+| AI 人物性格走样 / `llm.personas` 为 `0` | 检查 `/health` 中 `llm.personas`（默认应为 `58`）；确认没有把 `MSS_LLM_PERSONA_DIRS` 设成 `none`，且 Docker 未覆盖挂载 `/app/personas`        |
+| 有画面没配音                            | 看 `tts.enabled`、`tts.apiBaseUrl` 能不能连通、参考音频路径是不是在 **TTS 服务端**磁盘上                                                      |
+| 有配音但嘴不动                          | 看这句 `Talk` 的 `modelId` 是不是 `-1`，或者该句音频下载/WAV 解码失败了                                                                       |
+| 改了配置没反应                          | 看改的是不是 `config.yaml`（别改错成 `config.example.yaml`）、有没有被 Shell / `.env` 中的 `MSS_*` 变量覆盖、改完有没有重启宿主               |
 
 ---
 
@@ -38,7 +41,10 @@ npx playwright install chromium
 这会直接把 GPU 活全扔给 CPU，导出耗时成倍暴涨。
 
 - **一键 GPU 预设**：先尝试设 `MSS_GPU_PROFILE=intel`（或 `nvidia` / `amd`），也可在 Docker 下使用对应的 `docker-compose.intel.yml` / `docker-compose.nvidia.yml` 叠加文件。
-- **Docker + Intel `/dev/dri` 权限失败**：在宿主机执行 `getent group video render`，将实际 GID 填入 `.env` 的 `VIDEO_GID` 和 `RENDER_GID` 后重建容器；确认宿主机存在 `/dev/dri/renderD128`。
+- **Intel UHD 630 / Iris Xe / Arc（Linux / Docker）**：
+  - 宿主机执行 `getent group video render`，将实际数字 GID 填入 `.env` 的 `VIDEO_GID` 和 `RENDER_GID` 后重建容器；确认宿主机存在 `/dev/dri/renderD128`（若在其他节点，设 `MSS_VAAPI_DEVICE=/dev/dri/renderD129`）。
+  - 确认宿主机/容器已安装 Mesa Vulkan 驱动与 `intel-media-va-driver`（`LIBVA_DRIVER_NAME=iHD`）。
+  - 配合 `MSS_GPU_PROFILE=intel` + `MSS_VIDEO_CODEC=hevc` + `fastFps: 30`，浏览器走 Vulkan ANGLE、编码走 Rust `/bridge/rs-stream` 二进制 WS + QSV/VAAPI。
 - **Docker + NVIDIA 无 GPU**：确认宿主机已安装并配置 NVIDIA Container Toolkit，且使用 `-f docker-compose.nvidia.yml` 启动。
 - Linux 有 NVIDIA 卡但**没有桌面 / Xorg**：把 `render.linuxGpuAngle` 设为 `false`，`render.extraChromeArgs` 设为 `"--use-angle=vulkan"`。
 - Linux 有 X11 桌面：保持 `linuxGpuAngle: true`。
@@ -49,40 +55,50 @@ npx playwright install chromium
 ## 3. 导出速度慢 / 内存或显存炸了
 
 - **低内存主机一键预设（4~8 GB RAM / NAS）**：设置 `MSS_MEMORY_PROFILE=low`（自动降为 `workers=1`、`maxConcurrentExports=1`、`workerRecycleExports=2`、`fps=30`、`fastFps=30`、`renderScale=1.0`）。如果 `.env` 里保留了 `MSS_VIDEO_FPS=60` / `MSS_FAST_FPS=60`，请注释掉以免精细变量覆盖预设。
-- **Linux 长驻内存碎片（RSS 持续上涨）**：在运行环境中设置 `MALLOC_ARENA_MAX=2` 与 `MALLOC_MMAP_THRESHOLD_=131072`（Docker 镜像与 `docker-compose.yml` 已默认开启，且已启用 `init: true` 回收 Chromium 僵尸进程）。
-- **降倍率**：`config.example.yaml` 默认 `renderScale: 1`，如果你用内置默认值跑会是 `1.5`（像素数 ×2.25），显式设回 `video.renderScale: 1` 立竿见影。
-- **降编码帧率**：保持 `video.fastFps: 30`（就算 `fps: 60` 也只编 30 帧，流畅度够用且省一半编码时间）。
+- **确认启用了原生 Rust 导出器与 `/bridge/rs-stream`**：检查 `/api/v1/health` 中的 `rustExporter.available`（受鉴权保护时不返回本机路径，但始终返回可用状态）。若未编译原生模块，运行 `npm run build:rust`；如因特殊平台兼容需要排查，可临时设 `MSS_USE_RUST_NAPI=0` 对比行为。
+- **Linux 长驻内存碎片（RSS 持续上涨）**：在运行环境中设置 `MALLOC_ARENA_MAX=2` 与 `MALLOC_MMAP_THRESHOLD_=131072`（Docker 镜像、`docker-compose.yml` 与 `deploy/mysekai-host.service` 均已默认开启，Docker 同时启用了 `init: true` 回收 Chromium 僵尸进程）。
+- **降倍率**：`config.example.yaml` 默认 `renderScale: 1`，如果你不建配置直接用裸默认值跑会是 `1.5`（像素数 ×2.25），显式设回 `video.renderScale: 1` 立竿见影。
+- **使用 30fps（Live2D 逐帧对齐）**：将 `video.fps: 30`、`video.fastFps: 30` 可减少一半抓帧与编码开销，同时保留 60Hz Live2D 动作、口型和眨眼完整精度。
 - **少开 worker**：每个 worker 吃 300~500 MB 内存和一份 WebGL 显存，小机器把 `render.workers` 设为 `1` 或 `2`。
 - **TTS 抢卡**：如果显卡显存很小且本地同时跑 IrodoriTTS，把 `video.ttsMode` 改成 `serial`（先全合成完语音再画图，不跟 WebGL 抢显存）。
 
 ## 4. 画质糊或文件太大
 
 - 走 **WebCodecs** 路径时调 `video.exportBitrate`（单位 bps，默认 `5500000`，即 5.5 Mbps）与 `video.maxOutputMbps`（默认 `6.5` Mbps）；想文件更小可适当调低。
-- 走 **`rawvideo` / `image2pipe`（ffmpeg）** 路径时调 `video.crf`（越小越清晰、文件越大；常用 `23` ~ `28`）。
+- 走 **Rust `/bridge/rs-stream` `rawvideo` / `image2pipe`（ffmpeg）** 路径时调 `video.crf`（越小越清晰、文件越大；常用 `23` ~ `28`）。
 - `renderScale` 设小于 `1` 导致的画面发虚，拉高码率是救不回来的，先改回 `1`。
 
-## 5. 云端素材下载失败或默认 BGM 没声音
+## 5. 云端素材下载失败、本地覆盖无效或默认 BGM 没声音
 
-- **首次冷启动拉取慢**：Docker 或空 `resources/` 目录首次拉取 600+ 云端模型索引时，`/api/v1/resources`、AI 生成和导出会自动等待最多 **180 秒**；若网络受限请配置 `HTTP_PROXY` / `HTTPS_PROXY`，恢复后再调一次 `POST /api/v1/cloud/refresh`。
+- **首次冷启动拉取慢**：Docker 或空 `resources/` 目录首次拉取 574 套云端模型索引时，`/api/v1/resources`、AI 生成和导出会自动等待最多 **180 秒**；若网络受限请配置 `HTTP_PROXY` / `HTTPS_PROXY`，恢复后再调一次 `POST /api/v1/cloud/refresh`。
+- **本地放了素材但被忽略**：`config.example.yaml`、`.env.example` 与 `npm run init` 默认开启 `assets.cloudOnly: true`（严格纯云端模式）。如需优先加载本地 `resources/models/`、`images/` 或 `bgm.yaml`，请设为 `assets.cloudOnly: false`（或 `MSS_ASSETS_CLOUD_ONLY=false`）后重启。
 - 先看 `/api/v1/resources` 里有没有 `cloud` 字段；没有就检查启动日志里的 `[Cloud]` 报错，网络恢复后调一次 `POST /api/v1/cloud/refresh`。
 - 下载老超时的话，把 `assets.concurrency` 调小到 `1` 或 `2`，或把 `assets.timeoutMs` 调大。
-- 如果手动建了 `resources/audio/bgm/bgm.yaml`，它会**整体替换**主配置与默认 `bgm00003` 兜底；记得检查里面的 `enabled: true`、`volume > 0` 和路径是否正确，改完重启宿主。
+- 如果在 `cloudOnly: false` 下手动建了 `resources/audio/bgm/bgm.yaml`，它会**整体替换**主配置与默认 `bgm00003` 兜底；记得检查里面的 `enabled: true`、`volume > 0` 和路径是否正确，改完重启宿主。
 - **Docker 挂载 `config.yaml` 变成空目录**：如果宿主机还没建 `config.yaml` 就取消了 Compose 挂载注释，Docker 会创建同名目录导致配置无法读取（启动脚本会告警并回退纯环境变量模式）。删掉该目录，运行 `npm run init` 或 `cp config.example.yaml config.yaml` 后重启，或者干脆去掉挂载直接用 `.env`。
 
-## 6. 端口被占用（`EADDRINUSE`）
+## 6. 内置角色人设未生效（`personas/pjsk/`）
+
+- 启动日志会打印实际加载的角色人设数量，也可通过 `GET /api/v1/health` 的 `llm.personas` 确认（默认应为 `58`）。
+- 如果为 `0`：
+  - 检查环境变量 `MSS_LLM_PERSONA_DIRS` 是否被误设为 `none` / `off` 或指向了不存在的路径；
+  - 检查 `config.yaml` 中是否显式写了 `llm.personaDirs: []`；
+  - **Docker 常见坑**：不要把宿主机空目录直接挂载到 `/app/personas`（会遮蔽镜像内置的 `/app/personas/pjsk`）。请改为挂载到 `/app/custom-personas` 并设置 `MSS_LLM_PERSONA_DIRS=/app/personas/pjsk,/app/custom-personas`。
+
+## 7. 端口被占用（`EADDRINUSE`）
 
 查一下谁占了 `9881` 端口，别上来就 `killall node` 或乱杀 Chrome（可能误杀正常任务）：
 
 - Windows PowerShell：`Get-NetTCPConnection -LocalPort 9881 -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess`
 - Linux：`ss -ltnp 'sport = :9881'`
 
-## 7. TTS 配音缺句或日文预检报错
+## 8. TTS 配音缺句或日文预检报错
 
 - **路径基准别搞反**：`tts.characters[].refAudioPath` 和 `loraAdapter` 填的是 **TTS 服务那台机器上的路径**。
 - **Irodori 报 400 缺日文 `ttsText`**：Irodori 引擎只能读日语。请确保 `llm.enabled: true` 让宿主自动翻译，或者自己提交的剧本每句 `Talk` 都带上了日文 `ttsText`。
 - **单句静音**：查日志里是不是单句 TTS HTTP 超时了（Irodori 高峰排队久的话，把 `tts.timeoutMs` 适当调大到比如 `300000`）。
 
-## 8. 动作、表情或台词显示不对
+## 9. 动作、表情或台词显示不对
 
 - **动作/表情名不能跨角色混用**：去 `/api/v1/resources` 看这个角色真实的 `motions` 和 `facials` 列表。
 - **`actions[].at` 是 `0..1` 的比例**：不是秒数，受本句 TTS 时长影响。

@@ -3,17 +3,17 @@
  * AI 剧本生成评测：直接调用宿主的三段式流水线，落盘剧本并计算与官方基线的差距。
  *
  * 用法：
- *   set MSS_LLM_API_KEY=sk-...
- *   node scripts/stories/ai-eval.mjs --runs 1 --out D:/msst-lab/runs/v1
+ *   MSS_LLM_API_KEY=sk-... \
+ *   node scripts/stories/ai-eval.mjs --runs 1 --out ./runs/v1
  *
  * 参数：
- *   --base-url   OpenAI 兼容根地址（默认读 MSS_LLM_BASE_URL 或官方）
- *   --model      模型名
+ *   --base-url   OpenAI 兼容根地址（默认读 MSS_LLM_BASE_URL 或 config.yaml）
+ *   --model      模型名（默认读 MSS_LLM_MODEL 或 config.yaml）
  *   --runs       每个场景生成几次（默认 1）
  *   --prompts    all | 逗号分隔的场景编号（1 开始）
  *   --out        输出目录
  *   --target     目标时长分钟（默认 3）
- *   --pipeline   staged | single
+ *   --pipeline   staged | hybrid | agent | single
  */
 import fs from 'node:fs'
 import path from 'node:path'

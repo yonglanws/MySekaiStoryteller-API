@@ -3,23 +3,23 @@
 [返回文档总览](README.md) · [云端资源获取](cloud-assets.md) · [故事文件格式](story-format.md) · [部署指南](host-deployment.md)
 
 > [!TIP]
-> 默认开启 `assets.cloudCatalog: true` 时，`resources/` 可以完全留空，不用自己建 `models.yaml`、`images.yaml` 或 `bgm.yaml`。下面只讲两件事：**怎么放本地素材覆盖云端**，以及**怎么配 TTS 配音和 BGM**。
+> 默认配置模板（`config.example.yaml`、`.env.example`、`npm run init` 与 Docker）开启了 `assets.cloudCatalog: true` 与 `assets.cloudOnly: true`，**`resources/` 可以完全留空**，不用自己建 `models.yaml`、`images.yaml` 或 `bgm.yaml`。下面只讲两件事：**如何关闭 `cloudOnly` 以启用本地素材覆盖**，以及**怎么配 TTS 配音和 BGM**。
 
 ## `resources/` 目录长什么样
 
 ```text
 resources/                        默认资源根（可通过 paths.resources / MSS_RESOURCE_DIR 修改）
 ├─ models/
-│  ├─ models.yaml                 可选：本地模型登记表
+│  ├─ models.yaml                 可选：本地模型登记表（需 assets.cloudOnly: false）
 │  ├─ <角色>/<变体>/               可选：本地模型包（model3.json、moc3、纹理、motions/）
 │  └─ cloud/                      云端按需下载的模型缓存（可删，导出时自动重建）
 ├─ images/
-│  ├─ images.yaml                 可选：本地背景描述表
+│  ├─ images.yaml                 可选：本地背景描述表（需 assets.cloudOnly: false）
 │  ├─ <bg>.png|jpg|webp           可选：本地背景文件（只扫直属文件）
 │  └─ cloud/                      云端按需下载的背景缓存
 ├─ audio/
 │  ├─ bgm/
-│  │  ├─ bgm.yaml                 可选：独立 BGM 设置（存在时会整体替换 config.yaml 的 bgm）
+│  │  ├─ bgm.yaml                 可选：独立 BGM 设置（cloudOnly: false 时整体替换 config.yaml 的 bgm）
 │  │  ├─ soundtracks.json         官方曲名索引缓存
 │  │  ├─ <bgm>.mp3|wav|ogg|flac   可选：本地 BGM 文件
 │  │  └─ cloud/                   云端按需下载的 BGM 缓存
@@ -39,9 +39,12 @@ resources/                        默认资源根（可通过 paths.resources / 
 需要手动写本地清单时，可直接复制这三份模板：
 [models.example.yaml](../resources/models/models.example.yaml) · [images.example.yaml](../resources/images/images.example.yaml) · [bgm.example.yaml](../resources/audio/bgm/bgm.example.yaml)
 
-## 本地素材覆盖规则
+## `cloudOnly` 与本地素材覆盖规则
 
-- **模型（`models/models.yaml`）**：本地配了哪个角色，就以 `source: "local"` 占住该角色的默认位置，但**不会屏蔽这个角色的其他云端换装，也不会屏蔽其他角色**。模型 `motions/` 下如果有未登记进 `model3.json` 的 `.motion3.json`，目录构建时会自动补齐。
+- **为什么默认放进 `resources/` 的本地文件没有生效？**
+  因为 `config.example.yaml`、`.env.example`、`npm run init` 与 Docker 默认启用 **`assets.cloudOnly: true`**（严格纯云端模式），会主动忽略本地 `models.yaml` / `images.yaml` / `bgm.yaml` 及非 `cloud/` 路径，防止旧本地缓存影响开箱体验。
+- **如何开启本地优先覆盖**：在 `config.yaml` 中设置 `assets.cloudOnly: false`，或在 `.env` / 环境变量中设置 `MSS_ASSETS_CLOUD_ONLY=false` 后重启宿主（不创建 `config.yaml` 且不设该变量时，schema 裸默认即为 `false`）。
+- **模型（`models/models.yaml`）**：开启本地覆盖后，本地配了哪个角色，就以 `source: "local"` 占住该角色的默认位置，但**不会屏蔽这个角色的其他云端换装，也不会屏蔽其他角色**。模型 `motions/` 下如果有未登记进 `model3.json` 的 `.motion3.json`，目录构建时会自动补齐。
 - **背景（`images/images.yaml`）**：只扫描 `images/` 第一层的图片。如果本地已经下载了云端同名图片（比如 `bg_a000301.webp`），宿主不再建 `cloud/` 副本，直接把官方中文名和地点标签贴上去。
 - **生效时间**：改本地 `models.yaml` / `images.yaml` 等最多 30 秒内存缓存过期即可生效；改 `config.yaml`、`bgm.yaml` 或 `tts` 配置**必须重启宿主**。
 
@@ -91,7 +94,7 @@ tts:
     responseFormat: wav
     numSteps: 40
     cfgScaleText: 3.0
-    cfgScaleCaption: 3.0
+    cfgScaleCaption: 3.0 # 可由 MSS_IRODORI_CFG_SCALE_CAPTION 覆盖
     cfgScaleSpeaker: 5.0
     durationScale: 1.0
     chunkingEnabled: true
@@ -99,10 +102,10 @@ tts:
     seed: -1
     defaultLoraAdapter: ''
     defaultCaption: ''
-    speakerKvScale: 1.15 # 早期去噪步锁住角色音色底色
-    speakerKvMinT: 0.9
+    speakerKvScale: 1.15 # 早期去噪步锁住角色音色底色（MSS_IRODORI_SPEAKER_KV_SCALE）
+    speakerKvMinT: 0.9 # （MSS_IRODORI_SPEAKER_KV_MIN_T）
     timbreLockMode: normal # normal = 普通句锁基础参考音频，仅特殊高潮句解锁；off = 按 emotion 切换
-    specialSceneCfgScaleCaption: 3.6
+    specialSceneCfgScaleCaption: 3.6 # （MSS_IRODORI_SPECIAL_CFG_SCALE_CAPTION）
     emotionLabels: [平静, 开心, 生气, 伤心, 害羞, 惊讶]
   characters:
     - characterName: 晓山瑞希
@@ -136,10 +139,10 @@ tts:
 
 ## BGM 背景音乐
 
-1. **云端默认兜底**：在 `cloudOnly: true`（`config.example.yaml` 默认开启）或本地无 `bgm.yaml` / `bg1.mp3` 且启用云端目录时，默认 BGM 自动指向 **`bgm00003`（`Slapstick!!`）**，全局默认音量 **`0.35`**（已叠加 `0.75x` 增益与人声期间 `0.65x` 自动闪避）。
+1. **云端默认兜底**：在 `cloudOnly: true`（默认模板启用）下，或 `cloudOnly: false` 且本地无 `bgm.yaml` / `bg1.mp3` 且启用云端目录时，默认 BGM 自动指向 **`bgm00003`（`Slapstick!!`）**，全局默认音量 **`0.35`**（已叠加 `0.75x` 增益与人声期间 `0.65x` 自动闪避）。
 2. **自定义全局 BGM**：
    - 支持直接通过 `config.yaml` 的 `bgm` 节或环境变量 `MSS_BGM_ENABLED` / `MSS_BGM_PATH` / `MSS_BGM_VOLUME` 覆盖（`MSS_BGM_*` 始终优先级最高）。
-   - 若关闭 `cloudOnly` 并新建 `resources/audio/bgm/bgm.yaml`，该文件会**整体替换** `config.yaml` 的 `bgm` 节（缺省字段使用 `enabled: true`、`volume: 0.35`）；开启 `cloudOnly: true` 时会忽略本地 `bgm.yaml` 与非 `cloud/` 音频：
+   - 若关闭 `cloudOnly`（设为 `false`）并新建 `resources/audio/bgm/bgm.yaml`，该文件会**整体替换** `config.yaml` 的 `bgm` 节（缺省字段使用 `enabled: true`、`volume: 0.35`）；开启 `cloudOnly: true` 时会忽略本地 `bgm.yaml` 与非 `cloud/` 音频：
      ```yaml
      enabled: true
      path: bgm00003

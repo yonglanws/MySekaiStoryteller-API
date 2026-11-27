@@ -5,7 +5,7 @@
  * 用法：
  *   MSS_LLM_API_KEY=... MSS_LLM_BASE_URL=... \
  *   node scripts/stories/dialogue-probe.mjs --scene "放学后瑞希和绘名聊下次 Live" \
- *     [--cast 瑞希,绘名] [--thinking off] [--out D:/.../dialogue.json]
+ *     [--cast 瑞希,绘名] [--thinking off] [--out ./dialogue.json]
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -24,7 +24,7 @@ function parseArgs(argv) {
     thinking: 'on',
     out: '',
     baseUrl: process.env.MSS_LLM_BASE_URL || '',
-    model: process.env.MSS_LLM_MODEL || 'deepseek-v4.1-flash',
+    model: process.env.MSS_LLM_MODEL || '',
     target: 3
   }
   for (let i = 0; i < argv.length; i++) {
@@ -53,7 +53,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
   const config = loadHostConfig()
   if (args.baseUrl) config.llm.baseUrl = args.baseUrl
-  config.llm.model = args.model
+  if (args.model) config.llm.model = args.model
   config.llm.translateForTts = false
   config.llm.extraBody = args.thinking === 'off' ? { thinking: { type: 'disabled' } } : {}
   const logger = new Logger({ type: 'hidden' })

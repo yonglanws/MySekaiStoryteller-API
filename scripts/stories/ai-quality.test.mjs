@@ -1,16 +1,15 @@
 /**
  * AI 生成质量回归：读取 ai-eval 的 report.json，断言聚合指标落在“接近官方”的区间。
  *
- * 报告默认读 D:/Users/桌面/mzkbot/msst-ai-lab/runs/phase3a-thinkoff/report.json，
- * 可用 MSS_EVAL_REPORT 指向任意一次 ai-eval 输出。没有报告时跳过。
+ * 通过环境变量 MSS_EVAL_REPORT 指定任意一次 ai-eval 输出的 report.json 路径。
+ * 未配置或文件不存在时自动跳过。
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { test } from 'node:test'
 
-const REPORT =
-  process.env.MSS_EVAL_REPORT || 'D:/Users/桌面/mzkbot/msst-ai-lab/runs/phase20-mid/report.json'
-const hasReport = fs.existsSync(REPORT)
+const REPORT = process.env.MSS_EVAL_REPORT || ''
+const hasReport = Boolean(REPORT) && fs.existsSync(REPORT)
 
 const inRange = (value, min, max, label) =>
   assert.ok(value >= min && value <= max, `${label}=${value} 不在 ${min}~${max} 区间`)

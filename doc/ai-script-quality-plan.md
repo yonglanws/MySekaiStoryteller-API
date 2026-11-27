@@ -2,14 +2,12 @@
 
 > [!NOTE]
 > **历史演进记录（已被现行实现取代）**：本文件记录 2026-11-07~08 期间四段式提示词与官方 40 句基线的早期量化探索。
-> 当前实现已演进为 **5 阶段 AI 导演流水线**（含三路并行与 `directStaging`、2 人 `Normal` 交叠轮换、语义资源筛选及 `OfficialLinter`），现行规格请查阅 [宿主内置 AI 剧本生成](ai-script.md)。
+> 当前实现已演进为**统一三段式上下文隔离 + 工具驱动流水线**（`hybrid` / `agent` / `staged`，含 Phase 1 只读工具探索、Phase 2 纯净上下文写词 + 人设 Critic、Phase 3 并行编译 + 轻量导演终审与 `OfficialLinter`），现行规格请查阅 [宿主内置 AI 剧本生成](ai-script.md)。
 
-> 上下文被压缩后，先读这份文件，再继续工作。目标不是“能生成”，而是量化逼近官方剧情。
-> 运行数据放在仓库外 `D:/Users/桌面/mzkbot/msst-ai-lab/`，不提交。
+> 目标不是“能生成”，而是量化逼近官方剧情。评测语料与运行输出建议放在仓库外（通过环境变量 `MSS_CORPUS_DIR` / `MSS_EVAL_REPORT` 指定），不提交入库。
 >
-> **2026-11-08 起，双人戏改为整场 Left/Right 同场，不再按发言段逐段 Clear/Appear**
-> （用户要求“两个人物都显示就行了”）。本文件里的“单人/双人交替”指标是旧阶段记录，
-> 新回归门禁已放宽；动作时序、入场、双人、Irodori 日文 TTS、导出日志见
+> **2026-11-08 起，双人戏默认改为同场 Left/Right（并允许特写 Cutaway），不再按发言段逐段 Clear/Appear**。
+> 本文件里的“单人/双人交替”指标是旧阶段记录，新回归门禁已放宽；动作时序、入场、双人、Irodori 日文 TTS、导出日志见
 > [Moesekai 演出对齐计划](moesekai-parity-plan.md)。
 
 ## 参考来源
@@ -19,10 +17,10 @@
   以及逐句上下场、单人镜头、表情/动作的原始字段含义。
 - **官方语料** `https://storage.exmeaning.com/sekai-<region>-assets/event_story/...`：真实活动剧本，
   本项目所有“官方基线”数字都从这里的 40 个活动 / 328 集实测得到。
-- **`D:\Users\桌面\ournotes-player`**：借用了“分阶段写作”的思路——先选角/事件，再写台词，
-  最后单独设计表演；以及台词与表演分离、台词定稿后逐字保留的流水线结构。没有复制其代码。
-- **本项目自有**：`staged.ts` 的四段提示词、情绪稳定化、presence 调度、`composeStory` 合成、
-  指标库与回归测试都是按上述官方语料重新实现的。
+- **分阶段写作思路**：参考多阶段剧本创作模式——先选角/定纲，再专注写台词，最后单独设计表演；
+  实现台词与表演分离、台词定稿后逐字保留的流水线结构。
+- **本项目自有**：`staged.ts`（现已模块化为 `src/host/ai/staged/`）的提示词、情绪稳定化、presence 调度、`composeStory` 合成、
+  指标库与回归测试都是按上述官方语料独立实现的。
 
 ## 目标
 
@@ -142,31 +140,31 @@
 ## 评测命令
 
 ```bash
-# 官方基线（已生成）
+# 官方基线
 node scripts/stories/official-metrics.mjs \
-  --corpus D:/Users/桌面/mzkbot/msst-ai-lab/corpus \
-  --out D:/Users/桌面/mzkbot/msst-ai-lab/official-baseline.json
+  --corpus /path/to/msst-ai-lab/corpus \
+  --out /path/to/msst-ai-lab/official-baseline.json
 
 # AI 评测（需要 MSS_LLM_API_KEY）
-MSS_LLM_API_KEY=... MSS_LLM_BASE_URL=http://192.168.31.54:5000/v1 \
-  node scripts/stories/ai-eval.mjs --runs 1 --out D:/Users/桌面/mzkbot/msst-ai-lab/runs/phase1
+MSS_LLM_API_KEY=sk-... MSS_LLM_BASE_URL=https://api.openai.com/v1 \
+  node scripts/stories/ai-eval.mjs --runs 1 --out /path/to/msst-ai-lab/runs/phase1
 ```
 
 评测脚本输出每个场景的 `summary`（text/turns/acting/emotion/stage）与聚合 `report.json`。
 
 ## 关键文件
 
-- `src/host/ai/staged.ts`：三段式提示词、normalize、composeStory。
-- `src/host/ai/storyWriter.ts`：流水线编排；新增情绪轮在这里接入。
+- `src/host/ai/staged.ts`（及 `src/host/ai/staged/`）：多阶段提示词、normalize、`composeStory` 与导演终审。
+- `src/host/ai/storyWriter.ts`：统一三段式流水线编排。
 - `src/host/ai/validate.ts`：动作/情绪/舞台校验。
 - `scripts/stories/story-metrics-lib.mjs`：官方与 AI 共用的指标库。
 - `scripts/stories/official-metrics.mjs`：官方基线。
 - `scripts/stories/ai-eval.mjs`：AI 评测。
 - `scripts/stories/fetch-official-corpus.mjs`：语料下载。
 
-## 环境
+## 环境约定
 
-- LLM：`http://192.168.31.54:5000/v1`，模型 `deepseek-v4.1-flash`，key 在用户消息里。
-- 语料：`D:/Users/桌面/mzkbot/msst-ai-lab/corpus`（328 集 JP+CN，40 活动）。
-- 人格：`D:/Users/桌面/人格设定/PJSK/*.md`。
-- 本机宿主 9881 正在运行渲染池；评测脚本直接 import `out-host`，不占用渲染端口。
+- LLM：任意 OpenAI 兼容端点（通过 `MSS_LLM_BASE_URL` / `MSS_LLM_MODEL` / `MSS_LLM_API_KEY` 指定）。
+- 语料：通过 `MSS_CORPUS_DIR` 指向外部拉取的官方活动语料（如 328 集 JP+CN）。
+- 人格：现已内置于仓库 `personas/pjsk/*.md`（58 份 PJSK 角色人格自动加载）。
+- 评测脚本直接 import `out-host`，不占用 9881 渲染端口。

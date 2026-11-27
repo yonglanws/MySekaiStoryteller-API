@@ -1,6 +1,6 @@
 /**
  * 背景名索引：官方剧情的 PlaceInfo/Telop 地点文本 → 背景 id 的可读名。
- * 名字来源与 ournotes-player 的 stage caption 一致，只统计背景生效期间的文本。
+ * 名字来源于官方舞台字幕（stage caption），只统计背景生效期间的文本。
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
