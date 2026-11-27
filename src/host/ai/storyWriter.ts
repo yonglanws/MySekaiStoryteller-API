@@ -502,15 +502,25 @@ export class StoryWriter {
       }
 
       try {
-        const validated = validateAndFixStory(parsed, view, this.logger, {
+        let validated = validateAndFixStory(parsed, view, this.logger, {
           emotionLabels: this.emotionLabels
         })
-        alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
+        const alignedBefore = alignStoryTtsEmotionsAndCaptions(validated.story, {
+          emotionLabels: this.emotionLabels
+        })
         let ttsTranslated = 0
         if (options.translateForTts ?? this.settings.translateForTts) {
           ttsTranslated = await this.translateTtsText(validated.story, options.signal)
         }
-        alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
+        const alignedAfter = alignStoryTtsEmotionsAndCaptions(validated.story, {
+          emotionLabels: this.emotionLabels
+        })
+        if (alignedBefore.updatedEmotions > 0 || alignedAfter.updatedEmotions > 0) {
+          validated = validateAndFixStory(validated.story, view, this.logger, {
+            emotionLabels: this.emotionLabels
+          })
+          alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
+        }
         return {
           story: validated.story,
           meta: {
@@ -1109,23 +1119,31 @@ export class StoryWriter {
     // ---- 5. 合成与校验 -------------------------------------------------------------------------------------
     let validated: ValidationResult
     try {
-      validated = validateAndFixStory(
-        composeStory(view, plan, dialogue, direction, staging),
-        view,
-        this.logger,
-        { emotionLabels: this.emotionLabels }
-      )
+      const composed = composeStory(view, plan, dialogue, direction, staging)
+      alignStoryTtsEmotionsAndCaptions(composed as unknown as StoryData, {
+        emotionLabels: this.emotionLabels
+      })
+      validated = validateAndFixStory(composed, view, this.logger, {
+        emotionLabels: this.emotionLabels
+      })
     } catch (error) {
       const message = errorMessage(error)
       this.logger.warn(`[AI] staged 合成校验失败，退回无动作版本：${message}`)
       details.push(`合成：${message}`)
       try {
-        validated = validateAndFixStory(
-          composeStory(view, plan, dialogue, fallbackDirection(view, plan), staging),
+        const fallbackComposed = composeStory(
           view,
-          this.logger,
-          { emotionLabels: this.emotionLabels }
+          plan,
+          dialogue,
+          fallbackDirection(view, plan),
+          staging
         )
+        alignStoryTtsEmotionsAndCaptions(fallbackComposed as unknown as StoryData, {
+          emotionLabels: this.emotionLabels
+        })
+        validated = validateAndFixStory(fallbackComposed, view, this.logger, {
+          emotionLabels: this.emotionLabels
+        })
         warnings.push(`表演设计校验失败，已退回无动作版本：${message}`)
       } catch (fallbackError) {
         details.push(`合成回退：${errorMessage(fallbackError)}`)
@@ -1208,6 +1226,14 @@ export class StoryWriter {
     const alignedStaged = alignStoryTtsEmotionsAndCaptions(validated.story, {
       emotionLabels: this.emotionLabels
     })
+    if (alignedStaged.updatedEmotions > 0) {
+      validated = validateAndFixStory(validated.story, view, this.logger, {
+        emotionLabels: this.emotionLabels
+      })
+      alignStoryTtsEmotionsAndCaptions(validated.story, {
+        emotionLabels: this.emotionLabels
+      })
+    }
     if (
       alignedStaged.updatedEmotions > 0 ||
       alignedStaged.updatedCaptions > 0 ||

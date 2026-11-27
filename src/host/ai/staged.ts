@@ -2637,6 +2637,7 @@ ${labels.length > 0 ? labels.join('、') : '平静、开心、生气、伤心、
 - **emotion（粗情绪族）**：
   - 平静：仅用于日常寒暄、温和叙述、冷静思考。**绝不要**把喊人（「瑞希っ！」）、含泪道歉（「对不起」「ごめんね」）、哽咽（「可是……可是……！」）或激动呐喊错标为「平静」。
   - 开心：轻松玩笑、被逗笑、温柔鼓励、豁然开朗或愉悦收尾（如带「～♪」、互相打趣、和好约定）。
+  - 排练入戏后的调侃打趣切换：前面哪怕刚刚在排练悲情戏码或感慨（「『别难过……』」），只要紧接着有人笑着打趣、调侃或温和夸赞（「呵呵呵，很有远行的气势嘛，司。」「哈哈哈」「不错嘛」且无真正哭诉/痛苦词），**立刻切回「开心」或「平静」**，绝不把排练的「伤心」惯性拖到调侃句上。
   - 伤心：失落、脆弱倾诉、愧疚、哽咽、含泪恳求，以及哭戏途中强忍泪水安慰对方（「没关系的」）、无奈解释（「大家都太温柔了」）或绝望吐露——**哭戏未真正释怀和解前全段保持「伤心」，严禁中途掉回「平静」**。
   - 结尾呼吸感与余韵过渡：当冲突在结尾真正走向释怀、夕阳缓和或安静接纳时（如「夕阳沉下去了」「再等我一会儿」），允许结尾数句自然过渡到柔和释放的「平静」或「开心」（搭配安堵/温柔的 ttsCaption），让情绪弧光有呼吸落点，不要把整场几十句锁死在单一哭腔。
   - 生气：争执、嘴硬反驳、委屈发火、情绪激动地质问或焦急大喊；**严禁因前文在打趣就把突然认真/反驳/斥责的急停句（如「别岔开话题！」「别开玩笑了！」「够了！」）惯性标成「开心」，必须立刻切回「生气」或「平静」**。
@@ -2854,7 +2855,12 @@ ${raw.slice(0, 3000)}
 }
 
 const isEmotionPivotCue = (text: string, emotion: string): boolean => {
-  if (emotion === '开心') return /♪|～♪|哈哈|太好了|よかった/.test(text)
+  if (emotion === '开心') {
+    return (
+      /♪|～♪|哈哈|呵呵|嘿嘿|嘻嘻|太好了|よかった|气势嘛|不错嘛|厉害嘛/.test(text) &&
+      !/对不起|ごめん|难过|伤心|痛苦|……/.test(text)
+    )
+  }
   if (emotion === '伤心') return /对不起|ごめん|别.*推开|不要.*走|求你|眼泪|哭|ダメ|呜/.test(text)
   if (emotion === '生气') {
     return /！！|!!|住口|够了|闭嘴|混蛋|别岔开话题|别转移话题|别开玩笑|别敷衍|别装|少啰嗦|别闹了|やめろ|ふざけ/.test(
@@ -3272,6 +3278,37 @@ export function softenPunctuation(dialogue: StagedDialogue, targetShare = 0.55):
 // 第三段：舞台调度与运镜音效（directStaging）
 // ---------------------------------------------------------------------------
 
+function isStagingDramaticEpisode(
+  scene: string,
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue
+): boolean {
+  const planText = [
+    scene,
+    plan.event,
+    plan.logline,
+    plan.understanding?.turningPoint ?? '',
+    ...(plan.outline ?? [])
+  ].join('\n')
+  const hasHighDramaKeyword =
+    /对峙|争执|吵架|冲突|追逐|对决|battle|比试|决斗|崩溃|绝望|质问|爆发|冲刺|舞台高潮|演出高潮|动作|震撼|惊变|急转|跌落|撞/i.test(
+      planText
+    )
+  let intenseLines = 0
+  let shoutingOrShockLines = 0
+  for (const line of dialogue.lines) {
+    if (/！！|!!|？！|\?!/.test(line.content)) shoutingOrShockLines += 1
+    if (
+      /别走|住口|够了|闭嘴|别岔开话题|别开玩笑|对不起|求你|受不了|回不去|怎么可能|接招|上吧/.test(
+        line.content
+      )
+    ) {
+      intenseLines += 1
+    }
+  }
+  return hasHighDramaKeyword || intenseLines >= 2 || shoutingOrShockLines >= 3
+}
+
 export function buildStagingPrompt(
   view: CatalogView,
   plan: StagedCastPlan,
@@ -3316,7 +3353,9 @@ export function buildStagingPrompt(
   const firstBgm = view.bgmPromptChoices(10)[0]?.file ?? ''
   const secondBgm = view.bgmPromptChoices(10).find((b) => b.file !== firstBgm)?.file ?? ''
   const midLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.45)]?.id ?? 'l1'
+  const peakLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.58)]?.id ?? midLine
   const lateLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.72)]?.id ?? 'l1'
+  const isDramaticEpisode = isStagingDramaticEpisode(options.scene, plan, dialogue)
 
   const firstSe = view.seDetailsList()[0]?.file ?? 'se00053_b.mp3'
   const example = {
@@ -3340,9 +3379,18 @@ export function buildStagingPrompt(
         },
         ...(secondBgm ? { bgmCut: { action: 'play', file: secondBgm, fadeMs: 900 } } : {})
       },
+      ...(isDramaticEpisode
+        ? [
+            {
+              lineId: peakLine,
+              camera: { kind: 'zoomIn', scale: 1.12, durationMs: 450 }
+            }
+          ]
+        : []),
       {
         lineId: lateLine,
         se: { file: firstSe, timing: 'before' },
+        ...(isDramaticEpisode ? { camera: { kind: 'zoomReset', durationMs: 450 } } : {}),
         silentReaction: { modelId: plan.cast[0]?.modelId ?? 1 }
       }
     ]
@@ -3385,8 +3433,16 @@ ${presenceRule}
 - **严禁滑动入出场与横向滑位**：所有 \`LayoutAppear\` / \`LayoutClear\` 必须原地渐变淡入淡出（\`from.side === to.side, offset: 0\`），禁止使用 \`walkInCast\` / \`walkOutCast\` / \`LeftOver\` / \`RightOver\` 画外滑入滑出，也禁止 \`Move\` 左右偏移滑行或从 Left/Right 滑到 Center。
 - **克制镜头、震动与开场字幕条（严禁每场套模板）**：
   - 说话后需要角色沉默留白或低头反应时，设 \`silentReaction: { modelId }\`（无需强行把 \`closeWindowAfter: true\` 挂在紧接瞬时动作之前）；仅在停顿 \`Wait >= 300ms\` 或场景/幕次切换前才设置 \`closeWindowAfter: true\`。
-  - **镜头（CameraZoom / CameraMove）克制原则**：官方日常谈心、后台会议、安静独白场次大多 **0~1 次**（切忌平均塞 4~8 次推进平移！）；仅在真正的高潮爆发、重大揭示或舞台演出切镜时用 \`1~3\` 次，且高潮过后及时用 \`zoomReset\` 复位。
-  - **震动（CharacterShake / ShakeWindow / ShakeScreen）极稀缺**：\`CharacterShake\` 仅在真实物理碰撞或猛然吓一跳时偶用（日常对话/安静谈心禁用）；\`ShakeWindow\` / \`ShakeScreen\` 仅用于大喊/突发惊吓。
+  - **镜头（\`events[].camera\`）与震动（\`events[].characterShake\`）按剧情强弱分化（严禁平均摊派）**：
+    - **日常谈心 / 后台会议 / 轻喜剧 / 温柔回忆**：保持 **0 次镜头推拉、0 次震动**（不要加 \`camera\` 或 \`characterShake\`）。
+    - **激烈对峙 / 情绪崩溃 / 街头 Battle / 天台追逐或舞台高潮**：**务必**在转折或爆发峰值 1~2 句上精准安排运镜与震动，并于 1~3 句后复位：
+      - 推进/横摇/复位：\`camera: { kind: "zoomIn", scale: 1.12, durationMs: 450 }\`、\`camera: { kind: "pan", x: 50, y: 0, durationMs: 500 }\`、\`camera: { kind: "zoomReset", durationMs: 450 }\`
+      - 爆发/冲击震动：\`camera: { kind: "shakeScreen" | "shakeWindow", durationMs: 420 }\` 或碰撞惊吓 \`characterShake: { modelId: <id>, axis: "X" }\`（全场至多 1~2 次，绝不用于普通对话）。
+    - ${
+      isDramaticEpisode
+        ? '**本场判定为冲突/动作高潮场**：请在最关键的 1~2 个峰值句安排 `camera`（如 `zoomIn` + 1~3 句后 `zoomReset`，或 `pan`），必要时配 1 次 `shakeScreen` / `characterShake`，不要全片 `0/0`。'
+        : '**本场判定为日常/温和对话场**：请保持克制，`events` 中不要添加 `camera` 推拉或 `shake` 震动（保持 0/0）。'
+    }
   - **开场 Telop / PlaceInfo 按需选用**：仅在时间/地点需要明确交代或跳幕时才写 \`telop\` / \`placeInfo\`，安静延续或私密谈心可直接入戏，不必每场千篇一律加 \`Telop + PlaceInfo\`。
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与转场**：跳时间/换场地优先善用 \`SideFade\`（\`transitionIn: "sideFade"\`），回忆段务必配 \`transitionIn: "flashback"\`, \`isFlashback: true\`（自动接 \`WhiteOut -> se00053_b -> FlashbackIn -> WhiteIn\`），时段/氛围变化用 \`ambient\`（\`normal\`/\`evening\`/\`night\`），出入 SEKAI 用 \`sekaiIn\`/\`sekaiOut\`，天候粒子用（${CURATED_SCENARIO_EFFECTS.join('/')}）。

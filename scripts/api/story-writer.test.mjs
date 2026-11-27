@@ -388,3 +388,121 @@ test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-cha
   assert.ok(!out.meta.stages.some((s) => s.stage === 'dialogue-expand'), '34 lines / 680 chars must not trigger dialogue-expand')
   assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 34)
 })
+
+test('staged StoryWriter clears false 伤心 emotion on teasing praise before facial repair runs', async (t) => {
+  const twoCastCatalog = {
+    get: () => ({
+      models: [
+        {
+          id: 9,
+          characterId: 16,
+          name: '神代类',
+          shortName: '类',
+          path: '16rui_normal/16rui_normal.model3.json',
+          motions: ['m-normal-nod01'],
+          facials: ['face_smile_02', 'face_cry_01', 'face_normal_01'],
+          defaultMotion: 'm-normal-nod01',
+          defaultFacial: 'face_normal_01'
+        },
+        {
+          id: 18,
+          characterId: 13,
+          name: '天马司',
+          shortName: '司',
+          path: '13tsukasa_normal/13tsukasa_normal.model3.json',
+          motions: ['m-normal-nod01'],
+          facials: ['face_smile_01', 'face_cry_01', 'face_normal_01'],
+          defaultMotion: 'm-normal-nod01',
+          defaultFacial: 'face_normal_01'
+        }
+      ],
+      images: ['bg_room.jpg'],
+      imageDetails: [{ file: 'bg_room.jpg', name: '舞台', description: '奇幻舞台' }],
+      voices: [],
+      bgm: ['bgm00003.mp3'],
+      bgmDetails: [{ file: 'bgm00003.mp3', name: '主题曲', mood: 'warm' }]
+    })
+  }
+
+  const lines = [
+    { id: 'l1', speaker: '司', content: '『别难过，我的伙伴们！就算奔向更遥远的舞台！』', emotion: '伤心', caption: '力強く芝居調で語る。' },
+    { id: 'l2', speaker: '司', content: '『所以，笑着送我出发吧！！』', emotion: '伤心', caption: '熱く叫び上げる。' },
+    { id: 'l3', speaker: '类', content: '呵呵呵，很有远行的气势嘛，司。', emotion: '伤心', caption: '感心した様子で柔らかく労う。' },
+    { id: 'l4', speaker: '司', content: '哈哈哈！那是当然的！', emotion: '开心', caption: '晴れやかに笑う。' }
+  ]
+
+  const server = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    const system = body.messages?.find((m) => m.role === 'system')?.content ?? ''
+    let payload
+    if (system.includes('第一轮')) {
+      payload = {
+        title: '早间排练',
+        event: '排练打趣',
+        logline: '排练后的打趣',
+        background: 'bg_room.jpg',
+        cast: [
+          { modelId: 9, name: '类', role: '调侃' },
+          { modelId: 18, name: '司', role: '排练' }
+        ],
+        outline: ['排练', '打趣']
+      }
+    } else if (system.includes('第二轮')) {
+      payload = {
+        title: '早间排练',
+        turns: lines.map((l) => ({ speaker: l.speaker, lines: [l.content] }))
+      }
+    } else if (system.includes('配音导演兼情绪标注员')) {
+      payload = {
+        lines: lines.map((l) => ({ id: l.id, emotion: l.emotion, ttsCaption: l.caption, ttsSpeed: 0.95 }))
+      }
+    } else if (system.includes('舞台监督')) {
+      payload = {
+        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'normal', activeCast: ['类', '司'], bgm: 'bgm00003.mp3' }],
+        events: []
+      }
+    } else if (system.includes('精细演技导演')) {
+      payload = {
+        background: 'bg_room.jpg',
+        bgm: 'bgm00003.mp3',
+        lines: [
+          { id: 'l1', motion: 'm-normal-nod01', facial: 'face_cry_01' },
+          { id: 'l2', motion: 'm-normal-nod01', facial: 'face_cry_01' },
+          { id: 'l3', motion: 'm-normal-nod01', facial: 'face_smile_02' },
+          { id: 'l4', motion: 'm-normal-nod01', facial: 'face_smile_01' }
+        ]
+      }
+    } else {
+      throw new Error(`unexpected stage: ${system.slice(0, 40)}`)
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ model: 'mock', choices: [{ message: { content: JSON.stringify(payload) } }] }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  process.env.MSS_TEST_LLM_KEY = 'test-key'
+  const settings = makeSettings(`http://127.0.0.1:${server.address().port}/v1`, {
+    pipeline: 'staged',
+    targetMinutes: 0.2,
+    translateForTts: false
+  })
+  const writer = new StoryWriter(
+    new LlmClient(settings, new Logger({ type: 'hidden' })),
+    settings,
+    twoCastCatalog,
+    new Logger({ type: 'hidden' }),
+    ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
+  )
+  const out = await writer.generate({ prompt: '奇幻舞台排练', targetMinutes: 0.2, translateForTts: false })
+  const talks = out.story.snippets.filter((s) => s.type === 'Talk')
+  const ruiLine = talks.find((t) => t.data.content.includes('很有远行的气势嘛'))
+  assert.ok(ruiLine)
+  assert.equal(ruiLine.data.emotion, '开心')
+  const ruiAction = ruiLine.data.actions?.find((a) => a.modelId === 9)
+  assert.notEqual(ruiAction?.facial, 'face_cry_01', 'facial must not be forced into face_cry_01 after clearing false 伤心 emotion')
+})

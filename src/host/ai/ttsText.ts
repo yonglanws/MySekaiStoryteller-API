@@ -253,6 +253,10 @@ const TRICKY_BRIGHT_LEXICAL_RE =
 const SHARP_REPRIMAND_CUE_RE =
   /别岔开话题|别转移话题|别开玩笑|别敷衍|少敷衍|别装傻|别装了|少装了|少啰嗦|别啰嗦|别闹了|够了|住口|闭嘴|给我认真|我是认真的|认真一点|到底怎么回事|你到底在瞒|别想逃|别逃避|ふざけないで|話をそらさないで|ごまかさないで|いい加減にして|黙って/
 const GENUINE_JOKING_CONTENT_RE = /♪|～♪|哈哈|嘻嘻|嘿嘿|开玩笑的|逗你的|骗你的|🤭|😆|😊|わはは|ふふ|あはは/
+const LIGHT_TEASING_PRAISE_RE =
+  /呵呵|哈哈哈|嘿嘿|嘻嘻|♪|～♪|很有.*气势嘛|不错嘛|厉害嘛|真行嘛|了不起嘛|ふふ|わはは|あはは/
+const SORROW_CAPTION_RE = /涙|泣|悲|寂|切な|苦|諦|自嘲|震|落ち込|沈/
+const POSITIVE_CAPTION_RE = /感心|労|微笑|明る|嬉し|楽し|軽やか|朗らか|穏やか|優し|温か/
 
 const SPOKEN_STRIP_RE =
   /(?:\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}\uFE0F?)*)|[\s….\-—–―〜～!！?？、,，。・♪「」『』（）()]+/gu
@@ -279,6 +283,9 @@ interface TalkSignalProfile {
   hasPositiveSurfaceWords: boolean
   hasSharpReprimandCue: boolean
   hasGenuineJokingInContent: boolean
+  hasLightTeasingCue: boolean
+  hasSorrowCaption: boolean
+  hasPositiveNonSadCaption: boolean
   hasBreathOrPantCue: boolean
   isShouting: boolean
   isMonologue: boolean
@@ -352,6 +359,15 @@ function buildTalkSignalProfile(
   const hasPositiveSurfaceWords = TRICKY_BRIGHT_LEXICAL_RE.test(combinedText)
   const hasSharpReprimandCue = SHARP_REPRIMAND_CUE_RE.test(combinedText)
   const hasGenuineJokingInContent = GENUINE_JOKING_CONTENT_RE.test(content)
+  const rawCaption = typeof data.ttsCaption === 'string' ? data.ttsCaption.trim() : ''
+  const hasSorrowCaption = SORROW_CAPTION_RE.test(rawCaption)
+  const hasPositiveNonSadCaption =
+    rawCaption.length > 0 && POSITIVE_CAPTION_RE.test(rawCaption) && !hasSorrowCaption
+  const hasLightTeasingCue =
+    LIGHT_TEASING_PRAISE_RE.test(content) &&
+    !hasCryOrBreakupCue &&
+    !hasSorrowfulToneCue &&
+    !/……|对不起|抱歉|ごめん|难过|伤心|痛苦|苦笑|自嘲|勉强|失落/.test(combinedText)
   const hasBreathOrPantCue = /はぁ……はぁ|ふぅ……|息を|🌬️/.test(combinedText)
   const isShouting = /！！|!!|——！！|——!!/.test(combinedText)
   const isMonologue = /^[（(].*[）)]$/s.test(content)
@@ -379,6 +395,9 @@ function buildTalkSignalProfile(
     hasPositiveSurfaceWords,
     hasSharpReprimandCue,
     hasGenuineJokingInContent,
+    hasLightTeasingCue,
+    hasSorrowCaption,
+    hasPositiveNonSadCaption,
     hasBreathOrPantCue,
     isShouting,
     isMonologue,
@@ -584,8 +603,21 @@ export function alignStoryTtsEmotionsAndCaptions(
     const inSadContext = hasPrevSad || (hasNextSad && (p.hasCryOrBreakupCue || p.hasSorrowfulToneCue))
     const hasSadTextSignal = p.hasCryOrBreakupCue || p.hasSorrowfulToneCue || p.hasPositiveSurfaceWords
 
+    const isFalseCarryoverSadOnTeasing =
+      p.emotion === '伤心' &&
+      p.hasLightTeasingCue &&
+      !p.hasSorrowCaption &&
+      (!p.isCryFacial || p.hasPositiveNonSadCaption) &&
+      !p.isSadFacial
+
     let nextEmotion = p.emotion
-    if (p.isCryFacial && p.emotion !== '伤心' && canUseLabel('伤心')) {
+    if (isFalseCarryoverSadOnTeasing) {
+      nextEmotion = canUseLabel('开心')
+        ? '开心'
+        : canUseLabel('平静')
+          ? '平静'
+          : p.emotion
+    } else if (p.isCryFacial && p.emotion !== '伤心' && canUseLabel('伤心')) {
       nextEmotion = '伤心'
     } else if (
       p.emotion === '开心' &&
@@ -636,7 +668,13 @@ export function alignStoryTtsEmotionsAndCaptions(
   for (let i = 0; i < profiles.length; i++) {
     const p = profiles[i]
     const emo = effectiveEmotions[i]
-    const isSadOrCrying = emo === '伤心' || p.isCryFacial
+    const isLightTeasingResolved =
+      (emo === '开心' || emo === '平静') &&
+      p.hasLightTeasingCue &&
+      !p.hasSorrowCaption &&
+      !p.isSadFacial &&
+      (!p.isCryFacial || p.hasPositiveNonSadCaption)
+    const isSadOrCrying = !isLightTeasingResolved && (emo === '伤心' || p.isCryFacial)
     const isAngryOrTense = !isSadOrCrying && (emo === '生气' || p.isAngryFacial)
     const isShocked = !isSadOrCrying && !isAngryOrTense && (emo === '惊讶' || p.isShockFacial)
     const isSharpSerious =
@@ -653,6 +691,15 @@ export function alignStoryTtsEmotionsAndCaptions(
       isJapaneseText(p.ttsText)
     ) {
       let nextTts = stripZeroWidthChars(p.ttsText)
+      if (isLightTeasingResolved) {
+        const strippedSorrow = nextTts
+          .replace(/[🥺😭😢]/gu, '')
+          .replace(/[ \t]{2,}/g, ' ')
+          .trim()
+        if (strippedSorrow && isJapaneseText(strippedSorrow)) {
+          nextTts = strippedSorrow
+        }
+      }
       if (isSadOrCrying || isAngryOrTense || isShocked || isSharpSerious) {
         const stripped = stripJoyfulIrodoriEmojis(
           nextTts,
@@ -701,11 +748,11 @@ export function alignStoryTtsEmotionsAndCaptions(
       }
     }
 
-    // 2b. 补齐并清洗日语 ttsCaption（严禁年龄/性别身份词；伤心句严禁积极/笑颜词根；被急停纠正的严肃/生气句替换残余欢快词根）
+    // 2b. 补齐并清洗日语 ttsCaption（严禁年龄/性别身份词；伤心句由 sanitizeIrodoriCaption 清洗；被急停纠正的严肃/生气句替换残余欢快词根）
     const rawExistingCaption =
       typeof p.data.ttsCaption === 'string' ? p.data.ttsCaption : ''
     const staleJoyfulCaption =
-      (isAngryOrTense || isSharpSerious || isSadOrCrying) &&
+      (isAngryOrTense || isSharpSerious) &&
       /明る|楽し|軽やか|朗らか|笑顔|嬉し/.test(rawExistingCaption)
     const existingCaption =
       rawExistingCaption && !staleJoyfulCaption ? sanitizeIrodoriCaption(rawExistingCaption, emo) : ''
@@ -723,6 +770,14 @@ export function alignStoryTtsEmotionsAndCaptions(
     }
 
     // 2c. 补齐合理语速微调（不覆盖模型已有合法值；非喊叫的伤心+正面词句收紧至 <= 0.94，普通非高潮伤心 <= 0.95）
+    if (isLightTeasingResolved) {
+      if (p.data.ttsSpecialScene === true) {
+        delete p.data.ttsSpecialScene
+      }
+      if (typeof p.data.ttsSpeed === 'number' && p.data.ttsSpeed < 0.95) {
+        p.data.ttsSpeed = emo === '开心' ? 1.02 : 1.0
+      }
+    }
     if (hasTranslationContent(p.content)) {
       if (typeof p.data.ttsSpeed !== 'number' || !Number.isFinite(p.data.ttsSpeed)) {
         if (emo === '伤心') {
