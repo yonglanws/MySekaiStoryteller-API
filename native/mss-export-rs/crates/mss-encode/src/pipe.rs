@@ -8,7 +8,8 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -136,6 +137,34 @@ fn write_frames_loop(
     Ok(written_chunks)
 }
 
+#[derive(Clone)]
+pub struct PipeAbortHandle {
+    child: Arc<Mutex<Option<Child>>>,
+    aborted: Arc<AtomicBool>,
+}
+
+impl PipeAbortHandle {
+    pub fn for_test(aborted: Arc<AtomicBool>) -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+            aborted,
+        }
+    }
+
+    pub fn abort_now(&self) {
+        self.aborted.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.child.lock()
+            && let Some(ref mut child) = *guard
+        {
+            let _ = child.kill();
+        }
+    }
+
+    pub fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::Acquire)
+    }
+}
+
 /// Reusable in-process FFmpeg streaming pipe session with bounded ring-buffer recycling,
 /// rayon RGBA->BT.709 conversion, and zero-conversion duplicate/static-frame repeat.
 pub struct PipeSession {
@@ -148,7 +177,8 @@ pub struct PipeSession {
     dedup_default: bool,
     encoder_label: String,
     started: Instant,
-    child: Option<Child>,
+    child: Arc<Mutex<Option<Child>>>,
+    aborted: Arc<AtomicBool>,
     tx: Option<mpsc::SyncSender<Vec<u8>>>,
     recycle_rx: mpsc::Receiver<Vec<u8>>,
     spare: Vec<Vec<u8>>,
@@ -279,7 +309,8 @@ impl PipeSession {
             dedup_default: opts.dedup,
             encoder_label: spec.label(),
             started,
-            child: Some(child),
+            child: Arc::new(Mutex::new(Some(child))),
+            aborted: Arc::new(AtomicBool::new(false)),
             tx: Some(tx),
             recycle_rx,
             spare: Vec::with_capacity(QUEUED_FRAMES + 1),
@@ -290,6 +321,13 @@ impl PipeSession {
             last_in_frame: Vec::new(),
             last_out_frame: Vec::new(),
         })
+    }
+
+    pub fn abort_handle(&self) -> PipeAbortHandle {
+        PipeAbortHandle {
+            child: Arc::clone(&self.child),
+            aborted: Arc::clone(&self.aborted),
+        }
     }
 
     pub fn frame_count(&self) -> u64 {
@@ -308,6 +346,9 @@ impl PipeSession {
     }
 
     fn enqueue_out_buf(&mut self, buf: Vec<u8>) -> Result<(), String> {
+        if self.aborted.load(Ordering::Acquire) {
+            return Err("pipe session aborted".to_owned());
+        }
         let tx = self
             .tx
             .as_ref()
@@ -317,6 +358,9 @@ impl PipeSession {
     }
 
     pub fn repeat_last_frame(&mut self, count: u32) -> Result<(), String> {
+        if self.aborted.load(Ordering::Acquire) {
+            return Err("pipe session aborted".to_owned());
+        }
         if count == 0 {
             return Ok(());
         }
@@ -343,6 +387,9 @@ impl PipeSession {
         repeat_count: u32,
         dedup_override: Option<bool>,
     ) -> Result<(), String> {
+        if self.aborted.load(Ordering::Acquire) {
+            return Err("pipe session aborted".to_owned());
+        }
         if data.is_empty() {
             return Ok(());
         }
@@ -475,14 +522,21 @@ impl PipeSession {
 
         let mut child = self
             .child
-            .take()
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
             .ok_or_else(|| "ffmpeg child missing".to_owned())?;
-        if writer_res.is_err() {
+        if self.aborted.load(Ordering::Acquire) || writer_res.is_err() {
             let _ = child.kill();
         }
         let output = child
             .wait_with_output()
             .map_err(|e| format!("failed to wait on ffmpeg: {e}"))?;
+
+        if self.aborted.load(Ordering::Acquire) {
+            let _ = std::fs::remove_file(&self.partial);
+            return Err("pipe session aborted".to_owned());
+        }
 
         if let Err(e) = writer_res {
             let _ = std::fs::remove_file(&self.partial);
@@ -524,8 +578,9 @@ impl PipeSession {
     }
 
     pub fn abort(mut self) {
+        self.aborted.store(true, Ordering::Release);
         self.tx.take();
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child.lock().ok().and_then(|mut g| g.take()) {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -540,12 +595,16 @@ impl PipeSession {
 impl Drop for PipeSession {
     fn drop(&mut self) {
         self.tx.take();
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child.lock().ok().and_then(|mut g| g.take()) {
             let _ = child.kill();
             let _ = child.wait();
         }
         if let Some(w) = self.writer.take() {
             let _ = w.join();
+        }
+        if self.aborted.load(Ordering::Acquire) {
+            let _ = std::fs::remove_file(&self.partial);
+            let _ = std::fs::remove_file(&self.output);
         }
     }
 }
@@ -864,16 +923,19 @@ pub fn run_remux(opts: &RemuxOptions) -> Result<RemuxResult, String> {
                 used_encoder = primary.label();
                 Ok(())
             }
-            Err(_) => {
+            Err(first_err) => {
                 let second = primary.fallback_spec();
-                if second != primary && run_once(&second, partial).is_ok() {
+                let sw = primary.fallback_software();
+                if second != primary && second != sw && run_once(&second, partial).is_ok() {
                     used_encoder = second.label();
                     return Ok(());
                 }
-                let sw = primary.fallback_software();
-                run_once(&sw, partial)?;
-                used_encoder = sw.label();
-                Ok(())
+                if sw != primary {
+                    run_once(&sw, partial)?;
+                    used_encoder = sw.label();
+                    return Ok(());
+                }
+                Err(first_err)
             }
         })?;
     }
@@ -928,5 +990,27 @@ mod tests {
             bt709_vui_bsf(Codec::Hevc),
             "hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0"
         );
+    }
+
+    #[test]
+    fn non_qsv_lp_fallback_spec_equals_fallback_software_avoiding_duplicate_pass() {
+        use crate::hardware::{Backend, EncoderSpec};
+        let nvenc = EncoderSpec::Hardware {
+            backend: Backend::Nvenc,
+            codec: Codec::H264,
+            crf: 23,
+            gop: Some(60),
+            low_power: true,
+        };
+        assert_eq!(nvenc.fallback_spec(), nvenc.fallback_software());
+
+        let qsv_lp = EncoderSpec::Hardware {
+            backend: Backend::Qsv,
+            codec: Codec::Hevc,
+            crf: 27,
+            gop: Some(120),
+            low_power: true,
+        };
+        assert_ne!(qsv_lp.fallback_spec(), qsv_lp.fallback_software());
     }
 }

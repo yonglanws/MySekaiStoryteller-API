@@ -343,10 +343,23 @@ export class GpuYuv420Converter {
         return
       }
       if (res === gl.WAIT_FAILED) {
+        this.warnSyncIssue('clientWaitSync returned WAIT_FAILED; proceeding with PBO readback')
         return
       }
       await fastYield()
     }
+    if (!this.disposed) {
+      this.warnSyncIssue('waitSync timed out after 1000 yields; proceeding with PBO readback')
+    }
+  }
+
+  private lastSyncWarnAtMs = -Infinity
+
+  private warnSyncIssue(reason: string): void {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    if (now - this.lastSyncWarnAtMs < 5000) return
+    this.lastSyncWarnAtMs = now
+    console.warn(`[GpuYuv420Converter] ${reason}`)
   }
 
   private async readSlot(slotIndex: number, target?: Uint8Array): Promise<Uint8Array> {

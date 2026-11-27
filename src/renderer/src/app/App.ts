@@ -914,7 +914,7 @@ export class App {
 
     this.ttsManager.updateBGMConfig({
       enabled: bgmConfig?.enabled ?? true,
-      path: bgmConfig?.path ?? 'audio/bgm/bg1.mp3',
+      path: bgmConfig?.path ?? 'audio/bgm/cloud/bgm00003.mp3',
       volume: bgmConfig?.volume ?? 0.35
     })
 
@@ -941,8 +941,12 @@ export class App {
     if (fxChildren && fxChildren.length >= 6) {
       const fxContainer = fxChildren[0] as { children?: unknown[] } | undefined
       const movieSprite = fxChildren[1] as { visible?: boolean } | undefined
-      const seBlackSprite = fxChildren[2] as { visible?: boolean; alpha?: number } | undefined
-      const seWhiteSprite = fxChildren[3] as { visible?: boolean; alpha?: number } | undefined
+      const seBlackSprite = fxChildren[2] as
+        | { visible?: boolean; alpha?: number; filters?: unknown[] }
+        | undefined
+      const seWhiteSprite = fxChildren[3] as
+        | { visible?: boolean; alpha?: number; filters?: unknown[] }
+        | undefined
       const wipeSprite = fxChildren[4] as { visible?: boolean } | undefined
       const sideFade = fxChildren[5] as { visible?: boolean } | undefined
       if (
@@ -953,9 +957,14 @@ export class App {
       ) {
         return true
       }
+      const getCurtainAlpha = (sprite?: { alpha?: number; filters?: unknown[] }): number => {
+        if (!sprite) return 0
+        const filterAlpha = (sprite.filters?.[0] as { alpha?: number } | undefined)?.alpha
+        return typeof filterAlpha === 'number' ? filterAlpha : (sprite.alpha ?? 0)
+      }
       isOccluded = Boolean(
-        (seBlackSprite?.visible && (seBlackSprite.alpha ?? 0) >= 0.999) ||
-          (seWhiteSprite?.visible && (seWhiteSprite.alpha ?? 0) >= 0.999)
+        (seBlackSprite?.visible && getCurtainAlpha(seBlackSprite) >= 0.999) ||
+          (seWhiteSprite?.visible && getCurtainAlpha(seWhiteSprite) >= 0.999)
       )
     }
 
@@ -982,14 +991,18 @@ export class App {
       const n = node as {
         visible?: boolean
         alpha?: number
+        filters?: unknown[]
         x?: number
         y?: number
         text?: string
         texture?: { baseTexture?: { uid?: number }; uid?: number }
         children?: unknown[]
       }
+      const filterAlpha = (n.filters?.[0] as { alpha?: number } | undefined)?.alpha
+      const effectiveAlpha = typeof filterAlpha === 'number' ? filterAlpha : (n.alpha ?? 1)
       parts.push(
         n.visible ? 1 : 0,
+        Math.round(effectiveAlpha * 1000),
         Math.round((n.alpha ?? 1) * 1000),
         Math.round((n.x ?? 0) * 10),
         Math.round((n.y ?? 0) * 10),

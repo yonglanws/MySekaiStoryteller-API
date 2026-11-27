@@ -805,3 +805,253 @@ test('normalizeExportVideoCodec & resolveRemuxCodecPlan treat hevc and h265 iden
   assert.equal(hevcNative.transcode, false)
   assert.equal(hevcNative.finalCodec, 'hevc')
 })
+
+test('App.isFrameVisuallyActive and getStaticSceneSignature read filters[0].alpha on SEBlack/SEWhite curtains', () => {
+  const appPath = path.join(rendererRoot, 'app/App.ts')
+  let appSrc = fs.readFileSync(appPath, 'utf8')
+  appSrc = appSrc.replace(
+    /const gameFontLoaderModules =[\s\S]*?:\s*\{\}/,
+    'const gameFontLoaderModules = {}'
+  )
+  const out = ts.transpileModule(appSrc, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    fileName: appPath
+  }).outputText
+  const mod = { exports: {} }
+  const noop = () => {}
+  const noopClass = class {}
+  const req = (spec) => {
+    if (spec === '@pixi/unsafe-eval' || spec === 'fontfaceobserver' || spec === 'pixi-live2d-display-advanced') {
+      return { configureCubism4: noop }
+    }
+    if (spec === 'pixi.js') {
+      return { Application: noopClass, Container: noopClass, Texture: noopClass, Ticker: { shared: { stop: noop } } }
+    }
+    if (spec.endsWith('/AnimationManager')) {
+      return { __esModule: true, default: class { static exportStepHandlers = new Set() } }
+    }
+    return new Proxy({}, { get: (_t, prop) => (prop === '__esModule' ? true : noopClass) })
+  }
+  const ctx = vm.createContext({ console, Math, Set, Map, Array, Object, String, Number, Boolean, Promise, window: undefined })
+  new vm.Script(`(function(exports, require, module) {\n${out}\n})`, { filename: appPath }).runInContext(ctx)(
+    mod.exports,
+    req,
+    mod
+  )
+  const { App } = mod.exports
+
+  const seBlackSprite = { visible: true, alpha: 1, filters: [{ alpha: 0.5 }], x: 0, y: 0 }
+  const seWhiteSprite = { visible: false, alpha: 1, filters: [{ alpha: 0 }], x: 0, y: 0 }
+  const fakeApp = Object.assign(Object.create(App.prototype), {
+    currentTalkLipSync: null,
+    cameraMoveTarget: null,
+    cameraZoomTarget: null,
+    cameraScale: 1,
+    cameraOffsetX: 0,
+    cameraOffsetY: 0,
+    shakeOffsetX: 0,
+    shakeOffsetY: 0,
+    postEffectOwner: 'none',
+    envFilters: [],
+    cameraBlurFilter: null,
+    layerSpecialEffect: {
+      getContainer: () => ({
+        visible: true,
+        alpha: 1,
+        children: [
+          { children: [] },
+          { visible: false },
+          seBlackSprite,
+          seWhiteSprite,
+          { visible: false },
+          { visible: false }
+        ]
+      })
+    },
+    layerModel: {
+      hasActiveModelsOrShaders: () => true,
+      getContainer: () => ({ visible: true, alpha: 1, children: [] })
+    },
+    layerBackground: { getContainer: () => ({ visible: true, alpha: 1, children: [] }) },
+    layerUI: { getContainer: () => ({ visible: true, alpha: 1, children: [] }) }
+  })
+
+  // filter.alpha = 0.5 (< 0.999) with sprite.alpha = 1 MUST NOT occlude visible models
+  assert.equal(fakeApp.isFrameVisuallyActive(), true)
+  const sigHalf = fakeApp.getStaticSceneSignature()
+
+  // Changing filter.alpha to 0.75 MUST change static scene signature
+  seBlackSprite.filters[0].alpha = 0.75
+  const sigThreeQuarter = fakeApp.getStaticSceneSignature()
+  assert.notEqual(sigHalf, sigThreeQuarter)
+
+  // filter.alpha = 1.0 DOES occlude models
+  seBlackSprite.filters[0].alpha = 1.0
+  assert.equal(fakeApp.isFrameVisuallyActive(), false)
+})
+
+test('WebCodecsMp4Encoder rejects unexpected post-handshake binary WS close without HTTP fallback and warns on high bufferedAmount', async () => {
+  const invokeCalls = []
+  const sentFrames = []
+  let activeWs = null
+  const onCreateWs = (ws) => {
+    activeWs = ws
+  }
+  const warnings = []
+
+  class MockWebSocket {
+    static OPEN = 1
+    static CLOSED = 3
+    constructor() {
+      this.readyState = 1
+      this.bufferedAmount = 0
+      this.listeners = new Map()
+      onCreateWs(this)
+      queueMicrotask(() => this.emit('open', {}))
+    }
+    addEventListener(ev, fn) {
+      if (!this.listeners.has(ev)) this.listeners.set(ev, new Set())
+      this.listeners.get(ev).add(fn)
+    }
+    removeEventListener(ev, fn) {
+      this.listeners.get(ev)?.delete(fn)
+    }
+    emit(ev, data) {
+      for (const fn of this.listeners.get(ev) ?? []) fn(data)
+    }
+    send(payload) {
+      if (typeof payload === 'string') {
+        const msg = JSON.parse(payload)
+        if (msg.op === 'open-file') {
+          queueMicrotask(() => this.emit('message', { data: JSON.stringify({ ok: true, op: 'ack', streamId: msg.streamId }) }))
+        }
+        return
+      }
+      sentFrames.push(payload)
+    }
+    close() {
+      this.readyState = 3
+      this.emit('close', {})
+    }
+  }
+
+  let onDataCb = null
+  const { WebCodecsMp4Encoder } = loadRendererModule(
+    'managers/video-export/WebCodecsMp4Encoder.ts',
+    new Map([
+      [
+        'mp4-muxer',
+        {
+          Muxer: class {
+            constructor(opts) {
+              onDataCb = opts.target.onData
+            }
+            addVideoChunk() {}
+            finalize() {}
+          },
+          StreamTarget: class {
+            constructor(opts) {
+              this.onData = opts.onData
+            }
+          }
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        {
+          ExportLogger: class {
+            info() {}
+            warn(m) { warnings.push(m) }
+            error() {}
+          }
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'),
+        { GpuYuv420Converter: { create: () => null } }
+      ]
+    ]),
+    {
+      VideoEncoder: class {
+        encodeQueueSize = 0
+        configure() {}
+        encode() {}
+        async flush() {}
+        close() {}
+      },
+      VideoFrame: class { close() {} },
+      WebSocket: MockWebSocket,
+      location: { protocol: 'http:', host: '127.0.0.1:9999', search: '' },
+      fetch: async () => ({ ok: true, json: async () => ({ ok: true, wsUrl: '/bridge/ws-bin' }) }),
+      window: {
+        electron: {
+          ipcRenderer: {
+            invoke: async (ch, arg) => {
+              invokeCalls.push({ ch, arg })
+              return { success: true }
+            }
+          }
+        }
+      }
+    }
+  )
+
+  const enc = new WebCodecsMp4Encoder({
+    width: 64,
+    height: 64,
+    fps: 30,
+    bitrate: 1_000_000,
+    encoderConfig: { codec: 'avc1.640028', width: 64, height: 64, bitrate: 1_000_000, framerate: 30 },
+    useGpuYuvReadback: false
+  })
+  await enc.initialize('C:\\temp\\ws-close.mp4')
+
+  // Simulate high bufferedAmount backpressure warning on onData
+  activeWs.bufferedAmount = 40 * 1024 * 1024
+  onDataCb(new Uint8Array([1, 2, 3]), 0)
+  assert.equal(sentFrames.length, 1)
+  assert.ok(warnings.some((w) => w.includes('bufferedAmount')))
+
+  // Unexpected post-handshake WS close MUST record error and NEVER fall back to HTTP write-file-at
+  activeWs.readyState = 3
+  activeWs.emit('close', {})
+  onDataCb(new Uint8Array([4, 5, 6]), 3)
+  assert.equal(invokeCalls.length, 0, 'must never mix HTTP write-file-at after binary WS close')
+  await assert.rejects(() => enc.finish(), /Binary WS closed unexpectedly/)
+})
+
+test('GpuYuv420Converter.waitSync logs rate-limited warning on WAIT_FAILED', async () => {
+  const warnLogs = []
+  const fakeGl = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4,
+    ARRAY_BUFFER: 5, STATIC_DRAW: 6, TEXTURE0: 7, TEXTURE_2D: 8,
+    TEXTURE_MIN_FILTER: 9, TEXTURE_MAG_FILTER: 10, TEXTURE_WRAP_S: 11, TEXTURE_WRAP_T: 12,
+    LINEAR: 13, NEAREST: 14, CLAMP_TO_EDGE: 15, RGBA8: 16, RGBA: 17, UNSIGNED_BYTE: 18,
+    FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20, FRAMEBUFFER_COMPLETE: 21,
+    PIXEL_PACK_BUFFER: 22, STREAM_READ: 23, TRIANGLE_STRIP: 24, FLOAT: 25,
+    UNPACK_FLIP_Y_WEBGL: 26, SYNC_GPU_COMMANDS_COMPLETE: 27,
+    ALREADY_SIGNALED: 28, CONDITION_SATISFIED: 29, WAIT_FAILED: 30,
+    createShader: () => ({}), shaderSource: () => {}, compileShader: () => {}, getShaderParameter: () => true, deleteShader: () => {},
+    createProgram: () => ({}), attachShader: () => {}, linkProgram: () => {}, getProgramParameter: () => true, deleteProgram: () => {},
+    createVertexArray: () => ({}), bindVertexArray: () => {}, deleteVertexArray: () => {},
+    createBuffer: () => ({}), bindBuffer: () => {}, bufferData: () => {}, deleteBuffer: () => {},
+    getAttribLocation: () => 0, enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
+    createTexture: () => ({}), activeTexture: () => {}, bindTexture: () => {}, texParameteri: () => {}, texImage2D: () => {}, deleteTexture: () => {},
+    createFramebuffer: () => ({}), bindFramebuffer: () => {}, framebufferTexture2D: () => {}, checkFramebufferStatus: () => 21, deleteFramebuffer: () => {},
+    useProgram: () => {}, getUniformLocation: () => ({}), uniform1i: () => {}, viewport: () => {}, pixelStorei: () => {}, drawArrays: () => {},
+    readPixels: () => {}, fenceSync: () => ({}), flush: () => {},
+    clientWaitSync: () => 30, // WAIT_FAILED
+    deleteSync: () => {}, getBufferSubData: (_t, _o, dst) => { dst[0] = 7 }
+  }
+  const { GpuYuv420Converter } = loadRendererModule('managers/video-export/GpuYuv420Converter.ts', new Map(), {
+    OffscreenCanvas: class { getContext() { return fakeGl } },
+    console: { warn: (m) => warnLogs.push(m), info: () => {}, error: () => {} }
+  })
+  const conv = GpuYuv420Converter.create(16, 16, 1)
+  await conv.enqueueAsync({})
+  await conv.enqueueAsync({})
+  await conv.enqueueAsync({})
+  assert.equal(warnLogs.length, 1, 'WAIT_FAILED warning must be rate-limited within 5s window')
+  assert.match(warnLogs[0], /WAIT_FAILED/)
+  conv.dispose()
+})

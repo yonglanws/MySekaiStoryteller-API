@@ -182,6 +182,17 @@ export class WsHub {
       error: Error | null
     }
     const streams = new Map<number, FileStreamEntry>()
+    const openingStreams = new Set<number>()
+    let wsClosed = false
+
+    const sendJson = (payload: Record<string, unknown>): void => {
+      if (wsClosed || ws.readyState !== WebSocket.OPEN) return
+      try {
+        ws.send(JSON.stringify(payload))
+      } catch {
+        /* ignore send failure on closing socket */
+      }
+    }
 
     const closeStream = async (streamId: number): Promise<{ fileSize: number; error: Error | null }> => {
       const entry = streams.get(streamId)
@@ -224,7 +235,9 @@ export class WsHub {
           try {
             await entry.handle.write(payload, 0, payload.length, pos)
           } catch (err) {
-            entry.error = err instanceof Error ? err : new Error(String(err))
+            const wrapped = err instanceof Error ? err : new Error(String(err))
+            entry.error = wrapped
+            sendJson({ ok: false, op: 'async-error', streamId, error: wrapped.message })
           }
         })
         return
@@ -239,63 +252,80 @@ export class WsHub {
             truncate?: boolean
           }
           if (msg.op === 'ping') {
-            ws.send(JSON.stringify({ ok: true, op: 'pong' }))
+            sendJson({ ok: true, op: 'pong' })
             return
           }
           const streamId = Number(msg.streamId)
           if (!Number.isInteger(streamId) || streamId <= 0) {
-            ws.send(JSON.stringify({ ok: false, op: 'error', error: 'Invalid streamId' }))
+            sendJson({ ok: false, op: 'error', error: 'Invalid streamId' })
             return
           }
           if (msg.op === 'open-file') {
-            const safePath = this.resolveContainedTempPath(msg.path || '')
-            if (!safePath) {
-              ws.send(
-                JSON.stringify({ ok: false, op: 'error', streamId, error: 'Path outside tmpdir' })
-              )
+            if (streams.has(streamId) || openingStreams.has(streamId)) {
+              sendJson({ ok: false, op: 'error', streamId, error: 'Duplicate streamId' })
               return
             }
-            await fs.promises.mkdir(path.dirname(safePath), { recursive: true })
-            const handle = await fs.promises.open(safePath, msg.truncate !== false ? 'w+' : 'r+')
-            streams.set(streamId, {
-              filePath: safePath,
-              handle,
-              tail: Promise.resolve(),
-              closing: false,
-              error: null
-            })
-            ws.send(JSON.stringify({ ok: true, op: 'ack', streamId }))
+            const safePath = this.resolveContainedTempPath(msg.path || '')
+            if (!safePath) {
+              sendJson({ ok: false, op: 'error', streamId, error: 'Path outside tmpdir' })
+              return
+            }
+            openingStreams.add(streamId)
+            let handle: fs.promises.FileHandle | null = null
+            try {
+              await fs.promises.mkdir(path.dirname(safePath), { recursive: true })
+              if (wsClosed || ws.readyState !== WebSocket.OPEN) {
+                return
+              }
+              handle = await fs.promises.open(safePath, msg.truncate !== false ? 'w+' : 'r+')
+              if (wsClosed || ws.readyState !== WebSocket.OPEN) {
+                await handle.close().catch(() => {})
+                handle = null
+                return
+              }
+              streams.set(streamId, {
+                filePath: safePath,
+                handle,
+                tail: Promise.resolve(),
+                closing: false,
+                error: null
+              })
+              handle = null
+              sendJson({ ok: true, op: 'ack', streamId })
+            } finally {
+              openingStreams.delete(streamId)
+              if (handle) {
+                await handle.close().catch(() => {})
+              }
+            }
             return
           }
           if (msg.op === 'close') {
             const { fileSize, error } = await closeStream(streamId)
             if (error) {
-              ws.send(
-                JSON.stringify({ ok: false, op: 'error', streamId, error: error.message })
-              )
+              sendJson({ ok: false, op: 'error', streamId, error: error.message })
               return
             }
-            ws.send(JSON.stringify({ ok: true, op: 'closed', streamId, fileSize }))
+            sendJson({ ok: true, op: 'closed', streamId, fileSize })
             return
           }
           if (msg.op === 'abort') {
             await closeStream(streamId)
-            ws.send(JSON.stringify({ ok: true, op: 'aborted', streamId }))
+            sendJson({ ok: true, op: 'aborted', streamId })
             return
           }
         } catch (err) {
-          ws.send(
-            JSON.stringify({
-              ok: false,
-              op: 'error',
-              error: err instanceof Error ? err.message : String(err)
-            })
-          )
+          sendJson({
+            ok: false,
+            op: 'error',
+            error: err instanceof Error ? err.message : String(err)
+          })
         }
       })()
     })
 
     ws.on('close', () => {
+      wsClosed = true
       this.binarySockets.delete(ws)
       for (const streamId of Array.from(streams.keys())) {
         void closeStream(streamId)

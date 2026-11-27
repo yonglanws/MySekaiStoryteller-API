@@ -699,7 +699,7 @@ export async function resolveGlobalBgm(
   bgm: { enabled: boolean; path: string },
   ctx: CloudAssetContext
 ): Promise<boolean> {
-  if (!bgm.enabled || !bgm.path || !ctx.catalog) return false
+  if (!bgm.enabled || !bgm.path) return false
   const isCloudOnly = Boolean(ctx.cloudOnly ?? ctx.settings?.cloudOnly)
   const raw = bgm.path.trim()
   if (/^https?:\/\//i.test(raw) || raw.startsWith('/')) return false
@@ -716,6 +716,23 @@ export async function resolveGlobalBgm(
     }
     return false
   }
+
+  const cloudBgmDir = path.join(ctx.resourcesDir, 'audio', 'bgm', 'cloud')
+  const lookupStem =
+    isCloudOnly && isLegacyDefaultBgmRef(ref) ? DEFAULT_CLOUD_BGM_ID : stem(bgmRel)
+  const cachedCloud = lookupStem
+    ? existsWithExtensions(cloudBgmDir, lookupStem, AUDIO_EXTENSIONS)
+    : null
+  if (cachedCloud) {
+    const normalized = `audio/bgm/cloud/${path.basename(cachedCloud)}`
+    if (bgm.path !== normalized) {
+      bgm.path = normalized
+      return true
+    }
+    return false
+  }
+
+  if (!ctx.catalog) return false
 
   let entry = findCloudBgm(ctx.catalog, bgmRel) ?? findCloudBgm(ctx.catalog, path.basename(bgmRel))
   if (!entry && isLegacyDefaultBgmRef(ref)) {

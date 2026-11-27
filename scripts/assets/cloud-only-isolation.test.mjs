@@ -15,9 +15,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import express from 'express'
 import { Logger } from 'tslog'
-import { loadHostConfig } from '../../out-host/host/config.js'
-import { ResourceCatalog } from '../../out-host/host/resources/resourceCatalog.js'
+import { loadHostConfig, normalizeCloudOnlyBgmPath } from '../../out-host/host/config.js'
+import { ResourceCatalog, resolveRegisteredSeFile } from '../../out-host/host/resources/resourceCatalog.js'
+import { createStaticRouter } from '../../out-host/host/static/staticRoutes.js'
+import { createOptionalAudioPathResolver } from '../../out-host/host/bridge/bridgeRoutes.js'
 import {
   findCloudModel,
   resolveGlobalBgm,
@@ -560,4 +563,132 @@ test('resolveGlobalBgm & resolveStoryCloudAssets with cloudOnly=true ignore lega
     await once(server, 'close')
     fs.rmSync(resourcesDir, { recursive: true, force: true })
   }
+})
+
+test('cloudOnly=true gates /resources static serving, bridge optional audio paths, offline cached global BGM, config BGM normalization, and SE fallback', async (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-cloud-gates-'))
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }))
+
+  const resourcesDir = path.join(tmpRoot, 'resources')
+  const webRendererDir = path.join(tmpRoot, 'webrenderer')
+  const outputDir = path.join(tmpRoot, 'output')
+  fs.mkdirSync(webRendererDir, { recursive: true })
+  fs.mkdirSync(outputDir, { recursive: true })
+  fs.writeFileSync(path.join(webRendererDir, 'index.html'), '<html>ok</html>')
+
+  seedLegacyLocalResources(resourcesDir)
+  // Seed allowed cloud/ and inapp/ cached files alongside legacy local files
+  fs.mkdirSync(path.join(resourcesDir, 'models', 'cloud', '20mizuki_normal'), { recursive: true })
+  fs.writeFileSync(
+    path.join(resourcesDir, 'models', 'cloud', '20mizuki_normal', 'model.model3.json'),
+    '{}'
+  )
+  fs.mkdirSync(path.join(resourcesDir, 'images', 'cloud'), { recursive: true })
+  fs.writeFileSync(path.join(resourcesDir, 'images', 'cloud', 'bg_a000301.webp'), 'CLOUD_BG')
+  fs.mkdirSync(path.join(resourcesDir, 'audio', 'bgm', 'cloud'), { recursive: true })
+  fs.writeFileSync(path.join(resourcesDir, 'audio', 'bgm', 'cloud', 'bgm00003.mp3'), 'CLOUD_BGM')
+  fs.mkdirSync(path.join(resourcesDir, 'audio', 'se', 'cloud'), { recursive: true })
+  fs.writeFileSync(path.join(resourcesDir, 'audio', 'se', 'cloud', 'se00053_b.mp3'), 'CLOUD_SE')
+  fs.mkdirSync(path.join(resourcesDir, 'inapp', 'jp-7.0.0'), { recursive: true })
+  fs.writeFileSync(path.join(resourcesDir, 'inapp', 'jp-7.0.0', 'ui.png'), 'INAPP_UI')
+
+  // 1. Static router cloudOnly gate
+  const app = express()
+  app.use(
+    createStaticRouter({
+      paths: { resources: resourcesDir, webRenderer: webRendererDir, output: outputDir },
+      assets: { cloudOnly: true }
+    })
+  )
+  const srv = app.listen(0, '127.0.0.1')
+  await once(srv, 'listening')
+  t.after(() => srv.close())
+  const base = `http://127.0.0.1:${srv.address().port}`
+
+  const blockedPaths = [
+    '/resources/models/models.yaml',
+    '/resources/models/21mizuki_normal/21mizuki_normal.model3.json',
+    '/resources/images/images.yaml',
+    '/resources/images/bg_legacy_only.png',
+    '/resources/audio/bgm/bgm.yaml',
+    '/resources/audio/bgm/bg1.mp3',
+    '/resources/audio/se/se00053_b.mp3',
+    '/resources/voices/legacy_voice.wav'
+  ]
+  for (const p of blockedPaths) {
+    const res = await fetch(`${base}${p}`)
+    assert.ok(res.status === 403 || res.status === 404, `${p} must be blocked, got ${res.status}`)
+  }
+
+  const allowedPaths = [
+    '/resources/inapp/jp-7.0.0/ui.png',
+    '/resources/models/cloud/20mizuki_normal/model.model3.json',
+    '/resources/images/cloud/bg_a000301.webp',
+    '/resources/audio/bgm/cloud/bgm00003.mp3',
+    '/resources/audio/se/cloud/se00053_b.mp3'
+  ]
+  for (const p of allowedPaths) {
+    const res = await fetch(`${base}${p}`)
+    assert.equal(res.status, 200, `${p} must be allowed in cloudOnly mode`)
+  }
+
+  // 2. Bridge optional audio resolver gate
+  const resolveAudio = createOptionalAudioPathResolver({
+    paths: { resources: resourcesDir, output: outputDir, webRenderer: webRendererDir },
+    bgm: { enabled: true, path: 'audio/bgm/bg1.mp3', volume: 0.35 },
+    assets: { cloudOnly: true }
+  })
+  assert.equal(resolveAudio('audio/bgm/bg1.mp3'), undefined)
+  assert.equal(resolveAudio('/resources/audio/bgm/bgm00003.mp3'), undefined)
+  assert.equal(resolveAudio('audio/se/se00053_b.mp3'), undefined)
+  assert.ok(resolveAudio('audio/bgm/cloud/bgm00003.mp3')?.endsWith('bgm00003.mp3'))
+  assert.ok(resolveAudio('audio/se/cloud/se00053_b.mp3')?.endsWith('se00053_b.mp3'))
+
+  // 3. Config bgm.path normalization under cloudOnly
+  assert.equal(normalizeCloudOnlyBgmPath('audio/bgm/custom.mp3'), 'bgm00003')
+  assert.equal(normalizeCloudOnlyBgmPath('custom.mp3'), 'bgm00003')
+  assert.equal(normalizeCloudOnlyBgmPath('C:\\music\\local.mp3'), 'bgm00003')
+  assert.equal(normalizeCloudOnlyBgmPath('audio/bgm/bgm00297.mp3'), 'bgm00297')
+  assert.equal(normalizeCloudOnlyBgmPath('https://cdn.example.com/a.mp3'), 'https://cdn.example.com/a.mp3')
+  assert.equal(normalizeCloudOnlyBgmPath('cloud/bgm00003.mp3'), 'cloud/bgm00003.mp3')
+  assert.equal(normalizeCloudOnlyBgmPath('audio/bgm/cloud/bgm00003.mp3'), 'audio/bgm/cloud/bgm00003.mp3')
+
+  // 4. Offline resolveGlobalBgm checks cached audio/bgm/cloud/<stem>.* before !ctx.catalog
+  const offlineGlobal = { enabled: true, path: 'bgm00003' }
+  const offlineChanged = await resolveGlobalBgm(offlineGlobal, {
+    settings: { cloudOnly: true },
+    resourcesDir,
+    catalog: null,
+    logger,
+    cloudOnly: true
+  })
+  assert.equal(offlineChanged, true)
+  assert.equal(offlineGlobal.path, 'audio/bgm/cloud/bgm00003.mp3')
+
+  // 5. ResourceCatalog cloudOnly flag & SE fallback prefixing when cloud.se is empty
+  const emptySeCloudRc = new ResourceCatalog(
+    logger,
+    { paths: { resources: resourcesDir }, assets: { cloudOnly: true } },
+    () => ({
+      format: 'msst.cloud-catalog/1',
+      schemaVersion: 2,
+      generatedAt: new Date().toISOString(),
+      region: 'cn',
+      sources: { indexUrl: '', libraryRoot: '', assetBase: '', soundtrack: '' },
+      models: [],
+      backgrounds: [],
+      bgm: [],
+      se: []
+    })
+  )
+  const rcData = emptySeCloudRc.get()
+  assert.equal(rcData.cloudOnly, true)
+  assert.ok((rcData.seDetails?.length ?? 0) > 0)
+  assert.ok(rcData.seDetails.every((s) => s.file.startsWith('cloud/')))
+
+  assert.deepEqual(resolveRegisteredSeFile({ seDetails: [], cloudOnly: true }, 'se00053_b.mp3'), {
+    file: 'cloud/se00053_b.mp3',
+    remapped: false
+  })
+  assert.equal(resolveRegisteredSeFile({ seDetails: [], cloudOnly: true }, 'se_legacy_only.mp3'), null)
 })

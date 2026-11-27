@@ -169,7 +169,10 @@ export class BgmPlan {
     globalBuffer: AudioBuffer | null = null,
     startTimesIncludeDelay = false
   ): BuiltBgmCueList {
-    const baseCues = buildBgmCues(this.changes, startTimesMs, this.buffers, globalBuffer)
+    const normalizedChanges = startTimesIncludeDelay
+      ? this.changes.map((change) => ({ ...change, delayMs: 0 }))
+      : this.changes
+    const baseCues = buildBgmCues(normalizedChanges, startTimesMs, this.buffers, globalBuffer)
     const enriched: BuiltBgmCueList = baseCues.map((cue: BgmCue<AudioBuffer>) => {
       const loop = cue.buffer ? this.loopByBuffer.get(cue.buffer) : undefined
       return {
@@ -204,7 +207,10 @@ export class BgmPlan {
     volumeTweens: BgmVolumeTweenPoint[]
   } {
     const cues = this.changes.map((change) => ({
-      timeMs: Math.max(0, (startTimesMs[change.snippetIndex] ?? 0) + change.delayMs),
+      timeMs: Math.max(
+        0,
+        (startTimesMs[change.snippetIndex] ?? 0) + (startTimesIncludeDelay ? 0 : change.delayMs)
+      ),
       fadeMs: change.fadeMs,
       stop: change.stop,
       ...(change.stop ? {} : { relPath: `audio/bgm/${change.file}` }),

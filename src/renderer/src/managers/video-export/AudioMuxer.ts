@@ -608,7 +608,7 @@ export class AudioMuxer {
 
     const sorted = [...this.bgmCues].sort((a, b) => a.timeMs - b.timeMs)
     const starts = sorted.map((c) =>
-      Math.max(0, Math.min(totalSamples, Math.round((c.timeMs / 1000) * sampleRate)))
+      Math.max(0, Math.min(totalSamples, Math.floor((c.timeMs / 1000) * sampleRate)))
     )
     let segments = 0
     for (let idx = 0; idx < sorted.length; idx++) {
@@ -814,8 +814,12 @@ export class AudioMuxer {
         }
 
         const startSample = Math.max(0, Math.floor((track.startTime / 1000) * sampleRate))
-        const endSample = Math.min(startSample + sourceCh0.length, totalSamples)
-        if (startSample >= totalSamples) {
+        const endByTrack =
+          Number.isFinite(track.endTime) && track.endTime > track.startTime
+            ? Math.round((track.endTime / 1000) * sampleRate)
+            : Number.POSITIVE_INFINITY
+        const endSample = Math.min(startSample + sourceCh0.length, totalSamples, endByTrack)
+        if (endSample <= startSample) {
           skippedTrackCount++
           continue
         }

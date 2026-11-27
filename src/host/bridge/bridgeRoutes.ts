@@ -203,6 +203,78 @@ function randomSuffix(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12)
 }
 
+function isAllowedCloudOnlyResourceRelPath(relPosix: string): boolean {
+  const clean = relPosix.replace(/^\/+/, '').toLowerCase()
+  return (
+    clean.startsWith('audio/bgm/cloud/') ||
+    clean.startsWith('audio/se/cloud/') ||
+    clean.startsWith('cloud/') ||
+    clean.startsWith('inapp/')
+  )
+}
+
+/** 创建 Bridge 音频路径解析器（供路由与单元测试复用）；cloudOnly=true 时拒绝非 cloud/ 的 resources 音频路径。 */
+export function createOptionalAudioPathResolver(
+  config: Pick<HostConfig, 'paths' | 'bgm' | 'assets'>,
+  allowedTempRoots: string[] = [resolveWithExistingRealpath(tmpdir()), path.resolve(tmpdir())]
+): (rawPath: unknown) => string | undefined {
+  const resourceRoot = config.paths?.resources ? resolveWithExistingRealpath(config.paths.resources) : ''
+  const customBgmPath = config.bgm?.path ? resolveWithExistingRealpath(config.bgm.path) : ''
+  const allowedResourceRoots = Array.from(
+    new Set([...(resourceRoot ? [resourceRoot] : []), ...allowedTempRoots])
+  )
+
+  return (rawPath: unknown): string | undefined => {
+    if (typeof rawPath !== 'string' || !rawPath.trim() || rawPath.includes('\0')) return undefined
+    let candidate = rawPath.trim()
+    if (/^https?:\/\//i.test(candidate)) {
+      try {
+        candidate = new URL(candidate).pathname
+      } catch {
+        return undefined
+      }
+    }
+    if (candidate.startsWith('/resources/')) {
+      if (!resourceRoot) return undefined
+      candidate = path.join(resourceRoot, candidate.slice('/resources/'.length))
+    } else if (!path.isAbsolute(candidate)) {
+      if (!resourceRoot) return undefined
+      const stripped = candidate
+        .replace(/^\/+/, '')
+        .replace(/^resources\/builtin\//, '')
+        .replace(/^resources\//, '')
+      candidate = path.join(resourceRoot, stripped)
+    }
+    const resolvedCandidate = resolveWithExistingRealpath(candidate)
+    if (config.assets?.cloudOnly && resourceRoot) {
+      const relToResource = path.relative(
+        normalizePathForCompare(resourceRoot),
+        normalizePathForCompare(resolvedCandidate)
+      )
+      if (
+        !relToResource ||
+        (!relToResource.startsWith('..') &&
+          !path.isAbsolute(relToResource) &&
+          !isAllowedCloudOnlyResourceRelPath(relToResource.replace(/\\/g, '/')))
+      ) {
+        return undefined
+      }
+    }
+    if (
+      customBgmPath &&
+      normalizePathForCompare(resolvedCandidate) === normalizePathForCompare(customBgmPath)
+    ) {
+      return fs.existsSync(resolvedCandidate) ? resolvedCandidate : undefined
+    }
+    try {
+      const safe = assertContainedPath(candidate, allowedResourceRoots, 'audio resource path')
+      return fs.existsSync(safe) ? safe : undefined
+    } catch {
+      return undefined
+    }
+  }
+}
+
 /**
  * 渲染页面 ↔ 宿主的桥接层。
  * 通道语义与原 Electron IpcHandler 对齐：
@@ -226,46 +298,11 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
     ])
   )
   const resourceRoot = config.paths?.resources ? resolveWithExistingRealpath(config.paths.resources) : ''
-  const customBgmPath = config.bgm?.path ? resolveWithExistingRealpath(config.bgm.path) : ''
   const allowedResourceRoots = Array.from(
     new Set([...(resourceRoot ? [resourceRoot] : []), ...allowedTempRoots])
   )
 
-  const resolveOptionalAudioPath = (rawPath: unknown): string | undefined => {
-    if (typeof rawPath !== 'string' || !rawPath.trim() || rawPath.includes('\0')) return undefined
-    let candidate = rawPath.trim()
-    if (/^https?:\/\//i.test(candidate)) {
-      try {
-        candidate = new URL(candidate).pathname
-      } catch {
-        return undefined
-      }
-    }
-    if (candidate.startsWith('/resources/')) {
-      if (!resourceRoot) return undefined
-      candidate = path.join(resourceRoot, candidate.slice('/resources/'.length))
-    } else if (!path.isAbsolute(candidate)) {
-      if (!resourceRoot) return undefined
-      const stripped = candidate
-        .replace(/^\/+/, '')
-        .replace(/^resources\/builtin\//, '')
-        .replace(/^resources\//, '')
-      candidate = path.join(resourceRoot, stripped)
-    }
-    const resolvedCandidate = resolveWithExistingRealpath(candidate)
-    if (
-      customBgmPath &&
-      normalizePathForCompare(resolvedCandidate) === normalizePathForCompare(customBgmPath)
-    ) {
-      return fs.existsSync(resolvedCandidate) ? resolvedCandidate : undefined
-    }
-    try {
-      const safe = assertContainedPath(candidate, allowedResourceRoots, 'audio resource path')
-      return fs.existsSync(safe) ? safe : undefined
-    } catch {
-      return undefined
-    }
-  }
+  const resolveOptionalAudioPath = createOptionalAudioPathResolver(config, allowedTempRoots)
 
   const ensureRustBridgeEndpoint = (): RustBridgeServerInfo | null => {
     if (!isRustExporterAvailable(config.video.useRustExporter !== false)) {

@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import vm from 'node:vm'
+import ts from 'typescript'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import {
   buildBgmCues,
@@ -6,6 +11,77 @@ import {
   mixBgmCueSamples,
   normalizeBgmFile
 } from '../../out-host/common/audio/bgm.js'
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
+const rendererRoot = path.join(repoRoot, 'src/renderer/src')
+
+function loadRendererModule(relPath, mocks = new Map()) {
+  const fullPath = path.join(rendererRoot, relPath)
+  const cache = new Map()
+  const context = vm.createContext({
+    console,
+    Uint8Array,
+    Float32Array,
+    Int16Array,
+    Int32Array,
+    DataView,
+    ArrayBuffer,
+    Math,
+    Number,
+    Map,
+    Set,
+    WeakMap,
+    Promise,
+    AudioContext: class {
+      constructor() {
+        this.sampleRate = 48000
+        this.state = 'running'
+      }
+      createBuffer(channels, length, sampleRate) {
+        const bufs = Array.from({ length: channels }, () => new Float32Array(length))
+        return {
+          numberOfChannels: channels,
+          length,
+          sampleRate,
+          duration: length / sampleRate,
+          getChannelData: (c) => bufs[c]
+        }
+      }
+      async resume() {}
+      async close() {}
+    }
+  })
+  const loadByAbsPath = (absPath) => {
+    const norm = path.normalize(absPath)
+    if (cache.has(norm)) return cache.get(norm)
+    if (mocks.has(norm)) return mocks.get(norm)
+    const src = fs.readFileSync(norm, 'utf8')
+    const out = ts.transpileModule(src, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      fileName: norm
+    }).outputText
+    const mod = { exports: {} }
+    cache.set(norm, mod.exports)
+    const req = (spec) => {
+      if (mocks.has(spec)) return mocks.get(spec)
+      if (spec.startsWith('.')) {
+        const base = path.resolve(path.dirname(norm), spec)
+        for (const cand of [base, `${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts')]) {
+          if (fs.existsSync(cand) && fs.statSync(cand).isFile()) {
+            return loadByAbsPath(cand)
+          }
+        }
+      }
+      throw new Error(`Unexpected dependency "${spec}" from ${norm}`)
+    }
+    new vm.Script(`(function(exports, require, module) {\n${out}\n})`, { filename: norm }).runInContext(
+      context
+    )(mod.exports, req, mod)
+    cache.set(norm, mod.exports)
+    return mod.exports
+  }
+  return loadByAbsPath(fullPath)
+}
 
 const change = (file = '', stop = false, fadeMs = 600, volume = 1, delay = 0) => ({
   type: 'ChangeBgm',
@@ -125,4 +201,102 @@ test('mixBgmCueSamples loops, crossfades and stops on the timeline', () => {
   for (let index = 0; index < totalSamples; index++) {
     assert.equal(left[index], right[index])
   }
+})
+
+test('BgmPlan.build and getRustCues honor startTimesIncludeDelay without double-adding delayMs', () => {
+  const { BgmPlan } = loadRendererModule(
+    'managers/video-export/BgmPlan.ts',
+    new Map([
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        { ExportLogger: class { info() {} warn() {} error() {} } }
+      ]
+    ])
+  )
+  const snippets = [
+    { type: 'ChangeBgm', wait: false, delay: 0.5, data: { file: 'bgm00003.mp3', stop: false, fadeMs: 400, volume: 0.8 } },
+    { type: 'BgmVolume', wait: false, delay: 0.25, data: { volume: 0.5, duration: 300 } }
+  ]
+  const plan = new BgmPlan(snippets)
+  plan.buffers.set('bgm00003.mp3', { duration: 10 })
+
+  // startTimesIncludeDelay = false -> adds snippet delayMs
+  const noDelayCues = plan.build([1000, 2000], null, false)
+  assert.equal(noDelayCues[0].timeMs, 1500)
+  assert.equal(noDelayCues.volumeTweens[0].timeMs, 2250)
+  const rustNoDelay = plan.getRustCues([1000, 2000], false)
+  assert.equal(rustNoDelay.cues[0].timeMs, 1500)
+  assert.equal(rustNoDelay.volumeTweens[0].timeMs, 2250)
+
+  // startTimesIncludeDelay = true -> does NOT double-add delayMs
+  const incDelayCues = plan.build([1500, 2250], null, true)
+  assert.equal(incDelayCues[0].timeMs, 1500)
+  assert.equal(incDelayCues.volumeTweens[0].timeMs, 2250)
+  const rustIncDelay = plan.getRustCues([1500, 2250], true)
+  assert.equal(rustIncDelay.cues[0].timeMs, 1500)
+  assert.equal(rustIncDelay.volumeTweens[0].timeMs, 2250)
+})
+
+test('AudioMuxer clamps voice track endTime and floors loop-region BGM cue start samples', async () => {
+  const { AudioMuxer, ACF_GAIN_VOICE } = loadRendererModule(
+    'managers/video-export/AudioMuxer.ts',
+    new Map([
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        { ExportLogger: class { info() {} warn() {} error() {} } }
+      ]
+    ])
+  )
+
+  const muxer = new AudioMuxer()
+  const sr = 48_000
+  const voiceSamples = new Float32Array(sr) // 1s voice
+  voiceSamples.fill(0.5)
+  muxer.audioTracks.push({
+    audioBuffer: new ArrayBuffer(8),
+    pcmData: { channel0: voiceSamples, channel1: new Float32Array(voiceSamples), sampleRate: sr },
+    startTime: 100,
+    endTime: 300, // clamped to 200ms duration instead of full 1s
+    characterName: '一歌',
+    text: 'hello'
+  })
+
+  const left = new Float32Array(sr)
+  const right = new Float32Array(sr)
+  const spans = await muxer.mixTTSTracks(left, right, sr, sr)
+  assert.equal(spans.length, 1)
+  assert.equal(spans[0].startSample, Math.floor(0.1 * sr))
+  assert.equal(spans[0].endSample, Math.round(0.3 * sr))
+  assert.ok(Math.abs(left[Math.floor(0.2 * sr)] - 0.5 * ACF_GAIN_VOICE) < 1e-6)
+  assert.equal(left[Math.round(0.3 * sr) + 10], 0, 'voice PCM beyond track.endTime must be clamped')
+
+  // Verify mixAudioTracks end-to-end returns clamped output AudioBuffer
+  const mixedBuf = await muxer.mixAudioTracks(1000)
+  const mixedCh0 = mixedBuf.getChannelData(0)
+  assert.ok(Math.abs(mixedCh0[Math.floor(0.2 * sr)] - 0.5 * ACF_GAIN_VOICE) < 1e-6)
+  assert.equal(mixedCh0[Math.round(0.3 * sr) + 10], 0)
+
+  // Verify hasLoopRegions branch uses Math.floor for cue start sample (e.g. 10.9ms * 1000Hz = 10.9 -> floor 10)
+  const bgmSamples = new Float32Array(100).fill(1.0)
+  muxer.setBGMConfig({ enabled: true, path: 'bgm00003.mp3', volume: 1.0 })
+  muxer.setBgmCues([
+    {
+      timeMs: 10.9,
+      fadeMs: 0,
+      stop: false,
+      volume: 1,
+      loopStartMs: 0,
+      loopEndMs: 50,
+      buffer: {
+        numberOfChannels: 1,
+        sampleRate: 1000,
+        getChannelData: () => bgmSamples
+      }
+    }
+  ])
+  const bgmLeft = new Float32Array(100)
+  const bgmRight = new Float32Array(100)
+  muxer.mixStoryBGM(bgmLeft, bgmRight, 100, 1000, new Float32Array(100).fill(1), new Float32Array(100).fill(1))
+  assert.equal(bgmLeft[9], 0)
+  assert.ok(bgmLeft[10] > 0, 'Math.floor(10.9) = 10 must receive BGM sample')
 })
