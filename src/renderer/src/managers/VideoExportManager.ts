@@ -27,7 +27,11 @@ import { WebCodecsMp4Encoder, type WebCodecsProbeResult } from './video-export/W
 import { JpegFrameSink } from './video-export/JpegFrameSink'
 import { FrameInterpolator, type FrameSnapshot } from './video-export/FrameInterpolator'
 import { applyTalkPatch } from './video-export/talkPatch'
-import type { VideoExportOptions } from './video-export'
+import {
+  normalizeExportVideoCodec,
+  resolveRemuxCodecPlan,
+  type VideoExportOptions
+} from './video-export/types'
 import type { ExportProgress as ExtendedExportProgress } from './video-export'
 import type { SnippetData } from '../../../common/types/Story'
 import { snippetHasPreFence } from '../../../common/export/snippetSemantics'
@@ -130,6 +134,8 @@ export default class VideoExportManager {
   >()
 
   private static readonly DEFAULT_BATCH_SIZE = 30
+  private rustBackendProbe: Promise<boolean> | null = null
+  private rustAudioUnavailable = false
 
   constructor(app: App) {
     this.app = app
@@ -137,6 +143,51 @@ export default class VideoExportManager {
     this.checkpointManager = new CheckpointManager()
     this.errorRecovery = new ErrorRecoveryManager(3)
     this.progressTracker = new ProgressTracker()
+  }
+
+  private isHttpBridgeMode(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof fetch === 'function' &&
+      typeof location !== 'undefined' &&
+      location.protocol.startsWith('http')
+    )
+  }
+
+  private bridgeFetchHeaders(extra?: Record<string, string>): Record<string, string> {
+    const token =
+      typeof location !== 'undefined'
+        ? new URLSearchParams(location.search).get('token') || ''
+        : ''
+    return token ? { ...extra, 'x-mss-bridge-token': token } : { ...extra }
+  }
+
+  private probeRustBackendAvailable(): Promise<boolean> {
+    if (this.rustAudioUnavailable || !this.isHttpBridgeMode()) {
+      return Promise.resolve(false)
+    }
+    if (!this.rustBackendProbe) {
+      this.rustBackendProbe = fetch('/bridge/binary-stream-endpoint', {
+        headers: this.bridgeFetchHeaders()
+      })
+        .then(async (res) => {
+          if (!res.ok) return false
+          const body = (await res.json()) as { ok?: boolean; backend?: string }
+          return Boolean(body?.ok && body.backend === 'rust')
+        })
+        .catch(() => false)
+    }
+    return this.rustBackendProbe
+  }
+
+  private arrayBufferToBase64(buf: ArrayBuffer): string {
+    const bytes = new Uint8Array(buf)
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+    }
+    return btoa(binary)
   }
 
   public get signal(): AbortSignal | undefined {
@@ -189,6 +240,45 @@ export default class VideoExportManager {
     targetValueScale = 1
   ): Promise<ReturnType<typeof buildLipSyncEnvelope> | null> {
     try {
+      if (await this.probeRustBackendAvailable()) {
+        try {
+          const qs = `?targetValueScale=${encodeURIComponent(String(targetValueScale))}`
+          const resp = await fetch(`/bridge/rust/compute-lipsync${qs}`, {
+            method: 'POST',
+            headers: this.bridgeFetchHeaders({ 'content-type': 'application/octet-stream' }),
+            body: audioBuffer
+          })
+          this.checkAborted()
+          if (resp.ok) {
+            const parsed = (await resp.json()) as {
+              ok?: boolean
+              values?: number[]
+              frameMs?: number
+              durationMs?: number
+              audioDurationMs?: number
+              releaseStep?: number
+              targetValueScale?: number
+              powK?: number
+            }
+            if (parsed?.ok && Array.isArray(parsed.values)) {
+              return {
+                values: Float32Array.from(parsed.values),
+                frameMs: Number(parsed.frameMs) || FRAME_MS,
+                durationMs: Number(parsed.durationMs) || 0,
+                audioDurationMs: Number(parsed.audioDurationMs) || 0,
+                releaseStep: Number(parsed.releaseStep) || 0,
+                targetValueScale: Number(parsed.targetValueScale) || targetValueScale,
+                powK: Number(parsed.powK) || 0
+              }
+            }
+          } else if (resp.status === 503) {
+            this.rustAudioUnavailable = true
+          }
+        } catch (rustErr) {
+          this.checkAborted()
+          this.logger.warn('Rust compute-lipsync failed, falling back to OfflineAudioContext:', rustErr)
+        }
+      }
       // Offline decoding must not wait on timers while the fast frame pump is paused.
       const decoder = new OfflineAudioContext(1, 1, 48000)
       const decoded = await decoder.decodeAudioData(audioBuffer.slice(0))
@@ -1045,7 +1135,7 @@ export default class VideoExportManager {
       )
     }
 
-    const [useWebCodecs, bgmBuffer] = await Promise.all([
+    const [useWebCodecs, rustAudioProbe] = await Promise.all([
       segmentPrepareOnly
         ? Promise.resolve(false)
         : this.resolveFastUseWebCodecs(
@@ -1056,31 +1146,39 @@ export default class VideoExportManager {
             bitrate,
             options.exportFastEncoder ?? 'auto',
             options.gpuRenderer ?? 'auto',
-            options.codec === 'h265' ? 'hevc' : 'h264'
+            normalizeExportVideoCodec(options.codec) ?? 'h264'
           ),
-      isSegmentWorker
-        ? Promise.resolve(null)
-        : (async (): Promise<AudioBuffer | null> => {
-            await Promise.all([
-              bgmEnabled && bgmPlan.hasStoryFiles ? bgmPlan.load(audioMuxer) : Promise.resolve(),
-              sePlan.hasChanges ? sePlan.load(audioMuxer) : Promise.resolve()
-            ])
-            if (bgmEnabled && bgmConfig) {
-              audioMuxer.setBGMConfig(bgmConfig)
-              if (useGlobalBgm) {
-                try {
-                  return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
-                } catch (error) {
-                  this.logger.warn(`Failed to load BGM: ${error}`)
-                }
-              }
-            }
-            return null
-          })()
+      isSegmentWorker ? Promise.resolve(false) : this.probeRustBackendAvailable()
     ])
     this.checkAborted()
 
-    const bgmActive = bgmEnabled && (bgmPlan.hasLoadedFiles || bgmBuffer !== null)
+    const useRustAudio = rustAudioProbe
+    const loadFallbackJsAudio = async (): Promise<AudioBuffer | null> => {
+      await Promise.all([
+        bgmEnabled && bgmPlan.hasStoryFiles ? bgmPlan.load(audioMuxer) : Promise.resolve(),
+        sePlan.hasChanges ? sePlan.load(audioMuxer) : Promise.resolve()
+      ])
+      if (bgmEnabled && bgmConfig) {
+        audioMuxer.setBGMConfig(bgmConfig)
+        if (useGlobalBgm) {
+          try {
+            return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
+          } catch (error) {
+            this.logger.warn(`Failed to load BGM: ${error}`)
+          }
+        }
+      }
+      return null
+    }
+    let bgmBuffer: AudioBuffer | null =
+      isSegmentWorker || useRustAudio ? null : await loadFallbackJsAudio()
+    this.checkAborted()
+
+    const bgmActive =
+      bgmEnabled &&
+      (useRustAudio
+        ? bgmPlan.hasStoryFiles || Boolean(bgmConfig?.path)
+        : bgmPlan.hasLoadedFiles || bgmBuffer !== null)
 
     let ttsSetupMs = 0
     if (ttsEnabled && !isSegmentWorker && (serialTts || segmentPrepareOnly)) {
@@ -1160,7 +1258,8 @@ export default class VideoExportManager {
           height: outH,
           fps: encodeFps,
           bitrate,
-          encoderConfig: this.lastWebCodecsProbeConfig
+          encoderConfig: this.lastWebCodecsProbeConfig,
+          useGpuYuvReadback: true
         })
         try {
           await encoder.initialize(videoFilePath)
@@ -1326,9 +1425,14 @@ export default class VideoExportManager {
       tickMs += virtualClock.realTimeMs() - tickStart
     }
 
+    let skippedStaticFrames = 0
     const framePump = (async (): Promise<void> => {
       try {
         await stageReady
+        let hasRenderedFrame = false
+        let prevWasVisuallyActive = true
+        let prevSceneSig = ''
+        let lastEncodedLocalFrame = -encodeFps * 4
         const shouldStop = (): boolean => {
           if (isSegmentWorker && endFrame >= 0 && snippetLoopDone && frameIndex >= endFrame) {
             return true
@@ -1361,71 +1465,124 @@ export default class VideoExportManager {
             !segmentPrepareOnly && frameIndex >= startFrame && (endFrame < 0 || frameIndex < endFrame)
 
           if (shouldRenderFrame) {
-            let interpolatedTo: FrameSnapshot | null = null
-            if (storyTween > 1e-9) {
-              if (frameInterpolator.active) {
-                // base 与 base+1 两个故事步之间按余量 lerp 连续量，阶梯量保持 base
-                const fromSnapshot = frameInterpolator.snapshot()
-                await advanceToStoryStep(baseStoryStep + 1)
-                const toSnapshot = frameInterpolator.snapshot()
-                frameInterpolator.apply(fromSnapshot, toSnapshot, storyTween)
-                interpolatedTo = toSnapshot
-              } else {
-                frameInterpolator.logUnavailableOnce()
-              }
-            }
-
-            const renderStart = virtualClock.realTimeMs()
-            this.app.pixiApplication.render()
-            renderMs += virtualClock.realTimeMs() - renderStart
-            if (interpolatedTo) {
-              // 插值只影响本帧绘制；恢复 base+1，保证后续模拟连续
-              frameInterpolator.restore(interpolatedTo)
-            }
-
             const localFrame = frameIndex - startFrame
-            const timestampUs = Math.round(localFrame * (1_000_000 / encodeFps))
-            const durationUs = Math.round(1_000_000 / encodeFps)
-            // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
-            // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
             const nextFrameVirtualMs = virtualRenderStartMs + (frameIndex + 1) * frameMs
             const tailFrames = Math.ceil(encodeFps * 0.6)
             const inEndingTail =
               pumpTargetVirtualMs >= 0 &&
               nextFrameVirtualMs > pumpTargetVirtualMs - 600 &&
               frameIndex > Math.max(0, Math.ceil(pumpTargetVirtualMs / frameMs) - tailFrames)
+            const isEdgeFrame =
+              localFrame === 0 ||
+              (endFrame > 0 && frameIndex >= endFrame - 1) ||
+              (pumpDone && pumpTargetVirtualMs >= 0 && nextFrameVirtualMs >= pumpTargetVirtualMs - 1e-6)
+            const extendedStageApp = this.app as unknown as {
+              isFrameVisuallyActive?: () => boolean
+              getStaticSceneSignature?: () => string
+            }
+            const isVisuallyActive =
+              storyTween > 1e-9 || Boolean(extendedStageApp.isFrameVisuallyActive?.())
+            const sceneSig =
+              !isVisuallyActive && typeof extendedStageApp.getStaticSceneSignature === 'function'
+                ? extendedStageApp.getStaticSceneSignature()
+                : ''
+            const canSkipStatic =
+              Boolean(sinks.encoder) &&
+              !isEdgeFrame &&
+              !isVisuallyActive &&
+              !prevWasVisuallyActive &&
+              hasRenderedFrame &&
+              sceneSig !== '' &&
+              sceneSig === prevSceneSig
+
+            const timestampUs = Math.round(localFrame * (1_000_000 / encodeFps))
+            const durationUs = Math.round(1_000_000 / encodeFps)
+            // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
+            // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
+            const framesSinceEncoded = localFrame - lastEncodedLocalFrame
             const keyFrame =
               localFrame === 0 ||
+              framesSinceEncoded >= encodeFps * 4 ||
               (inEndingTail ? frameIndex % 4 === 0 : localFrame % (encodeFps * 4) === 0)
 
-            const captureStart = virtualClock.realTimeMs()
-            if (sinks.encoder) {
-              await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
-            } else if (sinks.jpegSink) {
-              await sinks.jpegSink.captureFrame(canvas)
-            }
-            snapshotMs += virtualClock.realTimeMs() - captureStart
-
-            if (localFrame % (encodeFps * 10) === 0) {
-              const v = frameValidator.validateFrame(canvas, frameIndex)
-              if (!v.isValid && v.error) {
-                VideoExportManager.warmValidatedApps.delete(this.app)
-                throw new Error(
-                  `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
-                    `Brightness: ${v.brightness.toFixed(2)}%`
-                )
+            let handledStaticRepeat = false
+            if (canSkipStatic && sinks.encoder?.repeatLastFrame) {
+              const captureStart = virtualClock.realTimeMs()
+              handledStaticRepeat = await sinks.encoder.repeatLastFrame(
+                timestampUs,
+                durationUs,
+                keyFrame
+              )
+              snapshotMs += virtualClock.realTimeMs() - captureStart
+              if (handledStaticRepeat) {
+                skippedStaticFrames++
+                lastEncodedLocalFrame = localFrame
+                if (skippedStaticFrames % 16 === 0) {
+                  await yieldMacrotask()
+                }
               }
-              if (v.isBlackScreen) {
-                blackFrameValidationCount++
-                if (blackFrameValidationCount >= 5) {
+            }
+
+            if (!handledStaticRepeat) {
+              let interpolatedTo: FrameSnapshot | null = null
+              if (storyTween > 1e-9) {
+                if (frameInterpolator.active) {
+                  // base 与 base+1 两个故事步之间按余量 lerp 连续量，阶梯量保持 base
+                  const fromSnapshot = frameInterpolator.snapshot()
+                  await advanceToStoryStep(baseStoryStep + 1)
+                  const toSnapshot = frameInterpolator.snapshot()
+                  frameInterpolator.apply(fromSnapshot, toSnapshot, storyTween)
+                  interpolatedTo = toSnapshot
+                } else {
+                  frameInterpolator.logUnavailableOnce()
+                }
+              }
+
+              const renderStart = virtualClock.realTimeMs()
+              this.app.pixiApplication.render()
+              renderMs += virtualClock.realTimeMs() - renderStart
+              if (interpolatedTo) {
+                // 插值只影响本帧绘制；恢复 base+1，保证后续模拟连续
+                frameInterpolator.restore(interpolatedTo)
+              }
+              hasRenderedFrame = true
+              prevWasVisuallyActive = isVisuallyActive
+              prevSceneSig = sceneSig
+              lastEncodedLocalFrame = localFrame
+
+              const captureStart = virtualClock.realTimeMs()
+              if (sinks.encoder) {
+                await sinks.encoder.encodeFrame(canvas, timestampUs, durationUs, keyFrame)
+              } else if (sinks.jpegSink) {
+                await sinks.jpegSink.captureFrame(canvas)
+              }
+              snapshotMs += virtualClock.realTimeMs() - captureStart
+
+              if (
+                localFrame === 0 ||
+                (blackFrameValidationCount > 0 && localFrame % encodeFps === 0) ||
+                localFrame % (encodeFps * 60) === 0
+              ) {
+                const v = frameValidator.validateFrame(canvas, frameIndex)
+                if (!v.isValid && v.error) {
                   VideoExportManager.warmValidatedApps.delete(this.app)
                   throw new Error(
-                    `Detected ${blackFrameValidationCount} black frames during fast export. ` +
-                      `Models are not rendering.`
+                    `Rendering validation failed at frame ${frameIndex}: ${v.error}. ` +
+                      `Brightness: ${v.brightness.toFixed(2)}%`
                   )
                 }
-              } else {
-                blackFrameValidationCount = 0
+                if (v.isBlackScreen) {
+                  blackFrameValidationCount++
+                  if (blackFrameValidationCount >= 5) {
+                    VideoExportManager.warmValidatedApps.delete(this.app)
+                    throw new Error(
+                      `Detected ${blackFrameValidationCount} black frames during fast export. ` +
+                        `Models are not rendering.`
+                    )
+                  }
+                } else {
+                  blackFrameValidationCount = 0
+                }
               }
             }
           } else {
@@ -1868,17 +2025,18 @@ export default class VideoExportManager {
         const invokeStart = virtualClock.realTimeMs()
         let finalSegmentPath = segVideoRaw
         let segmentConvert: 'browser' | 'ffmpeg' = 'browser'
-        const segCodec: 'h264' | 'hevc' = sinks.encoder
-          ? sinks.encoder.encoderCodecKind
+        const segPlan = resolveRemuxCodecPlan(options.codec, sinks.encoder)
+        let segCodec: 'h264' | 'hevc' = sinks.encoder
+          ? segPlan.encoderCodec
           : options.codec === 'h264'
             ? 'h264'
             : 'hevc'
 
         if (sinks.encoder) {
-          const needsColorConversion = sinks.encoder.requiresColorConversion === true
           const actualMbps =
             segDurationSec >= 2 ? (sinks.encoder.writtenBytes * 8) / (segDurationSec * 1_000_000) : 0
-          const needsRemux = needsColorConversion || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
+          const needsRemux =
+            segPlan.transcode || (maxOutputMbps > 0 && actualMbps > maxOutputMbps)
           if (needsRemux) {
             const remuxRes = await window.electron.ipcRenderer.invoke(
               'electron:api-remux-video-from-files',
@@ -1888,19 +2046,21 @@ export default class VideoExportManager {
                 audioBitrate: options.apiAudioBitrate ?? '128k',
                 frameCount: segFrames,
                 fps: encodeFps,
-                transcode: needsColorConversion,
+                ...(segPlan.targetCodec ? { codec: segPlan.targetCodec } : {}),
+                transcode: segPlan.transcode,
                 inputWidth: outW,
                 inputHeight: outH,
                 crf: options.apiCrf ?? options.crf ?? 23,
                 recordedBitrate: bitrate,
-                inputCodec: segCodec
+                inputCodec: segPlan.encoderCodec
               }
             )
             if (!remuxRes?.success) {
               throw new Error(remuxRes?.error || 'Segment video remux failed')
             }
             finalSegmentPath = segmentRange.outputPath
-            segmentConvert = 'ffmpeg'
+            segCodec = segPlan.finalCodec
+            segmentConvert = segPlan.needsColorConversion ? 'ffmpeg' : 'browser'
           }
         } else if (sinks.jpegSink?.isPipeMode) {
           const remuxRes = await window.electron.ipcRenderer.invoke(
@@ -2072,17 +2232,82 @@ export default class VideoExportManager {
       const actualStartTimesMs = snippets.map((_, index) =>
         timestampRecorder.getVideoRelativeStartTimeMs(index)
       )
-      if (bgmPlan.hasChanges) {
-        audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
-      }
-      if (sePlan.hasChanges) {
-        audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
-      }
-
       const audioTask = (async (): Promise<string | undefined> => {
+        if (isSegmentWorker) return undefined
         if (!(hasTtsTracks || bgmActive || sePlan.hasChanges)) return undefined
+
+        const audioPlacements = hasTtsTracks
+          ? timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
+          : []
+        const useSharedMixFile = segmentPrepareOnly && Boolean(options.segmentSharedDir)
+        const targetMixPath = useSharedMixFile
+          ? `${options.segmentSharedDir}/mixed-${sharedWriteId}.wav`
+          : undefined
+
+        if (useRustAudio) {
+          try {
+            const rustBgm = bgmPlan.hasChanges
+              ? bgmPlan.getRustCues(actualStartTimesMs)
+              : { cues: [], volumeTweens: [] }
+            const rustSeCues = sePlan.hasChanges ? sePlan.getRustCues(actualStartTimesMs) : []
+            const voices = audioPlacements.map((placement) => ({
+              startMs: placement.startTimeMs,
+              endMs: placement.endTimeMs,
+              audioBase64: this.arrayBufferToBase64(placement.audioBuffer)
+            }))
+            const resp = await fetch('/bridge/rust/mix-audio-plan', {
+              method: 'POST',
+              headers: this.bridgeFetchHeaders({ 'content-type': 'application/json' }),
+              body: JSON.stringify({
+                durationMs: totalDurationMs,
+                ...(targetMixPath ? { outputPath: targetMixPath } : {}),
+                ...(bgmActive || bgmPlan.hasChanges
+                  ? {
+                      bgm: {
+                        enabled: bgmEnabled,
+                        volume: bgmConfig?.volume ?? 0.2,
+                        ...(useGlobalBgm && bgmConfig?.path
+                          ? { globalPath: resolveBgmUrl(bgmConfig.path) }
+                          : {}),
+                        cues: rustBgm.cues,
+                        volumeTweens: rustBgm.volumeTweens
+                      }
+                    }
+                  : {}),
+                ...(rustSeCues.length > 0 ? { se: { cues: rustSeCues } } : {}),
+                ...(voices.length > 0 ? { voices } : {})
+              })
+            })
+            if (resp.ok) {
+              const resJson = (await resp.json()) as {
+                ok?: boolean
+                outputPath?: string
+                elapsedMs?: number
+              }
+              if (resJson?.ok && resJson.outputPath) {
+                this.logger.info(
+                  `Rust mixAudioPlan finished in ${resJson.elapsedMs ?? 0}ms → ${resJson.outputPath}`
+                )
+                this.pcmCache.clear()
+                this.lipSyncCache.clear()
+                return resJson.outputPath
+              }
+            } else if (resp.status === 503) {
+              this.rustAudioUnavailable = true
+            }
+          } catch (rustMixErr) {
+            this.logger.warn('Rust mix-audio-plan failed, falling back to AudioMuxer:', rustMixErr)
+          }
+          bgmBuffer = await loadFallbackJsAudio()
+        }
+
+        if (bgmPlan.hasChanges) {
+          audioMuxer.setBgmCues(bgmPlan.build(actualStartTimesMs, useGlobalBgm ? bgmBuffer : null))
+        }
+        if (sePlan.hasChanges) {
+          audioMuxer.setSeCues(sePlan.build(actualStartTimesMs))
+        }
         if (hasTtsTracks) {
-          const audioPlacements = timestampRecorder.buildAudioTrackPlacements(ttsAudioResults)
           for (const placement of audioPlacements) {
             audioMuxer.addAudioTrack({
               audioBuffer: placement.audioBuffer,
@@ -2106,7 +2331,6 @@ export default class VideoExportManager {
         }
 
         let path: string
-        const useSharedMixFile = segmentPrepareOnly && Boolean(options.segmentSharedDir)
         if (
           typeof muxer.mixToInt16Chunks === 'function' &&
           typeof muxer.createWavHeader === 'function'
@@ -2276,8 +2500,7 @@ export default class VideoExportManager {
       if (sinks.encoder || sinks.jpegSink?.isPipeMode) {
         // WebCodecs 的硬件编码器经常输出 full-range/yuvj420p 且带 sRGB TRC；
         // 此时必须让宿主按统一 BT.709/tv 滤镜链重编码，不能直接 copy 容器。
-        const needsColorConversion = sinks.encoder?.requiresColorConversion === true
-        const encoderCodec = sinks.encoder?.encoderCodecKind ?? (options.codec === 'h265' ? 'hevc' : 'h264')
+        const codecPlan = resolveRemuxCodecPlan(options.codec, sinks.encoder)
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -2287,23 +2510,24 @@ export default class VideoExportManager {
             audioBitrate,
             frameCount: finalFrameCount,
             fps: encodeFps,
+            ...(codecPlan.targetCodec ? { codec: codecPlan.targetCodec } : {}),
             ...(sinks.encoder
               ? {
-                  transcode: needsColorConversion,
+                  transcode: codecPlan.transcode,
                   inputWidth: outW,
                   inputHeight: outH,
                   crf: options.apiCrf ?? options.crf ?? 23,
                   recordedBitrate: bitrate,
-                  inputCodec: encoderCodec
+                  inputCodec: codecPlan.encoderCodec
                 }
               : {})
           }
         )
         if (sinks.encoder) {
-          this.lastEncoderLabel = needsColorConversion
-            ? `webcodecs-${encoderCodec}+ffmpeg`
-            : `webcodecs-${encoderCodec}`
-          this.lastConvert = needsColorConversion ? 'ffmpeg' : 'browser'
+          this.lastEncoderLabel = codecPlan.transcode
+            ? `webcodecs-${codecPlan.encoderCodec}+${codecPlan.finalCodec === 'hevc' ? 'hevc_qsv' : 'ffmpeg'}`
+            : `webcodecs-${codecPlan.encoderCodec}`
+          this.lastConvert = codecPlan.needsColorConversion ? 'ffmpeg' : 'browser'
         }
       } else {
         const framesDir = sinks.framesDir || videoFilePath
@@ -2342,6 +2566,7 @@ export default class VideoExportManager {
         invokeMs: Math.round(invokeMs),
         frames: finalFrameCount,
         encodedFrames: frameIndex,
+        skippedStaticFrames,
         videoDurationMs: Math.round(videoDurationMs),
         // 墙钟耗时保留在 timings，供性能排查；不再冒充 API 的 duration
         wallMs: Math.round(virtualClock.realTimeMs() - realStart),
@@ -2359,7 +2584,7 @@ export default class VideoExportManager {
       this.logger.info(
         `Fast export phase timings: pump=${pumpMs.toFixed(0)}ms ` +
           `(tick=${tickMs.toFixed(0)}ms render=${renderMs.toFixed(0)}ms ` +
-          `capture=${snapshotMs.toFixed(0)}ms) ` +
+          `capture=${snapshotMs.toFixed(0)}ms skippedStatic=${skippedStaticFrames}) ` +
           `ttsWait=${ttsWaitMs.toFixed(0)}ms encode=${encodeMs.toFixed(0)}ms ` +
           `audio=${audioMs.toFixed(0)}ms invoke=${invokeMs.toFixed(0)}ms ` +
           `frames=${frameIndex} ` +

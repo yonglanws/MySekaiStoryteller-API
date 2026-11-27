@@ -156,6 +156,14 @@ export default class ModelLayer extends BaseLayer {
     return this.getVisibleModels()
   }
 
+  /** 保守判断当前舞台上是否存在可见模型或逐帧着色器动画，避免静帧跳过误冻眨眼/呼吸/物理。 */
+  public hasActiveModelsOrShaders(): boolean {
+    if (this.characterShaders.size > 0) return true
+    return this.layerContainer.children.some(
+      (child) => child.visible && !child.destroyed && child.alpha > 0.001
+    )
+  }
+
   public removeModel(model: AdvancedModel): void {
     const id = model.metadata?.id
     if (id !== undefined) {

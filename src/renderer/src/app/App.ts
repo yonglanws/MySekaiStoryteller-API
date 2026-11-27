@@ -18,6 +18,7 @@ import { runEasedTween } from '../effects/Ease'
 import { preloadCommonInappTextures, resetInappTextureCache } from '../effects/InappTextures'
 import { createMulberry32, DollyZoomFilter } from '../effects/OfficialFilters'
 import { configureCubism4 } from 'pixi-live2d-display-advanced'
+import { installCubismWebGL2Optimizer } from '../managers/video-export/CubismWebGL2Optimizer'
 import VideoExportManager, {
   VideoExportOptions,
   ExportProgress
@@ -236,7 +237,7 @@ export class App {
       const appOptions: any = {
         backgroundColor: forExport ? 0x000000 : 0xffffff,
         autoDensity: true,
-        antialias: true,
+        antialias: !forExport,
         resolution,
         preserveDrawingBuffer: forExport,
         powerPreference: 'high-performance'
@@ -270,6 +271,7 @@ export class App {
     configureCubism4({
       memorySizeMB: forExport ? 256 : 128
     })
+    installCubismWebGL2Optimizer()
 
     this.logger.info(
       `Render initialized: resolution=${resolution}, forExport=${forExport}, canvas=${(this.pixiApplication.view as HTMLCanvasElement).width}x${(this.pixiApplication.view as HTMLCanvasElement).height}`
@@ -919,6 +921,93 @@ export class App {
     this.ttsManager.updateTranslationConfig({
       enabled: false
     })
+  }
+
+  /**
+   * 判断当前虚拟时刻是否存在逐帧动画、口型同步、粒子/特写遮罩或可见未遮挡 Live2D 角色。
+   * 只有全部静止（例如纯黑幕过渡后等待、无立绘纯字幕停留）才允许静帧跳过渲染，
+   * 绝不冻结任何可见角色的眨眼、呼吸、物理摆动或口型动画。
+   */
+  public isFrameVisuallyActive(): boolean {
+    const handlers = (
+      AnimationManager as unknown as { exportStepHandlers?: Set<unknown> }
+    ).exportStepHandlers
+    if (handlers && handlers.size > 0) return true
+    if (this.currentTalkLipSync !== null) return true
+    if (this.cameraMoveTarget !== null || this.cameraZoomTarget !== null) return true
+
+    const fxChildren = this.layerSpecialEffect?.getContainer?.()?.children
+    let isOccluded = false
+    if (fxChildren && fxChildren.length >= 6) {
+      const fxContainer = fxChildren[0] as { children?: unknown[] } | undefined
+      const movieSprite = fxChildren[1] as { visible?: boolean } | undefined
+      const seBlackSprite = fxChildren[2] as { visible?: boolean; alpha?: number } | undefined
+      const seWhiteSprite = fxChildren[3] as { visible?: boolean; alpha?: number } | undefined
+      const wipeSprite = fxChildren[4] as { visible?: boolean } | undefined
+      const sideFade = fxChildren[5] as { visible?: boolean } | undefined
+      if (
+        (fxContainer?.children?.length ?? 0) > 0 ||
+        movieSprite?.visible ||
+        wipeSprite?.visible ||
+        sideFade?.visible
+      ) {
+        return true
+      }
+      isOccluded = Boolean(
+        (seBlackSprite?.visible && (seBlackSprite.alpha ?? 0) >= 0.999) ||
+          (seWhiteSprite?.visible && (seWhiteSprite.alpha ?? 0) >= 0.999)
+      )
+    }
+
+    if (!isOccluded && this.layerModel?.hasActiveModelsOrShaders?.()) {
+      return true
+    }
+    return false
+  }
+
+  /** 轻量场景指纹（~2us）：兜底捕捉不经过 AnimationManager 的瞬时贴图/文字/显隐切换。 */
+  public getStaticSceneSignature(): string {
+    const parts: Array<string | number> = [
+      this.cameraScale,
+      this.cameraOffsetX,
+      this.cameraOffsetY,
+      this.shakeOffsetX,
+      this.shakeOffsetY,
+      this.postEffectOwner,
+      this.envFilters.length,
+      this.cameraBlurFilter ? 1 : 0
+    ]
+    const pushNodeSig = (node: unknown, depth: number): void => {
+      if (!node || typeof node !== 'object') return
+      const n = node as {
+        visible?: boolean
+        alpha?: number
+        x?: number
+        y?: number
+        text?: string
+        texture?: { baseTexture?: { uid?: number }; uid?: number }
+        children?: unknown[]
+      }
+      parts.push(
+        n.visible ? 1 : 0,
+        Math.round((n.alpha ?? 1) * 1000),
+        Math.round((n.x ?? 0) * 10),
+        Math.round((n.y ?? 0) * 10),
+        n.texture?.baseTexture?.uid ?? n.texture?.uid ?? 0,
+        typeof n.text === 'string' ? n.text : ''
+      )
+      if (depth > 0 && Array.isArray(n.children)) {
+        parts.push(n.children.length)
+        for (const child of n.children) {
+          pushNodeSig(child, depth - 1)
+        }
+      }
+    }
+    pushNodeSig(this.layerBackground?.getContainer?.(), 1)
+    pushNodeSig(this.layerSpecialEffect?.getContainer?.(), 1)
+    pushNodeSig(this.layerUI?.getContainer?.(), 3)
+    pushNodeSig(this.layerModel?.getContainer?.(), 1)
+    return parts.join('|')
   }
 
   public async run(): Promise<void> {

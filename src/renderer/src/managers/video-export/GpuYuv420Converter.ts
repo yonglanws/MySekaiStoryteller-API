@@ -1,5 +1,21 @@
 const nativeSetTimeout: typeof setTimeout = globalThis.setTimeout.bind(globalThis)
 
+const fastYield: () => Promise<void> = (() => {
+  if (typeof MessageChannel !== 'undefined') {
+    const ch = new MessageChannel()
+    const waiters: Array<() => void> = []
+    ch.port1.onmessage = () => {
+      waiters.shift()?.()
+    }
+    return () =>
+      new Promise<void>((resolve) => {
+        waiters.push(resolve)
+        ch.port2.postMessage(null)
+      })
+  }
+  return () => new Promise<void>((resolve) => nativeSetTimeout(resolve, 0))
+})()
+
 const VERTEX_SHADER_SRC = `#version 300 es
 in vec2 aPos;
 void main() {
@@ -122,7 +138,11 @@ export class GpuYuv420Converter {
     return width > 0 && height > 0 && width % 4 === 0 && height % 4 === 0
   }
 
-  static create(width: number, height: number, pboRingSize = 2): GpuYuv420Converter | null {
+  static create(
+    width: number,
+    height: number,
+    pboRingSize = 2
+  ): GpuYuv420Converter | null {
     if (!GpuYuv420Converter.isSupportedDimensions(width, height)) return null
     try {
       const surface =
@@ -194,6 +214,7 @@ export class GpuYuv420Converter {
       gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0)
       gl.bindVertexArray(null)
 
+      gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, srcTexture)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
@@ -225,6 +246,7 @@ export class GpuYuv420Converter {
       gl.uniform1i(gl.getUniformLocation(program, 'uTex'), 0)
       gl.uniform1i(gl.getUniformLocation(program, 'uWidth'), width)
       gl.uniform1i(gl.getUniformLocation(program, 'uHeight'), height)
+      gl.useProgram(null)
 
       const pboSlots: PboSlot[] = []
       const ringCount = Math.max(0, pboRingSize)
@@ -323,7 +345,7 @@ export class GpuYuv420Converter {
       if (res === gl.WAIT_FAILED) {
         return
       }
-      await new Promise<void>((resolve) => nativeSetTimeout(resolve, 0))
+      await fastYield()
     }
   }
 
@@ -364,17 +386,13 @@ export class GpuYuv420Converter {
       return syncBytes.slice()
     }
 
-    let completed: Uint8Array | null = null
-    if (this.pendingSlots.length >= this.pboSlots.length) {
-      const oldestSlot = this.pendingSlots.shift()!
-      completed = await this.readSlot(oldestSlot, reuseBuffer)
-    }
-
     const slotIdx = this.pboCursor
     this.pboCursor = (this.pboCursor + 1) % this.pboSlots.length
     const slot = this.pboSlots[slotIdx]
     const gl = this.gl
 
+    // Issue GPU YUV shader + PBO DMA + flush FIRST so frame N executes on GPU in parallel
+    // while CPU harvests the oldest already-completed PBO slot (true GPU/CPU overlap).
     this.renderToFbo(source)
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer)
     gl.readPixels(0, 0, this.packW, this.packH, gl.RGBA, gl.UNSIGNED_BYTE, 0)
@@ -385,7 +403,12 @@ export class GpuYuv420Converter {
     gl.flush()
     this.pendingSlots.push(slotIdx)
 
-    return completed
+    if (this.pendingSlots.length >= this.pboSlots.length) {
+      const oldestSlot = this.pendingSlots.shift()!
+      return await this.readSlot(oldestSlot, reuseBuffer)
+    }
+
+    return null
   }
 
   public async drainAllAsync(acquireBuffer?: () => Uint8Array): Promise<Uint8Array[]> {

@@ -87,9 +87,13 @@ export class WebCodecsMp4Encoder {
   private readonly useGpuYuvReadback: boolean
   private pendingPboMeta: Array<{ timestampUs: number; durationUs: number; keyFrame: boolean }> = []
   private pboReusePool: Uint8Array[] = []
+  private lastCompletedYuv: Uint8Array | null = null
   private activeMuxerCodec: 'avc' | 'hevc' = 'avc'
   private totalWrittenBytes = 0
   private dequeueWaiter: (() => void) | null = null
+  private binWs: WebSocket | null = null
+  private binStreamId = 1
+  private binCtrlResolvers: Array<(msg: { ok?: boolean; error?: string; op?: string }) => void> = []
 
   constructor(opts: {
     width: number
@@ -360,19 +364,45 @@ export class WebCodecsMp4Encoder {
       config.codec.startsWith('hvc1') || config.codec.startsWith('hev1') ? 'hevc' : 'avc'
     this.pendingPboMeta = []
     this.pboReusePool = []
+    this.lastCompletedYuv = null
     this.totalWrittenBytes = 0
 
-    // 先建空文件（append-to-file 不存在时自动创建），
-    // positioned write 需要 r+ 打开已存在的文件
-    await window.electron.ipcRenderer.invoke('electron:append-to-file', {
-      filePath: this.filePath,
-      data: new Uint8Array(0)
-    })
+    // 优先连接原生 Rust / Node 二进制 WebSocket 流通道，消除 HTTP positioned write 序列化开销；
+    // 在无 HTTP 环境（单元测试或降级时）透明回退到 electron:append-to-file / write-file-at。
+    const wsConnected = await this.tryOpenBinaryStream(this.filePath)
+    if (!wsConnected) {
+      // 先建空文件（append-to-file 不存在时自动创建），
+      // positioned write 需要 r+ 打开已存在的文件
+      await window.electron.ipcRenderer.invoke('electron:append-to-file', {
+        filePath: this.filePath,
+        data: new Uint8Array(0)
+      })
+    }
 
     this.muxer = new Muxer({
       target: new StreamTarget({
         onData: (data: Uint8Array, position: number) => {
           this.totalWrittenBytes = Math.max(this.totalWrittenBytes, position + data.byteLength)
+          const ws = this.binWs
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            try {
+              const pkt = new Uint8Array(16 + data.byteLength)
+              const dv = new DataView(pkt.buffer)
+              dv.setUint32(0, this.binStreamId, true)
+              dv.setUint8(4, 1) // KIND_WRITE_FILE_AT
+              dv.setUint8(5, 0)
+              dv.setUint16(6, 0, true)
+              dv.setBigUint64(8, BigInt(position), true)
+              pkt.set(data, 16)
+              ws.send(pkt)
+              return
+            } catch (err) {
+              const wrapped = err instanceof Error ? err : new Error(String(err))
+              this.encodeError = this.encodeError ?? wrapped
+              this.wakeDequeueWaiter()
+              return
+            }
+          }
           const copy = new Uint8Array(data)
           this.writeChain = this.writeChain
             .then(() =>
@@ -450,6 +480,123 @@ export class WebCodecsMp4Encoder {
     }
   }
 
+  private async tryOpenBinaryStream(filePath: string): Promise<boolean> {
+    if (
+      typeof window === 'undefined' ||
+      typeof WebSocket === 'undefined' ||
+      typeof fetch !== 'function' ||
+      typeof location === 'undefined' ||
+      !location.protocol.startsWith('http')
+    ) {
+      return false
+    }
+    try {
+      const token = new URLSearchParams(location.search).get('token') || ''
+      const headers: Record<string, string> = token ? { 'x-mss-bridge-token': token } : {}
+      const infoRes = await fetch('/bridge/binary-stream-endpoint', { headers })
+      if (!infoRes.ok) return false
+      const info = (await infoRes.json()) as { ok?: boolean; wsUrl?: string }
+      if (!info?.ok || !info.wsUrl) return false
+      const fullWsUrl = info.wsUrl.startsWith('/')
+        ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${info.wsUrl}`
+        : info.wsUrl
+      const ws = new WebSocket(fullWsUrl)
+      ws.binaryType = 'arraybuffer'
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          ws.removeEventListener('open', onOpen)
+          ws.removeEventListener('error', onErr)
+          ws.removeEventListener('close', onClose)
+        }
+        const onOpen = (): void => {
+          cleanup()
+          resolve()
+        }
+        const onErr = (): void => {
+          cleanup()
+          reject(new Error('Binary WS connection error'))
+        }
+        const onClose = (): void => {
+          cleanup()
+          reject(new Error('Binary WS closed during handshake'))
+        }
+        ws.addEventListener('open', onOpen)
+        ws.addEventListener('error', onErr)
+        ws.addEventListener('close', onClose)
+      })
+
+      ws.addEventListener('message', (ev) => {
+        try {
+          const parsed = JSON.parse(String(ev.data)) as {
+            ok?: boolean
+            error?: string
+            op?: string
+          }
+          const resolver = this.binCtrlResolvers.shift()
+          resolver?.(parsed)
+        } catch {
+          // ignore malformed ctrl reply
+        }
+      })
+      ws.addEventListener('error', () => {
+        if (!this.isDisposed) {
+          this.encodeError = this.encodeError ?? new Error('Binary WS transport error')
+          this.wakeDequeueWaiter()
+        }
+      })
+      this.binWs = ws
+      const ack = await this.sendBinaryControl({
+        op: 'open-file',
+        streamId: this.binStreamId,
+        path: filePath,
+        truncate: true
+      })
+      if (!ack?.ok) {
+        this.closeBinaryWs()
+        return false
+      }
+      return true
+    } catch {
+      this.closeBinaryWs()
+      return false
+    }
+  }
+
+  private sendBinaryControl(
+    payload: Record<string, unknown>
+  ): Promise<{ ok?: boolean; error?: string; op?: string }> {
+    const ws = this.binWs
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.resolve({ ok: false, error: 'Binary WS not open' })
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = this.binCtrlResolvers.indexOf(done)
+        if (idx >= 0) this.binCtrlResolvers.splice(idx, 1)
+        resolve({ ok: false, error: 'Binary WS control ack timeout' })
+      }, 15_000)
+      const done = (msg: { ok?: boolean; error?: string; op?: string }): void => {
+        clearTimeout(timer)
+        resolve(msg)
+      }
+      this.binCtrlResolvers.push(done)
+      ws.send(JSON.stringify(payload))
+    })
+  }
+
+  private closeBinaryWs(): void {
+    const ws = this.binWs
+    this.binWs = null
+    this.binCtrlResolvers = []
+    if (ws) {
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   private wakeDequeueWaiter(): void {
     const waiter = this.dequeueWaiter
     if (waiter) {
@@ -459,7 +606,8 @@ export class WebCodecsMp4Encoder {
   }
 
   private async waitEncodeQueueReady(): Promise<void> {
-    while (this.encoder && !this.isDisposed && this.encoder.encodeQueueSize > 8) {
+    const queueLimit = this.useGpuYuvReadback ? 8 : 11
+    while (this.encoder && !this.isDisposed && this.encoder.encodeQueueSize > queueLimit) {
       const encoder = this.encoder
       await new Promise<void>((resolve) => {
         const cleanup = (): void => {
@@ -515,6 +663,49 @@ export class WebCodecsMp4Encoder {
     if (this.encodeError) throw this.encodeError
   }
 
+  private retainCompletedYuv(yuvBytes: Uint8Array): void {
+    const expectedLen = this.yuvConverter?.frameByteLength ?? 0
+    if (expectedLen === 0 || yuvBytes.byteLength !== expectedLen) return
+    if (this.lastCompletedYuv && this.lastCompletedYuv !== yuvBytes) {
+      this.pboReusePool.push(this.lastCompletedYuv)
+    }
+    this.lastCompletedYuv = yuvBytes
+  }
+
+  private async drainPendingYuv(): Promise<void> {
+    if (!this.yuvConverter || typeof this.yuvConverter.drainAllAsync !== 'function') return
+    const frameLen = this.yuvConverter.frameByteLength
+    const remaining = await this.yuvConverter.drainAllAsync(
+      () => this.pboReusePool.pop() ?? new Uint8Array(frameLen)
+    )
+    for (const yuvBytes of remaining) {
+      const meta = this.pendingPboMeta.shift()
+      if (meta) {
+        await this.encodeI420Buffer(yuvBytes, meta.timestampUs, meta.durationUs, meta.keyFrame)
+      }
+      this.retainCompletedYuv(yuvBytes)
+    }
+  }
+
+  /**
+   * 重复编码上一帧已转换的 BT.709 I420 缓冲，维持严格的固定帧率（CFR）时间轴
+   * 同时跳过 Pixi 渲染与 GPU 回读。无可用缓冲时返回 false 交由调用方常规渲染。
+   */
+  async repeatLastFrame(
+    timestampUs: number,
+    durationUs: number,
+    keyFrame: boolean
+  ): Promise<boolean> {
+    if (this.encodeError) throw this.encodeError
+    if (this.isDisposed || !this.encoder || !this.yuvConverter) return false
+    if (this.pendingPboMeta.length > 0) {
+      await this.drainPendingYuv()
+    }
+    if (!this.lastCompletedYuv) return false
+    await this.encodeI420Buffer(this.lastCompletedYuv, timestampUs, durationUs, keyFrame)
+    return true
+  }
+
   /**
    * 编码一帧。
    * @param source 画布（HTMLCanvasElement）
@@ -541,9 +732,7 @@ export class WebCodecsMp4Encoder {
           if (meta) {
             await this.encodeI420Buffer(completed, meta.timestampUs, meta.durationUs, meta.keyFrame)
           }
-          if (completed.byteLength === this.yuvConverter.frameByteLength) {
-            this.pboReusePool.push(completed)
-          }
+          this.retainCompletedYuv(completed)
         }
         return
       }
@@ -571,7 +760,8 @@ export class WebCodecsMp4Encoder {
 
     const frame = new VideoFrame(frameSource, {
       timestamp: timestampUs,
-      duration: durationUs
+      duration: durationUs,
+      alpha: 'discard'
     })
     try {
       this.encoder.encode(frame, { keyFrame: this.resolveKeyFrame(keyFrame) })
@@ -588,23 +778,10 @@ export class WebCodecsMp4Encoder {
     if (!this.encoder || !this.muxer) throw new Error('Encoder not initialized')
 
     if (this.yuvConverter) {
-      if (typeof this.yuvConverter.drainAllAsync === 'function') {
-        const frameLen = this.yuvConverter.frameByteLength
-        const remaining = await this.yuvConverter.drainAllAsync(
-          () => this.pboReusePool.pop() ?? new Uint8Array(frameLen)
-        )
-        for (const yuvBytes of remaining) {
-          const meta = this.pendingPboMeta.shift()
-          if (meta) {
-            await this.encodeI420Buffer(yuvBytes, meta.timestampUs, meta.durationUs, meta.keyFrame)
-          }
-          if (yuvBytes.byteLength === frameLen) {
-            this.pboReusePool.push(yuvBytes)
-          }
-        }
-      }
+      await this.drainPendingYuv()
       this.pendingPboMeta = []
       this.pboReusePool = []
+      this.lastCompletedYuv = null
       this.yuvConverter.dispose()
       this.yuvConverter = null
     }
@@ -618,12 +795,18 @@ export class WebCodecsMp4Encoder {
     this.muxer = null
 
     await this.writeChain
-    if (this.encodeError) throw this.encodeError
-    if (this.filePath) {
+    if (this.binWs) {
+      const closed = await this.sendBinaryControl({ op: 'close', streamId: this.binStreamId })
+      this.closeBinaryWs()
+      if (!closed?.ok) {
+        throw new Error(closed?.error || 'Binary WS close failed')
+      }
+    } else if (this.filePath) {
       await window.electron.ipcRenderer
         .invoke('electron:close-file-handle', { filePath: this.filePath })
         .catch(() => {})
     }
+    if (this.encodeError) throw this.encodeError
 
     this.logger.info(`WebCodecs encode finished: ${this.frameCount} frames → ${this.filePath}`)
     return this.filePath
@@ -664,6 +847,7 @@ export class WebCodecsMp4Encoder {
     this.wakeDequeueWaiter()
     this.pendingPboMeta = []
     this.pboReusePool = []
+    this.lastCompletedYuv = null
     this.yuvConverter?.dispose()
     this.yuvConverter = null
     try {
@@ -673,7 +857,16 @@ export class WebCodecsMp4Encoder {
     }
     this.encoder = null
     this.muxer = null
-    if (this.filePath) {
+    if (this.binWs) {
+      if (this.binWs.readyState === WebSocket.OPEN) {
+        try {
+          this.binWs.send(JSON.stringify({ op: 'abort', streamId: this.binStreamId }))
+        } catch {
+          /* ignore */
+        }
+      }
+      this.closeBinaryWs()
+    } else if (this.filePath) {
       void window.electron?.ipcRenderer
         ?.invoke?.('electron:close-file-handle', { filePath: this.filePath })
         ?.catch?.(() => {})

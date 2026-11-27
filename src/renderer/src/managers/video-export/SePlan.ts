@@ -170,4 +170,60 @@ export class SePlan {
 
     return cues.sort((a, b) => a.timeMs - b.timeMs)
   }
+
+  /** 生成供原生 Rust `mixAudioPlan` 使用的路径级 SE cue 列表。 */
+  public getRustCues(
+    startTimesMs: ReadonlyArray<number>,
+    startTimesIncludeDelay = false
+  ): Array<{
+    timeMs: number
+    file: string
+    stop: boolean
+    loop: boolean
+    fadeMs: number
+    volume: number
+    relPath: string
+  }> {
+    const cues: Array<{
+      timeMs: number
+      file: string
+      stop: boolean
+      loop: boolean
+      fadeMs: number
+      volume: number
+      relPath: string
+    }> = []
+    for (const change of this.changes) {
+      const snippet = this.snippets[change.snippetIndex]
+      const extraOffset =
+        snippet?.type === 'PlaySe'
+          ? Math.max(0, Number((snippet.data as { offsetMs?: number }).offsetMs) || 0)
+          : 0
+      const base = Math.max(0, startTimesMs[change.snippetIndex] ?? 0)
+      const timeMs =
+        base + (startTimesIncludeDelay ? 0 : change.delayMs) + extraOffset
+      cues.push({
+        timeMs,
+        file: change.file,
+        stop: change.stop,
+        loop: change.loop,
+        fadeMs: change.fadeMs,
+        volume: change.volume,
+        relPath: `audio/se/${change.file}`
+      })
+    }
+    for (const ev of this.uiEvents) {
+      const baseMs = startTimesMs[ev.snippetIndex] ?? 0
+      cues.push({
+        timeMs: Math.max(0, baseMs + (startTimesIncludeDelay ? 0 : ev.delayMs) + ev.afterStartMs),
+        file: ev.relUrl,
+        stop: false,
+        loop: false,
+        fadeMs: 0,
+        volume: ev.volume,
+        relPath: ev.relUrl
+      })
+    }
+    return cues.sort((a, b) => a.timeMs - b.timeMs)
+  }
 }

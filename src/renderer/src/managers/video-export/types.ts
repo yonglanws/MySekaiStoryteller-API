@@ -4,7 +4,7 @@ export interface VideoExportOptions {
   height: number
   quality: 'draft' | 'standard' | 'high'
   format: 'mp4' | 'webm'
-  codec?: 'h264' | 'h265' | 'vp9' | 'prores'
+  codec?: 'h264' | 'h265' | 'hevc' | 'vp9' | 'prores'
   crf?: number
   bitrate?: string
   useGpu?: boolean
@@ -115,3 +115,38 @@ export interface ExportResult {
 }
 
 export type ProgressCallback = (progress: ExportProgress) => void
+
+export function normalizeExportVideoCodec(
+  codec?: VideoExportOptions['codec']
+): 'h264' | 'hevc' | undefined {
+  if (codec === 'hevc' || codec === 'h265') return 'hevc'
+  if (codec === 'h264') return 'h264'
+  return undefined
+}
+
+export interface RemuxCodecPlan {
+  targetCodec?: 'h264' | 'hevc'
+  encoderCodec: 'h264' | 'hevc'
+  finalCodec: 'h264' | 'hevc'
+  needsColorConversion: boolean
+  needsCodecTranscode: boolean
+  transcode: boolean
+}
+
+export function resolveRemuxCodecPlan(
+  optionsCodec: VideoExportOptions['codec'] | undefined,
+  encoder?: { encoderCodecKind?: 'h264' | 'hevc'; requiresColorConversion?: boolean } | null
+): RemuxCodecPlan {
+  const targetCodec = normalizeExportVideoCodec(optionsCodec)
+  const encoderCodec = encoder?.encoderCodecKind ?? targetCodec ?? 'h264'
+  const needsColorConversion = encoder?.requiresColorConversion === true
+  const needsCodecTranscode = !!targetCodec && !!encoder && encoderCodec !== targetCodec
+  return {
+    targetCodec,
+    encoderCodec,
+    finalCodec: targetCodec ?? encoderCodec,
+    needsColorConversion,
+    needsCodecTranscode,
+    transcode: needsColorConversion || needsCodecTranscode
+  }
+}
