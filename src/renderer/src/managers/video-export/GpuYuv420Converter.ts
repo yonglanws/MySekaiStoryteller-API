@@ -97,6 +97,27 @@ interface PboSlot {
   inUse: boolean
 }
 
+function getSourceDimensions(source: TexImageSource): { width: number; height: number } | null {
+  const s = source as {
+    videoWidth?: number
+    videoHeight?: number
+    naturalWidth?: number
+    naturalHeight?: number
+    codedWidth?: number
+    codedHeight?: number
+    displayWidth?: number
+    displayHeight?: number
+    width?: number
+    height?: number
+  }
+  const width = s.videoWidth ?? s.naturalWidth ?? s.codedWidth ?? s.displayWidth ?? s.width
+  const height = s.videoHeight ?? s.naturalHeight ?? s.codedHeight ?? s.displayHeight ?? s.height
+  if (typeof width === 'number' && typeof height === 'number' && width > 0 && height > 0) {
+    return { width, height }
+  }
+  return null
+}
+
 function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader | null {
   const shader = gl.createShader(type)
   if (!shader) return null
@@ -130,6 +151,8 @@ export class GpuYuv420Converter {
 
   private readonly pboSlots: PboSlot[] = []
   private readonly syncOutputBuffer: Uint8Array
+  private srcTexWidth = 0
+  private srcTexHeight = 0
   private pboCursor = 0
   private pendingSlots: number[] = []
   private disposed = false
@@ -138,11 +161,7 @@ export class GpuYuv420Converter {
     return width > 0 && height > 0 && width % 4 === 0 && height % 4 === 0
   }
 
-  static create(
-    width: number,
-    height: number,
-    pboRingSize = 2
-  ): GpuYuv420Converter | null {
+  static create(width: number, height: number, pboRingSize = 2): GpuYuv420Converter | null {
     if (!GpuYuv420Converter.isSupportedDimensions(width, height)) return null
     try {
       const surface =
@@ -317,7 +336,19 @@ export class GpuYuv420Converter {
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.srcTexture)
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0)
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
+    const dims = getSourceDimensions(source)
+    if (
+      dims &&
+      dims.width === this.srcTexWidth &&
+      dims.height === this.srcTexHeight &&
+      typeof gl.texSubImage2D === 'function'
+    ) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source)
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
+      this.srcTexWidth = dims ? dims.width : 0
+      this.srcTexHeight = dims ? dims.height : 0
+    }
     gl.useProgram(this.program)
     gl.bindVertexArray(this.vao)
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
@@ -346,7 +377,11 @@ export class GpuYuv420Converter {
         this.warnSyncIssue('clientWaitSync returned WAIT_FAILED; proceeding with PBO readback')
         return
       }
-      await fastYield()
+      if (guard < 2) {
+        await fastYield()
+      } else {
+        await new Promise<void>((resolve) => nativeSetTimeout(resolve, 1))
+      }
     }
     if (!this.disposed) {
       this.warnSyncIssue('waitSync timed out after 1000 yields; proceeding with PBO readback')

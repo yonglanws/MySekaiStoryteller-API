@@ -1,19 +1,29 @@
 import { ExportLogger } from './ExportLogger'
 import { AsyncFrameCapturer } from './AsyncFrameCapturer'
 import { GpuYuv420Converter } from './GpuYuv420Converter'
+import {
+  BINARY_WS_HEADER_BYTES,
+  BINARY_WS_KIND_PIPE_FRAME,
+  BINARY_WS_KIND_REPEAT_FRAME,
+  BinaryWsClient,
+  fetchBinaryStreamEndpoint,
+  writeBinaryHeader
+} from './BinaryWsClient'
 
 const RAW_CHUNK_TARGET_BYTES = 8 * 1024 * 1024
 const RAW_MAX_BATCH_FRAMES = 4
 const RAW_MAX_IN_FLIGHT_SENDS = 2
 const RAW_REPEAT_FLUSH_THRESHOLD = 60
+const RUST_WS_PACKET_POOL_MAX = 4
+const RUST_WS_PIPE_CLOSE_TIMEOUT_MS = 300_000
 
 /**
  * fast 导出模式的宿主管道帧接收器：当 WebCodecs 不可用时使用。
  *
- * 1. 优先用 WebGL2 GPU 将画布直转为 BT.709 limited-range `yuv420p` 并通过 PBO 环异步读回，
- *    多帧拼批走 `frameFormat: 'rawvideo'` 推入宿主 FFmpeg，跳过 JPEG 编解码与 CPU swscale；
- * 2. 复用单帧与批缓冲池并支持静止帧 `repeatLastFrame`，避免大块 `Uint8Array` 反复分配与重复传输；
- * 3. 若 WebGL2 不可用或尺寸不支持，回落 `image2pipe` MJPEG 或临时帧目录。
+ * 1. 优先用 WebGL2 GPU 将画布直转为 BT.709 limited-range `yuv420p` 并通过 3-slot PBO 环异步读回；
+ * 2. 若宿主提供 Rust `/bridge/rs-stream` 二进制 WebSocket，则以零批拷贝单帧包（`KIND_PIPE_FRAME=2`）
+ *    与 16B 静止帧复用包（`KIND_REPEAT_FRAME=3`）直推原生管道；
+ * 3. 否则回退 HTTP `frames-stream-*` 多帧拼批管道，或进一步回落 `image2pipe` MJPEG / 临时帧目录。
  */
 export class JpegFrameSink {
   private readonly logger = new ExportLogger('JpegFrameSink')
@@ -24,6 +34,7 @@ export class JpegFrameSink {
     fps: number
     crf: number
   }
+  private readonly explicitCrf: number | undefined
   private capturer: AsyncFrameCapturer
   private yuvConverter: GpuYuv420Converter | null = null
   private rawMode = false
@@ -35,6 +46,14 @@ export class JpegFrameSink {
   private rawPipelineError: Error | null = null
   private pendingRepeatCount = 0
   private disposed = false
+
+  private rustWsClient: BinaryWsClient | null = null
+  private readonly rustWsStreamId = 1
+  private rustWsVideoPath: string | null = null
+  private rustWsTempDir: string | null = null
+  private rustPacketPool: Uint8Array[] = []
+  private readonly repeatHeaderBuf = new Uint8Array(BINARY_WS_HEADER_BYTES)
+  private lastWsBackpressureWarnAtMs = 0
 
   private framesDir: string
   private frameCount = 0
@@ -51,6 +70,7 @@ export class JpegFrameSink {
     crf?: number
   }) {
     this.framesDir = opts.framesDir ?? ''
+    this.explicitCrf = opts.crf
     this.opts = {
       width: opts.width,
       height: opts.height,
@@ -70,15 +90,27 @@ export class JpegFrameSink {
   }
 
   get isPipeMode(): boolean {
-    return Boolean(this.pipeSessionId || this.finishedPipeVideoPath)
+    return Boolean(this.pipeSessionId || this.rustWsClient || this.finishedPipeVideoPath)
   }
 
   get isRawVideoMode(): boolean {
     return this.rawMode
   }
 
+  get isRustWsPipeMode(): boolean {
+    return Boolean(
+      this.rustWsClient ||
+      (this.rustWsVideoPath && this.finishedPipeVideoPath === this.rustWsVideoPath)
+    )
+  }
+
   get canRepeatLastFrame(): boolean {
-    return Boolean(this.rawMode && this.yuvConverter && this.pipeSessionId && this.frameCount > 0)
+    return Boolean(
+      this.rawMode &&
+      this.yuvConverter &&
+      (this.pipeSessionId || this.rustWsClient) &&
+      this.frameCount > 0
+    )
   }
 
   get framesDirectory(): string {
@@ -114,9 +146,96 @@ export class JpegFrameSink {
     }
   }
 
+  private acquireRustPacketPayload(frameBytes: number): Uint8Array {
+    const packetLen = BINARY_WS_HEADER_BYTES + frameBytes
+    const pooled = this.rustPacketPool.pop()
+    const pkt = pooled && pooled.byteLength === packetLen ? pooled : new Uint8Array(packetLen)
+    return pkt.subarray(BINARY_WS_HEADER_BYTES)
+  }
+
+  private releaseRustPacket(pkt: Uint8Array): void {
+    if (!this.disposed && this.rustPacketPool.length < RUST_WS_PACKET_POOL_MAX) {
+      this.rustPacketPool.push(pkt)
+    }
+  }
+
+  private async tryStartRustWsPipe(converter: GpuYuv420Converter): Promise<boolean> {
+    const endpoint = await fetchBinaryStreamEndpoint()
+    if (!endpoint || endpoint.backend !== 'rust' || !endpoint.wsUrl) {
+      return false
+    }
+    const invoke = window.electron?.ipcRenderer?.invoke
+    if (typeof invoke !== 'function') {
+      return false
+    }
+
+    let baseDir = ''
+    let client: BinaryWsClient | null = null
+    try {
+      baseDir = (await invoke('electron:get-temp-base-dir')) as string
+      if (!baseDir) return false
+      const sep = baseDir.includes('\\') && !baseDir.includes('/') ? '\\' : '/'
+      const normalizedBase = baseDir.replace(/[\\/]+$/, '')
+      const outputPath = `${normalizedBase}${sep}video.mp4`
+
+      client = await BinaryWsClient.connect(endpoint.wsUrl, {
+        onAsyncError: (err) => {
+          if (!this.disposed) {
+            this.rawPipelineError ??= err
+          }
+        }
+      })
+
+      const ack = await client.sendControl({
+        op: 'open-pipe',
+        streamId: this.rustWsStreamId,
+        outputPath,
+        width: this.opts.width,
+        height: this.opts.height,
+        fps: this.opts.fps,
+        format: 'yuv420p',
+        codec: endpoint.videoConfig?.codec || 'hevc',
+        encoder: endpoint.videoConfig?.encoder || 'auto',
+        crf: this.explicitCrf ?? endpoint.videoConfig?.crf ?? this.opts.crf,
+        faststart: false,
+        lowPower: true,
+        dedup: false
+      })
+
+      if (!ack?.ok) {
+        throw new Error(ack?.error || 'Rust binary WS open-pipe rejected')
+      }
+
+      this.yuvConverter = converter
+      this.rawMode = true
+      this.rustWsClient = client
+      this.rustWsVideoPath = outputPath
+      this.rustWsTempDir = baseDir
+      this.logger.info(
+        `Raw YUV420p Rust WS pipe started: encoder=${endpoint.videoConfig?.encoder || 'auto'}, codec=${endpoint.videoConfig?.codec || 'hevc'} → ${outputPath}`
+      )
+      return true
+    } catch (error) {
+      this.logger.warn(
+        'Rust binary WS pipe unavailable, falling back to HTTP frames-stream:',
+        error
+      )
+      client?.close()
+      if (baseDir) {
+        await invoke('electron:delete-temp-file', { filePath: baseDir }).catch(() => {})
+      }
+      return false
+    }
+  }
+
   private async tryStartRawVideoPipe(): Promise<boolean> {
-    const converter = GpuYuv420Converter.create(this.opts.width, this.opts.height, 2)
+    const converter = GpuYuv420Converter.create(this.opts.width, this.opts.height, 3)
     if (!converter) return false
+
+    if (await this.tryStartRustWsPipe(converter)) {
+      return true
+    }
+
     try {
       const started = (await window.electron?.ipcRenderer?.invoke?.(
         'electron:frames-stream-start',
@@ -153,6 +272,47 @@ export class JpegFrameSink {
     }
     converter.dispose()
     return false
+  }
+
+  private async sendRustPipeFrame(yuvFrame: Uint8Array): Promise<void> {
+    const client = this.rustWsClient
+    if (!client) {
+      throw this.rawPipelineError ?? new Error('Rust binary WS pipe closed')
+    }
+    if (this.rawPipelineError) throw this.rawPipelineError
+    await client.waitBufferReady({
+      isCancelled: () => this.disposed || Boolean(this.rawPipelineError),
+      onHighWater: (buffered) => {
+        const now = Date.now()
+        if (now - this.lastWsBackpressureWarnAtMs >= 5000) {
+          this.lastWsBackpressureWarnAtMs = now
+          this.logger.warn(
+            `Rust pipe WS bufferedAmount high (${(buffered / (1024 * 1024)).toFixed(1)} MB), pacing capture`
+          )
+        }
+      }
+    })
+    if (this.rawPipelineError) throw this.rawPipelineError
+    if (!client.isOpen) {
+      const err =
+        this.rawPipelineError ?? new Error('Rust binary WS closed unexpectedly during export')
+      this.rawPipelineError ??= err
+      throw err
+    }
+
+    const frameBytes = yuvFrame.byteLength
+    const packetLen = BINARY_WS_HEADER_BYTES + frameBytes
+    let pkt: Uint8Array
+    if (yuvFrame.byteOffset === BINARY_WS_HEADER_BYTES && yuvFrame.buffer.byteLength >= packetLen) {
+      pkt = new Uint8Array(yuvFrame.buffer, 0, packetLen)
+    } else {
+      const pooled = this.rustPacketPool.pop()
+      pkt = pooled && pooled.byteLength === packetLen ? pooled : new Uint8Array(packetLen)
+      pkt.set(yuvFrame, BINARY_WS_HEADER_BYTES)
+    }
+    writeBinaryHeader(pkt, this.rustWsStreamId, BINARY_WS_KIND_PIPE_FRAME, 1)
+    client.sendBinary(pkt)
+    this.releaseRustPacket(pkt)
   }
 
   private async flushRawBatch(): Promise<void> {
@@ -205,6 +365,15 @@ export class JpegFrameSink {
   private async drainPboToRawPipe(): Promise<void> {
     if (!this.rawMode || !this.yuvConverter) return
     const frameBytes = this.yuvConverter.frameByteLength
+    if (this.rustWsClient) {
+      const remaining = await this.yuvConverter.drainAllAsync(() =>
+        this.acquireRustPacketPayload(frameBytes)
+      )
+      for (const frame of remaining) {
+        await this.sendRustPipeFrame(frame)
+      }
+      return
+    }
     const remaining = await this.yuvConverter.drainAllAsync(
       () => this.rawBufferPool.pop() ?? new Uint8Array(frameBytes)
     )
@@ -220,6 +389,28 @@ export class JpegFrameSink {
   private async flushPendingRepeats(): Promise<void> {
     if (this.pendingRepeatCount <= 0) return
     if (this.rawPipelineError) throw this.rawPipelineError
+    if (this.rustWsClient) {
+      await this.drainPboToRawPipe()
+      if (this.rawPipelineError) throw this.rawPipelineError
+      const count = this.pendingRepeatCount
+      this.pendingRepeatCount = 0
+      const client = this.rustWsClient
+      if (!client) {
+        throw new Error('Rust binary WS pipe closed before repeat')
+      }
+      await client.waitBufferReady({
+        isCancelled: () => this.disposed || Boolean(this.rawPipelineError)
+      })
+      if (this.rawPipelineError) throw this.rawPipelineError
+      writeBinaryHeader(
+        this.repeatHeaderBuf,
+        this.rustWsStreamId,
+        BINARY_WS_KIND_REPEAT_FRAME,
+        count
+      )
+      client.sendBinary(this.repeatHeaderBuf)
+      return
+    }
     if (!this.pipeSessionId) {
       this.pendingRepeatCount = 0
       return
@@ -238,8 +429,8 @@ export class JpegFrameSink {
   }
 
   /**
-   * 静止帧复用：跳过 GPU readPixels 与 3.11 MB HTTP 帧传输，合并连续重复次数后
-   * 通过 `electron:frames-stream-repeat` 通知宿主管道复写上一帧。
+   * 静止帧复用：跳过 GPU readPixels 与 3.11 MB 帧传输，合并连续重复次数后
+   * 通过 Rust `KIND_REPEAT_FRAME` (16B) 或 HTTP `electron:frames-stream-repeat` 复写上一帧。
    */
   async repeatLastFrame(count = 1): Promise<boolean> {
     if (!this.canRepeatLastFrame) return false
@@ -323,6 +514,15 @@ export class JpegFrameSink {
       if (this.pendingRepeatCount > 0) {
         await this.flushPendingRepeats()
       }
+      if (this.rustWsClient) {
+        const reuse = this.acquireRustPacketPayload(this.yuvConverter.frameByteLength)
+        const completed = await this.yuvConverter.enqueueAsync(canvas, reuse)
+        this.frameCount++
+        if (completed) {
+          await this.sendRustPipeFrame(completed)
+        }
+        return
+      }
       const reuse = this.rawBufferPool.pop()
       const completed = await this.yuvConverter.enqueueAsync(canvas, reuse)
       this.frameCount++
@@ -342,7 +542,9 @@ export class JpegFrameSink {
   async finish(): Promise<string> {
     if (this.rawMode && this.yuvConverter) {
       await this.drainPboToRawPipe()
-      await Promise.all([...this.rawInFlightSends])
+      if (!this.rustWsClient) {
+        await Promise.all([...this.rawInFlightSends])
+      }
       if (this.pendingRepeatCount > 0) {
         await this.flushPendingRepeats()
       }
@@ -351,9 +553,30 @@ export class JpegFrameSink {
       this.rawBufferPool.length = 0
       this.rawBatchBufferPool.length = 0
       this.rawPendingFrames.length = 0
+      this.rustPacketPool.length = 0
       if (this.rawPipelineError) throw this.rawPipelineError
     } else {
       await this.capturer.flushAll()
+    }
+
+    if (this.rustWsClient) {
+      const client = this.rustWsClient
+      const videoPath = this.rustWsVideoPath!
+      const closed = await client.sendControl(
+        { op: 'close', streamId: this.rustWsStreamId },
+        RUST_WS_PIPE_CLOSE_TIMEOUT_MS
+      )
+      client.close()
+      this.rustWsClient = null
+      if (this.rawPipelineError) throw this.rawPipelineError
+      if (!closed?.ok) {
+        throw new Error(closed?.error || 'Rust binary WS pipe close failed')
+      }
+      this.finishedPipeVideoPath = videoPath
+      this.logger.info(
+        `Raw YUV420p Rust WS pipe finished: ${this.frameCount} frames (${closed.encoder ?? 'unknown'}, deduped=${closed.dedupedFrames ?? 0}) → ${videoPath}`
+      )
+      return videoPath
     }
 
     if (this.pipeSessionId) {
@@ -387,7 +610,21 @@ export class JpegFrameSink {
     this.rawPendingFrames.length = 0
     this.rawBufferPool.length = 0
     this.rawBatchBufferPool.length = 0
+    this.rustPacketPool.length = 0
     await Promise.allSettled([...this.rawInFlightSends])
+    if (this.rustWsClient) {
+      const client = this.rustWsClient
+      this.rustWsClient = null
+      client.sendAbort(this.rustWsStreamId)
+      client.close()
+    }
+    if (this.rustWsTempDir && !this.finishedPipeVideoPath) {
+      const dir = this.rustWsTempDir
+      this.rustWsTempDir = null
+      await window.electron?.ipcRenderer
+        ?.invoke?.('electron:delete-temp-file', { filePath: dir })
+        ?.catch(() => {})
+    }
     if (this.pipeSessionId) {
       const id = this.pipeSessionId
       this.pipeSessionId = null

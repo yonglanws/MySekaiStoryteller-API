@@ -2,14 +2,16 @@
 //! Includes Intel QSV `-low_power 1` VDENC fast path (`168-241fps` on Iris Xe,
 //! `-global_quality 27 -g 240 -tag:v hvc1`) with automatic fallback to standard QSV -> software.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
 use crate::color;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Codec {
     #[default]
     Hevc,
@@ -33,7 +35,7 @@ impl Codec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
     VideoToolbox,
     Nvenc,
@@ -42,7 +44,49 @@ pub enum Backend {
     Vaapi,
 }
 
-const VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
+pub fn vaapi_device() -> String {
+    std::env::var("MSS_VAAPI_DEVICE")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_VAAPI_DEVICE.to_owned())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProbeCacheKey {
+    ffmpeg_path: PathBuf,
+    codec: Codec,
+    backend: Backend,
+    low_power: bool,
+    vaapi_device: Option<String>,
+}
+
+static PROBE_CACHE: OnceLock<Mutex<HashMap<ProbeCacheKey, bool>>> = OnceLock::new();
+
+fn probe_cache() -> &'static Mutex<HashMap<ProbeCacheKey, bool>> {
+    PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_probe(key: ProbeCacheKey, probe_fn: impl FnOnce() -> bool) -> bool {
+    {
+        let cache = probe_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&cached) = cache.get(&key) {
+            return cached;
+        }
+    }
+    let ok = probe_fn();
+    let mut cache = probe_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.insert(key, ok);
+    ok
+}
+
+pub fn clear_probe_cache() {
+    if let Some(m) = PROBE_CACHE.get() {
+        m.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,7 +154,7 @@ impl Backend {
 
     pub fn global_args(self) -> Vec<String> {
         match self {
-            Self::Vaapi => vec!["-vaapi_device".into(), VAAPI_DEVICE.into()],
+            Self::Vaapi => vec!["-vaapi_device".into(), vaapi_device()],
             _ => Vec::new(),
         }
     }
@@ -176,6 +220,21 @@ impl Backend {
     }
 
     pub fn works_with_low_power(self, ffmpeg: &Path, codec: Codec, low_power: bool) -> bool {
+        let key = ProbeCacheKey {
+            ffmpeg_path: ffmpeg.to_path_buf(),
+            codec,
+            backend: self,
+            low_power,
+            vaapi_device: if self == Self::Vaapi {
+                Some(vaapi_device())
+            } else {
+                None
+            },
+        };
+        cached_probe(key, || self.probe_uncached(ffmpeg, codec, low_power))
+    }
+
+    fn probe_uncached(self, ffmpeg: &Path, codec: Codec, low_power: bool) -> bool {
         let mut filters = vec!["format=yuv420p".to_owned(), color::tag_filter()];
         if let Some(upload) = self.upload_filter() {
             filters.push(upload.to_owned());
@@ -562,5 +621,78 @@ mod tests {
         assert!(qsv_args.windows(2).any(|w| w == ["-g", "240"]));
         assert!(qsv_args.windows(2).any(|w| w == ["-tag:v", "hvc1"]));
         assert!(qsv_args.windows(2).any(|w| w == ["-pix_fmt", "nv12"]));
+    }
+
+    #[test]
+    fn probe_cache_memoizes_by_ffmpeg_codec_backend_and_low_power() {
+        clear_probe_cache();
+        let mut calls = 0usize;
+        let key1 = ProbeCacheKey {
+            ffmpeg_path: PathBuf::from("/fake/ffmpeg-cache-test"),
+            codec: Codec::Hevc,
+            backend: Backend::Qsv,
+            low_power: true,
+            vaapi_device: None,
+        };
+        assert!(cached_probe(key1.clone(), || {
+            calls += 1;
+            true
+        }));
+        assert!(cached_probe(key1.clone(), || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 1, "second probe with identical key should hit cache");
+
+        let key2 = ProbeCacheKey {
+            low_power: false,
+            ..key1.clone()
+        };
+        assert!(!cached_probe(key2, || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 2, "different low_power flag should miss cache");
+
+        let key3 = ProbeCacheKey {
+            codec: Codec::H264,
+            ..key1.clone()
+        };
+        assert!(cached_probe(key3, || {
+            calls += 1;
+            true
+        }));
+        assert_eq!(calls, 3, "different codec should miss cache");
+
+        clear_probe_cache();
+        assert!(!cached_probe(key1, || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 4, "clearing probe cache should re-run probe");
+    }
+
+    #[test]
+    fn vaapi_device_defaults_and_respects_env_override() {
+        let prev = std::env::var_os("MSS_VAAPI_DEVICE");
+        // SAFETY: test runs serially for this env var and restores previous state.
+        unsafe { std::env::remove_var("MSS_VAAPI_DEVICE") };
+        assert_eq!(vaapi_device(), "/dev/dri/renderD128");
+        assert_eq!(
+            Backend::Vaapi.global_args(),
+            vec!["-vaapi_device".to_owned(), "/dev/dri/renderD128".to_owned()]
+        );
+
+        unsafe { std::env::set_var("MSS_VAAPI_DEVICE", "/dev/dri/renderD129") };
+        assert_eq!(vaapi_device(), "/dev/dri/renderD129");
+        assert_eq!(
+            Backend::Vaapi.global_args(),
+            vec!["-vaapi_device".to_owned(), "/dev/dri/renderD129".to_owned()]
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("MSS_VAAPI_DEVICE", v) },
+            None => unsafe { std::env::remove_var("MSS_VAAPI_DEVICE") },
+        }
     }
 }

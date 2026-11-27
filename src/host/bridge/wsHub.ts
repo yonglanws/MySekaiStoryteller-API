@@ -1,11 +1,10 @@
-import crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import { IncomingMessage } from 'node:http'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
 import { ILogObj, Logger } from 'tslog'
+import { resolveContainedTempPath, timingSafeTokenEqual } from './bridgeSecurity'
 
 export interface WorkerMessage {
   type: string
@@ -51,9 +50,7 @@ export class WsHub {
     const headerToken = request.headers['x-mss-bridge-token']
     const queryToken = url.searchParams.get('token')
     const provided = (typeof headerToken === 'string' ? headerToken : '') || queryToken || ''
-    const a = Buffer.from(provided, 'utf8')
-    const b = Buffer.from(this.bridgeToken, 'utf8')
-    return a.length === b.length && crypto.timingSafeEqual(a, b)
+    return timingSafeTokenEqual(provided, this.bridgeToken)
   }
 
   attach(httpServer: {
@@ -140,31 +137,7 @@ export class WsHub {
   }
 
   private resolveContainedTempPath(rawPath: string): string | null {
-    if (!rawPath || rawPath.includes('\0')) return null
-    const tempRoots = [fs.realpathSync(tmpdir()), path.resolve(tmpdir())]
-    const resolveReal = (target: string): string => {
-      const abs = path.resolve(target)
-      const tail: string[] = []
-      let cur = abs
-      while (true) {
-        try {
-          const real = fs.realpathSync(cur)
-          return tail.length ? path.join(real, ...tail.reverse()) : real
-        } catch {
-          const parent = path.dirname(cur)
-          if (parent === cur) return abs
-          tail.push(path.basename(cur))
-          cur = parent
-        }
-      }
-    }
-    const resolved = resolveReal(rawPath)
-    const norm = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p)
-    const ok = tempRoots.some((root) => {
-      const rel = path.relative(norm(root), norm(resolved))
-      return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel)
-    })
-    return ok ? resolved : null
+    return resolveContainedTempPath(rawPath)
   }
 
   /**
@@ -194,7 +167,9 @@ export class WsHub {
       }
     }
 
-    const closeStream = async (streamId: number): Promise<{ fileSize: number; error: Error | null }> => {
+    const closeStream = async (
+      streamId: number
+    ): Promise<{ fileSize: number; error: Error | null }> => {
       const entry = streams.get(streamId)
       if (!entry) return { fileSize: 0, error: null }
       streams.delete(streamId)
