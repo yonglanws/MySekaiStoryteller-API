@@ -126,6 +126,25 @@ test('MSS_LLM_PERSONA_DIRS, MSS_LLM_POLISH_DIALOGUE, and MSS_SERVER_CORS env ove
   process.env.MSS_SERVER_CORS = '   '
   const cfg3 = loadHostConfig()
   assert.equal(cfg3.server.cors, undefined)
+
+  // Explicit env opt-out via "none" clears personaDirs
+  process.env.MSS_LLM_PERSONA_DIRS = 'none'
+  const cfg4 = loadHostConfig()
+  assert.deepEqual(cfg4.llm.personaDirs, [])
+})
+
+test('llm.personaDirs defaults to built-in personas/pjsk when omitted and supports explicit opt-out', (t) => {
+  withIsolatedConfig(t, null)
+
+  const defaultCfg = loadHostConfig()
+  assert.deepEqual(defaultCfg.llm.personaDirs, [path.resolve(defaultCfg.rootDir, 'personas/pjsk')])
+
+  // Empty env var string does not clobber built-in default
+  process.env.MSS_LLM_PERSONA_DIRS = '   '
+  const blankEnvCfg = loadHostConfig()
+  assert.deepEqual(blankEnvCfg.llm.personaDirs, [
+    path.resolve(blankEnvCfg.rootDir, 'personas/pjsk')
+  ])
 })
 
 test('MSS_GPU_PROFILE and MSS_GPU_MODE apply platform-aware presets before explicit overrides', (t) => {
@@ -254,13 +273,22 @@ test('validateConfigHints catches common beginner misconfigurations and stays si
     `expected 0.0.0.0 security hint, got: ${hints.join(' | ')}`
   )
 
-  // Clean configuration produces zero hints
+  // Clean configuration produces zero hints (including with built-in personas/pjsk)
   const clean = structuredClone(misconfigured)
   clean.server.apiKey = 'super-secret-token'
   clean.video.fastFps = 60
   clean.tts.enabled = false
   const cleanHints = validateConfigHints(clean, { MSS_LLM_API_KEY: 'sk-test-123' })
   assert.deepEqual(cleanHints, [])
+
+  // Non-existent personaDirs entry produces a clear hint
+  const badPersona = structuredClone(clean)
+  badPersona.llm.personaDirs = [path.join(clean.rootDir, 'does-not-exist-personas')]
+  const badPersonaHints = validateConfigHints(badPersona, { MSS_LLM_API_KEY: 'sk-test-123' })
+  assert.ok(
+    badPersonaHints.some((h) => h.includes('personaDirs') && h.includes('personas/pjsk')),
+    `expected missing personaDirs hint, got: ${badPersonaHints.join(' | ')}`
+  )
 })
 
 test('init-config.mjs --non-interactive generates valid config.yaml & .env and guards overwrite', (t) => {
@@ -339,6 +367,7 @@ test('init-config.mjs --non-interactive generates valid config.yaml & .env and g
   assert.equal(loaded.llm.baseUrl, 'https://api.example.com/v1')
   assert.equal(loaded.llm.model, 'deepseek-chat')
   assert.equal(loaded.llm.pipeline, 'hybrid')
+  assert.deepEqual(loaded.llm.personaDirs, [path.resolve(loaded.rootDir, 'personas/pjsk')])
   assert.equal(loaded.tts.enabled, true)
   assert.equal(loaded.tts.provider, 'irodori')
   assert.equal(loaded.tts.apiBaseUrl, 'http://127.0.0.1:8088')
@@ -418,4 +447,5 @@ test('config.example.yaml parses cleanly, preserves key defaults, and has zero p
   assert.equal(cfg.video.maxOutputMbps, 6.5)
   assert.equal(cfg.video.useRustExporter, true)
   assert.ok(['staged', 'hybrid'].includes(cfg.llm.pipeline))
+  assert.deepEqual(cfg.llm.personaDirs, [path.resolve(cfg.rootDir, 'personas/pjsk')])
 })

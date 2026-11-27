@@ -190,6 +190,11 @@ test('Dockerfile is multi-stage, aligned with package-lock Playwright version, a
   ]) {
     assert.ok(dockerfile.includes(artifact), `Dockerfile runtime stage must copy: ${artifact}`)
   }
+  assert.match(
+    dockerfile,
+    /^COPY\s+personas\s+\.\/personas$/m,
+    'Dockerfile runtime stage must copy built-in personas into /app/personas'
+  )
 
   assert.match(dockerfile, /MSS_FFMPEG_PATH=\/usr\/bin\/ffmpeg/)
   assert.match(dockerfile, /MALLOC_ARENA_MAX=2/)
@@ -217,6 +222,16 @@ test('.dockerignore excludes VCS, build caches, runtime outputs, and secrets', (
       `.dockerignore must exclude ${entry}`
     )
   }
+  assert.doesNotMatch(
+    dockerignore,
+    /^personas\/?$/m,
+    '.dockerignore must not exclude built-in personas/ directory'
+  )
+  assert.match(
+    dockerignore,
+    /^!personas\/\*\*\/\*\.md$/m,
+    '.dockerignore must explicitly include personas/**/*.md despite root *.md rule'
+  )
 })
 
 test('docker-compose files are valid YAML with matching service name and required settings', () => {

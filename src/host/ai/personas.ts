@@ -2,8 +2,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import yaml from 'js-yaml'
 import { CHARACTERS, isVirtualSinger } from '../assets/names'
-import type { LlmPersona, LlmSettings } from '../config'
+import {
+  DEFAULT_BUILTIN_PERSONA_DIR,
+  resolveBuiltinPersonaDir,
+  type LlmPersona,
+  type LlmSettings
+} from '../config'
 import type { CatalogModel } from '../resources/resourceCatalog'
+
+export { DEFAULT_BUILTIN_PERSONA_DIR, resolveBuiltinPersonaDir }
 
 export interface PersonaEntry {
   name: string

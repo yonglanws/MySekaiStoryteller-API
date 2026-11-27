@@ -129,6 +129,7 @@ COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/native/mss-export-rs/target/release/mss-export-napi.node ./native/mss-export-rs/target/release/mss-export-napi.node
 COPY --from=builder /app/native/mss-export-rs/target/release/mss-export-rs ./native/mss-export-rs/target/release/mss-export-rs
 COPY config.example.yaml ./config.example.yaml
+COPY personas ./personas
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \

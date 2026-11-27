@@ -131,6 +131,14 @@ else
   api_auth_status="disabled"
 fi
 
+if [ -n "${MSS_LLM_PERSONA_DIRS:-}" ]; then
+  persona_status="${MSS_LLM_PERSONA_DIRS}"
+elif [ -d "/app/personas/pjsk" ]; then
+  persona_status="built-in (/app/personas/pjsk)"
+else
+  persona_status="default"
+fi
+
 # 6. Print clean startup summary
 cat <<EOF
 ================================================================================
@@ -146,7 +154,7 @@ cat <<EOF
  Video            : ${MSS_VIDEO_WIDTH:-default}x${MSS_VIDEO_HEIGHT:-default} @ ${MSS_VIDEO_FPS:-default}fps (codec: ${MSS_VIDEO_CODEC:-hevc}, rust: ${MSS_USE_RUST_EXPORTER:-true})
  Memory / Workers : profile=${MSS_MEMORY_PROFILE:-standard}, workers=${MSS_WORKERS:-default}
  Cloud / BGM      : cloudOnly=${MSS_ASSETS_CLOUD_ONLY:-default}, cloudCatalog=${MSS_ASSETS_CLOUD_CATALOG:-default}, bgmVolume=${MSS_BGM_VOLUME:-0.35}
- LLM              : enabled=${MSS_LLM_ENABLED:-true}, model=${MSS_LLM_MODEL:-default}, pipeline=${MSS_LLM_PIPELINE:-default}, key=${llm_key_status}
+ LLM              : enabled=${MSS_LLM_ENABLED:-true}, model=${MSS_LLM_MODEL:-default}, pipeline=${MSS_LLM_PIPELINE:-default}, personas=${persona_status}, key=${llm_key_status}
  TTS              : enabled=${MSS_TTS_ENABLED:-default}, provider=${MSS_TTS_PROVIDER:-default}
 ================================================================================
 EOF

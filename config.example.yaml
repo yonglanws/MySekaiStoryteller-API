@@ -219,8 +219,9 @@ llm:
   targetMinutes: 3                # 提示词里的目标成片时长（env: MSS_LLM_TARGET_MINUTES）
   systemPrompt: ""                # single 覆盖内置系统提示词；staged 追加到每段系统提示词（env: MSS_LLM_SYSTEM_PROMPT）
   extraBody: {}                   # 原样并入请求体，例如 {"thinking":{"type":"disabled"}}（env: MSS_LLM_EXTRA_BODY）
-  personaDirs: []                 # 人格目录：读取其中的 *.md / *.txt（env: MSS_LLM_PERSONA_DIRS，逗号分隔）
-                                  # 长人设只提取核心机制/语言与风格/角色档案/核心禁忌进入对白提示词
+  personaDirs: [personas/pjsk]    # 角色人格目录（*.md / *.txt）；省略时默认自动加载仓库内置 personas/pjsk（58 份 PJSK 角色人格）
+                                  # 追加目录如 [personas/pjsk, /path/to/custom] 可叠加并覆盖同名角色；设为 [] 或 MSS_LLM_PERSONA_DIRS=none 可禁用
+                                  # （env: MSS_LLM_PERSONA_DIRS，逗号分隔；长人设自动提取核心机制/语言与风格/人际关系/核心禁忌进入对白提示词）
   personas: []                    # 内联人格：name / prompt / aliases / group
   polishDialogue: true            # 启用反套路台词质检与条件外科润色（env: MSS_LLM_POLISH_DIALOGUE）
   # 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b + SQ8 磁盘缓存 + 零网络词法回退；严格 PJSK 领域隔离）

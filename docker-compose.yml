@@ -36,7 +36,8 @@ services:
       - ./cache:/app/cache
       # Optional: mount custom config.yaml (copy config.example.yaml -> config.yaml first)
       # - ./config.yaml:/app/config.yaml:ro
-      # Optional: mount custom character personas (pair with MSS_LLM_PERSONA_DIRS=/app/personas)
-      # - ./personas:/app/personas:ro
+      # Built-in 58 PJSK personas ship inside the image at /app/personas/pjsk automatically.
+      # Optional: mount custom/extra personas (extend via MSS_LLM_PERSONA_DIRS=/app/personas/pjsk,/app/custom-personas)
+      # - ./custom-personas:/app/custom-personas:ro
     restart: unless-stopped
     stop_grace_period: 150s

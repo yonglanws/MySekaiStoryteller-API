@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   actingPersonaPrompt,
   dialoguePersonaPrompt,
@@ -22,8 +23,8 @@ import {
 } from '../../out-host/host/ai/dialogueLinter.js'
 import { splitOverflowTalks } from '../../out-host/host/ai/validate.js'
 
-const REAL_PJSK_DIR = 'D:\\Users\\桌面\\人格设定\\重写提示词\\PJSK'
-const hasRealPjskDir = fs.existsSync(REAL_PJSK_DIR)
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const BUILTIN_PJSK_DIR = path.join(REPO_ROOT, 'personas', 'pjsk')
 
 function makeModel(overrides) {
   return {
@@ -426,10 +427,9 @@ test('dialogueLinter detects AI-slop phrasing, asterisk stage leaks, Mizuki gend
 })
 
 test(
-  'real PJSK persona corpus loads all 58 files, all 30 unit-specific Virtual Singers, and extracts clean prompts',
-  { skip: !hasRealPjskDir && `真实PJSK人设目录不存在：${REAL_PJSK_DIR}` },
+  'built-in PJSK persona corpus loads all 58 files, all 30 unit-specific Virtual Singers, and extracts clean prompts',
   () => {
-    const personas = loadPersonas({ personaDirs: [REAL_PJSK_DIR], personas: [] })
+    const personas = loadPersonas({ personaDirs: [BUILTIN_PJSK_DIR], personas: [] })
     assert.equal(personas.length, 58)
 
     for (const vsName of ['初音未来', '镜音铃', '镜音连', '巡音流歌', 'MEIKO', 'KAITO']) {

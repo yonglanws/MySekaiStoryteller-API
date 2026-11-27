@@ -5,6 +5,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { EmbeddingClient } from '../../out-host/host/rag/embeddingClient.js'
 import {
   AdaptiveRagRetriever,
@@ -136,11 +137,17 @@ ${longRelations}
   assert.ok(wsMiku[0].chars.includes('初音未来') && wsMiku[0].chars.includes('WS初音未来'))
 })
 
-test('loadPersonaMarkdownDir handles real rewritten PJSK persona folder if present with 0 boilerplate leaks', () => {
-  const realDir = 'D:\\Users\\桌面\\人格设定\\重写提示词\\PJSK'
-  if (!fs.existsSync(realDir)) return
-  const personas = loadPersonaMarkdownDir([realDir])
-  assert.ok(personas.length >= 50, `expected >=50 rewritten PJSK persona files, got ${personas.length}`)
+test('loadPersonaMarkdownDir handles built-in rewritten PJSK persona folder with 0 boilerplate leaks', () => {
+  const builtinDir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+    'personas',
+    'pjsk'
+  )
+  assert.ok(fs.existsSync(builtinDir), `built-in personas/pjsk missing at ${builtinDir}`)
+  const personas = loadPersonaMarkdownDir([builtinDir])
+  assert.equal(personas.length, 58, `expected 58 built-in rewritten PJSK persona files, got ${personas.length}`)
   const chunks = chunkPersonasToLore(personas)
   assert.ok(chunks.length >= 200)
   for (const c of chunks) {

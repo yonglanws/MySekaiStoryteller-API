@@ -363,7 +363,11 @@ const LlmSchema = z.object({
    * 只对支持这些字段的服务生效，留空不影响兼容性。
    */
   extraBody: z.record(z.string(), z.unknown()).default({}),
-  /** 角色人格目录：读取其中的 *.md / *.txt，文件名或 frontmatter name 作为角色名 */
+  /**
+   * 角色人格目录：读取其中的 *.md / *.txt，文件名或 frontmatter name 作为角色名。
+   * 未显式配置且未设置 MSS_LLM_PERSONA_DIRS 时，loadHostConfig() 会自动加载仓库内置 personas/pjsk；
+   * 显式设为 []（或 MSS_LLM_PERSONA_DIRS=none）可禁用内置人格，设为 [personas/pjsk, <custom>] 可叠加覆盖。
+   */
   personaDirs: z.array(z.string()).default([]),
   personas: z.array(LlmPersonaSchema).default([]),
   /** 自适应语义 RAG（qwen3-embedding-8b + qwen3-reranker-8b 重排 + SQ8 磁盘缓存 + 词法回退） */
@@ -460,6 +464,8 @@ export interface HostConfig {
   logLevel: string
 }
 
+export const DEFAULT_BUILTIN_PERSONA_DIR = 'personas/pjsk'
+
 /**
  * 计算仓库根目录：优先从编译产物位置推导（out-host/host → 根目录），
  * 推导失败时回退到 process.cwd()。
@@ -470,6 +476,52 @@ function resolveRootDir(): string {
     return derived
   }
   return path.resolve(process.cwd())
+}
+
+/**
+ * 解析仓库内置 PJSK 角色人格目录（personas/pjsk）。
+ * 依次探测：显式 rootDir → 编译产物推导的仓库根 → process.cwd() → Docker 默认 /app。
+ * 目录存在时返回规范化绝对路径，不存在时返回 null。
+ */
+export function resolveBuiltinPersonaDir(rootDir?: string): string | null {
+  const candidates: string[] = []
+  if (rootDir) {
+    candidates.push(path.resolve(rootDir, DEFAULT_BUILTIN_PERSONA_DIR))
+  }
+  const derivedRoot = path.resolve(__dirname, '..', '..')
+  candidates.push(path.resolve(derivedRoot, DEFAULT_BUILTIN_PERSONA_DIR))
+  candidates.push(path.resolve(process.cwd(), DEFAULT_BUILTIN_PERSONA_DIR))
+  if (process.platform !== 'win32') {
+    candidates.push(path.posix.join('/app', DEFAULT_BUILTIN_PERSONA_DIR))
+  }
+
+  const seen = new Set<string>()
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue
+    seen.add(candidate)
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        return candidate
+      }
+    } catch {
+      // 忽略无权限等异常，继续尝试下一个候选
+    }
+  }
+  return null
+}
+
+function parsePersonaDirsEnv(raw: string | undefined): { explicit: boolean; dirs: string[] } {
+  if (raw === undefined) return { explicit: false, dirs: [] }
+  const trimmed = raw.trim()
+  if (!trimmed) return { explicit: false, dirs: [] }
+  if (['none', 'off'].includes(trimmed.toLowerCase())) {
+    return { explicit: true, dirs: [] }
+  }
+  const dirs = trimmed
+    .split(',')
+    .map((d) => d.trim())
+    .filter(Boolean)
+  return { explicit: dirs.length > 0, dirs }
 }
 
 export type GpuProfile = 'intel' | 'nvidia' | 'amd' | 'cpu'
@@ -791,13 +843,9 @@ function applyEnvOverrides(
   if (env.MSS_LLM_POLISH_DIALOGUE !== undefined && env.MSS_LLM_POLISH_DIALOGUE.trim() !== '') {
     config.llm.polishDialogue = parseEnvBool(env.MSS_LLM_POLISH_DIALOGUE)
   }
-  if (env.MSS_LLM_PERSONA_DIRS !== undefined) {
-    const dirs = env.MSS_LLM_PERSONA_DIRS.split(',')
-      .map((d) => d.trim())
-      .filter(Boolean)
-    if (dirs.length > 0) {
-      config.llm.personaDirs = dirs
-    }
+  const personaDirsEnv = parsePersonaDirsEnv(env.MSS_LLM_PERSONA_DIRS)
+  if (personaDirsEnv.explicit) {
+    config.llm.personaDirs = personaDirsEnv.dirs
   }
   if (env.MSS_LLM_TARGET_MINUTES) {
     const v = parseFloat(env.MSS_LLM_TARGET_MINUTES)
@@ -901,6 +949,20 @@ export function validateConfigHints(
       hints.push(
         `[LLM] 已启用 AI 剧本生成，但环境变量 ${keyName} 未设置；请在 .env 或运行环境中设置 ${keyName}=sk-...（使用本地免鉴权 Ollama/vLLM 可忽略）。(LLM enabled but env ${keyName} is empty)`
       )
+    }
+    if (config.llm.personaDirs.length > 0) {
+      const missingPersonaDirs = config.llm.personaDirs.filter((dir) => {
+        try {
+          return !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()
+        } catch {
+          return true
+        }
+      })
+      if (missingPersonaDirs.length > 0) {
+        hints.push(
+          `[LLM] personaDirs 包含不存在的目录：${missingPersonaDirs.join(', ')}；省略 llm.personaDirs 或清空 MSS_LLM_PERSONA_DIRS 将自动加载内置 personas/pjsk。(Missing personaDirs: ${missingPersonaDirs.join(', ')})`
+        )
+      }
     }
   }
 
@@ -1018,8 +1080,28 @@ export function loadHostConfig(options?: LoadHostConfigOptions): HostConfig {
     webRenderer: path.resolve(rootDir, pathsRaw.webRenderer)
   }
 
+  // llm.personaDirs 生效优先级：
+  // 1. 环境变量 MSS_LLM_PERSONA_DIRS（非空时覆盖；设为 "none"/"off" 显式禁用；逗号分隔多目录）
+  // 2. config.yaml 显式声明的 llm.personaDirs（设为 [] 显式禁用；设为 [personas/pjsk, <custom>] 叠加覆盖）
+  // 3. 内置默认：两者均未显式指定时，自动加载仓库内置 personas/pjsk（若存在）
+  const rawLlm =
+    raw.llm && typeof raw.llm === 'object' && !Array.isArray(raw.llm)
+      ? (raw.llm as Record<string, unknown>)
+      : undefined
+  const hasExplicitYamlPersonaDirs =
+    rawLlm !== undefined &&
+    Object.prototype.hasOwnProperty.call(rawLlm, 'personaDirs') &&
+    rawLlm.personaDirs !== undefined &&
+    rawLlm.personaDirs !== null
+  const hasExplicitEnvPersonaDirs = parsePersonaDirsEnv(process.env.MSS_LLM_PERSONA_DIRS).explicit
+
   // 角色人格目录、资源基地址等相对路径以仓库根为基准
-  config.llm.personaDirs = config.llm.personaDirs.map((p) => path.resolve(rootDir, p))
+  if (!hasExplicitEnvPersonaDirs && !hasExplicitYamlPersonaDirs) {
+    const builtinPersonaDir = resolveBuiltinPersonaDir(rootDir)
+    config.llm.personaDirs = builtinPersonaDir ? [builtinPersonaDir] : []
+  } else {
+    config.llm.personaDirs = config.llm.personaDirs.map((p) => path.resolve(rootDir, p))
+  }
   config.llm.baseUrl = config.llm.baseUrl.replace(/\/+$/, '')
   config.llm.rag.baseUrl = config.llm.rag.baseUrl.replace(/\/+$/, '')
   config.llm.rag.rerank.baseUrl = config.llm.rag.rerank.baseUrl.replace(/\/+$/, '')

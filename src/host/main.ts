@@ -12,6 +12,7 @@ import { ResourceCatalog } from './resources/resourceCatalog'
 import { TtsLeaseManager, type TtsWeights } from './tts/TtsLeaseManager'
 import { detectAvailableGpuEncoder, getCachedGpuEncoder } from '../shared/ffmpeg'
 import { LlmClient } from './ai/llm'
+import { loadPersonas } from './ai/personas'
 import { StoryWriter, StoryGenerationError, type GenerateStoryResult } from './ai/storyWriter'
 import { fetchModels, loadMoesekaiIndex, selectModels } from './assets/moesekai'
 import { fetchMedia, listMedia, type MediaKind } from './assets/media'
@@ -125,11 +126,15 @@ async function bootstrap(): Promise<void> {
 
   // 宿主内置 AI 剧本生成：LLM 客户端 + 资源目录提示词/校验
   const llmClient = new LlmClient(config.llm, logger)
+  const loadedPersonaCount = loadPersonas(config.llm).length
   const emotionLabels = collectEmotionLabels(
     config.tts.irodori.emotionLabels,
     config.tts.characters
   )
   const storyWriter = new StoryWriter(llmClient, config.llm, resourceCatalog, logger, emotionLabels)
+  logger.info(
+    `[LLM] Personas loaded: ${loadedPersonaCount} (dirs=${config.llm.personaDirs.length}, inline=${config.llm.personas.length})`
+  )
   let aiActive = 0
   const AI_MAX_CONCURRENT = Math.max(1, Math.min(4, config.render.workers))
   let assetFetchTask: Promise<unknown> | null = null
@@ -852,6 +857,7 @@ async function bootstrap(): Promise<void> {
         pipeline: config.llm.pipeline,
         agentMaxSteps: config.llm.agentMaxSteps,
         apiKeyConfigured: Boolean(llmClient.apiKey),
+        personas: loadedPersonaCount,
         activeGenerations: aiActive,
         maxConcurrent: AI_MAX_CONCURRENT
       },

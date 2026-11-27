@@ -26,7 +26,6 @@ native/mss-export-rs/target
 # Persistent runtime data & user-specific secrets/configs
 apifile
 cache
-personas
 config.yaml
 .env
 .env.*
@@ -45,6 +44,7 @@ doc
 docs
 documents
 *.md
+!personas/**/*.md
 astrbot_plugin_msst
 astrbot_plugin_msst.zip
 docker-compose*.yml
