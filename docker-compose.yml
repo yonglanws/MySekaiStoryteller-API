@@ -22,10 +22,14 @@ services:
         BUILD_MIRROR: ${BUILD_MIRROR:-global}
     ports:
       - '${MSS_HOST_PORT:-9881}:9881'
+    init: true
     shm_size: 2gb
     env_file:
       - path: .env
         required: false
+    environment:
+      MALLOC_ARENA_MAX: '${MALLOC_ARENA_MAX:-2}'
+      MALLOC_MMAP_THRESHOLD_: '${MALLOC_MMAP_THRESHOLD_:-131072}'
     volumes:
       - ./apifile:/app/apifile
       - ./resources:/app/resources

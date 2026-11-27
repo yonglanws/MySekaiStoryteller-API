@@ -192,6 +192,8 @@ test('Dockerfile is multi-stage, aligned with package-lock Playwright version, a
   }
 
   assert.match(dockerfile, /MSS_FFMPEG_PATH=\/usr\/bin\/ffmpeg/)
+  assert.match(dockerfile, /MALLOC_ARENA_MAX=2/)
+  assert.match(dockerfile, /MALLOC_MMAP_THRESHOLD_=131072/)
   assert.match(dockerfile, /EXPOSE\s+9881/)
   assert.match(dockerfile, /HEALTHCHECK[\s\S]*http:\/\/127\.0\.0\.1:9881\/api\/v1\/health/)
 })
@@ -235,8 +237,23 @@ test('docker-compose files are valid YAML with matching service name and require
   assert.ok(nvidiaService, 'docker-compose.nvidia.yml must extend services.mysekai-storyteller')
 
   // Base compose invariants
+  assert.equal(
+    baseService.init,
+    true,
+    'docker-compose.yml must set init: true to reap Chromium zombies'
+  )
   assert.equal(baseService.shm_size, '2gb')
   assert.equal(baseService.restart, 'unless-stopped')
+  assert.match(
+    String(baseService.environment?.MALLOC_ARENA_MAX ?? ''),
+    /2/,
+    'docker-compose.yml must configure MALLOC_ARENA_MAX=2'
+  )
+  assert.match(
+    String(baseService.environment?.MALLOC_MMAP_THRESHOLD_ ?? ''),
+    /131072/,
+    'docker-compose.yml must configure MALLOC_MMAP_THRESHOLD_=131072'
+  )
   assert.ok(
     Array.isArray(baseService.ports) && baseService.ports.some((p) => String(p).endsWith(':9881')),
     'docker-compose.yml must expose container port 9881'
@@ -456,4 +473,18 @@ test('docker/entrypoint.sh passes bash syntax check and runtime preset behavior 
   assert.equal(overrideArgs, '--custom-flag')
   assert.equal(overrideAngle, 'true')
   assert.equal(overrideEncoder, 'libx264')
+
+  // MSS_GPU_PROFILE takes precedence over MSS_GPU_MODE (matching src/host/config.ts)
+  // and explicit MSS_VIDEO_ENCODER is not clobbered by preset MSS_FFMPEG_ENCODER
+  const profileRes = runCase('intel', {
+    MSS_GPU_PROFILE: 'nvidia',
+    MSS_VIDEO_ENCODER: 'libx264'
+  })
+  assert.equal(profileRes.status, 0, profileRes.stderr)
+  const profileLine = profileRes.stdout.split(/\r?\n/).find((line) => line.startsWith('RESULT|'))
+  assert.ok(profileLine)
+  const [, , profileArgs, profileAngle, profileEncoder] = profileLine.split('|')
+  assert.equal(profileArgs, '--use-angle=vulkan')
+  assert.equal(profileAngle, 'false')
+  assert.equal(profileEncoder, '')
 })

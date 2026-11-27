@@ -139,7 +139,9 @@ ENV NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     MSS_FFMPEG_PATH=/usr/bin/ffmpeg \
     MSS_HOST=0.0.0.0 \
-    MSS_PORT=9881
+    MSS_PORT=9881 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072
 
 EXPOSE 9881
 

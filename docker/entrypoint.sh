@@ -57,9 +57,10 @@ if [ -z "${MSS_BROWSER_EXECUTABLE:-}" ]; then
   fi
 fi
 
-# 2. Apply GPU mode defaults when MSS_GPU_MODE (or MSS_GPU_PROFILE) is set.
-#    Explicit MSS_CHROME_ARGS / MSS_LINUX_GPU_ANGLE / MSS_FFMPEG_ENCODER always win.
-gpu_mode_raw="${MSS_GPU_MODE:-${MSS_GPU_PROFILE:-}}"
+# 2. Apply GPU mode defaults when MSS_GPU_PROFILE / MSS_GPU_MODE is set
+#    (MSS_GPU_PROFILE takes precedence over MSS_GPU_MODE to match src/host/config.ts).
+#    Explicit MSS_CHROME_ARGS / MSS_LINUX_GPU_ANGLE / MSS_FFMPEG_ENCODER / MSS_VIDEO_ENCODER always win.
+gpu_mode_raw="${MSS_GPU_PROFILE:-${MSS_GPU_MODE:-}}"
 gpu_mode="$(printf '%s' "${gpu_mode_raw}" | tr '[:upper:]' '[:lower:]')"
 
 case "${gpu_mode}" in
@@ -70,7 +71,7 @@ case "${gpu_mode}" in
     if [ -z "${MSS_LINUX_GPU_ANGLE+x}" ]; then
       export MSS_LINUX_GPU_ANGLE="false"
     fi
-    if [ -z "${MSS_FFMPEG_ENCODER:-}" ]; then
+    if [ -z "${MSS_FFMPEG_ENCODER:-}" ] && [ -z "${MSS_VIDEO_ENCODER:-}" ]; then
       export MSS_FFMPEG_ENCODER="intel"
     fi
     ;;
@@ -81,24 +82,24 @@ case "${gpu_mode}" in
     if [ -z "${MSS_LINUX_GPU_ANGLE+x}" ]; then
       export MSS_LINUX_GPU_ANGLE="false"
     fi
-    if [ -z "${MSS_FFMPEG_ENCODER:-}" ]; then
+    if [ -z "${MSS_FFMPEG_ENCODER:-}" ] && [ -z "${MSS_VIDEO_ENCODER:-}" ]; then
       export MSS_FFMPEG_ENCODER="nvidia"
     fi
     ;;
   amd)
-    if [ -z "${MSS_FFMPEG_ENCODER:-}" ]; then
+    if [ -z "${MSS_FFMPEG_ENCODER:-}" ] && [ -z "${MSS_VIDEO_ENCODER:-}" ]; then
       export MSS_FFMPEG_ENCODER="amd"
     fi
     ;;
   cpu)
-    if [ -z "${MSS_FFMPEG_ENCODER:-}" ]; then
+    if [ -z "${MSS_FFMPEG_ENCODER:-}" ] && [ -z "${MSS_VIDEO_ENCODER:-}" ]; then
       export MSS_FFMPEG_ENCODER="libx264"
     fi
     ;;
   ""|auto)
     ;;
   *)
-    echo "[entrypoint] WARN: unrecognized MSS_GPU_MODE='${gpu_mode_raw}' (expected: auto|intel|nvidia|amd|cpu); using default GPU settings." >&2
+    echo "[entrypoint] WARN: unrecognized MSS_GPU_PROFILE/MSS_GPU_MODE='${gpu_mode_raw}' (expected: auto|intel|nvidia|amd|cpu); using default GPU settings." >&2
     ;;
 esac
 
