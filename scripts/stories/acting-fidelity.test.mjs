@@ -1934,3 +1934,152 @@ test('C2 regression: face_cry_02 classifies as cry, scene cuts reset tense mood,
   )
   assert.equal(audit.passed, true, `unexpected diagnostics: ${JSON.stringify(audit.diagnostics)}`)
 })
+
+test('C2 Round 3: cheerful banter clears sticky tenseTracker, listener_forced_smile repairs on neutral turn in upbeat scenes, and dramatic climax preserves earned CameraZoom/CharacterShake', () => {
+  const r3View = new CatalogView({
+    models: [
+      {
+        id: 7,
+        name: '东云彰人',
+        shortName: '彰人',
+        path: '07akito_normal/07akito_normal.model3.json',
+        motions: [
+          'm-normal-nod01',
+          'm-normal-nod02',
+          'm-cool-posenod01',
+          'm-normal-forward01',
+          'm-normal-tilthead01',
+          'm-normal-glad01',
+          'm-normal-relief01'
+        ],
+        facials: ['face_normal_01', 'face_serious_01', 'face_smile_01', 'face_smile_02', 'face_smallmouth_01'],
+        defaultMotion: 'm-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 8,
+        name: '青柳冬弥',
+        shortName: '冬弥',
+        path: '08touya_normal/08touya_normal.model3.json',
+        motions: [
+          'm-normal-nod01',
+          'm-normal-nod02',
+          'm-normal-forward01',
+          'm-cool-posenod01',
+          'm-normal-tilthead01',
+          'm-normal-glad01',
+          'm-normal-relief01'
+        ],
+        facials: ['face_normal_01', 'face_serious_02', 'face_smile_01', 'face_smile_02', 'face_smallmouth_01'],
+        defaultMotion: 'm-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_street.jpg'],
+    imageDetails: [{ file: 'bg_street.jpg', name: '街头', description: '街头' }],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: 'Street', description: '街头' }]
+  })
+
+  const snippets = [
+    { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+    { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+    { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 7, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'm-normal-nod01', facial: 'face_serious_01' } },
+    { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 8, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'm-normal-nod01', facial: 'face_serious_02' } }
+  ]
+
+  // Build 16-Talk street confrontation/climax story:
+  // - Early sad/tense beat -> Akito holds serious facial -> Talk 4 is 平静 yet listener flips to face_smile_02 (must be caught/repaired!)
+  // - Climax conflict beats + earned CameraZoom + CharacterShake (must be preserved!)
+  // - Followed by 2 cheerful ♪ turns that clear tenseTracker before a happy finale smile
+  const climaxLines = [
+    { spk: 7, emo: '伤心', text: '糟糕，刚才那段节奏还是没咬紧……' },
+    { spk: 8, emo: '平静', text: '嗯，再听一次鼓点。' },
+    { spk: 7, emo: '生气', text: '可恶，决不让舞台在这里砸掉！' },
+    { spk: 8, emo: '平静', text: '巷口已经有人停下脚步了，直接切进去……', listenerSmile: true },
+    { spk: 7, emo: '生气', text: '都给我认真听好了，爆发就在这一拍！', zoom: true, shake: true },
+    { spk: 8, emo: '生气', text: '对峙到最后也绝对不退！' },
+    { spk: 7, emo: '生气', text: '全速冲上去，一、二——开始！', resetZoom: true },
+    { spk: 8, emo: '平静', text: '跟上这个速度。' },
+    { spk: 7, emo: '开心', text: '答对啦♪ 刚才那段合唱稳住了！' },
+    { spk: 8, emo: '开心', text: '太好了，大家的欢呼都响起来了！' },
+    { spk: 7, emo: '开心', text: '嘿嘿，今天这局算我们漂亮拿下！' },
+    { spk: 8, emo: '开心', text: '嗯，下一次也继续并肩上吧。' },
+    { spk: 7, emo: '开心', text: '那是当然的！' },
+    { spk: 8, emo: '开心', text: '走吧，去庆功。' },
+    { spk: 7, emo: '开心', text: '哈哈，正合我意！' },
+    { spk: 8, emo: '开心', text: '明天见。' }
+  ]
+  for (let idx = 0; idx < climaxLines.length; idx++) {
+    const line = climaxLines[idx]
+    if (idx === 3) {
+      snippets.push({
+        type: 'Motion',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0.25,
+        data: { modelId: 7, motion: 'm-cool-posenod01', facial: 'face_serious_01', facialFirst: true }
+      })
+    }
+    if (line.zoom) {
+      snippets.push({ type: 'CameraZoom', wait: false, progressBehavior: 'Now', delay: 0, data: { scale: 1.08, duration: 400 } })
+    }
+    if (line.shake) {
+      snippets.push({ type: 'CharacterShake', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 7, axis: 'Y' } })
+    }
+    if (line.resetZoom) {
+      snippets.push({ type: 'CameraZoom', wait: false, progressBehavior: 'Now', delay: 0, data: { scale: 1, duration: 400 } })
+    }
+    const actions = [{ at: 0, modelId: line.spk, motion: 'm-normal-nod01', facial: line.emo === '开心' ? 'face_smile_02' : 'face_serious_01' }]
+    if (line.listenerSmile) {
+      actions.push({ at: 0, modelId: 7, facial: 'face_smile_02' })
+    }
+    snippets.push({
+      type: 'Talk',
+      wait: true,
+      progressBehavior: 'WaitFinished',
+      delay: 0,
+      data: {
+        speaker: line.spk === 7 ? '彰人' : '冬弥',
+        emotion: line.emo,
+        content: line.text,
+        modelId: line.spk,
+        actions,
+        ...(idx === climaxLines.length - 1 ? { closeWindowOnFinish: true } : {})
+      }
+    })
+  }
+  snippets.push(
+    { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 7, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+    { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 8, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+    { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+  )
+
+  const { story, lint } = validateAndFixStory(
+    {
+      models: [
+        { id: 7, model: '07akito_normal/07akito_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+        { id: 8, model: '08touya_normal/08touya_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+      ],
+      images: [{ id: 1, image: 'bg_street.jpg' }],
+      bgm: ['bgm00003.mp3'],
+      snippets
+    },
+    r3View
+  )
+  assert.equal(lint.passed, true, `expected lint pass: ${lint.issues.join('; ')}`)
+  assert.equal(
+    story.snippets.filter((s) => s.type === 'CameraZoom').length,
+    2,
+    'dramatic climax story must preserve earned CameraZoom + reset'
+  )
+  assert.equal(
+    story.snippets.filter((s) => s.type === 'CharacterShake').length,
+    1,
+    'dramatic outburst with physical/stage impact must preserve earned CharacterShake'
+  )
+  const audit = auditStoryActingAndFidelity(story, r3View)
+  assert.equal(audit.passed, true, `unexpected diagnostics: ${JSON.stringify(audit.diagnostics)}`)
+  assert.equal(audit.score, 100, `expected 100 score, got ${audit.score}`)
+})

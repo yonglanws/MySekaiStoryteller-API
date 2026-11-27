@@ -1631,9 +1631,14 @@ function buildDirectorStageTelemetry(
         `全片仅使用了 ${distinctMotions.size} 种不同身体动作，容易陷入机械循环（近期官方主演单集约 18~30+ 种）：请从角色全量动作库补充不同编号及贴合气氛的跨风格动作`
       )
     }
+    const highEnergyDramaCount = (emotionCounts.get('生气') ?? 0) + (emotionCounts.get('惊讶') ?? 0)
     if (talkCount >= 12 && cameraOrShakeCount >= 4 && dominantEmotion === '平静') {
       reviewFocusPoints.push(
-        `日常/平静场景镜头与震动偏多（${cameraOrShakeCount} 处）：请克制 CameraZoom/CameraMove（0~1 次）与 CharacterShake（仅真实受惊/物理碰撞），避免公式化抖动`
+        `日常/平静场景镜头与震动偏多（${cameraOrShakeCount} 处）：日常/谈心/后台场请保持 CameraZoom/CameraMove 与 CharacterShake 为 0，避免公式化抖动`
+      )
+    } else if (talkCount >= 16 && highEnergyDramaCount >= 4 && cameraOrShakeCount === 0) {
+      reviewFocusPoints.push(
+        `冲突/高潮张力较强（生气/惊讶共 ${highEnergyDramaCount} 句）但全片 0 镜头推进与震动：请在核心对峙/爆发或受惊冲击句配置 1~2 处 CameraZoom(1.06~1.12 -> 1.0) 或 CharacterShake/ShakeScreen`
       )
     }
   if (talkCount >= 14 && avgTalkChars >= 19 && longLineShare >= 0.35) {
@@ -3960,7 +3965,7 @@ export async function runAgenticStoryGeneration(
     '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
     '1. **持续情绪、动作多样性与真伪笑脸分辨**：泣不成声、悲伤倾诉、冲突崩溃段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句；充分利用角色全量动作库（含 `nod02/03`、`forward02`、`sigh01`、`lookaway01`、`fidget01`、`relief01` 及贴合气氛的跨风格变体），同一词根整场不要重复超过 2~3 次，确保每位在场角色都有多样身体动作，并在句间/转折前点缀独立 `Motion` 节拍（约 16~22 次/40句）。严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；先前处于「生气/伤心」的听者严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝或睡眠台词；真冬保持克制内敛。',
     '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集高频穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（内心独白、连续说话或情绪爆发切单人 `Center`），所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**；转场善用 `SideFade`、`FlashbackIn/Out` 与 `AmbientColor`。听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
-    '3. **声画节拍与镜头/震动/字幕克制**：开场必须由 `ChangeBgm` 起乐，情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白，物理/情绪节拍务必配 `PlaySe`；**严禁公式化滥用镜头、震动与开场字幕**：日常/谈心/后台戏 `CameraZoom`/`CameraMove` 仅用 `0~1` 次（仅高潮爆点用 `1~3` 次），`CharacterShake` 仅限真实受惊/物理碰撞（平常对话不用），`Telop`/`PlaceInfo` 仅在明确需要交代时空时可选使用、不要每场模板双挂；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵。',
+    '3. **声画节拍与镜头/震动/字幕分级**：开场必须由 `ChangeBgm` 起乐，情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白，物理/情绪节拍务必配 `PlaySe`；**镜头/震动严格按剧种分级**：日常/谈心/排练/后台戏保持 `CameraZoom`/`CameraMove` 0 次与 `CharacterShake` 0 次；而高潮对峙/爆发/Live 演出/受惊冲击戏应在关键爆点主动配置 `1~2` 次 `CameraZoom`（随后复位 1.0）及 `1~2` 次 `CharacterShake`/`ShakeScreen`；`Telop`/`PlaceInfo` 仅在明确需要交代时空时可选使用、不要每场模板双挂；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵。',
     '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教或重复独白拖长；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
     emotionNote,
     options.systemPrompt?.trim() ?? ''

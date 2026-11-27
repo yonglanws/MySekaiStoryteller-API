@@ -1856,8 +1856,9 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
   if (talkCount < 14) return
 
   const work = story.snippets as JsonRecord[]
-  const STARTLE_OR_JOLT_RE = /(?:吓|一震|猛地|撞上|撞到|撞进|相撞|摔|抓|推|痛|啊！|呜哇|糟了|追)/
-  const DRAMATIC_LINE_RE = /(?:追|撞上|撞到|撞进|相撞|摔|抓|窒息|崩溃|争执|对峙|决裂|滚|住手|休想|到底怎么)/
+  const STARTLE_OR_JOLT_RE = /(?:吓|一震|猛地|撞上|撞到|撞进|相撞|摔|抓|推|痛|啊！|呜哇|糟了|追|轰|咚|啪)/
+  const DRAMATIC_LINE_RE =
+    /(?:追|撞上|撞到|撞进|相撞|摔|抓|窒息|崩溃|争执|对峙|决裂|滚|住手|休想|到底怎么|爆发|哭喊|全速|绝不|舞台|聚光灯|一、二|倒数|欢呼)/
 
   let highDramaTalks = 0
   for (const t of talks) {
@@ -1868,14 +1869,14 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
       emo === '生气' ||
       DRAMATIC_LINE_RE.test(content) ||
       (d.ttsSpecialScene === true &&
-        (emo === '伤心' || emo === '害怕') &&
+        (emo === '伤心' || emo === '害怕' || emo === '惊讶') &&
         !/(?:谢谢|感谢|加油|一起)/.test(content))
     ) {
       highDramaTalks += 1
     }
   }
-  const isDramaticStory = highDramaTalks / talkCount >= 0.16 || highDramaTalks >= 5
-  const maxCameraCues = isDramaticStory ? 3 : highDramaTalks >= 3 ? 1 : 0
+  const isDramaticStory = highDramaTalks / talkCount >= 0.12 || highDramaTalks >= 4
+  const maxCameraCues = isDramaticStory ? 3 : highDramaTalks >= 2 ? 1 : 0
   const maxCharShakes = isDramaticStory ? 2 : 1
 
   const adjacentTalkWindow = (idx: number): JsonRecord[] => {
@@ -1908,7 +1909,13 @@ function enforceCameraShakeOpeningRestraint(story: JsonRecord, warn: (message: s
       const d = isRecord(t.data) ? t.data : {}
       const emo = toStr(d.emotion).trim()
       const content = toStr(d.content)
-      if ((emo === '惊讶' && /[！!]/.test(content)) || emo === '害怕') score += 2
+      if (
+        (emo === '惊讶' && /[！!]/.test(content)) ||
+        emo === '害怕' ||
+        (isDramaticStory && (emo === '生气' || DRAMATIC_LINE_RE.test(content)))
+      ) {
+        score += 2
+      }
       if (STARTLE_OR_JOLT_RE.test(content)) score += 3
     }
     if (score === 0) {
@@ -2757,7 +2764,7 @@ function diversifyActingAndPreTalkMotions(
   let addedPreTalkMotions = 0
   if (talkCount >= 14) {
     const existingMotions = snippets.filter((s) => s.type === 'Motion').length
-    const targetMotions = Math.round(talkCount * 0.48)
+    const targetMotions = Math.round(talkCount * 0.54)
     if (existingMotions < targetMotions) {
       const needed = targetMotions - existingMotions
       const stageActorsNow = new Set<number>()
