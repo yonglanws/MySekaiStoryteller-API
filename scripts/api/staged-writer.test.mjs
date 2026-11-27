@@ -1923,3 +1923,161 @@ test('sharp reprimand lines override stale 开心 emotion across stabilizeEmotio
   assert.ok(!/明る|軽やか/.test(story.snippets[1].data.ttsCaption), 'stale happy ttsCaption replaced')
   assert.equal(story.snippets[0].data.emotion, '开心', 'genuine teasing line stays 开心')
 })
+
+test('buildStagingPrompt differentiates calm scenes (0/0) from dramatic climax scenes (camera + zoomReset)', () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        characterId: 20,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_normal_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        characterId: 19,
+        name: '东云绘名',
+        shortName: '绘名',
+        path: '19ena_normal/19ena_normal.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_normal_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '天台', description: '夜晚天台' }],
+    voices: [],
+    bgm: ['bgm00297.mp3'],
+    bgmDetails: [{ file: 'bgm00297.mp3', name: '夜色钢琴', mood: 'dramatic' }]
+  })
+
+  const calmPlan = {
+    title: '甜品店闲聊',
+    event: '午后一起分享新口味',
+    logline: '轻松聊天',
+    background: 'bg_rooftop.jpg',
+    cast: [
+      { modelId: 1, name: '瑞希', fullName: '晓山瑞希', path: view.models[0].path, role: '发起' },
+      { modelId: 2, name: '绘名', fullName: '东云绘名', path: view.models[1].path, role: '回应' }
+    ],
+    outline: ['打招呼', '聊近况']
+  }
+  const calmDialogue = {
+    title: '甜品店闲聊',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '今天的草莓圣代真不错呢。' },
+      { id: 'l2', speaker: '绘名', content: '嗯，比上次那家甜度刚好。' },
+      { id: 'l3', speaker: '瑞希', content: '下次再一起来吧。' }
+    ]
+  }
+  const calmStagingPrompt = buildStagingPrompt(view, calmPlan, calmDialogue, {
+    scene: '午后在甜品店闲聊',
+    personas: [],
+    targetMinutes: 2
+  })
+  assert.ok(calmStagingPrompt.user.includes('保持 0/0'))
+  assert.ok(!calmStagingPrompt.user.includes('"kind": "zoomIn"'))
+
+  const dramaticPlan = {
+    title: '天台激烈对峙',
+    event: '深夜天台追逐后的激烈对峙',
+    logline: '绘名拦住想逃跑的瑞希',
+    understanding: {
+      explicitRequests: [],
+      implicitSubtext: '',
+      relationshipDynamic: '',
+      emotionalArc: '',
+      turningPoint: '瑞希情绪崩溃哭出来',
+      canonHooks: [],
+      avoidList: []
+    },
+    background: 'bg_rooftop.jpg',
+    cast: calmPlan.cast,
+    outline: ['追上', '爆发对峙']
+  }
+  const dramaticDialogue = {
+    title: '天台激烈对峙',
+    lines: [
+      { id: 'l1', speaker: '绘名', content: '瑞希！！你到底想躲到什么时候！' },
+      { id: 'l2', speaker: '瑞希', content: '别再追了……我受不了了！' },
+      { id: 'l3', speaker: '绘名', content: '我不会让你一个人逃走的！！' }
+    ]
+  }
+  const dramaticStagingPrompt = buildStagingPrompt(view, dramaticPlan, dramaticDialogue, {
+    scene: '深夜天台激烈对峙',
+    personas: [],
+    targetMinutes: 2
+  })
+  assert.ok(dramaticStagingPrompt.user.includes('本场判定为冲突/动作高潮场'))
+  assert.ok(dramaticStagingPrompt.user.includes('"kind": "zoomIn"'))
+  assert.ok(dramaticStagingPrompt.user.includes('"kind": "zoomReset"'))
+})
+
+test('lighthearted teasing praise clears false carryover 伤心 while bitter N25 sigh stays 伤心', () => {
+  const stable = stabilizeEmotions(
+    {
+      title: '排练打趣',
+      lines: [
+        { id: 'l1', speaker: '司', content: '『别难过，我的伙伴们！就算奔向更遥远的舞台——』' },
+        { id: 'l2', speaker: '司', content: '『所以，笑着送我出发吧！！』' },
+        { id: 'l3', speaker: '类', content: '呵呵呵，很有远行的气势嘛，司。' },
+        { id: 'l4', speaker: '司', content: '哈哈，那是当然的！' }
+      ]
+    },
+    new Map([
+      ['l1', '伤心'],
+      ['l2', '伤心'],
+      ['l3', '开心'],
+      ['l4', '开心']
+    ]),
+    ['平静', '开心', '生气', '伤心']
+  )
+  assert.equal(stable.get('l3'), '开心')
+
+  const story = {
+    models: [{ id: 9 }, { id: 18 }, { id: 1 }],
+    images: [],
+    snippets: [
+      {
+        type: 'Talk',
+        data: {
+          modelId: 9,
+          speaker: '类',
+          content: '呵呵呵，很有远行的气势嘛，司。',
+          ttsText: '🥺 フフ、なかなか旅立ちの気迫があったじゃないか、司くん。',
+          emotion: '伤心',
+          ttsCaption: '感心した様子で柔らかく労う。',
+          ttsSpeed: 0.88,
+          ttsSpecialScene: true,
+          actions: [{ at: 0, modelId: 9, facial: 'face_smile_02' }]
+        }
+      },
+      {
+        type: 'Talk',
+        data: {
+          modelId: 1,
+          speaker: '瑞希',
+          content: '呵呵……真是太好了呢，对不起。',
+          ttsText: '……ふふ、よかったね……ごめん。',
+          emotion: '伤心',
+          ttsCaption: '自嘲気味に小さく息を漏らす。',
+          actions: [{ at: 0, modelId: 1, facial: 'face_sad_01' }]
+        }
+      }
+    ]
+  }
+  alignStoryTtsEmotionsAndCaptions(story, {
+    emotionLabels: ['平静', '开心', '生气', '伤心']
+  })
+  assert.equal(story.snippets[0].data.emotion, '开心')
+  assert.equal(story.snippets[0].data.ttsText.includes('🥺'), false)
+  assert.equal(story.snippets[0].data.ttsSpecialScene, undefined)
+  assert.ok(story.snippets[0].data.ttsSpeed >= 1.0)
+  assert.equal(story.snippets[1].data.emotion, '伤心', 'bitter apology in N25 context must stay 伤心')
+})
