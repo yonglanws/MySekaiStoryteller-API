@@ -629,54 +629,57 @@ export class ResourceCatalog {
 
   private build(): ResourceCatalogData {
     const resourcesDir = this.config.paths.resources
+    const cloudOnly = Boolean(this.config.assets?.cloudOnly)
     const modelsDir = path.join(resourcesDir, 'models')
     const manifestPath = path.join(modelsDir, 'models.yaml')
 
-    // 云端模式下 models.yaml 可以完全不存在：本地清单是可选覆盖，
-    // 不是启动前提。
-    let manifest: ModelManifest = { models: [] }
-    if (fs.existsSync(manifestPath)) {
-      const loaded = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as unknown
-      if (loaded !== null && loaded !== undefined) {
-        if (typeof loaded !== 'object' || Array.isArray(loaded)) {
-          throw new Error(`models.yaml must be a key-value mapping: ${manifestPath}`)
-        }
-        manifest = loaded as ModelManifest
-      }
-    } else {
-      this.logger.info('[Catalog] models.yaml not found, using cloud catalog only')
-    }
-
     const models: CatalogModel[] = []
-    for (const entry of manifest.models ?? []) {
-      if (!entry?.path || !entry?.name || !Number.isFinite(entry.id)) {
-        this.logger.warn(`[Catalog] Invalid model manifest entry: ${JSON.stringify(entry)}`)
-        continue
+    if (!cloudOnly) {
+      // 云端模式下 models.yaml 可以完全不存在：本地清单是可选覆盖，
+      // 不是启动前提。
+      let manifest: ModelManifest = { models: [] }
+      if (fs.existsSync(manifestPath)) {
+        const loaded = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as unknown
+        if (loaded !== null && loaded !== undefined) {
+          if (typeof loaded !== 'object' || Array.isArray(loaded)) {
+            throw new Error(`models.yaml must be a key-value mapping: ${manifestPath}`)
+          }
+          manifest = loaded as ModelManifest
+        }
+      } else {
+        this.logger.info('[Catalog] models.yaml not found, using cloud catalog only')
       }
 
-      const modelJsonPath = path.join(modelsDir, entry.path)
-      let motions: string[] = []
-      let facials: string[] = []
+      for (const entry of manifest.models ?? []) {
+        if (!entry?.path || !entry?.name || !Number.isFinite(entry.id)) {
+          this.logger.warn(`[Catalog] Invalid model manifest entry: ${JSON.stringify(entry)}`)
+          continue
+        }
 
-      try {
-        const names = this.readMotionNames(modelJsonPath)
-        motions = names.filter((n) => !n.startsWith('face_')).sort()
-        facials = names.filter((n) => n.startsWith('face_')).sort()
-      } catch (err) {
-        this.logger.warn(`[Catalog] Failed to read model3.json for ${entry.path}`, err)
+        const modelJsonPath = path.join(modelsDir, entry.path)
+        let motions: string[] = []
+        let facials: string[] = []
+
+        try {
+          const names = this.readMotionNames(modelJsonPath)
+          motions = names.filter((n) => !n.startsWith('face_')).sort()
+          facials = names.filter((n) => n.startsWith('face_')).sort()
+        } catch (err) {
+          this.logger.warn(`[Catalog] Failed to read model3.json for ${entry.path}`, err)
+        }
+
+        models.push({
+          id: entry.id,
+          name: entry.name,
+          shortName: entry.shortName || entry.name,
+          path: entry.path,
+          motions,
+          facials,
+          defaultMotion: pickPreferred(motions, DEFAULT_MOTION_PREFERENCE),
+          defaultFacial: pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE),
+          source: 'local'
+        })
       }
-
-      models.push({
-        id: entry.id,
-        name: entry.name,
-        shortName: entry.shortName || entry.name,
-        path: entry.path,
-        motions,
-        facials,
-        defaultMotion: pickPreferred(motions, DEFAULT_MOTION_PREFERENCE),
-        defaultFacial: pickPreferred(facials, DEFAULT_FACIAL_PREFERENCE),
-        source: 'local'
-      })
     }
 
     const listFiles = (relDir: string, extensions: Set<string>): string[] => {
@@ -698,11 +701,13 @@ export class ResourceCatalog {
         .sort()
     }
 
-    const imageFiles = listFiles('images', IMAGE_EXTENSIONS)
-    const imageDetails = this.loadImageDetails(resourcesDir, imageFiles)
-    const bgmFiles = this.listAudioFilesRecursive(resourcesDir, path.join('audio', 'bgm'))
-    const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
-    const localSeFiles = this.listSeFiles(resourcesDir)
+    const imageFiles = cloudOnly ? [] : listFiles('images', IMAGE_EXTENSIONS)
+    const imageDetails = cloudOnly ? [] : this.loadImageDetails(resourcesDir, imageFiles)
+    const bgmFiles = cloudOnly
+      ? []
+      : this.listAudioFilesRecursive(resourcesDir, path.join('audio', 'bgm'))
+    const bgmDetails = cloudOnly ? [] : this.loadBgmDetails(resourcesDir, bgmFiles)
+    const localSeFiles = cloudOnly ? [] : this.listSeFiles(resourcesDir)
 
     const cloud = this.cloud?.() ?? null
     const seDetails: CatalogSeItem[] = []
@@ -720,7 +725,11 @@ export class ResourceCatalog {
       this.mergeCloudBackgrounds(imageFiles, imageDetails, cloud)
       this.mergeCloudBgm(bgmFiles, bgmDetails, cloud)
       for (const entry of cloud.se ?? []) {
-        const stemKey = (entry.id || fileStem(entry.file)).toLowerCase()
+        const entryFile =
+          cloudOnly && !entry.file.toLowerCase().startsWith('cloud/')
+            ? `cloud/${entry.file.replace(/^\/+/, '')}`
+            : entry.file
+        const stemKey = (entry.id || fileStem(entryFile)).toLowerCase()
         const localItem = seByStem.get(stemKey)
         if (localItem) {
           if (entry.description && (!localItem.description || localItem.description.startsWith('本地音效（'))) {
@@ -734,11 +743,11 @@ export class ResourceCatalog {
           }
           continue
         }
-        const fileKey = entry.file.toLowerCase()
+        const fileKey = entryFile.toLowerCase()
         if (seFilesSeen.has(fileKey)) continue
         seFilesSeen.add(fileKey)
         seDetails.push({
-          file: entry.file,
+          file: entryFile,
           id: entry.id,
           name: entry.name,
           category: entry.category,
@@ -752,7 +761,7 @@ export class ResourceCatalog {
       models,
       images: imageFiles,
       imageDetails,
-      voices: listFiles('voices', AUDIO_EXTENSIONS),
+      voices: cloudOnly ? [] : listFiles('voices', AUDIO_EXTENSIONS),
       bgm: bgmFiles,
       bgmDetails,
       ...(seDetails.length > 0 ? { seDetails } : {}),

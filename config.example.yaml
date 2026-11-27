@@ -272,6 +272,8 @@ assets:
                                   # 自动暴露全 26 位角色及换装变体+知名配角、~1400 云端背景、~420 剧情/区域 BGM 与 SE；
                                   # 剧本可写背景名（如 神山高校 天台·黄昏）、曲名（Slapstick!!）或云端 id；
                                   # 导出前按需物化到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_CATALOG）
+  cloudOnly: true                 # 严格纯云端模式：完全忽略旧本地资源（models.yaml / bgm.yaml / 非 cloud/ 图片与音频 / voices），
+                                  # 即使本地有旧 Live2D 模型也只用云端目录并按需物化到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_ONLY）
   cloudCatalogTtlHours: 6         # 目录缓存有效期（小时）；过期后台刷新，失败沿用旧快照
                                   # （env: MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS）
 

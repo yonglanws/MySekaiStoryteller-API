@@ -95,10 +95,11 @@ async function bootstrap(): Promise<void> {
     bridgeToken
   )
 
+  const useCloudCatalog = config.assets.cloudCatalog || config.assets.cloudOnly
   const cloudCatalog = new CloudCatalogService(logger, config.assets, {
     ttlMs: Math.max(1, config.assets.cloudCatalogTtlHours) * 60 * 60 * 1000
   })
-  if (config.assets.cloudCatalog) {
+  if (useCloudCatalog) {
     // 先读磁盘缓存，再等在线上限 15 秒：离线/资源站慢时不让宿主启动卡死，
     // 目录刷新会继续在后台跑，导出时再按需物化。
     fs.mkdirSync(config.paths.resources, { recursive: true })
@@ -114,7 +115,7 @@ async function bootstrap(): Promise<void> {
   const resourceCatalog = new ResourceCatalog(
     logger,
     config,
-    config.assets.cloudCatalog ? () => cloudCatalog.get() : null
+    useCloudCatalog ? () => cloudCatalog.get() : null
   )
 
   // 宿主内置 AI 剧本生成：LLM 客户端 + 资源目录提示词/校验
@@ -181,15 +182,16 @@ async function bootstrap(): Promise<void> {
     cors: corsEnabled,
     corsOrigins,
     // 云端资源物化：故事里的背景名/ID、BGM、Live2D 模型在这里变成
-    // resources/cloud/ 下的真实文件；本地已有文件优先，不覆盖用户资源。
+    // resources/cloud/ 下的真实文件；cloudOnly=true 时严格忽略非 cloud/ 的旧本地资源。
     prepareStory: async (story) => {
-      if (config.assets.cloudCatalog) {
+      if (useCloudCatalog) {
         await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 5_000 })
         const cloudContext = {
           settings: config.assets,
           resourcesDir: config.paths.resources,
           catalog: cloudCatalog.get(),
-          logger
+          logger,
+          cloudOnly: config.assets.cloudOnly
         }
         await resolveGlobalBgm(config.bgm, cloudContext)
         await resolveStoryCloudAssets(story, cloudContext)
@@ -218,7 +220,7 @@ async function bootstrap(): Promise<void> {
       // 资源目录：供 AstrBot 插件动态构建提示词与校验白名单。
       // 已有缓存时最多等 2 秒刷新；冷启动尚无本地缓存时等待完整首轮拉取（上限 60 秒）。
       app.get('/api/v1/resources', async (_req, res) => {
-        if (config.assets.cloudCatalog) {
+        if (useCloudCatalog) {
           await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000 })
         }
         res.json({ success: true, ...resourceCatalog.get() })
@@ -226,7 +228,7 @@ async function bootstrap(): Promise<void> {
 
       // 手动刷新云端目录（模型/背景/BGM 名称索引）。
       app.post('/api/v1/cloud/refresh', async (_req, res) => {
-        if (!config.assets.cloudCatalog) {
+        if (!useCloudCatalog) {
           res.status(409).json({ success: false, error: 'cloud catalog is disabled' })
           return
         }
@@ -493,7 +495,7 @@ async function bootstrap(): Promise<void> {
         if (!llmClient.enabled) {
           throw new StoryGenerationError('宿主未启用 LLM（llm.enabled=false）', [])
         }
-        if (config.assets.cloudCatalog && !cloudCatalog.get()) {
+        if (useCloudCatalog && !cloudCatalog.get()) {
           await cloudCatalog.waitReady({ coldTimeoutMs: 60_000, staleTimeoutMs: 2_000, signal })
         }
         if (typeof body.prompt !== 'string' || !body.prompt.trim()) {
@@ -848,6 +850,8 @@ async function bootstrap(): Promise<void> {
       assets: {
         source: config.assets.source,
         region: config.assets.region,
+        cloudCatalog: useCloudCatalog,
+        cloudOnly: config.assets.cloudOnly,
         ...(authed
           ? {
               indexBase: config.assets.indexBase,
