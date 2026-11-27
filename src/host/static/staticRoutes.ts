@@ -3,6 +3,41 @@ import * as fs from 'node:fs'
 import type { HostConfig } from '../config'
 
 /**
+ * cloudOnly=true 时对 /resources 静态路由的严格隔离判定：
+ * - 允许 inapp/ 公共 UI/字体/音效资源
+ * - models/、images/、audio/bgm/、audio/se/ 下仅允许 cloud/ 子目录
+ * - 拒绝 voices/ 与本地清单（models.yaml / bgm.yaml / images.yaml）
+ */
+export function isAllowedCloudOnlyResourcePath(rawPath: string): boolean {
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(rawPath)
+  } catch {
+    return false
+  }
+  const norm = decoded.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase()
+  const segments = norm.split('/').filter(Boolean)
+  if (segments.length === 0 || segments.includes('..')) return false
+  const clean = segments.join('/')
+  if (clean === 'inapp' || clean.startsWith('inapp/')) return true
+  if (clean === 'models.yaml' || clean === 'bgm.yaml' || clean === 'images.yaml') return false
+  if (clean === 'voices' || clean.startsWith('voices/')) return false
+  if (clean === 'models' || clean.startsWith('models/')) {
+    return clean.startsWith('models/cloud/')
+  }
+  if (clean === 'images' || clean.startsWith('images/')) {
+    return clean.startsWith('images/cloud/')
+  }
+  if (clean === 'audio/bgm' || clean.startsWith('audio/bgm/')) {
+    return clean.startsWith('audio/bgm/cloud/')
+  }
+  if (clean === 'audio/se' || clean.startsWith('audio/se/')) {
+    return clean.startsWith('audio/se/cloud/')
+  }
+  return true
+}
+
+/**
  * 静态资源托管：
  * - /              → webrenderer 构建产物（渲染工作进程页面）
  * - /resources/*   → 资源根：models/ images/ voices/ audio/ stories/
@@ -16,6 +51,16 @@ export function createStaticRouter(config: HostConfig): Router {
     throw new Error(
       `Web renderer build not found at ${config.paths.webRenderer}. Run "npm run build:web" first.`
     )
+  }
+
+  if (config.assets?.cloudOnly) {
+    router.use('/resources', (req, res, next) => {
+      if (!isAllowedCloudOnlyResourcePath(req.path)) {
+        res.status(403).end()
+        return
+      }
+      next()
+    })
   }
 
   router.use('/resources', express.static(config.paths.resources))

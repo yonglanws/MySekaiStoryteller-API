@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { once } from 'node:events'
 import fs from 'node:fs'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
+import http from 'node:http'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { promisify } from 'node:util'
+import { Logger } from 'tslog'
 import { WebSocket } from 'ws'
 import { createRendererLoader } from './lib/renderer-loader.mjs'
 
@@ -15,6 +18,7 @@ const require = createRequire(import.meta.url)
 const root = process.cwd()
 
 const rustExporter = require(path.join(root, 'out-host/host/export/rustExporter.js'))
+const { WsHub } = require(path.join(root, 'out-host/host/bridge/wsHub.js'))
 const { SegmentCoordinator } = require(
   path.join(root, 'out-host/host/export/segmentCoordinator.js')
 )
@@ -604,4 +608,109 @@ test('Rust binary WebSocket bridge streams files and video pipe frames with toke
   assert.ok((await stat(pipeOut)).size > 400)
 
   ws.close()
+})
+
+test('WsHub /bridge/ws-bin guards duplicate streamId, surfaces async write errors, and closes handle on mid-await disconnect', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mss-wshub-safety-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  const hub = new WsHub(new Logger({ type: 'hidden' }), {
+    onWorkerReady: () => {},
+    onWorkerMessage: () => {},
+    onWorkerDisconnected: () => {}
+  })
+  const server = http.createServer()
+  hub.attach(server)
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(async () => {
+    hub.closeAll()
+    server.close()
+  })
+  const port = server.address().port
+
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/bridge/ws-bin`)
+  await once(ws, 'open')
+
+  const sendControl = (obj) =>
+    new Promise((resolve, reject) => {
+      const onMsg = (data) => {
+        ws.off('message', onMsg)
+        resolve(JSON.parse(data.toString()))
+      }
+      ws.on('message', onMsg)
+      ws.send(JSON.stringify(obj), (err) => {
+        if (err) reject(err)
+      })
+    })
+
+  const outFile = path.join(tmpdir(), `mss-wshub-${Date.now()}.bin`)
+  t.after(() => rm(outFile, { force: true }).catch(() => {}))
+
+  const ack1 = await sendControl({ op: 'open-file', streamId: 7, path: outFile, truncate: true })
+  assert.equal(ack1.ok, true)
+
+  // Duplicate streamId must fail cleanly instead of overwriting and leaking first FileHandle
+  const dup = await sendControl({ op: 'open-file', streamId: 7, path: outFile, truncate: true })
+  assert.equal(dup.ok, false)
+  assert.match(dup.error, /Duplicate streamId/)
+
+  const closed = await sendControl({ op: 'close', streamId: 7 })
+  assert.equal(closed.ok, true)
+
+  // Async write failure must push immediate op: 'async-error'
+  const origOpen = fs.promises.open
+  let midAwaitCloseCalled = false
+  t.mock.method(fs.promises, 'open', async (target, flags) => {
+    const targetStr = String(target)
+    if (targetStr.includes('mss-wshub-async-err-')) {
+      return {
+        write: async () => { throw new Error('disk full EIO') },
+        close: async () => {}
+      }
+    }
+    if (targetStr.includes('mss-wshub-mid-await-close-')) {
+      await new Promise((r) => setTimeout(r, 30))
+      return {
+        write: async () => ({ bytesWritten: 0 }),
+        close: async () => { midAwaitCloseCalled = true }
+      }
+    }
+    return origOpen.call(fs.promises, target, flags)
+  })
+
+  const errFile = path.join(tmpdir(), `mss-wshub-async-err-${Date.now()}.bin`)
+  const errAck = await sendControl({ op: 'open-file', streamId: 8, path: errFile, truncate: true })
+  assert.equal(errAck.ok, true)
+
+  const asyncErrPromise = new Promise((resolve) => {
+    const onMsg = (data) => {
+      const parsed = JSON.parse(data.toString())
+      if (parsed.op === 'async-error') {
+        ws.off('message', onMsg)
+        resolve(parsed)
+      }
+    }
+    ws.on('message', onMsg)
+  })
+  const hdr = Buffer.alloc(16)
+  hdr.writeUInt32LE(8, 0)
+  hdr.writeUInt8(1, 4)
+  hdr.writeBigUInt64LE(0n, 8)
+  ws.send(Buffer.concat([hdr, Buffer.from('PAYLOAD')]))
+  const asyncErrMsg = await asyncErrPromise
+  assert.equal(asyncErrMsg.ok, false)
+  assert.equal(asyncErrMsg.streamId, 8)
+  assert.match(asyncErrMsg.error, /disk full EIO/)
+  ws.close()
+
+  // Mid-await WS close during open-file must close the opened FileHandle without leaking
+  const ws2 = new WebSocket(`ws://127.0.0.1:${port}/bridge/ws-bin`)
+  await once(ws2, 'open')
+  const midFile = path.join(tmpdir(), `mss-wshub-mid-await-close-${Date.now()}.bin`)
+  ws2.send(JSON.stringify({ op: 'open-file', streamId: 9, path: midFile, truncate: true }))
+  await new Promise((r) => setTimeout(r, 5))
+  ws2.close()
+  await new Promise((r) => setTimeout(r, 60))
+  assert.equal(midAwaitCloseCalled, true, 'mid-await WS close must close opened FileHandle')
 })

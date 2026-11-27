@@ -19,6 +19,7 @@ use mss_core::{
     StoryPlan, StoryPlanInput, StoryPlanWithSpans, analyze_static_spans,
     bake_story_plan as core_bake_story_plan, split_segments,
 };
+use mss_encode::pipe::PipeAbortHandle;
 use mss_encode::{
     Codec, PipeEncodeOptions, PipeFormat, PipeSession, RemuxOptions, available_hardware_detailed,
     concat_segments as encode_concat_segments, run_remux as encode_run_remux,
@@ -31,8 +32,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static NEXT_SESSION_ID: AtomicU32 = AtomicU32::new(1);
 
-fn pipe_sessions() -> &'static Mutex<HashMap<u32, Arc<Mutex<Option<PipeSession>>>>> {
-    static MAP: OnceLock<Mutex<HashMap<u32, Arc<Mutex<Option<PipeSession>>>>>> = OnceLock::new();
+struct PipeSessionEntry {
+    session: Mutex<Option<PipeSession>>,
+    abort: PipeAbortHandle,
+}
+
+fn pipe_sessions() -> &'static Mutex<HashMap<u32, Arc<PipeSessionEntry>>> {
+    static MAP: OnceLock<Mutex<HashMap<u32, Arc<PipeSessionEntry>>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -484,8 +490,13 @@ pub fn open_pipe_session(options_json: String) -> Result<u32> {
     .map_err(to_napi_err)?;
 
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let abort = session.abort_handle();
+    let entry = Arc::new(PipeSessionEntry {
+        session: Mutex::new(Some(session)),
+        abort,
+    });
     let mut map = pipe_sessions().lock().map_err(to_napi_err)?;
-    map.insert(id, Arc::new(Mutex::new(Some(session))));
+    map.insert(id, entry);
     Ok(id)
 }
 
@@ -502,13 +513,16 @@ impl Task for WritePipeFrameTask {
     type JsValue = u32;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let arc = {
+        let entry = {
             let map = pipe_sessions().lock().map_err(to_napi_err)?;
             map.get(&self.session_id)
                 .cloned()
                 .ok_or_else(|| to_napi_err("pipe session not found"))?
         };
-        let mut guard = arc.lock().map_err(to_napi_err)?;
+        if entry.abort.is_aborted() {
+            return Err(to_napi_err("pipe session aborted"));
+        }
+        let mut guard = entry.session.lock().map_err(to_napi_err)?;
         let session = guard
             .as_mut()
             .ok_or_else(|| to_napi_err("pipe session already closed"))?;
@@ -550,13 +564,16 @@ impl Task for RepeatPipeFrameTask {
     type JsValue = u32;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let arc = {
+        let entry = {
             let map = pipe_sessions().lock().map_err(to_napi_err)?;
             map.get(&self.session_id)
                 .cloned()
                 .ok_or_else(|| to_napi_err("pipe session not found"))?
         };
-        let mut guard = arc.lock().map_err(to_napi_err)?;
+        if entry.abort.is_aborted() {
+            return Err(to_napi_err("pipe session aborted"));
+        }
+        let mut guard = entry.session.lock().map_err(to_napi_err)?;
         let session = guard
             .as_mut()
             .ok_or_else(|| to_napi_err("pipe session already closed"))?;
@@ -583,12 +600,12 @@ impl Task for FinishPipeSessionTask {
     type JsValue = String;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let arc = {
+        let entry = {
             let mut map = pipe_sessions().lock().map_err(to_napi_err)?;
             map.remove(&self.session_id)
                 .ok_or_else(|| to_napi_err("pipe session not found"))?
         };
-        let mut guard = arc.lock().map_err(to_napi_err)?;
+        let mut guard = entry.session.lock().map_err(to_napi_err)?;
         let session = guard
             .take()
             .ok_or_else(|| to_napi_err("pipe session already closed"))?;
@@ -608,15 +625,19 @@ pub fn finish_pipe_session_async(session_id: u32) -> AsyncTask<FinishPipeSession
 
 #[napi]
 pub fn abort_pipe_session(session_id: u32) -> Result<()> {
-    let arc = {
+    let entry = {
         let mut map = pipe_sessions().lock().map_err(to_napi_err)?;
         map.remove(&session_id)
     };
-    if let Some(arc) = arc
-        && let Ok(mut guard) = arc.lock()
-        && let Some(session) = guard.take()
-    {
-        session.abort();
+    if let Some(entry) = entry {
+        // Kill FFmpeg + mark aborted immediately without blocking on session mutex
+        // (WritePipeFrameTask/RepeatPipeFrameTask may be blocked in SyncSender::send).
+        entry.abort.abort_now();
+        if let Ok(mut guard) = entry.session.try_lock()
+            && let Some(session) = guard.take()
+        {
+            session.abort();
+        }
     }
     Ok(())
 }
@@ -658,4 +679,34 @@ pub fn stop_bridge_server() -> Result<()> {
         srv.stop();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn abort_pipe_session_does_not_deadlock_while_session_mutex_is_held() {
+        let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+        let aborted = Arc::new(AtomicBool::new(false));
+        let abort = PipeAbortHandle::for_test(Arc::clone(&aborted));
+        let entry = Arc::new(PipeSessionEntry {
+            session: Mutex::new(None),
+            abort,
+        });
+        {
+            let mut map = pipe_sessions().lock().unwrap();
+            map.insert(id, Arc::clone(&entry));
+        }
+
+        // Hold entry.session lock on the current thread to simulate blocked WritePipeFrameTask::compute.
+        let _held_guard = entry.session.lock().unwrap();
+        let started = Instant::now();
+        abort_pipe_session(id).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(aborted.load(Ordering::Acquire));
+        assert!(!pipe_sessions().lock().unwrap().contains_key(&id));
+    }
 }

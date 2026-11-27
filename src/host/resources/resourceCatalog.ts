@@ -97,6 +97,8 @@ export interface ResourceCatalogData {
   bgmDetails: CatalogBgm[]
   /** 云端 SE 语义清单 */
   seDetails?: CatalogSeItem[]
+  /** 是否处于严格纯云端模式 */
+  cloudOnly?: boolean
   /** 云端目录状态；云端不可用时省略 */
   cloud?: {
     generatedAt: string
@@ -296,6 +298,7 @@ export interface SeCatalogViewLike {
     category?: string
     tags?: string[]
   }>
+  readonly cloudOnly?: boolean
   canonicalSe?: (value: unknown) => string | null
 }
 
@@ -334,6 +337,17 @@ export function resolveRegisteredSeFile(
   const canonical = view.canonicalSe?.(raw) ?? resolveScenarioSe(raw)?.file ?? raw
   const registered = view.seDetails ?? []
   if (registered.length === 0) {
+    if (view.cloudOnly) {
+      if (raw.toLowerCase().startsWith('cloud/')) {
+        return { file: raw, remapped: false }
+      }
+      const known = view.canonicalSe?.(raw) ?? resolveScenarioSe(raw)?.file
+      if (!known) return null
+      const prefixed = known.toLowerCase().startsWith('cloud/')
+        ? known
+        : `cloud/${known.replace(/^\/+/, '')}`
+      return { file: prefixed, remapped: false }
+    }
     return canonical ? { file: canonical, remapped: false } : null
   }
 
@@ -755,6 +769,21 @@ export class ResourceCatalog {
           tags: entry.tags
         })
       }
+      if (cloudOnly && seDetails.length === 0) {
+        for (const cue of CURATED_SCENARIO_SES) {
+          const entryFile = cue.file.toLowerCase().startsWith('cloud/')
+            ? cue.file
+            : `cloud/${cue.file.replace(/^\/+/, '')}`
+          seDetails.push({
+            file: entryFile,
+            id: cue.id,
+            name: cue.id,
+            category: cue.category,
+            description: cue.description,
+            tags: [...cue.tags]
+          })
+        }
+      }
     }
 
     return {
@@ -764,6 +793,7 @@ export class ResourceCatalog {
       voices: cloudOnly ? [] : listFiles('voices', AUDIO_EXTENSIONS),
       bgm: bgmFiles,
       bgmDetails,
+      ...(cloudOnly ? { cloudOnly: true } : {}),
       ...(seDetails.length > 0 ? { seDetails } : {}),
       ...(cloud
         ? {

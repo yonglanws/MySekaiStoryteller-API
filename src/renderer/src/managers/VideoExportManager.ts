@@ -1159,7 +1159,7 @@ export default class VideoExportManager {
       ])
       if (bgmEnabled && bgmConfig) {
         audioMuxer.setBGMConfig(bgmConfig)
-        if (useGlobalBgm) {
+        if (useGlobalBgm && bgmConfig.path) {
           try {
             return await audioMuxer.loadBGMBuffer(resolveBgmUrl(bgmConfig.path))
           } catch (error) {
@@ -1470,7 +1470,11 @@ export default class VideoExportManager {
             const inEndingTail =
               pumpTargetVirtualMs >= 0 &&
               nextFrameVirtualMs > pumpTargetVirtualMs - 600 &&
-              frameIndex > Math.max(0, Math.ceil(pumpTargetVirtualMs / frameMs) - tailFrames)
+              frameIndex >
+                Math.max(
+                  0,
+                  Math.ceil((pumpTargetVirtualMs - virtualRenderStartMs) / frameMs) - tailFrames
+                )
             const isEdgeFrame =
               localFrame === 0 ||
               (endFrame > 0 && frameIndex >= endFrame - 1) ||
@@ -3018,7 +3022,7 @@ export default class VideoExportManager {
     let bgmBuffer: AudioBuffer | null = null
     if (bgmEnabled && bgmConfig) {
       audioMuxer.setBGMConfig(bgmConfig)
-      if (useGlobalBgm) {
+      if (useGlobalBgm && bgmConfig.path) {
         try {
           const bgmPath = resolveBgmUrl(bgmConfig.path)
           this.logger.info(`Loading BGM from: ${bgmPath}`)

@@ -5,6 +5,8 @@ import { GpuYuv420Converter } from './GpuYuv420Converter'
 const DEFAULT_MAX_PROBE_MS = 150
 const PROBE_WARMUP_FRAMES = 2
 const PROBE_FRAME_COUNT = 5
+const BINARY_WS_HIGH_WATER_BYTES = 32 * 1024 * 1024
+const BINARY_WS_LOW_WATER_BYTES = 16 * 1024 * 1024
 const VALID_COLOR_PRIMARIES = new Set<VideoColorPrimaries>(['bt709', 'bt470bg', 'smpte170m'])
 const VALID_COLOR_TRANSFER = new Set<VideoTransferCharacteristics>([
   'bt709',
@@ -92,6 +94,9 @@ export class WebCodecsMp4Encoder {
   private totalWrittenBytes = 0
   private dequeueWaiter: (() => void) | null = null
   private binWs: WebSocket | null = null
+  private usingBinaryWs = false
+  private binWsClosingIntentionally = false
+  private lastWsBackpressureWarnAtMs = 0
   private binStreamId = 1
   private binCtrlResolvers: Array<(msg: { ok?: boolean; error?: string; op?: string }) => void> = []
 
@@ -370,6 +375,7 @@ export class WebCodecsMp4Encoder {
     // 优先连接原生 Rust / Node 二进制 WebSocket 流通道，消除 HTTP positioned write 序列化开销；
     // 在无 HTTP 环境（单元测试或降级时）透明回退到 electron:append-to-file / write-file-at。
     const wsConnected = await this.tryOpenBinaryStream(this.filePath)
+    this.usingBinaryWs = wsConnected
     if (!wsConnected) {
       // 先建空文件（append-to-file 不存在时自动创建），
       // positioned write 需要 r+ 打开已存在的文件
@@ -383,9 +389,25 @@ export class WebCodecsMp4Encoder {
       target: new StreamTarget({
         onData: (data: Uint8Array, position: number) => {
           this.totalWrittenBytes = Math.max(this.totalWrittenBytes, position + data.byteLength)
-          const ws = this.binWs
-          if (ws && ws.readyState === WebSocket.OPEN) {
+          if (this.usingBinaryWs) {
+            const ws = this.binWs
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+              this.encodeError =
+                this.encodeError ?? new Error('Binary WS closed unexpectedly during export')
+              this.wakeDequeueWaiter()
+              return
+            }
             try {
+              const buffered = typeof ws.bufferedAmount === 'number' ? ws.bufferedAmount : 0
+              if (buffered > BINARY_WS_HIGH_WATER_BYTES) {
+                const now = Date.now()
+                if (now - this.lastWsBackpressureWarnAtMs >= 5000) {
+                  this.lastWsBackpressureWarnAtMs = now
+                  this.logger.warn(
+                    `Binary WS bufferedAmount high (${(buffered / (1024 * 1024)).toFixed(1)} MB), pacing encoder`
+                  )
+                }
+              }
               const pkt = new Uint8Array(16 + data.byteLength)
               const dv = new DataView(pkt.buffer)
               dv.setUint32(0, this.binStreamId, true)
@@ -525,12 +547,21 @@ export class WebCodecsMp4Encoder {
         ws.addEventListener('close', onClose)
       })
 
+      this.binWsClosingIntentionally = false
       ws.addEventListener('message', (ev) => {
         try {
           const parsed = JSON.parse(String(ev.data)) as {
             ok?: boolean
             error?: string
             op?: string
+          }
+          if (parsed.op === 'async-error' || (parsed.ok === false && this.binCtrlResolvers.length === 0)) {
+            if (!this.isDisposed) {
+              this.encodeError =
+                this.encodeError ?? new Error(parsed.error || 'Binary WS async write error')
+              this.wakeDequeueWaiter()
+            }
+            return
           }
           const resolver = this.binCtrlResolvers.shift()
           resolver?.(parsed)
@@ -541,6 +572,17 @@ export class WebCodecsMp4Encoder {
       ws.addEventListener('error', () => {
         if (!this.isDisposed) {
           this.encodeError = this.encodeError ?? new Error('Binary WS transport error')
+          this.wakeDequeueWaiter()
+        }
+      })
+      ws.addEventListener('close', () => {
+        while (this.binCtrlResolvers.length > 0) {
+          const resolver = this.binCtrlResolvers.shift()
+          resolver?.({ ok: false, error: 'Binary WS closed unexpectedly' })
+        }
+        if (!this.isDisposed && !this.binWsClosingIntentionally) {
+          this.encodeError =
+            this.encodeError ?? new Error('Binary WS closed unexpectedly during export')
           this.wakeDequeueWaiter()
         }
       })
@@ -587,7 +629,11 @@ export class WebCodecsMp4Encoder {
   private closeBinaryWs(): void {
     const ws = this.binWs
     this.binWs = null
-    this.binCtrlResolvers = []
+    this.binWsClosingIntentionally = true
+    while (this.binCtrlResolvers.length > 0) {
+      const resolver = this.binCtrlResolvers.shift()
+      resolver?.({ ok: false, error: 'Binary WS closed' })
+    }
     if (ws) {
       try {
         ws.close()
@@ -606,6 +652,24 @@ export class WebCodecsMp4Encoder {
   }
 
   private async waitEncodeQueueReady(): Promise<void> {
+    if (
+      this.usingBinaryWs &&
+      this.binWs &&
+      this.binWs.readyState === WebSocket.OPEN &&
+      typeof this.binWs.bufferedAmount === 'number' &&
+      this.binWs.bufferedAmount > BINARY_WS_HIGH_WATER_BYTES
+    ) {
+      while (
+        !this.isDisposed &&
+        !this.encodeError &&
+        this.binWs &&
+        this.binWs.readyState === WebSocket.OPEN &&
+        this.binWs.bufferedAmount > BINARY_WS_LOW_WATER_BYTES
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 8))
+      }
+      if (this.encodeError) throw this.encodeError
+    }
     const queueLimit = this.useGpuYuvReadback ? 8 : 11
     while (this.encoder && !this.isDisposed && this.encoder.encodeQueueSize > queueLimit) {
       const encoder = this.encoder
@@ -801,6 +865,8 @@ export class WebCodecsMp4Encoder {
       if (!closed?.ok) {
         throw new Error(closed?.error || 'Binary WS close failed')
       }
+    } else if (this.usingBinaryWs) {
+      throw this.encodeError ?? new Error('Binary WS closed unexpectedly before finish')
     } else if (this.filePath) {
       await window.electron.ipcRenderer
         .invoke('electron:close-file-handle', { filePath: this.filePath })
@@ -866,7 +932,7 @@ export class WebCodecsMp4Encoder {
         }
       }
       this.closeBinaryWs()
-    } else if (this.filePath) {
+    } else if (!this.usingBinaryWs && this.filePath) {
       void window.electron?.ipcRenderer
         ?.invoke?.('electron:close-file-handle', { filePath: this.filePath })
         ?.catch?.(() => {})

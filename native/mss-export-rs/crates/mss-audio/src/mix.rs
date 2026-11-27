@@ -56,7 +56,7 @@ pub struct BgmCueInput {
 pub struct BgmPlanInput {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_one")]
+    #[serde(default = "default_bgm_volume")]
     pub volume: f32,
     pub global_path: Option<String>,
     pub global_loop: Option<LoopMetadata>,
@@ -157,11 +157,16 @@ pub struct AudioMixResult {
     pub lip_syncs: Option<Vec<LipSyncPlanOutput>>,
 }
 
+pub const DEFAULT_BGM_VOLUME: f32 = 0.35;
+
 fn default_true() -> bool {
     true
 }
 fn default_one() -> f32 {
     1.0
+}
+fn default_bgm_volume() -> f32 {
+    DEFAULT_BGM_VOLUME
 }
 
 /// Legacy simple `mix-wav` entry point (parallel decode + parallel block mix).
@@ -412,7 +417,10 @@ pub fn mix_audio_plan(plan: &AudioMixPlan) -> Result<AudioMixResult, String> {
             }
             match decode_audio_file(path) {
                 Ok(d) => (p.clone(), Some(prepare_from_decoded(d))),
-                Err(_) => (p.clone(), None),
+                Err(err) => {
+                    eprintln!("[mss-audio] failed to decode audio file '{p}': {err}");
+                    (p.clone(), None)
+                }
             }
         })
         .collect();
@@ -989,21 +997,41 @@ fn write_stereo_aac(
         .spawn()
         .map_err(|e| format!("failed to spawn ffmpeg aac encoder: {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    let write_res: Result<(), String> = if let Some(mut stdin) = child.stdin.take() {
         let total_frames = left.len().min(right.len());
         let mut chunk = Vec::with_capacity(64 * 1024);
+        let mut res = Ok(());
         for i in 0..total_frames {
             chunk.extend_from_slice(&float_to_i16_sample(left[i]).to_le_bytes());
             chunk.extend_from_slice(&float_to_i16_sample(right[i]).to_le_bytes());
             if chunk.len() >= 64 * 1024 {
-                stdin.write_all(&chunk).map_err(|e| e.to_string())?;
+                if let Err(e) = stdin.write_all(&chunk) {
+                    res = Err(format!("ffmpeg aac stdin write failed: {e}"));
+                    break;
+                }
                 chunk.clear();
             }
         }
-        if !chunk.is_empty() {
-            stdin.write_all(&chunk).map_err(|e| e.to_string())?;
+        if res.is_ok()
+            && !chunk.is_empty()
+            && let Err(e) = stdin.write_all(&chunk)
+        {
+            res = Err(format!("ffmpeg aac stdin write failed: {e}"));
         }
-        stdin.flush().map_err(|e| e.to_string())?;
+        if res.is_ok()
+            && let Err(e) = stdin.flush()
+        {
+            res = Err(format!("ffmpeg aac stdin flush failed: {e}"));
+        }
+        drop(stdin);
+        res
+    } else {
+        Ok(())
+    };
+    if let Err(write_err) = write_res {
+        let _ = child.kill();
+        let _ = child.wait_with_output();
+        return Err(write_err);
     }
     let out = child
         .wait_with_output()
@@ -1123,6 +1151,41 @@ mod tests {
         assert!((mixed.samples[4800 * 2] - 0.30).abs() < 0.005);
         // During voice (at 600ms = sample 28800): 0.4*0.75*0.65 + 0.3*0.9 = 0.195 + 0.27 = 0.465
         assert!((mixed.samples[28800 * 2] - 0.465).abs() < 0.005);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bgm_plan_input_defaults_volume_to_0_35_and_handles_corrupt_audio_gracefully() {
+        let parsed: BgmPlanInput = serde_json::from_str("{}").unwrap();
+        assert!((parsed.volume - DEFAULT_BGM_VOLUME).abs() < 1e-6);
+        assert!(parsed.enabled);
+
+        let tmp = std::env::temp_dir().join(format!("mss-corrupt-audio-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let corrupt = tmp.join("bad.mp3");
+        let out_wav = tmp.join("out.wav");
+        std::fs::write(&corrupt, b"NOT_AN_AUDIO_FILE").unwrap();
+
+        let res = mix_audio_plan(&AudioMixPlan {
+            duration_ms: 200.0,
+            output_path: out_wav.to_string_lossy().into_owned(),
+            output_format: None,
+            audio_bitrate: None,
+            ffmpeg_path: None,
+            bgm: Some(BgmPlanInput {
+                enabled: true,
+                volume: DEFAULT_BGM_VOLUME,
+                global_path: Some(corrupt.to_string_lossy().into_owned()),
+                global_loop: None,
+                cues: Vec::new(),
+                volume_tweens: Vec::new(),
+            }),
+            se: None,
+            voices: Vec::new(),
+        })
+        .unwrap();
+        assert!(res.ok);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

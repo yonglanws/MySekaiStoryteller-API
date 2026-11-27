@@ -189,6 +189,49 @@ export const DEFAULT_CLOUD_BGM_ID = 'bgm00003'
 export const DEFAULT_BGM_VOLUME = 0.35
 
 /**
+ * cloudOnly=true 时归一化全局 BGM 路径：
+ * - 显式 http(s):// URL 与已带 cloud/ 前缀的路径保持原样
+ * - 识别到的云端曲目 ID（如 bgm00006、01_an_02）提取为 ID
+ * - 其余任意非 cloud/ 本地路径（bg1.mp3、audio/bgm/custom.mp3、绝对本地路径等）统一回落为 bgm00003
+ */
+export function normalizeCloudOnlyBgmPath(rawPath: string): string {
+  const raw = rawPath.trim()
+  if (!raw) return DEFAULT_CLOUD_BGM_ID
+  if (/^https?:\/\//i.test(raw)) return raw
+
+  const slashNorm = raw
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/^resources\//i, '')
+    .replace(/^audio\/bgm\//i, '')
+  if (slashNorm.toLowerCase().startsWith('cloud/')) {
+    return raw
+  }
+
+  const lower = slashNorm.toLowerCase()
+  if (lower === 'bg1.mp3' || lower === 'bg1') {
+    return DEFAULT_CLOUD_BGM_ID
+  }
+
+  const base = path.posix.basename(slashNorm)
+  const stem = base.replace(/\.[^.]+$/, '')
+  if (/^(?:bgm\d+(?:_\d+)?|\d{2}_[a-z]+_\d+|normal_area.*)$/i.test(stem)) {
+    return stem
+  }
+
+  if (
+    !/^(?:[a-z]:[\\/]|\/)/i.test(raw) &&
+    !raw.includes('/') &&
+    !raw.includes('\\') &&
+    !/\.(mp3|wav|ogg|flac|aac|m4a)$/i.test(raw)
+  ) {
+    return raw
+  }
+
+  return DEFAULT_CLOUD_BGM_ID
+}
+
+/**
  * BGM 播放设置：以资源根下的 audio/bgm/bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
  * 该文件不存在时回落到 config.yaml 的 bgm 节，旧配置照常可用；cloudOnly=true 时忽略 bgm.yaml，
  * 直接使用 config.yaml 的 bgm 节或默认值。
@@ -834,18 +877,12 @@ export function loadHostConfig(): HostConfig {
   config.bgm.volume = Math.min(Math.max(config.bgm.volume, 0), 1)
 
   // 云端优先兜底：
-  // 1) cloudOnly=true 时始终把旧默认本地 BGM（audio/bgm/bg1.mp3 / bg1.mp3 / bg1）替换为 bgm00003；
+  // 1) cloudOnly=true 时始终把非 cloud/ 的本地 bgm.path（如 audio/bgm/bg1.mp3、custom.mp3 等）
+  //    归一化为云端 ID 或回落 bgm00003，同时保留显式 https:// URL 与 cloud/ 路径；
   // 2) 非 cloudOnly 时，当 bgm.yaml 不存在、默认 audio/bgm/bg1.mp3 也不在磁盘上且启用 cloudCatalog 时回落。
-  const normalizedBgmPath = config.bgm.path.trim().replace(/^\/+/, '').toLowerCase()
-  const isDefaultLocalBgm =
-    normalizedBgmPath === DEFAULT_LOCAL_BGM_PATH.toLowerCase() ||
-    normalizedBgmPath === 'bg1.mp3' ||
-    normalizedBgmPath === 'bg1'
   if (config.assets.cloudOnly) {
     config.assets.cloudCatalog = true
-    if (!config.bgm.path || isDefaultLocalBgm) {
-      config.bgm.path = DEFAULT_CLOUD_BGM_ID
-    }
+    config.bgm.path = normalizeCloudOnlyBgmPath(config.bgm.path)
   } else if (
     !bgmFromManifest &&
     config.bgm.path === DEFAULT_LOCAL_BGM_PATH &&
