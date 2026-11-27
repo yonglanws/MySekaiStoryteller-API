@@ -11,13 +11,21 @@ import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
 import { ResourceCatalog } from '../../out-host/host/resources/resourceCatalog.js'
 import { alignStoryTtsEmotionsAndCaptions } from '../../out-host/host/ai/ttsText.js'
-import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
 import {
+  normalizeDialogueLineBreaks,
+  sanitizeDisplayText,
+  validateAndFixStory
+} from '../../out-host/host/ai/validate.js'
+import {
+  applyDialoguePolish,
   applyDirectorReviewPatches,
   buildCastPrompt,
+  buildDialoguePolishPrompt,
   buildDialoguePrompt,
   buildDirectionPrompt,
+  buildDirectorReviewPrompt,
   buildEmotionPrompt,
+  buildPersonaCriticPrompt,
   buildStagingPrompt,
   composeStory,
   condenseDialogue,
@@ -2080,4 +2088,207 @@ test('lighthearted teasing praise clears false carryover 伤心 while bitter N25
   assert.equal(story.snippets[0].data.ttsSpecialScene, undefined)
   assert.ok(story.snippets[0].data.ttsSpeed >= 1.0)
   assert.equal(story.snippets[1].data.emotion, '伤心', 'bitter apology in N25 context must stay 伤心')
+})
+
+test('all 6 staged prompt builders serialize multiline dialogue with escaped \\n instead of " / "', () => {
+  const view = new CatalogView(catalog.get())
+  const promptOpts = {
+    scene: '放学后瑞希和绘名在教室画画聊近况',
+    personas: [],
+    targetMinutes: 2,
+    emotionLabels: ['平静', '开心', '伤心']
+  }
+  const plan = normalizeCastPlan(castReply, view, promptOpts)
+  const multilineContent = '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）'
+  const dialogue = {
+    title: '放学后',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '今天也一起练吧。\n别偷懒哦。' },
+      { id: 'l2', speaker: '绘名', content: multilineContent },
+      { id: 'l3', speaker: '瑞希', content: '……好啦，\n快开始吧。' }
+    ]
+  }
+
+  const polishPrompt = buildDialoguePolishPrompt(
+    plan,
+    dialogue,
+    [{ lineId: 'l2', code: 'test', message: '示例问题' }],
+    promptOpts
+  )
+  const criticPrompt = buildPersonaCriticPrompt(plan, dialogue, promptOpts, [])
+  const emotionPrompt = buildEmotionPrompt(plan, dialogue, promptOpts)
+  const stagingPrompt = buildStagingPrompt(view, plan, dialogue, promptOpts)
+  const actingPrompt = buildDirectionPrompt(view, plan, dialogue, promptOpts)
+  const reviewStory = {
+    models: [{ id: 1 }, { id: 2 }],
+    images: [{ id: 1, image: 'bg_room.jpg' }],
+    snippets: [
+      {
+        type: 'Talk',
+        wait: false,
+        delay: 0,
+        data: {
+          modelId: 2,
+          speaker: '绘名',
+          content: multilineContent,
+          emotion: '平静',
+          actions: [{ at: 0, modelId: 2, facial: 'face_normal_01' }]
+        }
+      }
+    ]
+  }
+  const directorReviewPrompt = buildDirectorReviewPrompt(view, plan, reviewStory, promptOpts)
+
+  const allSix = [
+    ['buildDialoguePolishPrompt', polishPrompt],
+    ['buildPersonaCriticPrompt', criticPrompt],
+    ['buildEmotionPrompt', emotionPrompt],
+    ['buildStagingPrompt', stagingPrompt],
+    ['buildDirectionPrompt', actingPrompt],
+    ['buildDirectorReviewPrompt', directorReviewPrompt]
+  ]
+
+  for (const [name, messages] of allSix) {
+    assert.ok(
+      !messages.user.includes('一聊起画画， / 绘名名'),
+      `${name} must never serialize newline as " / "`
+    )
+    assert.ok(
+      messages.user.includes('一聊起画画，\\n绘名名'),
+      `${name} should serialize multiline dialogue using escaped \\n`
+    )
+  }
+
+  for (const [name, messages] of [
+    ['buildDialoguePolishPrompt', polishPrompt],
+    ['buildPersonaCriticPrompt', criticPrompt],
+    ['buildDirectorReviewPrompt', directorReviewPrompt]
+  ]) {
+    const combined = `${messages.system}\n${messages.user}`
+    assert.ok(
+      combined.includes('\\n') && combined.includes('严禁用'),
+      `${name} must explicitly instruct LLM to use \\n and never / for line breaks`
+    )
+  }
+})
+
+test('applyDialoguePolish and applyDirectorReviewPatches unescape \\n and clean CJK slash leaks while preserving legitimate slashes', () => {
+  const baseDialogue = {
+    title: '放学后',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '原句一' },
+      { id: 'l2', speaker: '绘名', content: '原句二' },
+      { id: 'l3', speaker: '瑞希', content: '原句三' }
+    ]
+  }
+  const polished = applyDialoguePolish(
+    baseDialogue,
+    {
+      replacements: [
+        {
+          id: 'l1',
+          content: '（……一聊起画画， / 绘名名的眼神果然跟以前不一样了呢。）'
+        },
+        {
+          id: 'l2',
+          content: '今天听了 Leo/need 的新歌，\\n简直 24/7 循环！'
+        },
+        {
+          id: 'l3',
+          content: '嗯…… ／ 真的吗？ / 那太好了。'
+        }
+      ]
+    },
+    new Set(['l1', 'l2', 'l3'])
+  )
+
+  assert.equal(
+    polished.lines[0].content,
+    '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）'
+  )
+  assert.equal(polished.lines[1].content, '今天听了 Leo/need 的新歌，\n简直 24/7 循环！')
+  assert.equal(polished.lines[2].content, '嗯……\n真的吗？\n那太好了。')
+
+  const story = {
+    models: [{ id: 1 }, { id: 2 }],
+    images: [],
+    snippets: [
+      {
+        type: 'Talk',
+        data: {
+          modelId: 1,
+          speaker: '瑞希',
+          content: '旧台词一',
+          ttsText: '古い台詞一'
+        }
+      },
+      {
+        type: 'Talk',
+        data: {
+          modelId: 2,
+          speaker: '绘名',
+          content: '第一行\n第二行',
+          ttsText: '一行目\n二行目'
+        }
+      }
+    ]
+  }
+  const patched = applyDirectorReviewPatches(story, {
+    dramaticArc: 'ok',
+    emotionalContinuityAndVoice: 'ok',
+    audioAndSeDesign: 'ok',
+    stageRhythm: 'ok',
+    actingNaturalness: 'ok',
+    concreteFixes: ['fix talk'],
+    operations: [
+      {
+        op: 'update_talk',
+        index: 0,
+        content: '（……一聊起画画， / 绘名名的眼神果然跟以前不一样了呢。）\\n真的太好了。'
+      },
+      {
+        op: 'update_talk',
+        index: 1,
+        content: '第一行\\n第二行'
+      }
+    ]
+  })
+  assert.equal(
+    patched.story.snippets[0].data.content,
+    '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）\n真的太好了。'
+  )
+  assert.equal(patched.story.snippets[0].data.ttsText, undefined)
+  assert.equal(patched.story.snippets[1].data.content, '第一行\n第二行')
+  assert.equal(
+    patched.story.snippets[1].data.ttsText,
+    '一行目\n二行目',
+    'escaped \\n matching existing newline should preserve ttsText'
+  )
+})
+
+test('sanitizeDisplayText and normalizeDialogueLineBreaks clean CJK slash leaks while preserving Leo/need, ratios, paths, and URLs', () => {
+  assert.equal(
+    sanitizeDisplayText('（……一聊起画画， / 绘名名的眼神果然跟以前不一样了呢。）'),
+    '（……一聊起画画，\n绘名名的眼神果然跟以前不一样了呢。）'
+  )
+  assert.equal(
+    sanitizeDisplayText('嗯，／原来如此！\\n明天见。'),
+    '嗯，\n原来如此！\n明天见。'
+  )
+  assert.equal(
+    sanitizeDisplayText('今天去看 Leo/need 演出，24/7 循环，大概 1/2 票卖完了'),
+    '今天去看 Leo/need 演出，24/7 循环，大概 1/2 票卖完了'
+  )
+  assert.equal(
+    sanitizeDisplayText('选 A/B 方案，链接 https://example.com/a/b 和 http://localhost/test', false),
+    '选 A/B 方案，链接 https://example.com/a/b 和 http://localhost/test'
+  )
+  assert.equal(
+    normalizeDialogueLineBreaks('cloud/bg_rooftop.jpg 与 早/晚 选项'),
+    'cloud/bg_rooftop.jpg 与 早/晚 选项'
+  )
+  assert.equal(
+    normalizeDialogueLineBreaks('啊 / 嗯 / 好'),
+    '啊\n嗯\n好'
+  )
 })

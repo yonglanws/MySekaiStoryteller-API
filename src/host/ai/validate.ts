@@ -1179,6 +1179,38 @@ export function ensureListenerReactivity(
   }
 }
 
+const CJK_SLASH_LEAK_LEFT = String.raw`[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff，。！？…—～♪、）】」』”’]`
+const CJK_SLASH_LEAK_RIGHT = String.raw`[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff（【「『“‘…—]`
+const CJK_PUNCT_SLASH_LEAK_LEFT = String.raw`[，。！？…—、）】」』”’]`
+
+// 匹配被 CJK 文本/标点包裹的带空格斜杠（如 `一聊起画画， / 绘名名`、`嗯。 ／ 走吧`）
+const CJK_SPACED_SLASH_BREAK_RE = new RegExp(
+  `(${CJK_SLASH_LEAK_LEFT})[ \\t\\u3000]+[\\/／][ \\t\\u3000]+(?=${CJK_SLASH_LEAK_RIGHT})`,
+  'g'
+)
+
+// 匹配紧跟在 CJK 句读标点后的全角斜杠或单侧带空格斜杠（如 `画画，／绘名名`、`画画， /绘名名`）
+const CJK_PUNCT_SLASH_BREAK_RE = new RegExp(
+  `(${CJK_PUNCT_SLASH_LEAK_LEFT})(?:[ \\t\\u3000]*／[ \\t\\u3000]*|[ \\t\\u3000]+\\/[ \\t\\u3000]*|[ \\t\\u3000]*\\/[ \\t\\u3000]+)(?=${CJK_SLASH_LEAK_RIGHT})`,
+  'g'
+)
+
+/**
+ * 规范化台词/字幕换行：
+ * 1. 将字面量 `\n` / `\r\n` 与 CRLF 统一还原为真实换行 `\n`；
+ * 2. 兜底清理 LLM 从提示词里抄漏的中文/日文换行斜杠（如 `一聊起画画， / 绘名名`、`嗯。 ／ 走吧`），
+ *    同时严格保留合法的非空格斜杠（如 `Leo/need`、`24/7`、`1/2`、`A/B`、`https://...`、`cloud/bg_...`）。
+ */
+export function normalizeDialogueLineBreaks(raw: string): string {
+  if (!raw) return ''
+  return raw
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n?/g, '\n')
+    .replace(CJK_SPACED_SLASH_BREAK_RE, '$1\n')
+    .replace(CJK_PUNCT_SLASH_BREAK_RE, '$1\n')
+}
+
 /** 字符显示宽度：CJK/全角记 1，ASCII 记 0.5。 */
 export function charWidthUnits(char: string): number {
   return char.codePointAt(0)! >= 0x2e80 ? 1 : 0.5
@@ -1190,9 +1222,7 @@ export function charWidthUnits(char: string): number {
  */
 export function sanitizeDisplayText(text: unknown, wrap = true): string {
   if (typeof text !== 'string') return ''
-  const cleaned = stripZeroWidth(text)
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
+  const cleaned = normalizeDialogueLineBreaks(stripZeroWidth(text))
     .replace(/[ \t\u3000]+/g, ' ')
     .replace(/\n{2,}/g, '\n')
     .trim()
@@ -3329,7 +3359,7 @@ export function validateAndFixStory(
       }
       const content = repairSpokenStageDirections(
         personasMod.normalizePjskTerminology(
-          stripZeroWidth(toStr(data.content, '...').replace(/\\n/g, '\n'))
+          normalizeDialogueLineBreaks(stripZeroWidth(toStr(data.content, '...')))
         )
       )
       data.content = stripZeroWidth(sanitizeDisplayText(content)) || '...'
