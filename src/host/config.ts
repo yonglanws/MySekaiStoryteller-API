@@ -186,15 +186,17 @@ const TtsSchema = z.object({
 
 export const DEFAULT_LOCAL_BGM_PATH = 'audio/bgm/bg1.mp3'
 export const DEFAULT_CLOUD_BGM_ID = 'bgm00003'
+export const DEFAULT_BGM_VOLUME = 0.35
 
 /**
  * BGM 播放设置：以资源根下的 audio/bgm/bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
- * 该文件不存在时回落到 config.yaml 的 bgm 节，旧配置照常可用。
+ * 该文件不存在时回落到 config.yaml 的 bgm 节，旧配置照常可用；cloudOnly=true 时忽略 bgm.yaml，
+ * 直接使用 config.yaml 的 bgm 节或默认值。
  */
 const BgmSchema = z.object({
   enabled: z.boolean().default(true),
   path: z.string().default(DEFAULT_LOCAL_BGM_PATH),
-  volume: z.number().default(0.2)
+  volume: z.number().default(DEFAULT_BGM_VOLUME)
 })
 
 /**
@@ -438,6 +440,22 @@ function readYamlConfig(rootDir: string): Record<string, unknown> {
     return (loaded && typeof loaded === 'object' ? loaded : {}) as Record<string, unknown>
   } catch (err) {
     throw new Error(`Failed to parse config.yaml: ${err instanceof Error ? err.message : err}`)
+  }
+}
+
+function applyBgmEnvOverrides(bgm: BgmSettings): void {
+  const env = process.env
+  if (env.MSS_BGM_ENABLED !== undefined) {
+    bgm.enabled = !['0', 'false', 'no', 'off'].includes(env.MSS_BGM_ENABLED.toLowerCase())
+  }
+  if (env.MSS_BGM_PATH && env.MSS_BGM_PATH.trim()) {
+    bgm.path = env.MSS_BGM_PATH.trim()
+  }
+  if (env.MSS_BGM_VOLUME !== undefined) {
+    const v = parseFloat(env.MSS_BGM_VOLUME)
+    if (Number.isFinite(v)) {
+      bgm.volume = Math.min(Math.max(v, 0), 1)
+    }
   }
 }
 
@@ -723,6 +741,9 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
     if (Number.isFinite(v) && v > 0) config.assets.cloudCatalogTtlHours = v
   }
 
+  // bgm
+  applyBgmEnvOverrides(config.bgm)
+
   // log
   if (env.MSS_LOG_LEVEL) config.logLevel = env.MSS_LOG_LEVEL
 }
@@ -804,10 +825,13 @@ export function loadHostConfig(): HostConfig {
 
   // 严格纯云端模式下忽略本地 audio/bgm/bgm.yaml 与本地 bg1.mp3；
   // 非纯云端模式保持以资源根下的 bgm.yaml 为准（文件不存在时沿用 config.yaml 的 bgm 节）。
+  // 环境变量 MSS_BGM_* 始终具有最高优先级（覆盖 bgm.yaml 与 config.yaml）。
   const bgmFromManifest = config.assets.cloudOnly ? null : readBgmManifest(paths.resources)
   if (bgmFromManifest) {
     config.bgm = bgmFromManifest
   }
+  applyBgmEnvOverrides(config.bgm)
+  config.bgm.volume = Math.min(Math.max(config.bgm.volume, 0), 1)
 
   // 云端优先兜底：
   // 1) cloudOnly=true 时始终把旧默认本地 BGM（audio/bgm/bg1.mp3 / bg1.mp3 / bg1）替换为 bgm00003；

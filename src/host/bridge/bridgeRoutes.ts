@@ -2085,7 +2085,7 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
             ? {
                 bgm: {
                   enabled: Boolean(body.bgm.enabled),
-                  volume: Number.isFinite(body.bgm.volume) ? Number(body.bgm.volume) : 0.3,
+                  volume: Number.isFinite(body.bgm.volume) ? Number(body.bgm.volume) : 0.35,
                   ...(resolvedGlobalBgm ? { globalPath: resolvedGlobalBgm } : {}),
                   cues: resolvedBgmCues,
                   volumeTweens: body.bgm.volumeTweens

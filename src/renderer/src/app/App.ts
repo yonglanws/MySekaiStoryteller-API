@@ -915,7 +915,7 @@ export class App {
     this.ttsManager.updateBGMConfig({
       enabled: bgmConfig?.enabled ?? true,
       path: bgmConfig?.path ?? 'audio/bgm/bg1.mp3',
-      volume: bgmConfig?.volume ?? 0.2
+      volume: bgmConfig?.volume ?? 0.35
     })
 
     this.ttsManager.updateTranslationConfig({

@@ -117,7 +117,7 @@ export class TTSManager {
     this.bgmConfig = {
       enabled: true,
       path: 'audio/bgm/bg1.mp3',
-      volume: 0.2
+      volume: 0.35
     }
   }
 

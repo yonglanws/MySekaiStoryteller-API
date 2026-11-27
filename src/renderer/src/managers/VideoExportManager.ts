@@ -2273,7 +2273,7 @@ export default class VideoExportManager {
                   ? {
                       bgm: {
                         enabled: bgmEnabled,
-                        volume: bgmConfig?.volume ?? 0.2,
+                        volume: bgmConfig?.volume ?? 0.35,
                         ...(useGlobalBgm && bgmConfig?.path
                           ? { globalPath: resolveBgmUrl(bgmConfig.path) }
                           : {}),

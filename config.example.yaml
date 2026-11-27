@@ -153,20 +153,21 @@ tts:
 # ---------------------------------------------------------------------------
 # 背景音乐
 #
-# BGM 设置不在本文件，改由资源根下的独立文件维护：
-#   resources/audio/bgm/bgm.yaml（示例见同目录 bgm.example.yaml）
-#
-#   enabled: true              # 导出时混入 BGM
-#   path: audio/bgm/bg1.mp3    # 相对资源根的路径，也可用云端 id（如 bgm00003）、绝对路径或 http(s) URL
-#   volume: 0.2                # 音量 0.0 - 1.0
-#
-# 当 bgm.yaml 不存在且本地没有 resources/audio/bgm/bg1.mp3 时：
-# - 若 assets.cloudCatalog 为 true（默认），宿主自动回落到已验证的云端日常 BGM（bgm00003）
-#   并在导出前按需物化到 resources/audio/bgm/cloud/；
-# - 只有本地磁盘真实存在对应文件时，才会优先使用本地文件。
-# 剧本里的 ChangeBgm 片段可在场景内切歌/停止；出现带文件的 ChangeBgm 时，
-# path 的全局默认曲目不再混入，只加载被引用的 audio/bgm/<file>。
+# 说明：
+# - assets.cloudOnly 为 true（默认）时，宿主忽略 resources/audio/bgm/bgm.yaml，
+#   直接读取本节（或 MSS_BGM_* 环境变量 / 内置默认值）；
+# - assets.cloudOnly 为 false 时，若存在 resources/audio/bgm/bgm.yaml，以它为准，
+#   不存在时回落本节（示例见 resources/audio/bgm/bgm.example.yaml）；
+# - 剧本里的 ChangeBgm 片段可在场景内切歌/停止；出现带文件的 ChangeBgm 时，
+#   path 的全局默认曲目不再混入，只加载被引用的曲目。
 # ---------------------------------------------------------------------------
+bgm:
+  enabled: true                   # 导出时混入 BGM（env: MSS_BGM_ENABLED）
+  path: bgm00003                  # 全局默认 BGM：云端 id（如 bgm00003）、曲名、
+                                  # 相对资源根路径（如 audio/bgm/bg1.mp3），或 http(s) URL
+                                  # （env: MSS_BGM_PATH）
+  volume: 0.35                    # 音量 0.0 - 1.0（env: MSS_BGM_VOLUME；已叠加 0.75x ACF 增益，
+                                  # 语音期间自动闪避 0.65x，留足人声清晰度与峰值余量）
 
 # ---------------------------------------------------------------------------
 # 宿主内置 AI 剧本生成（OpenAI 兼容 Chat Completions）
