@@ -1029,6 +1029,15 @@ export function isFacialCompatibleWithLine(params: {
   }
 
   // 2) 紧张对峙打圆场/强装轻松或克制型角色：未真正和好/明确开心时，禁用纯正阳光大笑/闭眼大笑（保留苦笑 wry_smile 给说话者掩饰）
+  const isWarmGroupClosure =
+    !restrainedRole &&
+    emo === '开心' &&
+    !hasNegCue &&
+    !ctx.apologyOrRegret &&
+    !DESPAIR_TEXT_RE.test(text) &&
+    !CRY_DESPAIR_CONFRONT_RE.test(text) &&
+    !/(?:没事|没关系|不用|别管|不在意|而已|罢了)/.test(text) &&
+    /(?:涂鸦|明天|四个人|大家|一起|去庆功|走吧)/.test(text)
   const isCheerfulHappyTurn =
     Boolean(cheerfulScene) &&
     emo === '开心' &&
@@ -1036,7 +1045,8 @@ export function isFacialCompatibleWithLine(params: {
     !ctx.apologyOrRegret &&
     !DESPAIR_TEXT_RE.test(text) &&
     !CRY_DESPAIR_CONFRONT_RE.test(text)
-  const isGenuineHappyOrReconcile = GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text) || isCheerfulHappyTurn
+  const isGenuineHappyOrReconcile =
+    GENUINE_HAPPY_OR_RECONCILIATION_RE.test(text) || isCheerfulHappyTurn || isWarmGroupClosure
   if (
     prevTense &&
     !isGenuineHappyOrReconcile &&
@@ -1143,6 +1153,28 @@ export interface MotionCompatibilityResult {
   reason?: string
 }
 
+export function isCharacterSignatureMotionAllowed(motion: string, modelPath?: string): boolean {
+  const clean = motion.trim()
+  if (!clean) return true
+  const pathLower = (modelPath ?? '').toLowerCase()
+  const charPrefix = /^m-([a-z]+)-/i.exec(clean)
+  if (charPrefix && pathLower && !pathLower.includes(charPrefix[1].toLowerCase())) {
+    return false
+  }
+  if (/wandahoi/i.test(clean) && pathLower && !/(?:13tsukasa|14emu|tsukasa|emu)/i.test(pathLower)) {
+    return false
+  }
+  return true
+}
+
+export function isMotionAutoPickAllowed(motion: string, modelPath?: string): boolean {
+  const clean = motion.trim()
+  if (!clean || isSpecialOrStandingMotion(clean)) return false
+  if (!isCharacterSignatureMotionAllowed(clean, modelPath)) return false
+  if (/animal/i.test(clean)) return false
+  return true
+}
+
 /**
  * 校验身体动作（motion）是否贴合台词情绪、听者视角与克制人设。
  */
@@ -1161,6 +1193,9 @@ export function isMotionCompatibleWithLine(params: {
 }): MotionCompatibilityResult {
   const clean = params.motion.trim()
   if (!clean) return { ok: true }
+  if (!isCharacterSignatureMotionAllowed(clean, params.modelPath)) {
+    return { ok: false, reason: 'character_exclusive_motion' }
+  }
   const info = inspectModelMotion(params.modelPath, clean, params.modelsRoot)
   if (info.role === 'special') {
     return { ok: false, reason: 'special_clear_motion_in_dialogue' }
@@ -1542,7 +1577,10 @@ export function updateSceneTenseAfterTalk(
   }
   if (emo === '平静' || emo === '') {
     tracker.calmRun += 1
-    if (tracker.calmRun >= 2) {
+    if (
+      tracker.calmRun >= 2 ||
+      /陪你|吹一会儿|多陪|走吧|涂鸦|明天.*再说/.test(text)
+    ) {
       tracker.tense = false
     }
   } else {
@@ -1647,7 +1685,7 @@ export function pickMoodMatchedMotion(
                       : (mood as DramaticContextMood)
 
   const avoid = Array.isArray(avoidMotions) ? new Set(avoidMotions) : avoidMotions
-  const activePool = motions.filter((m) => !isSpecialOrStandingMotion(m))
+  const activePool = motions.filter((m) => isMotionAutoPickAllowed(m, modelPath))
   const pool = sortMotionsByStyleConsistency(activePool.length > 0 ? activePool : motions)
   const wantedRoles =
     MOTION_ROLES_BY_DRAMATIC_MOOD[dramaticMood] ?? MOTION_ROLES_BY_DRAMATIC_MOOD.neutral
