@@ -1246,48 +1246,126 @@ export function sanitizeDisplayText(text: unknown, wrap = true): string {
   return lines.join('\n')
 }
 
-function splitTtsText(tts: string, groupCount: number): string[] {
-  const lineParts = tts
+function distributeTextParts(
+  parts: string[],
+  groupCount: number,
+  weights?: number[],
+  joiner = ''
+): string[] {
+  if (!weights || weights.length !== groupCount) {
+    const base = Math.floor(parts.length / groupCount)
+    const extra = parts.length % groupCount
+    const buckets: string[] = []
+    let index = 0
+    for (let i = 0; i < groupCount; i++) {
+      const take = base + (i < extra ? 1 : 0)
+      buckets.push(parts.slice(index, index + take).join(joiner).trim())
+      index += take
+    }
+    return buckets
+  }
+
+  const totalWeight = weights.reduce((sum, w) => sum + Math.max(1, w), 0)
+  const partLengths = parts.map((p) => Math.max(1, Array.from(p).length))
+  const totalPartChars = partLengths.reduce((sum, len) => sum + len, 0)
+
+  const buckets: string[] = []
+  let cursor = 0
+  let consumedWeight = 0
+  let consumedChars = 0
+
+  for (let i = 0; i < groupCount; i++) {
+    if (i === groupCount - 1) {
+      buckets.push(parts.slice(cursor).join(joiner).trim())
+      break
+    }
+    consumedWeight += Math.max(1, weights[i])
+    const targetChars = (consumedWeight / totalWeight) * totalPartChars
+    const maxEnd = parts.length - (groupCount - 1 - i)
+    let end = cursor + 1
+    consumedChars += partLengths[cursor] ?? 0
+    while (end < maxEnd) {
+      const nextLen = partLengths[end] ?? 0
+      const distBefore = Math.abs(consumedChars - targetChars)
+      const distAfter = Math.abs(consumedChars + nextLen - targetChars)
+      if (distAfter <= distBefore) {
+        consumedChars += nextLen
+        end += 1
+      } else {
+        break
+      }
+    }
+    buckets.push(parts.slice(cursor, end).join(joiner).trim())
+    cursor = end
+  }
+  return buckets
+}
+
+function segmentGraphemes(text: string): string[] {
+  if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter('ja', { granularity: 'grapheme' })
+    return Array.from(segmenter.segment(text), (item) => item.segment)
+  }
+  return Array.from(text)
+}
+
+function splitTtsText(tts: string, groupCount: number, weights?: number[]): string[] {
+  const clean = tts.trim()
+  if (!clean) return Array.from({ length: groupCount }, () => '')
+  if (groupCount <= 1) return [clean]
+
+  const lineParts = clean
     .split('\n')
     .map((part) => part.trim())
     .filter(Boolean)
   if (lineParts.length === groupCount) return lineParts
 
-  const sentenceParts = tts
+  const sentenceParts = clean
     .split(/(?<=[。！？!?.])\s*/)
     .map((part) => part.trim())
     .filter(Boolean)
   if (sentenceParts.length === groupCount) return sentenceParts
   if (sentenceParts.length > groupCount) {
-    const base = Math.floor(sentenceParts.length / groupCount)
-    const extra = sentenceParts.length % groupCount
-    const buckets: string[] = []
-    let index = 0
-    for (let i = 0; i < groupCount; i++) {
-      const take = base + (i < extra ? 1 : 0)
-      buckets.push(
-        sentenceParts
-          .slice(index, index + take)
-          .join('')
-          .trim()
-      )
-      index += take
-    }
-    return buckets
+    return distributeTextParts(sentenceParts, groupCount, weights)
   }
   if (lineParts.length >= groupCount) {
-    const base = Math.floor(lineParts.length / groupCount)
-    const extra = lineParts.length % groupCount
-    const buckets: string[] = []
-    let index = 0
-    for (let i = 0; i < groupCount; i++) {
-      const take = base + (i < extra ? 1 : 0)
-      buckets.push(lineParts.slice(index, index + take).join('\n'))
-      index += take
-    }
-    return buckets
+    return distributeTextParts(lineParts, groupCount, weights, '\n')
   }
-  return Array.from({ length: groupCount }, () => '')
+
+  // 句子数少于拆分段数时，优先按日文/中文子句标点切分，再按字符权重切分，绝不清空 ttsText
+  const clauseParts = clean
+    .split(/(?<=[、，,;；。！？!?.…])\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  if (clauseParts.length >= groupCount) {
+    return distributeTextParts(clauseParts, groupCount, weights)
+  }
+
+  const graphemes = segmentGraphemes(clean)
+  const effectiveWeights =
+    weights && weights.length === groupCount ? weights.map((w) => Math.max(1, w)) : Array.from({ length: groupCount }, () => 1)
+  const totalWeight = effectiveWeights.reduce((sum, w) => sum + w, 0)
+  const buckets: string[] = []
+  let cursor = 0
+  let accWeight = 0
+
+  for (let i = 0; i < groupCount; i++) {
+    if (i === groupCount - 1) {
+      buckets.push(graphemes.slice(cursor).join('').trim())
+      break
+    }
+    accWeight += effectiveWeights[i]
+    const targetEnd = Math.round((accWeight / totalWeight) * graphemes.length)
+    const minEnd = graphemes.length >= groupCount ? cursor + 1 : cursor
+    const maxEnd =
+      graphemes.length >= groupCount
+        ? Math.max(minEnd, graphemes.length - (groupCount - 1 - i))
+        : graphemes.length
+    const end = Math.min(maxEnd, Math.max(minEnd, targetEnd))
+    buckets.push(graphemes.slice(cursor, end).join('').trim())
+    cursor = end
+  }
+  return buckets
 }
 
 /** 把超过 3 行的 Talk 拆成同角色连续多条，台词一字不丢。 */
@@ -1314,13 +1392,13 @@ export function splitOverflowTalks(story: JsonRecord): JsonRecord {
     for (let index = 0; index < lines.length; index += TALK_MAX_LINES) {
       groups.push(lines.slice(index, index + TALK_MAX_LINES))
     }
-    const ttsGroups = splitTtsText(toStr(data.ttsText), groups.length)
     const weights = groups.map((group) =>
       Math.max(
         1,
         [...group.join('')].reduce((sum, char) => sum + charWidthUnits(char), 0)
       )
     )
+    const ttsGroups = splitTtsText(toStr(data.ttsText), groups.length, weights)
     const total = weights.reduce((sum, value) => sum + value, 0)
     let start = 0
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {

@@ -297,8 +297,41 @@ export class IncrementalSq8Cache {
     }
   }
 
+  /**
+   * 仅保留 `validHashes` 中的缓存向量并紧凑重建行索引（用于全量语料加载后清理过期哈希）。
+   * 返回被清理的条目数。
+   */
+  prune(validHashes: Iterable<string>): number {
+    if (this.entries.size === 0) return 0
+    const validSet = validHashes instanceof Set ? validHashes : new Set(validHashes)
+    let staleCount = 0
+    for (const hash of this.entries.keys()) {
+      if (!validSet.has(hash)) staleCount += 1
+    }
+    if (staleCount === 0) return 0
+
+    const nextEntries = new Map<string, number>()
+    const nextScales: number[] = []
+    const nextRows: Int8Array[] = []
+    for (const [hash, rowIdx] of this.entries) {
+      if (!validSet.has(hash)) continue
+      const data = this.rows[rowIdx]
+      const scale = this.scales[rowIdx]
+      if (!data) continue
+      nextEntries.set(hash, nextRows.length)
+      nextScales.push(scale)
+      nextRows.push(data)
+    }
+    this.entries = nextEntries
+    this.scales = nextScales
+    this.rows = nextRows
+    this.dirty = true
+    return staleCount
+  }
+
   save(): void {
-    if (!this.dirty || this.dims <= 0 || this.rows.length === 0) return
+    if (!this.dirty || this.dims <= 0) return
+    if (this.rows.length === 0 && this.entries.size === 0 && !fs.existsSync(this.resolveDir())) return
     const dir = this.resolveDir()
     fs.mkdirSync(dir, { recursive: true })
 

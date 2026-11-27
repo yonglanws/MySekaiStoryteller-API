@@ -113,40 +113,121 @@ const UNIT_PREFIX_LABELS: Array<{ unit: string; prefixes: string[] }> = [
   { unit: CANONICAL_UNITS.WXS, prefixes: ['WS', 'WxS', '乐园世界', '奇幻世界'] }
 ]
 
-/** 将目录名、H1 标题、model.cloudId / outfitLabel / 场景文本归一化为标准团名。 */
+const UNIT_KEYWORD_PATTERNS: Array<{ unit: string; pattern: RegExp }> = [
+  {
+    unit: CANONICAL_UNITS.N25,
+    pattern: /25时|25点|25時|nightcord|ニーゴ|无人[的]?世界|没有人的世界|誰もいないセカイ|_night\b|night_/i
+  },
+  {
+    unit: CANONICAL_UNITS.LN,
+    pattern:
+      /leo[\s/_-]*need|l\/n|レオニ|教室[的]?世界|教室のセカイ|_band\b|band_|(?:^|[^a-z])ln(?:[^a-z]|$)|^ln[\u4e00-\u9fa5a-z]/i
+  },
+  {
+    unit: CANONICAL_UNITS.MMJ,
+    pattern: /more[\s_-]*more[\s_-]*jump|mmj|モモジャン|舞台[的]?世界|ステージのセカイ|_idol\b|idol_/i
+  },
+  {
+    unit: CANONICAL_UNITS.VBS,
+    pattern: /vivid[\s_-]*bad[\s_-]*squad|vbs|ビビバス|街头[的]?世界|ストリートのセカイ|_street\b|street_/i
+  },
+  {
+    unit: CANONICAL_UNITS.WXS,
+    pattern:
+      /wonderlands|w[×x]?s(?:[^a-z]|$)|^ws[\u4e00-\u9fa5a-z]|ワンダショ|乐园[的]?世界|奇幻[的]?世界|奇幻乐园|ワンダーランドのセカイ|_wonder\b|wonder_/i
+  }
+]
+
+const UNIT_CAST_MEMBER_PATTERNS: Array<{ unit: string; members: RegExp[] }> = [
+  {
+    unit: CANONICAL_UNITS.N25,
+    members: [
+      /宵崎奏|(?<![演节伴前间尾合独重齐协变弹吹拉])(?:^|[\s，,、|/·「」()（）和与跟对向叫找])奏(?!(?:的)?(?:母亲|妈妈|父亲|爸爸)|[响鸣曲乐章折])(?:$|[\s，,、|/·「」()（）和与跟在的说问笑])|(?<![a-z])kanade(?![a-z])/i,
+      /朝比奈真冬|朝比奈まふゆ|真冬(?!(?:的)?(?:母亲|妈妈|父亲|爸爸))|まふゆ|(?<![a-z])mafuyu(?![a-z])/i,
+      /东云绘名|東雲絵名|绘名|絵名|绘绘|绘名名|えななん|(?<![a-z])ena(?![a-z])/i,
+      /晓山瑞希|暁山瑞希|瑞希|みずき|(?<![a-z])(?:mizuki|amia)(?![a-z])/i
+    ]
+  },
+  {
+    unit: CANONICAL_UNITS.LN,
+    members: [
+      /星乃一歌|一歌|いちか|(?<![a-z])ichika(?![a-z])/i,
+      /天马咲希|天馬咲希|咲希|さき|(?<![a-z])saki(?![a-z])/i,
+      /望月穗波|望月穂波|穗波|穂波|ほなみ|(?<![a-z])honami(?![a-z])/i,
+      /日野森志步|日野森志歩|志步|志歩|しほ|(?<![a-z])shiho(?![a-z])/i
+    ]
+  },
+  {
+    unit: CANONICAL_UNITS.MMJ,
+    members: [
+      /花里实乃理|花里みのり|实乃理|みのり|(?<![a-z])minori(?![a-z])/i,
+      /桐谷遥|(?:^|[\s，,、|/·「」()（）和与跟对向叫找])遥(?![远望想控测感指不相无])(?:$|[\s，,、|/·「」()（）和与跟在的说问笑])|はるか|(?<![a-z])haruka(?![a-z])/i,
+      /桃井爱莉|桃井愛莉|爱莉|愛莉|あいり|(?<![a-z])airi(?![a-z])/i,
+      /日野森雫|(?:^|[\s，,、|/·「」()（）和与跟对向叫找])雫(?:$|[\s，,、|/·「」()（）和与跟在的说问笑])|しずく|(?<![a-z])shizuku(?![a-z])/i
+    ]
+  },
+  {
+    unit: CANONICAL_UNITS.VBS,
+    members: [
+      /小豆泽心羽|小豆沢こはね|心羽|こはね|(?<![a-z])kohane(?![a-z])/i,
+      /白石杏|(?<![银青红白黄甜酸苦大山野])(?:^|[\s，,、|/·「」()（）和与跟对向叫找])杏(?![仁花树子林黄红干酱脯])(?:$|[\s，,、|/·「」()（）和与跟在的说问笑])/i,
+      /东云彰人|東雲彰人|彰人|あきと|(?<![a-z])akito(?![a-z])/i,
+      /青柳冬弥|青柳冬彌|冬弥|冬彌|とうや|(?<![a-z])(?:touya|toya)(?![a-z])/i
+    ]
+  },
+  {
+    unit: CANONICAL_UNITS.WXS,
+    members: [
+      /天马司|天馬司|(?<![公上有祭主分总官大法百三都巡土])(?:^|[\s，,、|/·「」()（）和与跟对向叫找])司(?![法机令仪空徒马库长员])(?:$|[\s，,、|/·「」()（）和与跟前辈君的在说问笑])|つかさ|(?<![a-z])tsukasa(?![a-z])/i,
+      /凤笑梦|鳳えむ|笑梦|えむ|(?<![a-z])emu(?![a-z])/i,
+      /草薙宁宁|草薙寧々|宁宁|寧々|ねね|(?<![a-z])nene(?![a-z])/i,
+      /神代类|神代類|(?<![人分种同此归异品大小各另这那其门细科属族词句肉鸟鱼兽藻菌])(?:^|[\s，,、|/·「」()（）和与跟对向叫找])类(?![似型别比目聚属群])(?:$|[\s，,、|/·「」()（）和与跟前辈君的在说问笑])|るい|(?<![a-z])rui(?![a-z])/i
+    ]
+  }
+]
+
+/** 将目录名、H1 标题、model.cloudId / outfitLabel / 场景文本或同团角色共现归一化为标准团名。 */
 export function inferUnitFromText(text: string): string | undefined {
   if (!text) return undefined
-  const lower = text.toLowerCase()
-  if (/25时|25点|nightcord|ニーゴ|无人[的]?世界|没有人的世界|_night\b|night_/.test(lower)) {
-    return CANONICAL_UNITS.N25
+
+  // 1. 显式组合名 / SEKAI / cloudId 关键词优先；若唯一命中则直接返回
+  const keywordHits = UNIT_KEYWORD_PATTERNS.filter((entry) => entry.pattern.test(text)).map(
+    (entry) => entry.unit
+  )
+  if (keywordHits.length === 1) {
+    return keywordHits[0]
   }
-  if (
-    /leo[\s/_-]*need|l\/n|教室[的]?世界|_band\b|band_|(?:^|[^a-z])ln(?:[^a-z]|$)|^ln[\u4e00-\u9fa5a-z]/i.test(
-      text
-    )
-  ) {
-    return CANONICAL_UNITS.LN
+
+  // 2. 从各团固定成员姓名/简称共现做多数票推断（若并列模糊则返回 undefined）
+  const scores = new Map<string, number>()
+  for (const unit of keywordHits) {
+    scores.set(unit, (scores.get(unit) ?? 0) + 3)
   }
-  if (/more[\s_-]*more[\s_-]*jump|mmj|舞台[的]?世界|_idol\b|idol_/.test(lower)) {
-    return CANONICAL_UNITS.MMJ
+  for (const group of UNIT_CAST_MEMBER_PATTERNS) {
+    let count = 0
+    for (const memberRe of group.members) {
+      if (memberRe.test(text)) count += 1
+    }
+    if (count > 0) {
+      scores.set(group.unit, (scores.get(group.unit) ?? 0) + count)
+    }
   }
-  if (/vivid[\s_-]*bad[\s_-]*squad|vbs|街头[的]?世界|_street\b|street_/.test(lower)) {
-    return CANONICAL_UNITS.VBS
+  if (scores.size === 0) return undefined
+
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1])
+  if (ranked.length >= 2 && ranked[0][1] === ranked[1][1]) {
+    return undefined
   }
-  if (
-    /wonderlands|w[×x]?s(?:[^a-z]|$)|^ws[\u4e00-\u9fa5a-z]|乐园[的]?世界|奇幻[的]?世界|奇幻乐园|_wonder\b|wonder_/i.test(
-      text
-    )
-  ) {
-    return CANONICAL_UNITS.WXS
-  }
-  return undefined
+  return ranked[0][0]
 }
 
-function normalizeUnit(unit: string | undefined): string | undefined {
+const GENERIC_UNIT_LABEL_RE = /^(?:虚拟歌手|虚拟歌姬|virtual\s*singer|vs|piapro|联动(?:\/特别)?)$/i
+
+/** 规范化组合标签，将「虚拟歌手」「联动」等泛标签视作未指定组合以便由场景上下文推断。 */
+export function normalizeUnit(unit: string | undefined): string | undefined {
   if (!unit) return undefined
   const trimmed = unit.trim()
-  if (!trimmed || trimmed === '虚拟歌手' || trimmed === '联动' || trimmed === '联动/特别') {
+  if (!trimmed || GENERIC_UNIT_LABEL_RE.test(trimmed)) {
     return undefined
   }
   return inferUnitFromText(trimmed) ?? trimmed
@@ -627,7 +708,7 @@ function truncateAtLine(text: string, maxChars: number): string {
 
 const CHATBOT_NOISE_HEADING_RE = /^(?:安全与防御协议|身份防御|注入防御|交互协议)$/
 const CHATBOT_NOISE_BULLET_RE =
-  /^-\s*(?:格式限制|禁止换行|长度限制|禁止CP话题|打字聊天感与换行)\s*[：:]/
+  /^-\s*(?:格式限制|禁止换行|长度限制|长度控制|隐私保护|等待启动|向真人学习(?:与有来有回)?|有来有回|拒绝重复|禁止CP话题|打字聊天感(?:与换行)?)\s*[：:]/
 const CHATBOT_IF_THEN_DROP_RE =
   /^\s*-\s*IF\b.*(?:收到.*图片|只有图|发来.*图|非文字图片|乱码|逻辑混乱|消息顺序|好友验证|审问|钓鱼|惹我生气|惹怒|死缠烂打|自证|土味情话|油腻|撩人)/i
 
@@ -713,11 +794,16 @@ export function stripPersonaProtocolNoise(text: string): string {
 
     if (CHATBOT_NOISE_BULLET_RE.test(line.trim())) continue
 
-    const cleanedLine = line.replace(
-      /严禁在输出中使用任何形式的换行，始终只输出一个连续的段落。?/g,
-      ''
-    )
-    if (line.trim() && !cleanedLine.trim()) continue
+    const cleanedLine = line
+      .replace(
+        /严禁在输出中使用任何形式的换行(?:[（(][^）)]*[）)])?[，,]?\s*(?:始终只输出一个连续的段落[。.]?)?/g,
+        ''
+      )
+      .replace(
+        /[，,、]?\s*或括号心理描写(?:[（(][^）)]*[）)])?(?:也严禁带括号输出)?[）)]*[，,]?\s*(?:严格维持纯打字聊天质感[。.]?)?/g,
+        ''
+      )
+    if (line.trim() && (!cleanedLine.trim() || /^-\s*$/.test(cleanedLine.trim()))) continue
     out.push(cleanedLine)
   }
 
@@ -847,7 +933,9 @@ export function dialoguePersonaPrompt(
   if (!raw) return ''
 
   const hasNoiseMarkers =
-    /(?:安全与防御协议|身份防御|注入防御|交互协议|特殊输入处理|格式限制|禁止换行)/.test(raw)
+    /(?:安全与防御协议|身份防御|注入防御|交互协议|特殊输入处理|格式限制|禁止换行|长度限制|长度控制|隐私保护|等待启动|向真人学习|有来有回|拒绝重复|打字聊天感|禁止CP话题|严禁在输出中使用|括号心理描写)/.test(
+      raw
+    )
   const cleaned = hasNoiseMarkers ? stripPersonaProtocolNoise(raw) : raw
   if (!cleaned) return truncateAtLine(raw, maxChars)
   if (cleaned.length <= maxChars && !hasNoiseMarkers) return cleaned
@@ -999,8 +1087,12 @@ const KNOWN_FAMILY_NAMES = [
   '古泷'
 ]
 
-function buildTargetLookup(name: string, personas: PersonaEntry[]): TargetLookup {
-  const persona = resolvePersonaByName(personas, name)
+function buildTargetLookup(
+  name: string,
+  personas: PersonaEntry[],
+  options?: PersonaLookupOptions
+): TargetLookup {
+  const persona = resolvePersonaByName(personas, name, options)
   const canonical = persona?.canonicalName ?? findCharacterMeta(name)?.name ?? name
   const charMeta = findCharacterMeta(canonical) ?? findCharacterMeta(name)
   const shortName = charMeta?.shortName ?? canonical
@@ -1021,20 +1113,71 @@ function buildTargetLookup(name: string, personas: PersonaEntry[]): TargetLookup
   }
 }
 
-function resolvePersonaByName(personas: PersonaEntry[], name: string): PersonaEntry | null {
+/**
+ * 按名字或别名解析角色人设，支持通过 `options.unitHint` / `options.contextText`
+ * 精准区分 5 团虚拟歌手与形态变体（向后兼容双参数调用）。
+ */
+export function resolvePersonaByName(
+  personas: PersonaEntry[],
+  name: string,
+  options?: PersonaLookupOptions
+): PersonaEntry | null {
   const trimmed = name.trim()
-  if (!trimmed) return null
+  if (!trimmed || personas.length === 0) return null
   const lower = trimmed.toLowerCase()
-  const exact = personas.find((p) => p.name.toLowerCase() === lower)
-  if (exact) return exact
-  const nonVariant = personas.filter((p) => !p.isVariant)
-  const pool = [...nonVariant, ...personas.filter((p) => p.isVariant)]
-  return (
-    pool.find(
-      (p) =>
-        p.canonicalName?.toLowerCase() === lower || p.aliases.some((a) => a.toLowerCase() === lower)
-    ) ?? null
-  )
+
+  const nameUnit = inferUnitFromText(trimmed)
+  const hintUnit = normalizeUnit(options?.unitHint) ?? inferUnitFromText(options?.unitHint ?? '')
+  const contextUnit = inferUnitFromText(options?.contextText ?? '')
+  const targetUnit = nameUnit ?? hintUnit ?? contextUnit
+  const contextText = options?.contextText?.trim() ?? ''
+  const canonicalLookup = findCharacterMeta(trimmed)?.name.toLowerCase() ?? ''
+
+  let best: PersonaEntry | null = null
+  let bestScore = 0
+
+  for (const p of personas) {
+    const pName = p.name.toLowerCase()
+    const pCanonical = p.canonicalName?.toLowerCase() ?? ''
+    const pAliases = p.aliases.filter(Boolean).map((a) => a.toLowerCase())
+
+    let baseScore = 0
+    if (pName === lower) baseScore = 100
+    else if (pCanonical === lower) baseScore = 85
+    else if (pAliases.includes(lower)) baseScore = 75
+    else if (canonicalLookup && pCanonical === canonicalLookup) baseScore = 70
+    if (baseScore === 0) continue
+
+    let score = baseScore
+    const personaUnit = normalizeUnit(p.unit) ?? normalizeUnit(p.group)
+    const canonicalChar = findCharacterMeta(p.canonicalName ?? p.name)
+    const isVs = Boolean(canonicalChar && isVirtualSinger(canonicalChar.characterId))
+
+    if (targetUnit && personaUnit) {
+      if (personaUnit === targetUnit) {
+        score += nameUnit && personaUnit === nameUnit ? 220 : 200
+      } else if (isVs) {
+        score -= 120
+      }
+    } else if (isVs && targetUnit && !personaUnit) {
+      score += 10
+    }
+
+    if (p.isVariant) {
+      if (pName === lower || contextMatchesVariant(p, contextText)) {
+        score += 150
+      } else {
+        score -= 50
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score
+      best = p
+    }
+  }
+
+  return bestScore > 0 ? best : null
 }
 
 function cleanCallToken(raw: string): string {
@@ -1240,20 +1383,35 @@ function extractCallFromPersonaLines(
 /**
  * 从角色人设的 `人际关系` 与 `口语化` 章节直接提取两两官方称呼规则，
  * 供 Stage 1 规划、Stage 2 对白及 dialogueLinter 复用。
+ * 支持可选第 3 参数 `options`（`unitHint` / `contextText`）区分 5 团虚拟歌手，向后兼容双参数调用。
  */
 export function extractPairwiseAddressBook(
   personas: PersonaEntry[],
-  names: string[]
+  names: string[],
+  options?: PersonaLookupOptions
 ): PairwiseAddressRule[] {
   const uniqueNames = dedupeStrings(names)
   if (uniqueNames.length < 2 || personas.length === 0) return []
 
-  const lookups = uniqueNames.map((n) => buildTargetLookup(n, personas))
+  const effectiveUnitHint =
+    normalizeUnit(options?.unitHint) ??
+    inferUnitFromText(options?.unitHint ?? '') ??
+    inferUnitFromText(options?.contextText ?? '') ??
+    inferUnitFromText(uniqueNames.join(' '))
+  const lookupOptions: PersonaLookupOptions | undefined =
+    effectiveUnitHint || options?.contextText
+      ? {
+          ...(effectiveUnitHint ? { unitHint: effectiveUnitHint } : {}),
+          ...(options?.contextText ? { contextText: options.contextText } : {})
+        }
+      : undefined
+
+  const lookups = uniqueNames.map((n) => buildTargetLookup(n, personas, lookupOptions))
   const rules: PairwiseAddressRule[] = []
 
   for (let i = 0; i < uniqueNames.length; i++) {
     const fromName = uniqueNames[i]
-    const fromPersona = resolvePersonaByName(personas, fromName)
+    const fromPersona = resolvePersonaByName(personas, fromName, lookupOptions)
     if (!fromPersona) continue
 
     for (let j = 0; j < uniqueNames.length; j++) {

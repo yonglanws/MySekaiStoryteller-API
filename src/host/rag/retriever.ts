@@ -231,31 +231,45 @@ interface CharAffinityResult {
   matchedCastCount: number
 }
 
-function computeCharAffinity(
+interface PreparedCastMember {
+  keys: string[]
+  names: string[]
+}
+
+function prepareCastMembers(cast: RagCastMemberHint[] | undefined): PreparedCastMember[] {
+  if (!cast || cast.length === 0) return []
+  return cast.map((member) => ({
+    keys: resolveCharKeysFromHint(member),
+    names: [member.name, member.fullName, ...(member.aliases ?? [])]
+      .filter((s): s is string => Boolean(s && s.trim()))
+      .map((s) => s.trim().toLowerCase())
+  }))
+}
+
+function buildChunkCharKeySet(chunk: RagChunk, hay: string): Set<string> {
+  const chunkCharKeys = new Set<string>(extractCanonicalEntityTokens(hay).charKeys)
+  for (const cid of chunk.charIds ?? []) {
+    for (const key of resolveCharKeysFromHint({ charId: cid })) {
+      chunkCharKeys.add(key)
+    }
+  }
+  return chunkCharKeys
+}
+
+function computeCharAffinityPrecomputed(
   chunk: RagChunk,
-  cast: RagCastMemberHint[] | undefined,
+  hay: string,
+  chunkCharKeys: Set<string>,
+  preparedCast: PreparedCastMember[],
   stage: RagRetrieveRequest['stage']
 ): CharAffinityResult {
   let score = 0
   let matchedCastCount = 0
 
-  if (cast && cast.length > 0) {
-    const hay = `${chunk.chars.join(' ')} ${chunk.story} ${chunk.text.slice(0, 180)}`.toLowerCase()
-    const chunkCharKeys = new Set<string>(extractCanonicalEntityTokens(hay).charKeys)
-    for (const cid of chunk.charIds ?? []) {
-      for (const key of resolveCharKeysFromHint({ charId: cid })) {
-        chunkCharKeys.add(key)
-      }
-    }
-
-    for (const member of cast) {
-      const memberKeys = resolveCharKeysFromHint(member)
-      const names = [member.name, member.fullName, ...(member.aliases ?? [])]
-        .filter((s): s is string => Boolean(s && s.trim()))
-        .map((s) => s.trim().toLowerCase())
-
-      const keyMatched = memberKeys.some((k) => chunkCharKeys.has(k))
-      const textMatched = names.some((n) => hay.includes(n))
+  if (preparedCast.length > 0) {
+    for (const member of preparedCast) {
+      const keyMatched = member.keys.some((k) => chunkCharKeys.has(k))
+      const textMatched = member.names.some((n) => hay.includes(n))
       if (keyMatched || textMatched) {
         matchedCastCount += 1
       }
@@ -399,10 +413,13 @@ export function formatRagPromptBlock(sections: RagSections): string {
 export interface AdaptiveRagRetrieverOptions {
   chunks: RagChunk[]
   settings: Pick<RagSettings, 'enabled' | 'model' | 'cacheDir' | 'fallbackLexical'> & {
+    dimensions?: number
     adaptive?: Partial<RagAdaptiveSettings>
   }
   embeddingClient?: EmbeddingClient | null
   rerankClient?: RerankClient | null
+  /** 仅在确认加载全量非子集语料时清理 SQ8 缓存中的失效哈希；省略时仅在高覆盖率（>=70%）时安全清理。 */
+  pruneStaleCache?: boolean
   logger?: Pick<Logger<ILogObj>, 'info' | 'warn' | 'debug'>
 }
 
@@ -534,6 +551,8 @@ export class AdaptiveRagRetriever {
   private readonly lexical: LexicalIndex
   private readonly scenarioChunksMap: Map<string, RagChunk[]>
   private readonly recencyFactors: Float32Array
+  private readonly chunkHaystacks: string[]
+  private readonly chunkCharKeySets: Set<string>[]
   private readonly logger?: Pick<Logger<ILogObj>, 'info' | 'warn' | 'debug'>
 
   constructor(options: AdaptiveRagRetrieverOptions) {
@@ -543,20 +562,32 @@ export class AdaptiveRagRetriever {
     this.adaptive = { ...DEFAULT_ADAPTIVE, ...(options.settings.adaptive ?? {}) }
     this.embeddingClient = options.embeddingClient ?? null
     this.rerankClient = options.rerankClient ?? null
+    const configuredDims =
+      typeof options.embeddingClient?.config.dimensions === 'number' &&
+      options.embeddingClient.config.dimensions > 0
+        ? Math.floor(options.embeddingClient.config.dimensions)
+        : typeof options.settings.dimensions === 'number' && options.settings.dimensions > 0
+          ? Math.floor(options.settings.dimensions)
+          : 0
     this.cache = new IncrementalSq8Cache(
       options.settings.cacheDir,
       options.settings.model,
-      0,
+      configuredDims,
       PJSK_DOMAIN
     )
     this.cache.load()
     this.lexical = buildLexicalIndex(this.chunks)
     this.scenarioChunksMap = new Map()
     this.recencyFactors = new Float32Array(this.chunks.length)
+    this.chunkHaystacks = new Array(this.chunks.length)
+    this.chunkCharKeySets = new Array(this.chunks.length)
 
     for (let i = 0; i < this.chunks.length; i++) {
       const chunk = this.chunks[i]
       this.recencyFactors[i] = computeRecencyFactor(chunk)
+      const hay = `${chunk.chars.join(' ')} ${chunk.story} ${chunk.text.slice(0, 180)}`.toLowerCase()
+      this.chunkHaystacks[i] = hay
+      this.chunkCharKeySets[i] = buildChunkCharKeySet(chunk, hay)
       let list = this.scenarioChunksMap.get(chunk.scenarioId)
       if (!list) {
         list = []
@@ -566,6 +597,26 @@ export class AdaptiveRagRetriever {
     }
     for (const list of this.scenarioChunksMap.values()) {
       list.sort((a, b) => a.lineStart - b.lineStart)
+    }
+    if (this.cache.size > 0 && this.chunks.length > 0 && options.pruneStaleCache !== false) {
+      const validHashes = new Set(this.chunks.map((c) => c.chunkHash))
+      let overlap = 0
+      for (const h of validHashes) {
+        if (this.cache.has(h)) overlap += 1
+      }
+      const isFullCorpus =
+        options.pruneStaleCache === true ||
+        (this.chunks.length >= this.cache.size * 0.7 && overlap >= this.cache.size * 0.7)
+      if (isFullCorpus) {
+        const pruned = this.cache.prune(validHashes)
+        if (pruned > 0) {
+          try {
+            this.cache.save()
+          } catch {
+            // 磁盘缓存清理失败不影响检索初始化
+          }
+        }
+      }
     }
     this.logger = options.logger
   }
@@ -800,6 +851,19 @@ export class AdaptiveRagRetriever {
       return empty('disabled', [], 'disabled')
     }
 
+    const throwIfAborted = (err?: unknown): void => {
+      if (!req.signal?.aborted) return
+      if (err !== undefined) throw err
+      const reason = req.signal.reason
+      if (reason instanceof Error) throw reason
+      const abortErr = new Error(
+        typeof reason === 'string' && reason ? reason : 'The operation was aborted'
+      )
+      abortErr.name = 'AbortError'
+      throw abortErr
+    }
+    throwIfAborted()
+
     const queries = buildQueries(req)
     if (queries.length === 0) {
       return empty('disabled', [], 'disabled')
@@ -812,11 +876,18 @@ export class AdaptiveRagRetriever {
     const lexScores = new Float32Array(this.chunks.length)
     const charScores = new Float32Array(this.chunks.length)
     const matchedCastCounts = new Uint8Array(this.chunks.length)
+    const preparedCast = prepareCastMembers(req.cast)
 
     for (let i = 0; i < this.chunks.length; i++) {
       const bm = bm25Raw[i]
       lexScores[i] = bm > 0 ? bm / (bm + 2.5) : 0
-      const affinity = computeCharAffinity(this.chunks[i], req.cast, req.stage)
+      const affinity = computeCharAffinityPrecomputed(
+        this.chunks[i],
+        this.chunkHaystacks[i],
+        this.chunkCharKeySets[i],
+        preparedCast,
+        req.stage
+      )
       charScores[i] = affinity.charScore
       matchedCastCounts[i] = affinity.matchedCastCount
     }
@@ -897,6 +968,10 @@ export class AdaptiveRagRetriever {
         denseIndices = evalIndices
         mode = 'hybrid'
       } catch (error) {
+        throwIfAborted(error)
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw error
+        }
         if (!this.settings.fallbackLexical) {
           this.logger?.warn?.(
             `[RAG] Embedding failed and lexical fallback disabled: ${
@@ -987,6 +1062,7 @@ export class AdaptiveRagRetriever {
         topN: Math.min(docs.length, this.rerankClient.config.topN),
         signal: req.signal
       })
+      throwIfAborted()
       if (reranked && reranked.items.length > 0) {
         rerankMode = 'reranked'
         rerankLatencyMs = reranked.latencyMs

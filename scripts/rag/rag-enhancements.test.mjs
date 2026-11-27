@@ -609,3 +609,110 @@ test('IncrementalSq8Cache reuses unchanged chunkHashes and embeds only new/chang
   assert.ok(docEmbedCall, 'changed chunk should be incrementally embedded')
   assert.equal(docEmbedCall.length, 1, 'should only embed the 1 changed chunk, reusing 2049 cached chunks')
 })
+
+test('AdaptiveRagRetriever propagates AbortError instead of lexical fallback, respects configured dimensions, and safely prunes stale hashes only on full corpus', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'msst-rag-abort-dims-'))
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }))
+
+  // 1. AbortError must not be swallowed into lexical_fallback
+  const slowServer = http.createServer((_req, _res) => {
+    // Intentionally never respond until aborted
+  })
+  slowServer.listen(0, '127.0.0.1')
+  await once(slowServer, 'listening')
+  t.after(() => slowServer.close())
+
+  const textA = '[活动: 荆棘之路 | 25时 | 瑞希, 绘名]\n瑞希: 绘绘，天台见。'
+  const textB = '[活动: 日常 | 25时 | 瑞希]\n瑞希: 今天心情不错。'
+  const textC = '[活动: 往事 | 25时 | 绘名]\n绘名: 画出满意的线稿了。'
+  const mkChunk = (id, text) => ({
+    id,
+    domain: 'pjsk',
+    chunkHash: computeChunkHash(text),
+    sourceKind: 'canon_story',
+    storyId: id,
+    story: '测试',
+    scenarioId: `sc_${id}`,
+    type: 'event',
+    chars: ['晓山瑞希'],
+    lineStart: 0,
+    lineEnd: 1,
+    text
+  })
+  const fullChunks = [mkChunk('a', textA), mkChunk('b', textB), mkChunk('c', textC)]
+
+  const clientWithDims = new EmbeddingClient({
+    enabled: true,
+    baseUrl: `http://127.0.0.1:${slowServer.address().port}/v1`,
+    apiKeyEnv: 'MSS_TEST_EMBED_KEY',
+    model: 'qwen3-embedding-8b',
+    dimensions: 4,
+    queryInstruct: '',
+    timeoutMs: 5000,
+    batchSize: 32
+  })
+
+  // Seed cache in pjsk-qwen3-embedding-8b-4d AND larger 8d dir to verify configured dims wins
+  const cache4d = new IncrementalSq8Cache(tmpDir, 'qwen3-embedding-8b', 4, 'pjsk')
+  for (const c of fullChunks) {
+    cache4d.put(c.chunkHash, Float32Array.from([1, 0, 0, 0]))
+  }
+  const staleHash = computeChunkHash('stale-old-header-text')
+  cache4d.put(staleHash, Float32Array.from([0, 1, 0, 0]))
+  cache4d.save()
+
+  const cache8d = new IncrementalSq8Cache(tmpDir, 'qwen3-embedding-8b', 8, 'pjsk')
+  cache8d.put(computeChunkHash('8d-only'), Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0]))
+  cache8d.save()
+
+  // Subset corpus (<70% of 4 cached entries): must NOT prune full 4d cache!
+  const subsetRetriever = new AdaptiveRagRetriever({
+    chunks: [fullChunks[0]],
+    settings: {
+      enabled: true,
+      model: 'qwen3-embedding-8b',
+      dimensions: 4,
+      cacheDir: tmpDir,
+      fallbackLexical: true
+    },
+    embeddingClient: clientWithDims
+  })
+  const reloadAfterSubset = new IncrementalSq8Cache(tmpDir, 'qwen3-embedding-8b', 4, 'pjsk')
+  assert.equal(reloadAfterSubset.load(), true)
+  assert.equal(reloadAfterSubset.size, 4, 'subset load must preserve existing cached hashes')
+
+  // Full corpus (3/4 = 75% >= 70% overlap): safely prunes staleHash and targets 4d dir (not 8d)
+  const fullRetriever = new AdaptiveRagRetriever({
+    chunks: fullChunks,
+    settings: {
+      enabled: true,
+      model: 'qwen3-embedding-8b',
+      dimensions: 4,
+      cacheDir: tmpDir,
+      fallbackLexical: true
+    },
+    embeddingClient: clientWithDims
+  })
+  const reloadAfterFull = new IncrementalSq8Cache(tmpDir, 'qwen3-embedding-8b', 4, 'pjsk')
+  assert.equal(reloadAfterFull.load(), true)
+  assert.equal(reloadAfterFull.size, 3, 'full corpus load should prune stale changed-header hash')
+  assert.equal(reloadAfterFull.has(staleHash), false)
+
+  // Abort pre-aborted signal & in-flight signal must throw AbortError (never lexical_fallback)
+  const preAborted = new AbortController()
+  preAborted.abort()
+  await assert.rejects(
+    fullRetriever.retrieve({ prompt: '瑞希 天台', stage: 'dialogue', signal: preAborted.signal }),
+    (err) => err?.name === 'AbortError'
+  )
+
+  const inFlight = new AbortController()
+  setTimeout(() => inFlight.abort(), 30)
+  await assert.rejects(
+    fullRetriever.retrieve({ prompt: '瑞希 天台', stage: 'dialogue', signal: inFlight.signal }),
+    (err) => err?.name === 'AbortError'
+  )
+
+  // Verify subsetRetriever exists cleanly
+  assert.equal(subsetRetriever.chunkCount, 1)
+})

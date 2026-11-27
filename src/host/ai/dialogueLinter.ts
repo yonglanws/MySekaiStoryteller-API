@@ -1,4 +1,4 @@
-import type { PersonaEntry } from './personas'
+import { resolvePersonaByName, type PersonaEntry } from './personas'
 import type { StagedCastPlan, StagedDialogue } from './staged'
 import { hasZeroWidthChars, stripZeroWidthChars } from './ttsText'
 
@@ -411,19 +411,60 @@ function personaOocIssues(
   const issues: DialogueLintIssue[] = []
   const cast = plan?.cast ?? []
   const personas = plan?.personas ?? []
+  const understanding = plan?.understanding
+  const contextText = understanding
+    ? [
+        ...(understanding.explicitRequests ?? []),
+        understanding.implicitSubtext ?? '',
+        understanding.relationshipDynamic ?? '',
+        understanding.emotionalArc ?? '',
+        ...(understanding.canonHooks ?? [])
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : ''
 
-  const isModeActive = (speaker: string, keywordRe: RegExp): boolean => {
+  const isModeActive = (
+    speaker: string,
+    keywordRe: RegExp,
+    roleKeywordRe: RegExp
+  ): boolean => {
     if (keywordRe.test(speaker)) return true
     const member = cast.find(
-      (m) => m.name === speaker || m.fullName === speaker || m.role.includes(speaker)
+      (m) => m.name === speaker || m.fullName === speaker || (m.role && m.role.includes(speaker))
     )
-    if (member && keywordRe.test(`${member.name} ${member.fullName} ${member.role}`)) return true
-    if (
-      personas.some(
-        (p) => keywordRe.test(p.name) && (p.name === speaker || p.canonicalName?.includes(speaker))
-      )
-    ) {
+    if (member && roleKeywordRe.test(`${member.name} ${member.fullName} ${member.role}`)) {
       return true
+    }
+
+    // 当传入全量 personas（同时含基础形态与变体形态）时，绝不能用 canonicalName 回退误激活变体规则；
+    // 仅当解析出的目标人设本身是该变体（无基础形态或上下文明确触发变体模式）时才激活。
+    const resolved = resolvePersonaByName(personas, speaker, contextText ? { contextText } : undefined)
+    if (resolved?.isVariant && keywordRe.test(resolved.name)) {
+      return true
+    }
+    if (!resolved) {
+      const matchingVariants = personas.filter(
+        (p) =>
+          p.isVariant &&
+          keywordRe.test(p.name) &&
+          (p.name === speaker ||
+            p.canonicalName === speaker ||
+            p.canonicalName?.includes(speaker) ||
+            (member ? p.canonicalName === member.fullName : false))
+      )
+      if (matchingVariants.length > 0) {
+        const hasBaseCanonical = matchingVariants.some((v) =>
+          personas.some(
+            (other) =>
+              !other.isVariant &&
+              (other.name === v.canonicalName ||
+                other.canonicalName === v.canonicalName ||
+                other.name === speaker)
+          )
+        )
+        if (!hasBaseCanonical) return true
+      }
     }
     return false
   }
@@ -442,7 +483,7 @@ function personaOocIssues(
 
     // 优男彰人形态：严禁窜戏到私下毒舌腔
     if (
-      isModeActive(sp, /优男彰人|优男模式/) &&
+      isModeActive(sp, /优男彰人|优男模式/, /优男彰人|优男模式/) &&
       /(?:……啧|啰里啰唆|狂什么啊|别胡说八道)/.test(line.content)
     ) {
       issues.push({
@@ -455,7 +496,7 @@ function personaOocIssues(
 
     // 优等生真冬形态：严禁泄露 25时 / Nightcord / OWN / 深夜称呼
     if (
-      isModeActive(sp, /优等生真冬|班长真冬/) &&
+      isModeActive(sp, /优等生真冬|班长真冬/, /优等生真冬|班长真冬|优等生模式|班长模式/) &&
       /(?:25时|Nightcord|\bOWN\b|绘绘|Amia)/i.test(line.content)
     ) {
       issues.push({
