@@ -1,0 +1,17 @@
+[package]
+name = "mss-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Standalone CLI binary mss-export-rs (fallback & direct invocation)"
+
+[[bin]]
+name = "mss-export-rs"
+path = "src/main.rs"
+
+[dependencies]
+mss-audio = { path = "../mss-audio" }
+mss-core = { path = "../mss-core" }
+mss-encode = { path = "../mss-encode" }
+serde_json = "1"

@@ -1,0 +1,24 @@
+[package]
+name = "mss-napi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "In-process NAPI-RS native addon for MySekaiStoryteller"
+
+[lib]
+name = "mss_export_napi"
+crate-type = ["cdylib"]
+
+[dependencies]
+mss-audio = { path = "../mss-audio" }
+mss-bridge = { path = "../mss-bridge" }
+mss-core = { path = "../mss-core" }
+mss-encode = { path = "../mss-encode" }
+napi = { version = "2", default-features = false, features = ["napi8", "async", "serde-json"] }
+napi-derive = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
