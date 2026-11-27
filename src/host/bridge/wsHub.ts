@@ -1,5 +1,8 @@
 import crypto from 'node:crypto'
+import * as fs from 'node:fs'
 import { IncomingMessage } from 'node:http'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
 import { ILogObj, Logger } from 'tslog'
@@ -27,7 +30,9 @@ export interface WsHubEvents {
 export class WsHub {
   private readonly logger: Logger<ILogObj>
   private readonly connections = new Map<string, WorkerConnection>()
+  private readonly binarySockets = new Set<WebSocket>()
   private wss: WebSocketServer | null = null
+  private binWss: WebSocketServer | null = null
   private events: WsHubEvents
   private readonly bridgeToken?: string
 
@@ -55,17 +60,24 @@ export class WsHub {
     on: (event: string, listener: (...args: unknown[]) => void) => void
   }): void {
     this.wss = new WebSocketServer({ noServer: true })
+    this.binWss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 * 1024 })
 
     httpServer.on('upgrade', (req: unknown, socket: unknown, head: unknown) => {
       const request = req as IncomingMessage
       const url = new URL(request.url || '/', 'http://localhost')
-      if (url.pathname !== '/bridge/ws') {
+      if (url.pathname !== '/bridge/ws' && url.pathname !== '/bridge/ws-bin') {
         return
       }
       if (!this.isAuthorizedUpgrade(request, url)) {
         const netSocket = socket as Duplex
         netSocket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
         netSocket.destroy()
+        return
+      }
+      if (url.pathname === '/bridge/ws-bin') {
+        this.binWss?.handleUpgrade(request, socket as Duplex, head as Buffer, (ws) => {
+          this.handleBinaryConnection(ws)
+        })
         return
       }
       this.wss?.handleUpgrade(request, socket as Duplex, head as Buffer, (ws) => {
@@ -127,6 +139,170 @@ export class WsHub {
     return true
   }
 
+  private resolveContainedTempPath(rawPath: string): string | null {
+    if (!rawPath || rawPath.includes('\0')) return null
+    const tempRoots = [fs.realpathSync(tmpdir()), path.resolve(tmpdir())]
+    const resolveReal = (target: string): string => {
+      const abs = path.resolve(target)
+      const tail: string[] = []
+      let cur = abs
+      while (true) {
+        try {
+          const real = fs.realpathSync(cur)
+          return tail.length ? path.join(real, ...tail.reverse()) : real
+        } catch {
+          const parent = path.dirname(cur)
+          if (parent === cur) return abs
+          tail.push(path.basename(cur))
+          cur = parent
+        }
+      }
+    }
+    const resolved = resolveReal(rawPath)
+    const norm = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p)
+    const ok = tempRoots.some((root) => {
+      const rel = path.relative(norm(root), norm(resolved))
+      return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel)
+    })
+    return ok ? resolved : null
+  }
+
+  /**
+   * 宿主机同源二进制 WebSocket 通道（`/bridge/ws-bin`）：
+   * 作为 Rust `/bridge/rs-stream` 不可用时的零 HTTP 开销 fallback，
+   * 支持 `open-file` / `close` / `abort` 与 `kind=1` (`WRITE_FILE_AT`) 16B 二进制帧。
+   */
+  private handleBinaryConnection(ws: WebSocket): void {
+    this.binarySockets.add(ws)
+    interface FileStreamEntry {
+      filePath: string
+      handle: fs.promises.FileHandle | null
+      tail: Promise<void>
+      closing: boolean
+      error: Error | null
+    }
+    const streams = new Map<number, FileStreamEntry>()
+
+    const closeStream = async (streamId: number): Promise<{ fileSize: number; error: Error | null }> => {
+      const entry = streams.get(streamId)
+      if (!entry) return { fileSize: 0, error: null }
+      streams.delete(streamId)
+      entry.closing = true
+      await entry.tail.catch(() => {})
+      if (entry.handle) {
+        await entry.handle.close().catch(() => {})
+        entry.handle = null
+      }
+      if (entry.error) {
+        return { fileSize: 0, error: entry.error }
+      }
+      try {
+        return { fileSize: fs.statSync(entry.filePath).size, error: null }
+      } catch {
+        return { fileSize: 0, error: null }
+      }
+    }
+
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        const buf = Buffer.isBuffer(data)
+          ? data
+          : Array.isArray(data)
+            ? Buffer.concat(data)
+            : Buffer.from(data as ArrayBuffer)
+        if (buf.length < 16) return
+        const streamId = buf.readUInt32LE(0)
+        const kind = buf.readUInt8(4)
+        const offsetBig = buf.readBigUInt64LE(8)
+        if (kind !== 1) return
+        const entry = streams.get(streamId)
+        if (!entry || entry.closing || entry.error) return
+        const payload = buf.subarray(16)
+        const pos = offsetBig === 0xffff_ffff_ffff_ffffn ? null : Number(offsetBig)
+        entry.tail = entry.tail.then(async () => {
+          if (!entry.handle || entry.error) return
+          try {
+            await entry.handle.write(payload, 0, payload.length, pos)
+          } catch (err) {
+            entry.error = err instanceof Error ? err : new Error(String(err))
+          }
+        })
+        return
+      }
+
+      void (async () => {
+        try {
+          const msg = JSON.parse(data.toString()) as {
+            op?: string
+            streamId?: number
+            path?: string
+            truncate?: boolean
+          }
+          if (msg.op === 'ping') {
+            ws.send(JSON.stringify({ ok: true, op: 'pong' }))
+            return
+          }
+          const streamId = Number(msg.streamId)
+          if (!Number.isInteger(streamId) || streamId <= 0) {
+            ws.send(JSON.stringify({ ok: false, op: 'error', error: 'Invalid streamId' }))
+            return
+          }
+          if (msg.op === 'open-file') {
+            const safePath = this.resolveContainedTempPath(msg.path || '')
+            if (!safePath) {
+              ws.send(
+                JSON.stringify({ ok: false, op: 'error', streamId, error: 'Path outside tmpdir' })
+              )
+              return
+            }
+            await fs.promises.mkdir(path.dirname(safePath), { recursive: true })
+            const handle = await fs.promises.open(safePath, msg.truncate !== false ? 'w+' : 'r+')
+            streams.set(streamId, {
+              filePath: safePath,
+              handle,
+              tail: Promise.resolve(),
+              closing: false,
+              error: null
+            })
+            ws.send(JSON.stringify({ ok: true, op: 'ack', streamId }))
+            return
+          }
+          if (msg.op === 'close') {
+            const { fileSize, error } = await closeStream(streamId)
+            if (error) {
+              ws.send(
+                JSON.stringify({ ok: false, op: 'error', streamId, error: error.message })
+              )
+              return
+            }
+            ws.send(JSON.stringify({ ok: true, op: 'closed', streamId, fileSize }))
+            return
+          }
+          if (msg.op === 'abort') {
+            await closeStream(streamId)
+            ws.send(JSON.stringify({ ok: true, op: 'aborted', streamId }))
+            return
+          }
+        } catch (err) {
+          ws.send(
+            JSON.stringify({
+              ok: false,
+              op: 'error',
+              error: err instanceof Error ? err.message : String(err)
+            })
+          )
+        }
+      })()
+    })
+
+    ws.on('close', () => {
+      this.binarySockets.delete(ws)
+      for (const streamId of Array.from(streams.keys())) {
+        void closeStream(streamId)
+      }
+    })
+  }
+
   closeAll(): void {
     for (const [, connection] of this.connections) {
       try {
@@ -136,5 +312,13 @@ export class WsHub {
       }
     }
     this.connections.clear()
+    for (const sock of this.binarySockets) {
+      try {
+        sock.close()
+      } catch {
+        // ignore
+      }
+    }
+    this.binarySockets.clear()
   }
 }

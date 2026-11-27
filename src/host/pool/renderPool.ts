@@ -88,7 +88,9 @@ function baseLaunchArgs(config: HostConfig): string[] {
     '--ignore-gpu-blocklist',
     '--enable-gpu-rasterization',
     '--enable-zero-copy',
-    '--disable-gpu-vsync'
+    '--disable-gpu-vsync',
+    // 允许同机不同端口的原生 Rust 二进制 WebSocket (/bridge/rs-stream) 接入而不被 LNA 拦截
+    '--disable-features=LocalNetworkAccessChecks'
   ]
 
   if (process.platform === 'linux') {

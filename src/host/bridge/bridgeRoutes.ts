@@ -23,8 +23,18 @@ import {
 } from '../../shared/ffmpeg'
 import {
   RustFramesPipeSession,
+  computeLipSync,
+  getRustBridgeServerInfo,
   isRustExporterAvailable,
-  runRustRemux
+  mixAudioPlan,
+  runRustRemux,
+  startRustBridgeServer,
+  stopRustBridgeServer,
+  type RustAudioMixPlan,
+  type RustBgmCue,
+  type RustBridgeServerInfo,
+  type RustSeCue,
+  type RustVoiceTrack
 } from '../export/rustExporter'
 
 export interface BridgeController {
@@ -215,6 +225,64 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         .map((d) => resolveWithExistingRealpath(d))
     ])
   )
+  const resourceRoot = config.paths?.resources ? resolveWithExistingRealpath(config.paths.resources) : ''
+  const customBgmPath = config.bgm?.path ? resolveWithExistingRealpath(config.bgm.path) : ''
+  const allowedResourceRoots = Array.from(
+    new Set([...(resourceRoot ? [resourceRoot] : []), ...allowedTempRoots])
+  )
+
+  const resolveOptionalAudioPath = (rawPath: unknown): string | undefined => {
+    if (typeof rawPath !== 'string' || !rawPath.trim() || rawPath.includes('\0')) return undefined
+    let candidate = rawPath.trim()
+    if (/^https?:\/\//i.test(candidate)) {
+      try {
+        candidate = new URL(candidate).pathname
+      } catch {
+        return undefined
+      }
+    }
+    if (candidate.startsWith('/resources/')) {
+      if (!resourceRoot) return undefined
+      candidate = path.join(resourceRoot, candidate.slice('/resources/'.length))
+    } else if (!path.isAbsolute(candidate)) {
+      if (!resourceRoot) return undefined
+      const stripped = candidate
+        .replace(/^\/+/, '')
+        .replace(/^resources\/builtin\//, '')
+        .replace(/^resources\//, '')
+      candidate = path.join(resourceRoot, stripped)
+    }
+    const resolvedCandidate = resolveWithExistingRealpath(candidate)
+    if (
+      customBgmPath &&
+      normalizePathForCompare(resolvedCandidate) === normalizePathForCompare(customBgmPath)
+    ) {
+      return fs.existsSync(resolvedCandidate) ? resolvedCandidate : undefined
+    }
+    try {
+      const safe = assertContainedPath(candidate, allowedResourceRoots, 'audio resource path')
+      return fs.existsSync(safe) ? safe : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  const ensureRustBridgeEndpoint = (): RustBridgeServerInfo | null => {
+    if (!isRustExporterAvailable(config.video.useRustExporter !== false)) {
+      return null
+    }
+    try {
+      const existing = getRustBridgeServerInfo()
+      if (existing?.running) return existing
+      return startRustBridgeServer({
+        allowedOutputDirs: allowedTempRoots,
+        bridgeToken: deps.bridgeToken
+      })
+    } catch (err) {
+      logger.warn('[Bridge] In-process Rust WS bridge unavailable, using Node /bridge/ws-bin:', err)
+      return null
+    }
+  }
 
   const ttsAllowlist = [
     parseAllowlistedOrigin(config.tts?.apiBaseUrl || 'http://127.0.0.1:9880')
@@ -696,6 +764,9 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         ...fileKeys.map((key) => closeCachedFileHandle(key)),
         ...uniqueDirs.map((dir) => cleanupTempPath(dir, true))
       ])
+      if (activeBridgeControllers.size === 0) {
+        stopRustBridgeServer()
+      }
     },
     activePipeSessionCount(): number {
       return framesPipeSessions.size
@@ -1844,6 +1915,207 @@ export function createBridgeRouter(deps: BridgeDeps): Router {
         res.setHeader('x-mss-status', '0')
         res.setHeader('x-mss-ok', '0')
         res.send('{}')
+      }
+    }
+  )
+
+  // ----- 原生 Rust 二进制 WebSocket 与音频/口型加速路由 -----
+
+  router.get('/binary-stream-endpoint', (_req: Request, res: Response) => {
+    const rustInfo = ensureRustBridgeEndpoint()
+    if (rustInfo?.running && rustInfo.wsUrl) {
+      res.json({
+        ok: true,
+        backend: 'rust',
+        wsUrl: rustInfo.wsUrl,
+        token: rustInfo.token
+      })
+      return
+    }
+    const tokenSuffix = deps.bridgeToken ? `?token=${encodeURIComponent(deps.bridgeToken)}` : ''
+    res.json({
+      ok: true,
+      backend: 'node',
+      wsUrl: `/bridge/ws-bin${tokenSuffix}`,
+      token: deps.bridgeToken ?? ''
+    })
+  })
+
+  router.post(
+    '/rust/compute-lipsync',
+    express.raw({ type: '*/*', limit: '50mb' }),
+    async (req: Request, res: Response) => {
+      if (!isRustExporterAvailable(config.video.useRustExporter !== false)) {
+        res.status(503).json({ ok: false, error: 'Rust exporter unavailable' })
+        return
+      }
+      try {
+        const body = req.body as Buffer
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          res.status(400).json({ ok: false, error: 'Empty audio payload' })
+          return
+        }
+        const scaleRaw = Number(req.query.targetValueScale)
+        const targetValueScale = Number.isFinite(scaleRaw) && scaleRaw > 0 ? scaleRaw : 1
+        const env = await computeLipSync({ audioBytes: body, targetValueScale })
+        res.json({
+          ok: true,
+          values: Array.from(env.values),
+          frameMs: env.frameMs,
+          durationMs: env.durationMs,
+          audioDurationMs: env.audioDurationMs,
+          releaseStep: env.releaseStep,
+          targetValueScale: env.targetValueScale,
+          powK: env.powK
+        })
+      } catch (err) {
+        logger.warn('[Bridge] rust compute-lipsync failed:', err)
+        res.status(500).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        })
+      }
+    }
+  )
+
+  router.post(
+    '/rust/mix-audio-plan',
+    express.json({ limit: '100mb' }),
+    async (req: Request, res: Response) => {
+      if (!isRustExporterAvailable(config.video.useRustExporter !== false)) {
+        res.status(503).json({ ok: false, error: 'Rust exporter unavailable' })
+        return
+      }
+      try {
+        const body = req.body as {
+          durationMs: number
+          outputPath?: string
+          prefix?: string
+          extension?: string
+          bgm?: {
+            enabled?: boolean
+            volume?: number
+            globalPath?: string
+            cues?: Array<RustBgmCue & { relPath?: string }>
+            volumeTweens?: Array<{ timeMs: number; volume: number; durationMs: number }>
+          }
+          se?: {
+            cues?: Array<RustSeCue & { relPath?: string }>
+          }
+          voices?: Array<RustVoiceTrack & { audioBase64?: string }>
+          workerId?: string
+          taskId?: string
+        }
+        const workerId = extractWorkerId(req, body)
+        const taskId = extractTaskId(req, body, workerId)
+        if (taskId && isTaskCancelled(taskId)) {
+          res.status(499).json({ ok: false, error: 'Export task was cancelled' })
+          return
+        }
+
+        let safeOutputPath: string
+        if (body.outputPath) {
+          safeOutputPath = assertContainedPath(body.outputPath, allowedTempRoots, 'audio outputPath')
+        } else {
+          safeOutputPath = path.join(
+            tmpdir(),
+            `mss-audio-${Date.now()}-${randomSuffix()}.wav`
+          )
+          registerTempPath(safeOutputPath, workerId, taskId)
+        }
+        if (isUnderTombstonedPath(safeOutputPath)) {
+          res.status(499).json({ ok: false, error: 'Temp file directory was cleaned up' })
+          return
+        }
+        await fs.promises.mkdir(path.dirname(safeOutputPath), { recursive: true })
+
+        const resolvedGlobalBgm = body.bgm?.globalPath
+          ? resolveOptionalAudioPath(body.bgm.globalPath)
+          : undefined
+        const resolvedBgmCues: RustBgmCue[] = []
+        for (const cue of body.bgm?.cues ?? []) {
+          const resolved = cue.stop ? undefined : resolveOptionalAudioPath(cue.relPath ?? cue.path)
+          if (!cue.stop && !resolved) continue
+          resolvedBgmCues.push({
+            timeMs: cue.timeMs,
+            fadeMs: cue.fadeMs,
+            stop: cue.stop,
+            path: resolved,
+            volume: cue.volume,
+            loopStartMs: cue.loopStartMs,
+            loopEndMs: cue.loopEndMs,
+            loopStartSample: cue.loopStartSample,
+            loopEndSample: cue.loopEndSample,
+            sourceSampleRate: cue.sourceSampleRate
+          })
+        }
+
+        const resolvedSeCues: RustSeCue[] = []
+        for (const cue of body.se?.cues ?? []) {
+          const resolved = cue.stop
+            ? undefined
+            : resolveOptionalAudioPath(cue.relPath ?? cue.path ?? `audio/se/${cue.file}`)
+          if (!cue.stop && !resolved) continue
+          resolvedSeCues.push({
+            timeMs: cue.timeMs,
+            file: cue.file,
+            path: resolved,
+            stop: cue.stop,
+            volume: cue.volume,
+            loop: cue.loop,
+            fadeMs: cue.fadeMs
+          })
+        }
+
+        const voices: RustVoiceTrack[] = (body.voices ?? []).map((v) => ({
+          startMs: v.startMs,
+          endMs: v.endMs,
+          snippetIndex: v.snippetIndex,
+          computeLipSync: v.computeLipSync,
+          targetValueScale: v.targetValueScale,
+          ...(v.path ? { path: assertContainedPath(v.path, allowedResourceRoots, 'voice path') } : {}),
+          ...(v.audioBase64 ? { audioBytes: Buffer.from(v.audioBase64, 'base64') } : {})
+        }))
+
+        const plan: RustAudioMixPlan = {
+          durationMs: Math.max(0, Number(body.durationMs) || 0),
+          outputPath: safeOutputPath,
+          outputFormat: 'wav',
+          ...(body.bgm
+            ? {
+                bgm: {
+                  enabled: Boolean(body.bgm.enabled),
+                  volume: Number.isFinite(body.bgm.volume) ? Number(body.bgm.volume) : 0.3,
+                  ...(resolvedGlobalBgm ? { globalPath: resolvedGlobalBgm } : {}),
+                  cues: resolvedBgmCues,
+                  volumeTweens: body.bgm.volumeTweens
+                }
+              }
+            : {}),
+          ...(resolvedSeCues.length > 0 ? { se: { cues: resolvedSeCues } } : {}),
+          ...(voices.length > 0 ? { voices } : {})
+        }
+
+        const result = await mixAudioPlan(plan)
+        if (taskId && isTaskCancelled(taskId)) {
+          await cleanupTempPath(safeOutputPath, true)
+          res.status(499).json({ ok: false, error: 'Export task was cancelled' })
+          return
+        }
+        res.json({
+          ok: true,
+          outputPath: result.outputPath,
+          frames: result.frames,
+          fileSize: result.fileSize,
+          elapsedMs: result.elapsedMs
+        })
+      } catch (err) {
+        logger.warn('[Bridge] rust mix-audio-plan failed:', err)
+        const status = err instanceof BridgeSecurityError ? err.statusCode : 500
+        res.status(status).json({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err)
+        })
       }
     }
   )

@@ -188,4 +188,31 @@ export class BgmPlan {
     enriched.volumeTweens = this.buildVolumeTweens(startTimesMs, startTimesIncludeDelay)
     return enriched
   }
+
+  /** 生成供原生 Rust `mixAudioPlan` 使用的路径级 cue 描述（无需浏览器解音频）。 */
+  public getRustCues(
+    startTimesMs: ReadonlyArray<number>,
+    startTimesIncludeDelay = false
+  ): {
+    cues: Array<{
+      timeMs: number
+      fadeMs: number
+      stop: boolean
+      relPath?: string
+      volume: number
+    }>
+    volumeTweens: BgmVolumeTweenPoint[]
+  } {
+    const cues = this.changes.map((change) => ({
+      timeMs: Math.max(0, (startTimesMs[change.snippetIndex] ?? 0) + change.delayMs),
+      fadeMs: change.fadeMs,
+      stop: change.stop,
+      ...(change.stop ? {} : { relPath: `audio/bgm/${change.file}` }),
+      volume: change.stop ? 0 : change.volume
+    }))
+    return {
+      cues,
+      volumeTweens: this.buildVolumeTweens(startTimesMs, startTimesIncludeDelay)
+    }
+  }
 }

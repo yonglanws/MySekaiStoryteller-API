@@ -25,15 +25,16 @@ video:
   width: 1920         # 输出视频宽度
   height: 1080         # 输出视频高度
   fps: 60             # 帧率
-  crf: 28             # 质量因子（越小质量越高、体积越大）
+  crf: 26             # 质量因子（越小质量越高、体积越大；hevc_qsv -low_power 1 推荐 26–27）
   renderScale: 1    # 渲染倍率（相对 1280 宽逻辑坐标；1 = 按输出分辨率 1:1 渲染，
                       # 1.5 = 超采样抗锯齿更好、每帧成本 x2.25，
                       # <1 = 降渲染分辨率提速，画面变软。例：1080p 输出下
                       # 1 = 渲染 1080p，0.75 = 渲染 810p 再放大）
+  codec: h264         # 输出编码：h264（与 Edge WebCodecs I420 硬编对齐，走 -c:v copy + BT.709 VUI 零重编码，最快）| hevc
   audioBitrate: 128k  # 音频码率
   encoder: auto       # 视频编码器：auto | nvidia | amd | intel | libx264
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264
-                      # 对应 ffmpeg：nvidia=h264_nvenc，amd=h264_amf，intel=h264_qsv
+                      # 对应 ffmpeg：nvidia=h264_nvenc，amd=h264_amf，intel=h264_qsv (hevc_qsv -low_power 1)
                       # 无独显或只要 CPU 编码时写 libx264（env: MSS_FFMPEG_ENCODER）
   watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
                       # 本视频由 MySekaiStoryteller-API 生成
@@ -42,9 +43,12 @@ video:
                       # 支持最多 2 行（\n 换行），留空则只显示自带水印
                       # （env: MSS_VIDEO_WATERMARK_TEXT）
   exportMode: fast    # 导出管线：fast | record（env: MSS_EXPORT_MODE；record 已废弃，自动回落 fast）
-                      # fast   = 虚拟时钟逐帧渲染 + WebCodecs 直编 MP4（不支持时自动回落 frames 管道）
+                      # fast   = 虚拟时钟逐帧渲染 + WebGL2 批处理 + WebCodecs 直编 + 原生 Rust 混音/合流
   recordTargetSizeMb: 0    # [已废弃] 仅向后兼容保留；fast 模式请通过 exportBitrate 控制体积
-  exportBitrate: 12000000  # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE）
+  exportBitrate: 5500000   # fast 模式视频码率 bps（env: MSS_EXPORT_BITRATE；2.5–5.5 Mbps 兼顾转场无宏块与体积）
+  maxOutputMbps: 6.5       # 成品码率软上限 Mbps（env: MSS_MAX_OUTPUT_MBPS；超限时自动启用 Rust QSV CRF 重编码）
+  useRustExporter: true    # 启用原生 Rust NAPI 导出器与音频/口型加速（env: MSS_USE_RUST_EXPORTER）
+  exportJobs: 1            # 并行分段渲染数（env: MSS_EXPORT_JOBS；Intel Iris Xe 单媒体引擎下 1 最快，独显多流可调 2–3）
   ttsMode: concurrent      # TTS 与渲染调度：concurrent | serial（env: MSS_TTS_MODE）
                            # concurrent（默认）= 边渲染边并发合成语音，端到端耗时最短
                            # serial = 先合成完全部语音再开始渲染，避免与 WebGL/编码争资源
@@ -54,7 +58,7 @@ video:
                            # （只有呼吸与眨眼）；>0 = 按该间隔（±25% 抖动）再接一个同情绪族
                            # 手势，想要"连续表演"的舞台风格再调大（env: MSS_IDLE_CHAIN_GAP_SEC）
   exportFastEncoder: auto # fast 模式页内编码路径：auto | webcodecs | frames
-  fastFps: 30        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
+  fastFps: 60        # fast 模式编码帧率上限（env: MSS_FAST_FPS），不超过 video.fps；
                       # 动画仍按 video.fps 推进，低上限只减少抓帧/编码次数
                       # auto：Linux+NVIDIA 时 WebCodecs 只有软编（慢），自动改走
                       #       JPEG 帧序列 + ffmpeg 硬件编码；其余平台优先 WebCodecs
