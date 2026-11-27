@@ -181,20 +181,36 @@ export class IncrementalSq8Cache {
     return this.entries.size
   }
 
+  stats(): { size: number; dims: number; model: string; domain: RagDomain; dir: string } {
+    return {
+      size: this.entries.size,
+      dims: this.dims,
+      model: this.model,
+      domain: this.domain,
+      dir: this.resolveDir()
+    }
+  }
+
   private resolveDir(): string {
     const slug = `${this.domain}-${modelSlug(this.model)}`
     if (this.dims > 0) {
       return path.join(this.baseDir, `${slug}-${this.dims}d`)
     }
-    // 自动发现已有 `<domain>-<slug>-*d` 目录
+    // 自动发现已有 `<domain>-<slug>-<dims>d` 目录（按维度数值挑选，避免字典序误判）
     if (fs.existsSync(this.baseDir)) {
       const prefix = `${slug}-`
       const candidates = fs
         .readdirSync(this.baseDir)
-        .filter((name) => name.startsWith(prefix) && name.endsWith('d'))
-        .sort()
+        .map((name) => {
+          if (!name.startsWith(prefix)) return null
+          const suffix = name.slice(prefix.length)
+          const match = /^(\d+)d$/.exec(suffix)
+          return match ? { name, dims: Number(match[1]) } : null
+        })
+        .filter((item): item is { name: string; dims: number } => Boolean(item))
+        .sort((a, b) => a.dims - b.dims)
       if (candidates.length > 0) {
-        return path.join(this.baseDir, candidates[candidates.length - 1])
+        return path.join(this.baseDir, candidates[candidates.length - 1].name)
       }
     }
     return path.join(this.baseDir, slug)

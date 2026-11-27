@@ -18,9 +18,22 @@ export interface RagChunk {
   storyId: string
   story: string
   ep?: string
+  epTitle?: string
   scenarioId: string
-  /** unit | event | card | talk | self | special | persona */
+  /** unit | event | event_synopsis | card | talk | self | special | persona */
   type: string
+  /** 所属组合标签（25时 / WS / VBS / MMJ / L/n / VS / 混活） */
+  unit?: string
+  /** 活动期数编号（如 145、210），用于时效加权 */
+  eventNum?: number
+  /** 活动或剧情年份（如 2025、2026） */
+  eventYear?: number
+  /** 是否属于 2025/2026 近期新剧本（含 jp_new_stories） */
+  isRecent2025_2026?: boolean
+  /** 语料对白语言（'cn' | 'jp'） */
+  lang?: 'cn' | 'jp'
+  /** 可选场景/演出/梗概标记 */
+  tags?: string[]
   chars: string[]
   charIds?: number[]
   lineStart: number
@@ -35,8 +48,14 @@ export interface RagExcerpt {
   sourceKind: RagSourceKind
   storyId: string
   story: string
+  ep?: string
+  epTitle?: string
   scenarioId: string
   type: string
+  unit?: string
+  eventNum?: number
+  isRecent2025_2026?: boolean
+  lang?: 'cn' | 'jp'
   chars: string[]
   lineStart: number
   lineEnd: number
@@ -47,6 +66,7 @@ export interface RagExcerpt {
   lexicalScore: number
   charScore: number
   rerankScore?: number
+  recencyBoost?: number
 }
 
 export interface RagCastMemberHint {
@@ -116,6 +136,57 @@ export interface RagMetaSummary {
   totalChars: number
   topScore: number
   latencyMs: number
+}
+
+export interface ScenarioContextResult {
+  scenarioId: string
+  storyId: string
+  story: string
+  ep?: string
+  epTitle?: string
+  unit?: string
+  eventNum?: number
+  isRecent2025_2026?: boolean
+  lang?: 'cn' | 'jp'
+  totalChunks: number
+  windowStartIdx: number
+  windowEndIdx: number
+  lineStart: number
+  lineEnd: number
+  text: string
+  chunks: RagChunk[]
+}
+
+export interface StoryCatalogScenarioSummary {
+  scenarioId: string
+  ep?: string
+  epTitle?: string
+  chunkCount: number
+}
+
+export interface StoryCatalogSummary {
+  storyId: string
+  story: string
+  type: string
+  sourceKind: RagSourceKind
+  unit?: string
+  eventNum?: number
+  isRecent2025_2026?: boolean
+  lang?: 'cn' | 'jp'
+  scenarios: StoryCatalogScenarioSummary[]
+}
+
+export interface ListStoriesFilter {
+  query?: string
+  unit?: string
+  sourceKind?: RagSourceKind
+  recentOnly?: boolean
+  limit?: number
+}
+
+export interface RagStructuredRetrieveResult extends RagRetrieveResult {
+  expandedContexts: ScenarioContextResult[]
+  availableStories: StoryCatalogSummary[]
 }
 
 export interface Sq8IndexHeader {
