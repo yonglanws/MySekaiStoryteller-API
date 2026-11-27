@@ -295,11 +295,12 @@ const LlmSchema = z.object({
   /**
    * 剧本生成流水线：
    * - staged（默认）：选角 → 只写台词（完整人设）→ 单独设计动作/表情/背景
+   * - hybrid：Agent 工具探索取证（人设/语料展开/云端素材）→ 完整重写人设精写对白与人设 Critic 润色 → 确定性舞台/配音/演技编译
    * - agent：带工具调用的 Agent 导演/编剧循环（失败时自动回退 staged）
    * - single：一次调用直接写完整剧本，省调用次数
    * chat 模式始终走 single。
    */
-  pipeline: z.enum(['single', 'staged', 'agent']).default('staged'),
+  pipeline: z.enum(['single', 'staged', 'agent', 'hybrid']).default('staged'),
   /** Agentic 模式下允许的最大工具调用/迭代步数 */
   agentMaxSteps: z.number().int().min(2).max(40).default(16),
   /** response_format=json_object：auto = 先带后回退，on = 必须，off = 不发送 */
@@ -626,7 +627,9 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
   }
   if (env.MSS_LLM_PIPELINE) {
     const v = env.MSS_LLM_PIPELINE.toLowerCase()
-    if (v === 'single' || v === 'staged' || v === 'agent') config.llm.pipeline = v
+    if (v === 'single' || v === 'staged' || v === 'agent' || v === 'hybrid') {
+      config.llm.pipeline = v
+    }
   }
   if (env.MSS_LLM_AGENT_MAX_STEPS) {
     const v = parseInt(env.MSS_LLM_AGENT_MAX_STEPS, 10)

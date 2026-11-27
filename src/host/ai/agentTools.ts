@@ -22,6 +22,26 @@ import * as officialLinterMod from './officialLinter'
 import * as personasMod from './personas'
 import { buildActingExample, isBackViewModel, isStandingMotion, type CatalogView } from './prompt'
 import * as scenarioCuesMod from './scenarioCues'
+import {
+  applyVoiceDirectionPlan,
+  buildDirectionPrompt,
+  buildEmotionPrompt,
+  buildStagingPrompt,
+  composeStory,
+  fallbackDirection,
+  fallbackStaging,
+  normalizeDialogue,
+  normalizeDirection,
+  normalizeStaging,
+  normalizeVoiceDirectionPlan,
+  type StagedCastPlan,
+  type StagedDialogue,
+  type StagedDirection,
+  type StagedDirectionLine,
+  type StagedPairwiseAddress,
+  type StagedScenePlan,
+  type StagedStaging
+} from './staged'
 import { alignStoryTtsEmotionsAndCaptions } from './ttsText'
 import { validateAndFixStory } from './validate'
 
@@ -274,6 +294,7 @@ export interface StoryAgentToolkitDeps {
   emotionLabels?: string[]
   targetMinutes?: number
   ragRetriever?: AdaptiveRagRetriever | null
+  llm?: LlmClient
   logger: Logger<ILogObj>
 }
 
@@ -1334,26 +1355,38 @@ function addUsage(acc: ChatUsage, delta: ChatUsage | null): void {
   if (delta.totalTokens !== undefined) acc.totalTokens = (acc.totalTokens ?? 0) + delta.totalTokens
 }
 
-function findModel(view: CatalogView, modelId?: unknown, character?: unknown): CatalogModel | null {
+function findModel(
+  view: CatalogView,
+  modelId?: unknown,
+  character?: unknown,
+  options: { unitHint?: string; contextText?: string } = {}
+): CatalogModel | null {
   if (typeof modelId === 'number' && Number.isFinite(modelId)) {
     const byId = view.modelById(modelId)
     if (byId) return byId
   }
   const q = typeof character === 'string' ? character.trim().toLowerCase() : ''
   if (!q) return null
-  return (
-    view.models.find(
+  const primary = view.primaryModels()
+  const searchPool = [...primary, ...view.models.filter((m) => !primary.includes(m))]
+  const matched =
+    searchPool.find(
       (m) =>
         m.name.toLowerCase() === q ||
         (m.shortName ?? '').toLowerCase() === q ||
         (m.cloudId ?? '').toLowerCase() === q
     ) ??
-    view.models.find(
+    searchPool.find(
       (m) =>
         m.name.toLowerCase().includes(q) || (m.shortName && q.includes(m.shortName.toLowerCase()))
     ) ??
     null
-  )
+  if (!matched) return null
+  const outfitHint = [options.unitHint, options.contextText].filter(Boolean).join(' ').trim()
+  if (outfitHint) {
+    return view.resolveOutfitVariant(matched, outfitHint) ?? matched
+  }
+  return matched
 }
 
 function countBodyMotionsByModel(story: StoryData): Record<string, number> {
@@ -1702,7 +1735,7 @@ function buildDirectorStageTelemetry(
  * - 对白、舞台、剧情表情动作逐句质检（validate_dialogue_draft, critique_story_draft, validate_story_draft）
  */
 export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgentToolkit {
-  const { view, personas, emotionLabels = [], targetMinutes, ragRetriever, logger } = deps
+  const { view, personas, emotionLabels = [], targetMinutes, ragRetriever, llm, logger } = deps
 
   let savedPlan: SavedStoryPlan | null = null
   let savedDraft: Record<string, unknown> | null = null
@@ -1715,7 +1748,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'lookup_character',
         description:
-          '一次批量查询全部出场角色的 modelId、模型路径、可用服装、人设口吻、表演气质；设 includeExpressions: true 时同步返回按情绪分组的丰富表情与多风格动作调色板（1 次调用即可替代多轮 lookup + inspect_character_expressions！）。',
+          '一次批量查询全部出场角色的 modelId、模型路径、可用云端服装、完整重写人设（核心机制/重要记忆/语言与风格/会说与绝不会说/人际称呼）、表演气质；设 includeExpressions: true 时同步返回按情绪分组的丰富表情与多风格动作调色板。',
         parameters: {
           type: 'object',
           properties: {
@@ -1733,6 +1766,16 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
               type: 'array',
               items: { type: 'number' },
               description: '可选：一次批量查询多个 modelId'
+            },
+            unitHint: {
+              type: 'string',
+              description:
+                '可选：组合提示（如 25时 / WS / VBS / MMJ / L/n），用于精准匹配虚拟歌手所在「世界」人设与服装'
+            },
+            contextText: {
+              type: 'string',
+              description:
+                '可选：剧情上下文文本，用于自动匹配变体人设（如优男彰人 / 优等生真冬）与场景服装'
             },
             includeExpressions: {
               type: 'boolean',
@@ -1898,18 +1941,147 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       function: {
         name: 'search_official_corpus',
         description:
-          '检索 Project SEKAI 官方剧情语料示例、对白节奏参考与官方演出规范（用于把握角色真实口吻、断句、停顿和单人留白，严禁照抄原句）。',
+          '检索 Project SEKAI 官方剧情语料（含 2025/2026 JP+CN 活动、对白样本与重写人设记忆），支持结构化检索（mode="search"）、展开官方剧集连续上下文（mode="expand"）和浏览可用故事目录（mode="list_stories"）。',
         parameters: {
           type: 'object',
           properties: {
-            query: { type: 'string', description: '剧情事件、关系或地点关键词' },
+            mode: {
+              type: 'string',
+              enum: ['search', 'expand', 'list_stories'],
+              description: '操作模式：search（默认，结构化检索+章节列表）、expand（展开指定 scenarioId 上下文）、list_stories（浏览官方故事目录）'
+            },
+            query: { type: 'string', description: '剧情事件、角色关系或地点关键词' },
             stage: {
               type: 'string',
               enum: ['cast', 'dialogue', 'acting'],
               description: '参考阶段（默认 dialogue）'
+            },
+            cast: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选：同台角色名数组，提升多角色共现官方剧集排序权重'
+            },
+            scenarioId: {
+              type: 'string',
+              description: 'mode="expand" 时必填：从 search/list_stories 返回的官方剧集 scenarioId'
+            },
+            aroundLine: {
+              type: 'number',
+              description: 'mode="expand" 时可选：以第几句台词为中心向前后展开'
+            },
+            radiusChunks: {
+              type: 'number',
+              description: 'mode="expand" 时可选：前后各展开几个切片（默认 2）'
+            },
+            unit: {
+              type: 'string',
+              description: 'mode="list_stories" 时可选：按组合筛选（25时 / WS / VBS / MMJ / L/n）'
+            },
+            recentOnly: {
+              type: 'boolean',
+              description: 'mode="list_stories" 时可选：仅列 2025/2026 近期新剧情'
+            },
+            limit: {
+              type: 'number',
+              description: 'mode="list_stories" 返回上限（默认 20）'
             }
-          },
-          required: ['query']
+          }
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'compile_dialogue_workflow',
+        description:
+          '【工作流编译器】将调研好的分幕大纲与纯对白台词（lines 或 turns）交给结构化 Staging + VoiceDirection + Acting + composeStory 编译器，一键生成零布局冲突、零穿帮动作、通过全套官方舞台校验的 Live2D StoryData 并自动存入工作区草稿（无需手写 150 条原始 snippet）。',
+        parameters: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: '短标题' },
+            event: { type: 'string', description: '本场核心小事件' },
+            logline: { type: 'string', description: '一句话梗概' },
+            background: { type: 'string', description: '开场背景名或云端 ID' },
+            ambient: { type: 'string', enum: ['normal', 'evening', 'night'] },
+            bgm: { type: 'string', description: '开场 BGM 曲名或云端 ID（可选）' },
+            cast: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  modelId: { type: 'number' },
+                  name: { type: 'string' },
+                  role: { type: 'string' },
+                  outfit: { type: 'string' }
+                }
+              }
+            },
+            scenes: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  summary: { type: 'string' },
+                  background: { type: 'string' },
+                  ambient: { type: 'string', enum: ['normal', 'evening', 'night'] },
+                  transitionIn: { type: 'string' },
+                  activeCast: { type: 'array', items: { type: 'string' } },
+                  bgm: { type: 'string' },
+                  telop: { type: 'string' },
+                  placeInfo: { type: 'string' },
+                  isFlashback: { type: 'boolean' },
+                  isSekai: { type: 'boolean' }
+                }
+              }
+            },
+            lines: {
+              type: 'array',
+              description: '纯台词数组 [{ id?, speaker, content, emotion?, sceneId?, pauseBefore?, closeWindowAfter?, ttsCaption?, ttsSpeed?, ttsSpecialScene? }]',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  speaker: { type: 'string' },
+                  content: { type: 'string' },
+                  emotion: { type: 'string' },
+                  sceneId: { type: 'string' },
+                  pauseBefore: { type: 'number' },
+                  closeWindowAfter: { type: 'boolean' },
+                  motion: { type: 'string' },
+                  facial: { type: 'string' },
+                  ttsCaption: { type: 'string' },
+                  ttsSpeed: { type: 'number' },
+                  ttsSpecialScene: { type: 'boolean' }
+                },
+                required: ['speaker', 'content']
+              }
+            },
+            turns: {
+              type: 'array',
+              description: '可选：按 turns 分组传入 [{ speaker, scene?, lines: [...] }]'
+            },
+            pairwiseAddress: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  from: { type: 'string' },
+                  to: { type: 'string' },
+                  zh: { type: 'string' },
+                  ja: { type: 'string' }
+                }
+              }
+            },
+            runLlmStages: {
+              type: 'boolean',
+              description: '若挂载了 llm 是否并发调用 Staging/Voice/Direction 导演（默认 true；false 时纯确定性离线编译）'
+            },
+            autoSaveDraft: {
+              type: 'boolean',
+              description: '编译后是否自动保存到工作区草稿（默认 true）'
+            }
+          }
         }
       }
     },
@@ -2353,13 +2525,25 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     const dialogueLines = extractDialogueLinesFromStory(
       rawAuditStory as unknown as Record<string, unknown>
     )
+    const speakerNames = Array.from(
+      new Set(dialogueLines.map((l) => l.speaker).filter(Boolean))
+    )
+    const seededAddresses = [
+      ...personasMod.extractPairwiseAddressBook(personas, speakerNames).map((r) => ({
+        from: r.from,
+        to: r.to,
+        zh: r.zh
+      })),
+      ...(savedPlan?.pairwiseAddress ?? [])
+    ]
     const dialogueLint = lintDialogueFidelity(
       {
         title: savedPlan?.title ?? '',
         lines: dialogueLines.map((l) => ({ id: l.id, speaker: l.speaker, content: l.content }))
       },
       {
-        ...(savedPlan?.pairwiseAddress ? { pairwiseAddress: savedPlan.pairwiseAddress } : {}),
+        ...(seededAddresses.length > 0 ? { pairwiseAddress: seededAddresses } : {}),
+        personas,
         cast: view.primaryModels().map((m) => ({
           modelId: m.id,
           name: view.shortName(m),
@@ -2609,7 +2793,10 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     }
   }
 
-  const resolveBatchModels = (args: Record<string, unknown>): CatalogModel[] => {
+  const resolveBatchModels = (
+    args: Record<string, unknown>,
+    lookupOpts: { unitHint?: string; contextText?: string } = {}
+  ): CatalogModel[] => {
     const picked: CatalogModel[] = []
     const seen = new Set<number>()
     const addIfFound = (m: CatalogModel | null): void => {
@@ -2619,13 +2806,13 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       }
     }
     if (Array.isArray(args.modelIds)) {
-      for (const id of args.modelIds) addIfFound(findModel(view, id, undefined))
+      for (const id of args.modelIds) addIfFound(findModel(view, id, undefined, lookupOpts))
     }
     if (Array.isArray(args.characters)) {
-      for (const c of args.characters) addIfFound(findModel(view, undefined, c))
+      for (const c of args.characters) addIfFound(findModel(view, undefined, c, lookupOpts))
     }
     if (args.modelId !== undefined || args.character !== undefined) {
-      addIfFound(findModel(view, args.modelId, args.character))
+      addIfFound(findModel(view, args.modelId, args.character, lookupOpts))
     }
     return picked
   }
@@ -2634,7 +2821,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     const args = parseToolArgs(rawArgs)
 
     if (name === 'lookup_character') {
-      const requestedBatch = resolveBatchModels(args)
+      const unitHint = typeof args.unitHint === 'string' ? args.unitHint.trim() : ''
+      const contextText = typeof args.contextText === 'string' ? args.contextText.trim() : ''
+      const effectiveUnitHint = unitHint || personasMod.inferUnitFromText(contextText) || ''
+      const lookupOpts = {
+        ...(effectiveUnitHint ? { unitHint: effectiveUnitHint } : {}),
+        ...(contextText ? { contextText } : {})
+      }
+      const requestedBatch = resolveBatchModels(args, lookupOpts)
       const hasExplicitFilter =
         Array.isArray(args.characters) ||
         Array.isArray(args.modelIds) ||
@@ -2645,36 +2839,58 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       const moodsArg = Array.isArray(args.moods)
         ? args.moods.map((m) => String(m ?? '').trim()).filter(Boolean)
         : undefined
+      const pairwiseAddressBook =
+        list.length >= 2
+          ? personasMod.extractPairwiseAddressBook(
+              personas,
+              list.map((m) => view.shortName(m))
+            )
+          : []
       return JSON.stringify({
         characters: list.map((m) => {
-          const persona = personasMod.personaFor(personas, m)
+          const persona = personasMod.personaFor(personas, m, {
+            unitHint: effectiveUnitHint || m.unit,
+            ...(contextText ? { contextText } : {})
+          })
           const profile = getActingProfile(`${m.name} ${m.path}`)
-          const outfits = view
-            .outfitsFor(m)
-            .filter((o) => !isBackViewModel(o))
-            .slice(0, 6)
-            .map((o) => ({
-              modelId: o.id,
-              label: o.outfitLabel || o.outfitCategory || o.cloudId || '默认'
-            }))
+          const allFrontOutfits = view.outfitsFor(m).filter((o) => !isBackViewModel(o))
+          const recommendedOutfit = contextText
+            ? view.resolveOutfitVariant(m, contextText)
+            : null
+          const orderedOutfits = recommendedOutfit
+            ? [recommendedOutfit, ...allFrontOutfits.filter((o) => o.id !== recommendedOutfit.id)]
+            : allFrontOutfits
+          const outfits = orderedOutfits.slice(0, 8).map((o) => ({
+            modelId: o.id,
+            label: o.outfitLabel || o.outfitCategory || o.cloudId || '默认',
+            ...(recommendedOutfit?.id === o.id ? { recommended: true } : {})
+          }))
           const exprBlock = includeExpressions
             ? buildModelExpressionOverview(m, { moods: moodsArg, compact: true })
             : null
+          const dialoguePersona = persona ? personasMod.dialoguePersonaPrompt(persona, 11000) : ''
+          const planningHighlights = persona
+            ? personasMod.planningPersonaPrompt(persona, 3200)
+            : ''
+          const actingNotes = persona ? personasMod.actingPersonaPrompt(persona, 2200) : ''
           return {
             modelId: m.id,
             name: m.name,
             shortName: view.shortName(m),
             path: m.path,
             ...(m.unit ? { unit: m.unit } : {}),
+            ...(persona?.unit ? { personaUnit: persona.unit } : {}),
+            ...(persona?.isVariant ? { personaVariant: persona.name } : {}),
             ...(m.outfitLabel ? { outfitLabel: m.outfitLabel } : {}),
             ...(outfits.length > 1 ? { availableOutfits: outfits } : {}),
             actingProfile: profile,
-            persona: persona
-              ? personasMod.dialoguePersonaPrompt(persona)
-              : '（按该角色官方设定演绎）',
+            ...(actingNotes ? { actingNotes } : {}),
+            ...(planningHighlights ? { planningHighlights } : {}),
+            persona: dialoguePersona || '（按该角色官方设定演绎）',
             ...(exprBlock?.byMood ? { expressionsByMood: exprBlock.byMood } : {})
           }
-        })
+        }),
+        ...(pairwiseAddressBook.length > 0 ? { pairwiseAddressBook } : {})
       })
     }
 
@@ -3020,35 +3236,11 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     }
 
     if (name === 'search_official_corpus') {
+      const modeRaw = typeof args.mode === 'string' ? args.mode.trim() : 'search'
+      const mode: 'search' | 'expand' | 'list_stories' =
+        modeRaw === 'expand' || modeRaw === 'list_stories' ? modeRaw : 'search'
       const query = typeof args.query === 'string' ? args.query.trim() : ''
       const stage: 'cast' | 'dialogue' = args.stage === 'cast' ? 'cast' : 'dialogue'
-      const excerpts = corpusExamplesMod.selectUnitFewShotExcerpts(
-        view
-          .primaryModels()
-          .slice(0, 3)
-          .map((m) => ({ name: view.shortName(m), path: m.path })),
-        query
-      )
-      let ragText = ''
-      if (ragRetriever && query) {
-        try {
-          const retrieved = await ragRetriever.retrieve({
-            prompt: query,
-            stage,
-            cast: view
-              .primaryModels()
-              .slice(0, 4)
-              .map((m) => ({
-                name: view.shortName(m),
-                fullName: m.name
-              })),
-            signal
-          })
-          ragText = retrieved?.promptBlock ?? ''
-        } catch (error) {
-          logger.debug(`[AgentTool] RAG query failed: ${String(error)}`)
-        }
-      }
       const actingGuidelines =
         typeof corpusExamplesApi.getOfficialActingGuidelines === 'function'
           ? corpusExamplesApi.getOfficialActingGuidelines({
@@ -3057,10 +3249,606 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
               isSekai: /sekai|世界/i.test(query)
             })
           : '官方PJSK规范：同场景连续对话保持1幕；允许短时单人Center内省留白再切回Left/Right；口语台词禁用括号动作提示；约75%~80%台词句首单拍动作，90%+ delay=0，双人各有动作切换且不同瞬碰撞。'
+
+      if (mode === 'list_stories') {
+        const limit =
+          typeof args.limit === 'number' && Number.isFinite(args.limit)
+            ? Math.max(1, Math.min(50, Math.round(args.limit)))
+            : 20
+        const stories = ragRetriever
+          ? ragRetriever.listAvailableStories({
+              ...(query ? { query } : {}),
+              ...(typeof args.unit === 'string' && args.unit.trim() ? { unit: args.unit.trim() } : {}),
+              ...(args.recentOnly === true ? { recentOnly: true } : {}),
+              limit
+            })
+          : []
+        return JSON.stringify({
+          mode: 'list_stories',
+          stories,
+          actingGuidelines
+        })
+      }
+
+      if (mode === 'expand') {
+        const scenarioId = typeof args.scenarioId === 'string' ? args.scenarioId.trim() : ''
+        const aroundLine =
+          typeof args.aroundLine === 'number' && Number.isFinite(args.aroundLine)
+            ? args.aroundLine
+            : undefined
+        const radiusChunks =
+          typeof args.radiusChunks === 'number' && Number.isFinite(args.radiusChunks)
+            ? Math.max(0, Math.min(6, Math.round(args.radiusChunks)))
+            : 2
+        if (!scenarioId) {
+          return JSON.stringify({
+            mode: 'expand',
+            found: false,
+            error: 'mode="expand" 需要传入 scenarioId（可先从 search 或 list_stories 获取）'
+          })
+        }
+        const context = ragRetriever
+          ? ragRetriever.expandScenarioContext(scenarioId, aroundLine, radiusChunks)
+          : null
+        return JSON.stringify({
+          mode: 'expand',
+          found: Boolean(context),
+          context: context
+            ? {
+                scenarioId: context.scenarioId,
+                storyId: context.storyId,
+                story: context.story,
+                ep: context.ep,
+                epTitle: context.epTitle,
+                unit: context.unit,
+                eventNum: context.eventNum,
+                isRecent2025_2026: context.isRecent2025_2026,
+                lang: context.lang,
+                lineStart: context.lineStart,
+                lineEnd: context.lineEnd,
+                totalChunks: context.totalChunks,
+                text: context.text
+              }
+            : null,
+          actingGuidelines
+        })
+      }
+
+      const excerpts = corpusExamplesMod.selectUnitFewShotExcerpts(
+        view
+          .primaryModels()
+          .slice(0, 3)
+          .map((m) => ({ name: view.shortName(m), path: m.path })),
+        query
+      )
+      const castHints = Array.isArray(args.cast)
+        ? args.cast
+            .map((c) => findModel(view, undefined, c))
+            .filter((m): m is CatalogModel => Boolean(m))
+            .map((m) => ({ name: view.shortName(m), fullName: m.name }))
+        : view
+            .primaryModels()
+            .slice(0, 4)
+            .map((m) => ({ name: view.shortName(m), fullName: m.name }))
+
+      let ragText = ''
+      let expandedContexts: Array<Record<string, unknown>> = []
+      let availableStories: Array<Record<string, unknown>> = []
+      if (ragRetriever && query) {
+        try {
+          const structured = await ragRetriever.searchStructured(
+            {
+              prompt: query,
+              stage,
+              cast: castHints,
+              signal
+            },
+            {
+              expandContextRadius: 1,
+              includeAvailableStories: true,
+              storyCatalogLimit: 12
+            }
+          )
+          ragText = structured.promptBlock ?? ''
+          expandedContexts = structured.expandedContexts.map((c) => ({
+            scenarioId: c.scenarioId,
+            storyId: c.storyId,
+            story: c.story,
+            epTitle: c.epTitle,
+            unit: c.unit,
+            eventNum: c.eventNum,
+            isRecent2025_2026: c.isRecent2025_2026,
+            lang: c.lang,
+            lineStart: c.lineStart,
+            lineEnd: c.lineEnd,
+            text: c.text
+          }))
+          availableStories = structured.availableStories.map((s) => ({
+            storyId: s.storyId,
+            story: s.story,
+            unit: s.unit,
+            eventNum: s.eventNum,
+            isRecent2025_2026: s.isRecent2025_2026,
+            lang: s.lang,
+            scenarios: s.scenarios.slice(0, 4)
+          }))
+        } catch (error) {
+          logger.debug(`[AgentTool] RAG query failed: ${String(error)}`)
+        }
+      }
       return JSON.stringify({
-        note: '仅学习称呼、断句、潜台词与留白节奏，严禁照抄原句',
+        mode: 'search',
+        note: '仅学习称呼、断句、潜台词与留白节奏，严禁照抄原句；可传 mode:"expand" + scenarioId 查看完整前后剧情',
         actingGuidelines,
-        excerpts: ragText || excerpts || '（当前查询暂无额外语料，请严格遵循角色口吻）'
+        excerpts: ragText || excerpts || '（当前查询暂无额外语料，请严格遵循角色口吻）',
+        ...(expandedContexts.length > 0 ? { expandedContexts } : {}),
+        ...(availableStories.length > 0 ? { availableStories } : {})
+      })
+    }
+
+    if (name === 'compile_dialogue_workflow') {
+      const title =
+        typeof args.title === 'string' && args.title.trim()
+          ? args.title.trim()
+          : (savedPlan?.title ?? '')
+      const event =
+        typeof args.event === 'string' && args.event.trim()
+          ? args.event.trim()
+          : (savedPlan?.event ?? title)
+      const logline =
+        typeof args.logline === 'string' && args.logline.trim()
+          ? args.logline.trim()
+          : (savedPlan?.logline ?? '')
+      const contextText = `${event}\n${logline}`
+      const unitHint = personasMod.inferUnitFromText(contextText)
+
+      // 1. 解析 cast（优先 args.cast -> savedPlan.cast -> lines[].speaker -> primaryModels）
+      const resolvedCast: StagedCastPlan['cast'] = []
+      const seenCastIds = new Set<number>()
+      const pushCastModel = (m: CatalogModel | null, role = ''): void => {
+        if (!m || seenCastIds.has(m.id)) return
+        seenCastIds.add(m.id)
+        resolvedCast.push({
+          modelId: m.id,
+          name: view.shortName(m),
+          fullName: m.name || view.shortName(m),
+          path: m.path,
+          role
+        })
+      }
+
+      if (Array.isArray(args.cast)) {
+        for (const item of args.cast) {
+          if (!item || typeof item !== 'object') continue
+          const rec = item as Record<string, unknown>
+          const outfit = typeof rec.outfit === 'string' ? rec.outfit.trim() : ''
+          const m = findModel(view, rec.modelId, rec.name, {
+            ...(unitHint ? { unitHint } : {}),
+            contextText: outfit || contextText
+          })
+          pushCastModel(m, typeof rec.role === 'string' ? rec.role.trim() : '')
+        }
+      }
+      if (resolvedCast.length === 0 && savedPlan?.cast?.length) {
+        for (const c of savedPlan.cast) {
+          pushCastModel(findModel(view, c.modelId, c.name), c.role)
+        }
+      }
+
+      // 提前扫一遍 lines / turns 的 speaker 以防 cast 未显式传入
+      const rawTurns = Array.isArray(args.turns) ? args.turns : []
+      const rawLinesInput = Array.isArray(args.lines) ? args.lines : []
+      if (resolvedCast.length === 0) {
+        const speakerCandidates: string[] = []
+        for (const t of rawTurns) {
+          if (t && typeof t === 'object' && typeof (t as Record<string, unknown>).speaker === 'string') {
+            speakerCandidates.push(String((t as Record<string, unknown>).speaker))
+          }
+        }
+        for (const l of rawLinesInput) {
+          if (l && typeof l === 'object' && typeof (l as Record<string, unknown>).speaker === 'string') {
+            speakerCandidates.push(String((l as Record<string, unknown>).speaker))
+          }
+        }
+        for (const sp of speakerCandidates) {
+          pushCastModel(findModel(view, undefined, sp, { ...(unitHint ? { unitHint } : {}), contextText }))
+        }
+      }
+      if (resolvedCast.length === 0) {
+        for (const m of view.primaryModels().slice(0, 2)) pushCastModel(m)
+      }
+
+      const defaultBg =
+        view.canonicalImage(args.background) ??
+        savedPlan?.scenes?.[0]?.background ??
+        view.defaultImage()
+      const defaultAmbient: 'normal' | 'evening' | 'night' =
+        args.ambient === 'evening' || args.ambient === 'night' ? args.ambient : 'normal'
+      const explicitBgm =
+        typeof args.bgm === 'string' && args.bgm.trim() ? view.canonicalBgm(args.bgm.trim()) ?? '' : ''
+
+      const rawScenes = Array.isArray(args.scenes) ? args.scenes : []
+      const compiledScenes: StagedScenePlan[] =
+        rawScenes.length > 0
+          ? rawScenes
+              .filter((s): s is Record<string, unknown> => Boolean(s && typeof s === 'object'))
+              .slice(0, 4)
+              .map((s, idx) => {
+                const bg = view.canonicalImage(s.background) ?? defaultBg
+                const amb: 'normal' | 'evening' | 'night' =
+                  s.ambient === 'evening' || s.ambient === 'night' ? s.ambient : defaultAmbient
+                const bgmRaw = typeof s.bgm === 'string' ? s.bgm.trim() : ''
+                const sBgm =
+                  bgmRaw === 'silence' || bgmRaw === 'keep'
+                    ? bgmRaw
+                    : bgmRaw
+                      ? (view.canonicalBgm(bgmRaw) ?? '')
+                      : explicitBgm || undefined
+                const transRaw = typeof s.transitionIn === 'string' ? s.transitionIn : 'black'
+                const transitionIn =
+                  transRaw === 'sideFade' ||
+                  transRaw === 'flashback' ||
+                  transRaw === 'sekaiIn' ||
+                  transRaw === 'sekaiOut' ||
+                  transRaw === 'white'
+                    ? transRaw
+                    : 'black'
+                return {
+                  id: typeof s.id === 'string' && s.id.trim() ? s.id.trim() : `s${idx + 1}`,
+                  summary: typeof s.summary === 'string' ? s.summary.trim() : '',
+                  background: bg,
+                  ambient: amb,
+                  ...(typeof s.telop === 'string' && s.telop.trim() ? { telop: s.telop.trim() } : {}),
+                  ...(typeof s.placeInfo === 'string' && s.placeInfo.trim()
+                    ? { placeInfo: s.placeInfo.trim() }
+                    : {}),
+                  transitionIn,
+                  ...(s.isFlashback ? { isFlashback: true } : {}),
+                  ...(s.isSekai ? { isSekai: true } : {}),
+                  activeCast: Array.isArray(s.activeCast)
+                    ? s.activeCast.map((x) => String(x)).slice(0, 2)
+                    : resolvedCast.slice(0, 2).map((c) => c.name),
+                  ...(sBgm ? { bgm: sBgm } : {})
+                }
+              })
+          : savedPlan?.scenes?.length
+            ? savedPlan.scenes.map((s) => ({
+                id: s.id,
+                summary: s.summary,
+                background: s.background,
+                ambient: s.ambient,
+                transitionIn:
+                  s.transitionIn === 'sideFade' ||
+                  s.transitionIn === 'flashback' ||
+                  s.transitionIn === 'sekaiIn' ||
+                  s.transitionIn === 'sekaiOut' ||
+                  s.transitionIn === 'white'
+                    ? s.transitionIn
+                    : 'black',
+                activeCast: s.activeCast,
+                ...(s.bgm ? { bgm: s.bgm } : {}),
+                ...(s.isFlashback ? { isFlashback: true } : {}),
+                ...(s.isSekai ? { isSekai: true } : {})
+              }))
+            : [
+                {
+                  id: 's1',
+                  summary: event || title,
+                  background: defaultBg,
+                  ambient: defaultAmbient,
+                  transitionIn: 'black',
+                  activeCast: resolvedCast.slice(0, 2).map((c) => c.name),
+                  ...(explicitBgm ? { bgm: explicitBgm } : {})
+                }
+              ]
+
+      const pairwiseMap = new Map<string, StagedPairwiseAddress>()
+      for (const r of personasMod.extractPairwiseAddressBook(
+        personas,
+        resolvedCast.map((c) => c.name)
+      )) {
+        pairwiseMap.set(`${r.from}::${r.to}`, { from: r.from, to: r.to, zh: r.zh })
+      }
+      for (const p of [
+        ...(savedPlan?.pairwiseAddress ?? []),
+        ...(Array.isArray(args.pairwiseAddress)
+          ? (args.pairwiseAddress as Array<Record<string, unknown>>).map((x) => ({
+              from: String(x?.from ?? '').trim(),
+              to: String(x?.to ?? '').trim(),
+              zh: String(x?.zh ?? '').trim(),
+              ...(typeof x?.ja === 'string' && x.ja.trim() ? { ja: x.ja.trim() } : {})
+            }))
+          : [])
+      ]) {
+        if (!p.from || !p.to || !p.zh) continue
+        pairwiseMap.set(`${p.from}::${p.to}`, p)
+      }
+
+      const plan: StagedCastPlan = {
+        title,
+        event,
+        logline,
+        outline: savedPlan?.beats ?? [],
+        cast: resolvedCast,
+        background: compiledScenes[0]?.background || defaultBg,
+        scenes: compiledScenes,
+        ...(savedPlan?.understanding
+          ? {
+              understanding: {
+                explicitRequests: savedPlan.understanding.explicitRequests ?? [],
+                implicitSubtext: '',
+                relationshipDynamic: '',
+                emotionalArc: '',
+                ...(savedPlan.understanding.turningPoint
+                  ? { turningPoint: savedPlan.understanding.turningPoint }
+                  : {}),
+                ...(savedPlan.understanding.openingMotif
+                  ? { openingMotif: savedPlan.understanding.openingMotif }
+                  : {}),
+                ...(savedPlan.understanding.closingCallback
+                  ? { closingCallback: savedPlan.understanding.closingCallback }
+                  : {}),
+                canonHooks: savedPlan.understanding.canonHooks ?? [],
+                avoidList: []
+              }
+            }
+          : {}),
+        ...(pairwiseMap.size > 0 ? { pairwiseAddress: [...pairwiseMap.values()] } : {})
+      }
+
+      const normalizedDialogue = normalizeDialogue(
+        rawTurns.length > 0 ? { title, turns: rawTurns } : { title, lines: rawLinesInput },
+        plan,
+        120,
+        emotionLabels
+      )
+      if (!normalizedDialogue || normalizedDialogue.lines.length < 2) {
+        return JSON.stringify({
+          compiled: false,
+          error: '请提供至少 2 条有效台词（lines 或 turns），且说话人需匹配 cast 中的角色'
+        })
+      }
+
+      // 保留调用方显式附带的 ttsCaption/ttsSpeed/ttsSpecialScene 与可选单句 motion/facial 覆盖
+      const explicitLineMeta = new Map<
+        number,
+        { motion?: string; facial?: string; ttsCaption?: string; ttsSpeed?: number; ttsSpecialScene?: boolean }
+      >()
+      if (rawLinesInput.length === normalizedDialogue.lines.length) {
+        rawLinesInput.forEach((raw, idx) => {
+          if (!raw || typeof raw !== 'object') return
+          const r = raw as Record<string, unknown>
+          explicitLineMeta.set(idx, {
+            ...(typeof r.motion === 'string' && r.motion.trim() ? { motion: r.motion.trim() } : {}),
+            ...(typeof r.facial === 'string' && r.facial.trim() ? { facial: r.facial.trim() } : {}),
+            ...(typeof r.ttsCaption === 'string' && r.ttsCaption.trim()
+              ? { ttsCaption: r.ttsCaption.trim() }
+              : {}),
+            ...(typeof r.ttsSpeed === 'number' && Number.isFinite(r.ttsSpeed)
+              ? { ttsSpeed: r.ttsSpeed }
+              : {}),
+            ...(r.ttsSpecialScene === true ? { ttsSpecialScene: true } : {})
+          })
+        })
+      }
+
+      let dialogue: StagedDialogue = {
+        ...normalizedDialogue,
+        lines: normalizedDialogue.lines.map((line, idx) => {
+          const meta = explicitLineMeta.get(idx)
+          return {
+            ...line,
+            content: repairSpokenStageDirections(line.content),
+            ...(meta?.ttsCaption ? { ttsCaption: meta.ttsCaption } : {}),
+            ...(meta?.ttsSpeed !== undefined ? { ttsSpeed: meta.ttsSpeed } : {}),
+            ...(meta?.ttsSpecialScene ? { ttsSpecialScene: true } : {})
+          }
+        })
+      }
+
+      const dialogueLint = lintDialogueFidelity(dialogue, { ...plan, personas })
+      const useLlmStages = Boolean(llm?.enabled && args.runLlmStages !== false)
+      const stagePromptOpts = {
+        scene: event || title,
+        personas,
+        targetMinutes: targetMinutes ?? 3,
+        emotionLabels
+      }
+
+      let staging: StagedStaging | null = null
+      if (useLlmStages && llm) {
+        try {
+          const [emoRes, stgRes] = await Promise.all([
+            emotionLabels.length > 0
+              ? llm
+                  .chat(
+                    [
+                      { role: 'system', content: buildEmotionPrompt(plan, dialogue, stagePromptOpts).system },
+                      { role: 'user', content: buildEmotionPrompt(plan, dialogue, stagePromptOpts).user }
+                    ],
+                    { json: true, temperature: 0.25, signal }
+                  )
+                  .catch(() => null)
+              : Promise.resolve(null),
+            llm
+              .chat(
+                [
+                  {
+                    role: 'system',
+                    content: buildStagingPrompt(view, plan, dialogue, stagePromptOpts).system
+                  },
+                  {
+                    role: 'user',
+                    content: buildStagingPrompt(view, plan, dialogue, stagePromptOpts).user
+                  }
+                ],
+                { json: true, signal }
+              )
+              .catch(() => null)
+          ])
+          if (emoRes) {
+            const voicePlan = normalizeVoiceDirectionPlan(
+              extractJson(emoRes.content),
+              dialogue,
+              emotionLabels
+            )
+            if (voicePlan) {
+              dialogue = applyVoiceDirectionPlan(dialogue, voicePlan, emotionLabels)
+            }
+          }
+          if (stgRes) {
+            staging = normalizeStaging(extractJson(stgRes.content), view, plan, dialogue)
+          }
+        } catch {
+          // 回退到确定性编译
+        }
+      }
+      if (!staging) {
+        staging = fallbackStaging(view, plan, dialogue)
+      }
+
+      // 构建表演设计：优先可选 LLM direction，否则确定性使用 recommendForLine + characterActingProfile
+      let direction: StagedDirection | null = null
+      if (useLlmStages && llm) {
+        try {
+          const dirPrompt = buildDirectionPrompt(view, plan, dialogue, stagePromptOpts, staging)
+          const dirRes = await llm.chat(
+            [
+              { role: 'system', content: dirPrompt.system },
+              { role: 'user', content: dirPrompt.user }
+            ],
+            { json: true, signal }
+          )
+          const parsedDir = normalizeDirection(extractJson(dirRes.content), view, plan, dialogue)
+          if (parsedDir.lines.length > 0) direction = parsedDir
+        } catch {
+          // 回退确定性表演编译
+        }
+      }
+
+      if (!direction) {
+        const lastFacial = new Map<number, string>()
+        const lastMotion = new Map<number, string>()
+        const recentMotions = new Map<number, string[]>()
+        const appeared = new Set<number>()
+        let prevContent = ''
+        let prevEmotion = ''
+        let prevTense = false
+
+        const dirLines: StagedDirectionLine[] = dialogue.lines.map((line, idx) => {
+          const member =
+            plan.cast.find((c) => c.name === line.speaker || c.fullName === line.speaker) ??
+            plan.cast[0]
+          const model = view.modelById(member.modelId)
+          const meta = explicitLineMeta.get(idx)
+          if (!model) {
+            return {
+              id: line.id,
+              ...(meta?.motion ? { motion: meta.motion } : {}),
+              ...(meta?.facial ? { facial: meta.facial } : {})
+            }
+          }
+          const profile = getActingProfile(`${model.name} ${model.path}`, member.role)
+          const recList = recentMotions.get(model.id) ?? []
+          const advised = recommendForLine(view, model, {
+            content: line.content,
+            emotion: line.emotion,
+            prevContent,
+            prevEmotion,
+            prevTense,
+            isMonologue: /^[（(]/.test(line.content.trim()) && /[）)]$/.test(line.content.trim()),
+            restrainedRole: profile.restrained,
+            prevFacial: lastFacial.get(model.id),
+            prevMotion: lastMotion.get(model.id),
+            recentMotions: recList,
+            limit: 4
+          })
+          const isFirstEntry = !appeared.has(model.id)
+          appeared.add(model.id)
+          const facial = meta?.facial || advised.facials[0] || view.neutralFacial(model.id)
+          // 首句紧接 LayoutAppear 时留空 body motion，其余句子避免连续 4 句相同动作并跳过 20% 平稳过渡句
+          const motionCandidate =
+            meta?.motion ||
+            (isFirstEntry
+              ? ''
+              : idx % 5 === 3 && advised.mood === 'neutral'
+                ? ''
+                : advised.motions.find((m) => m !== lastMotion.get(model.id)) ??
+                  advised.motions[0] ??
+                  '')
+          if (facial) lastFacial.set(model.id, facial)
+          if (motionCandidate) {
+            lastMotion.set(model.id, motionCandidate)
+            recentMotions.set(model.id, [...recList.slice(-4), motionCandidate])
+          }
+          const ctx = inferDramaticMoodFallback({
+            content: line.content,
+            emotion: line.emotion,
+            prevContent,
+            prevEmotion
+          })
+          prevTense = ctx.tense
+          prevContent = line.content
+          prevEmotion = line.emotion ?? ''
+
+          return {
+            id: line.id,
+            ...(motionCandidate ? { motion: motionCandidate } : {}),
+            ...(facial ? { facial } : {})
+          }
+        })
+
+        const baseDir = fallbackDirection(view, plan)
+        direction = {
+          ...baseDir,
+          background: staging.scenes[0]?.background || baseDir.background,
+          ambient: staging.scenes[0]?.ambient || baseDir.ambient,
+          bgm: staging.scenes[0]?.bgm && staging.scenes[0].bgm !== 'keep' && staging.scenes[0].bgm !== 'silence'
+            ? staging.scenes[0].bgm
+            : baseDir.bgm,
+          lines: dirLines
+        }
+      }
+
+      const composed = composeStory(view, plan, dialogue, direction, staging)
+      alignStoryTtsEmotionsAndCaptions(composed as unknown as StoryData, { emotionLabels })
+      const { story, warnings } = validateAndFixStory(composed, view, logger, { emotionLabels })
+
+      const shouldSave = args.autoSaveDraft !== false
+      const storyObj = story as unknown as Record<string, unknown>
+      if (shouldSave) {
+        savedPlan = {
+          title: plan.title,
+          logline: plan.logline,
+          event: plan.event,
+          cast: plan.cast.map((c) => ({ modelId: c.modelId, name: c.name, role: c.role })),
+          scenes: (plan.scenes ?? []).map((s) => ({
+            id: s.id,
+            summary: s.summary,
+            background: s.background,
+            ambient: s.ambient,
+            transitionIn: s.transitionIn,
+            activeCast: s.activeCast,
+            ...(s.bgm ? { bgm: s.bgm } : {}),
+            ...(s.isFlashback ? { isFlashback: true } : {}),
+            ...(s.isSekai ? { isSekai: true } : {})
+          })),
+          beats: plan.outline,
+          ...(plan.pairwiseAddress ? { pairwiseAddress: plan.pairwiseAddress } : {})
+        }
+        savedDraft = structuredClone(storyObj)
+        directorReview = null
+        finalized = false
+      }
+      const audit = runCompactAudit(storyObj)
+      return JSON.stringify({
+        compiled: true,
+        draftSaved: shouldSave,
+        snippetCount: story.snippets.length,
+        compileWarnings: warnings.slice(0, 10),
+        dialogueLintIssues: dialogueLint.issues.slice(0, 10),
+        ...(shouldSave ? {} : { story: storyObj }),
+        ...audit
       })
     }
 
@@ -3197,10 +3985,20 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           content: typeof l.content === 'string' ? l.content : ''
         }))
         .filter((l) => l.content.trim().length > 0)
+      const speakerNames = Array.from(new Set(lines.map((l) => l.speaker).filter(Boolean)))
+      const seededAddresses = [
+        ...personasMod.extractPairwiseAddressBook(personas, speakerNames).map((r) => ({
+          from: r.from,
+          to: r.to,
+          zh: r.zh
+        })),
+        ...(savedPlan?.pairwiseAddress ?? [])
+      ]
       const lint = lintDialogueFidelity(
         { title: typeof args.title === 'string' ? args.title : (savedPlan?.title ?? ''), lines },
         {
-          ...(savedPlan?.pairwiseAddress ? { pairwiseAddress: savedPlan.pairwiseAddress } : {}),
+          ...(seededAddresses.length > 0 ? { pairwiseAddress: seededAddresses } : {}),
+          personas,
           cast: view.primaryModels().map((m) => ({
             modelId: m.id,
             name: view.shortName(m),
@@ -3941,6 +4739,7 @@ export async function runAgenticStoryGeneration(
     emotionLabels,
     targetMinutes,
     ragRetriever,
+    llm,
     logger
   })
 
@@ -3959,8 +4758,8 @@ export async function runAgenticStoryGeneration(
 
   const sharedRules = [
     '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
-    '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se"], queries: [...] })` + `search_official_corpus({ query })`；**不要**按角色逐一重复查 `lookup_character` 或 `inspect_character_expressions`！',
-    '- **第 2 步（直接起草）**：基于已获取的人设、表情/动作调色板与素材，直接起草完整高质量 StoryData 并调用 1 次 `save_story_draft`（复杂多幕可先 `plan_story_outline`）。**严禁**把整场几十句台词重发一遍给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`！`save_story_draft` 已自带全套规则体检与 `directorTelemetry`，**无需**再重复调用 `validate_story_draft` 或 `critique_story_draft`。',
+    '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], unitHint, contextText, includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se","outfit"], queries: [...] })` + `search_official_corpus({ query, cast: [...] })`；若找到契合的官方剧集，可用 `search_official_corpus({ mode: "expand", scenarioId })` 细读上下文！**以 `lookup_character` 返回的完整重写人设作为第一真相源**（记忆、语癖、禁忌、称呼表）。',
+    '- **第 2 步（推荐：工作流编译 OR 直接起草）**：强烈推荐调用 `compile_dialogue_workflow`——只需传入调研好的 `title`/`event`/`background`/`bgm`/`cast`/`scenes` 与纯台词 `lines`（或 `turns`），编译器会自动完成零冲突 Live2D Staging + VoiceDirection + Acting + `composeStory` 并存入工作区草稿，无需手写 150 条原始 snippet！（也可手动调用 `save_story_draft`）。**严禁**把几十句台词重发给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`。',
     "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光、总句数时长达标与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写与双人 Left/Right 原地淡入淡出切镜、`SideFade`/`FlashbackIn`/`AmbientColor`、独立 `Motion` 静默拍、`Wait` 留白，以及克制的镜头/震动使用）（5）全量动作库多样性与表情自然度（严禁 `nod01`/`sad01` 刷屏，确保每位角色都有丰富动作）；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
     '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
     '1. **持续情绪、动作多样性与真伪笑脸分辨**：泣不成声、悲伤倾诉、冲突崩溃段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句；充分利用角色全量动作库（含 `nod02/03`、`forward02`、`sigh01`、`lookaway01`、`fidget01`、`relief01` 及贴合气氛的跨风格变体），同一词根整场不要重复超过 2~3 次，确保每位在场角色都有多样身体动作，并在句间/转折前点缀独立 `Motion` 节拍（约 16~22 次/40句）。严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；先前处于「生气/伤心」的听者严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝或睡眠台词；真冬保持克制内敛。',

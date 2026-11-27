@@ -4,9 +4,13 @@ import { selectUnitFewShotExcerpts } from './corpusExamples'
 import * as personasMod from './personas'
 import {
   GENERIC_PROFILE,
+  actingPersonaPrompt,
   dialoguePersonaPrompt,
+  extractPairwiseAddressBook,
+  inferUnitFromText,
   normalizePjskTerminology,
   personaFor,
+  planningPersonaPrompt,
   type PersonaEntry
 } from './personas'
 import {
@@ -53,7 +57,7 @@ import {
  * 4. composeStory + validateAndFixStory + OfficialLinter：编译官方时间线并校验硬指标。
  */
 
-export type LlmPipeline = 'single' | 'staged' | 'agent'
+export type LlmPipeline = 'single' | 'staged' | 'agent' | 'hybrid'
 
 export type StagedTransitionKind =
   | 'black'
@@ -297,6 +301,8 @@ export interface StagedPromptOptions {
   emotionLabels?: string[]
   /** 自适应 RAG 检索结果（Pass A / Pass B），缺省或无命中时为空 */
   ragContext?: RagRetrieveResult | null
+  /** hybrid 流水线前置 Agent 探索产出的核实研究简报（人设记忆、官方事件与云端素材） */
+  researchBrief?: string
 }
 
 export interface StagedMessages {
@@ -1163,10 +1169,59 @@ function unwrapRecord(raw: unknown, keys: string[]): unknown {
   return raw
 }
 
-function personaSummary(persona: PersonaEntry | null): string {
+function personaSummary(persona: PersonaEntry | null, maxChars = 320): string {
   if (!persona) return ''
+  const distilled = planningPersonaPrompt(persona, maxChars)
+  if (distilled) return distilled
   const text = persona.prompt.replace(/\s+/g, ' ').trim()
-  return text.length > 160 ? `${text.slice(0, 160)}…` : text
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
+}
+
+function resolveMemberPersona(
+  personas: PersonaEntry[],
+  member: Pick<StagedCastMember, 'modelId' | 'name' | 'fullName' | 'path'>,
+  view?: CatalogView,
+  contextText = ''
+): PersonaEntry | null {
+  if (personas.length === 0) return null
+  const model: CatalogModel = view?.modelById(member.modelId) ?? {
+    id: member.modelId,
+    name: member.fullName || member.name,
+    shortName: member.name,
+    path: member.path,
+    motions: [],
+    facials: [],
+    defaultMotion: '',
+    defaultFacial: ''
+  }
+  const unitHint = model.unit ?? inferUnitFromText(contextText)
+  return personaFor(personas, model, {
+    ...(unitHint ? { unitHint } : {}),
+    ...(contextText ? { contextText } : {})
+  })
+}
+
+function mergePairwiseAddresses(
+  personas: PersonaEntry[],
+  castNames: string[],
+  existing?: StagedPairwiseAddress[]
+): StagedPairwiseAddress[] | undefined {
+  const merged = new Map<string, StagedPairwiseAddress>()
+  for (const rule of extractPairwiseAddressBook(personas, castNames)) {
+    const key = `${rule.from}::${rule.to}`
+    merged.set(key, { from: rule.from, to: rule.to, zh: rule.zh })
+  }
+  for (const entry of existing ?? []) {
+    const key = `${entry.from}::${entry.to}`
+    const prev = merged.get(key)
+    merged.set(key, {
+      from: entry.from,
+      to: entry.to,
+      zh: entry.zh || prev?.zh || entry.to,
+      ...(entry.ja ? { ja: entry.ja } : {})
+    })
+  }
+  return merged.size > 0 ? [...merged.values()] : undefined
 }
 
 function castMemberFor(
@@ -1345,15 +1400,18 @@ function isGroupPrompt(scene: string, view: CatalogView): boolean {
 function compactOutfitOptions(view: CatalogView, model: CatalogModel, scene: string): string {
   const variants = view.outfitsFor(model)
   if (variants.length <= 1) return ''
-  // 每个服装大类取代表性变体，优先命中的场景服装关键词放前
+  const allowBack = /背影|背面|背对|back\s*view/i.test(scene)
+  const frontVariants = allowBack ? variants : variants.filter((v) => !isBackViewModel(v))
+  const pool = frontVariants.length > 0 ? frontVariants : variants
+  // 每个服装大类取代表性变体，优先命中的场景服装/组合关键词放前，适配 576+ 云端模型目录
   const picked: CatalogModel[] = []
   const seenCats = new Set<string>()
   const sceneMatched = view.resolveOutfitVariant(model, scene)
-  if (sceneMatched && sceneMatched.id !== model.id) {
+  if (sceneMatched && sceneMatched.id !== model.id && (allowBack || !isBackViewModel(sceneMatched))) {
     picked.push(sceneMatched)
-    seenCats.add(sceneMatched.outfitCategory ?? '')
+    seenCats.add(sceneMatched.outfitCategory ?? sceneMatched.outfitLabel ?? '')
   }
-  for (const variant of variants) {
+  for (const variant of pool) {
     if (picked.length >= 6) break
     const cat = variant.outfitCategory || variant.outfitLabel || String(variant.id)
     if (cat === '特殊' && !/幼年|剪影|童年/.test(scene)) continue
@@ -1362,7 +1420,7 @@ function compactOutfitOptions(view: CatalogView, model: CatalogModel, scene: str
     picked.push(variant)
   }
   if (picked.length <= 1) return ''
-  return ` [服装: ${picked.map((v) => `${v.outfitCategory || v.outfitLabel || '默认'}=${v.id}`).join(', ')}]`
+  return ` [服装: ${picked.map((v) => `${v.outfitLabel || v.outfitCategory || '默认'}=${v.id}`).join(', ')}]`
 }
 
 export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions): StagedMessages {
@@ -1379,17 +1437,27 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   ]
 
   const mentionedModels = findMentionedPrimaryModels(options.scene, primary)
+  const mentionedSet = new Set(mentionedModels.map((m) => m.id))
+  const sceneUnitHint = inferUnitFromText(options.scene)
   const cleanedSceneForGroup = options.scene.replace(META_EVENT_STYLE_RE, '')
   const asksForGroup = EXPLICIT_GROUP_INTENT_RE.test(cleanedSceneForGroup)
   const groupStyle = isGroupPrompt(options.scene, view)
+  const richRoster = mainRoster.length <= 6
   const models = mainRoster
     .map((model) => {
-      const persona = personaFor(options.personas, model)
+      const persona = personaFor(options.personas, model, {
+        unitHint: sceneUnitHint ?? model.unit,
+        contextText: options.scene
+      })
       const group = model.unit ? `（${model.unit}）` : persona?.group ? `（${persona.group}）` : ''
-      const summary = personaSummary(persona)
+      const isFocused =
+        richRoster ||
+        mentionedSet.has(model.id) ||
+        Boolean(sceneUnitHint && persona?.unit === sceneUnitHint)
+      const digest = personaSummary(persona, mentionedSet.has(model.id) ? 2200 : isFocused ? 1100 : 260)
       const outfits = compactOutfitOptions(view, model, options.scene)
       return `- modelId=${model.id} ${view.shortName(model)}${group}${outfits}${
-        summary ? `：${summary}` : ''
+        digest ? `\n${digest}` : ''
       }`
     })
     .join('\n')
@@ -1397,12 +1465,37 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   const subModelsBlock =
     subShown.length > 0
       ? `\n\n## 可选配角 / 特别角色（按需选用）\n${subShown
-          .map(
-            (m) =>
-              `- modelId=${m.id} ${view.shortName(m)}${m.outfitLabel ? `（${m.outfitLabel}）` : ''}`
-          )
+          .map((m) => {
+            const p = subMentioned.includes(m)
+              ? personaFor(options.personas, m, {
+                  unitHint: sceneUnitHint ?? m.unit,
+                  contextText: options.scene
+                })
+              : null
+            const subDigest = p ? personaSummary(p, 900) : ''
+            return `- modelId=${m.id} ${view.shortName(m)}${m.outfitLabel ? `（${m.outfitLabel}）` : ''}${
+              subDigest ? `\n${subDigest}` : ''
+            }`
+          })
           .join('\n')}`
       : ''
+
+  const candidateAddressBook =
+    mentionedModels.length >= 2
+      ? extractPairwiseAddressBook(
+          options.personas,
+          mentionedModels.map((m) => view.shortName(m))
+        )
+      : []
+  const candidateAddressBlock =
+    candidateAddressBook.length > 0
+      ? `\n\n## 候选角色已知人设称呼（pairwiseAddress 必须采纳）\n${candidateAddressBook
+          .map((r) => `- ${r.from} → ${r.to}：「${r.zh}」${r.note ? `（${r.note}）` : ''}`)
+          .join('\n')}`
+      : ''
+  const researchBriefBlock = options.researchBrief?.trim()
+    ? `\n\n## 前置探索研究简报（已核实人设记忆、官方剧情与云端素材，选角与大纲优先采纳）\n${options.researchBrief.trim()}`
+    : ''
 
   const backgrounds = view
     .imagePromptChoices(72, options.scene)
@@ -1533,8 +1626,8 @@ ${options.scene}
 - 目标时长：约 ${options.targetMinutes} 分钟，约 ${budget} 句台词（按 PJSK 配音与停顿约 7 秒/句换算，凝练紧凑，切勿注水拉长）
 - 只演完一个核心事件或情绪弧光，禁止塞入多条无关支线${preCastRagBlock}
 
-## 可选角色（modelId — 显示名；若角色有 [服装: 校服=ID...]，按场景时段与场合直接选对应服装 modelId）
-${models || '（资源目录为空）'}${subModelsBlock}
+## 可选角色（modelId — 显示名；含重写人设记忆与关系；若角色有 [服装: ...=ID]，按场合直接选对应 modelId）
+${models || '（资源目录为空）'}${subModelsBlock}${candidateAddressBlock}${researchBriefBlock}
 
 ## 可选背景（按场景地点、时段[白天/黄昏/夜晚/深夜]与[室内/室外]精准选择）
 ${backgrounds || '（目录暂未提供背景）'}
@@ -1780,7 +1873,7 @@ export function normalizeCastPlan(
     }
   }
 
-  let pairwiseAddress: StagedPairwiseAddress[] | undefined
+  let rawPairwiseAddress: StagedPairwiseAddress[] | undefined
   if (Array.isArray(doc.pairwiseAddress)) {
     const list: StagedPairwiseAddress[] = []
     for (const item of doc.pairwiseAddress.slice(0, 12)) {
@@ -1792,8 +1885,13 @@ export function normalizeCastPlan(
       if (!from || !to || (!zh && !ja)) continue
       list.push({ from, to, zh: zh || to, ...(ja ? { ja } : {}) })
     }
-    if (list.length > 0) pairwiseAddress = list
+    if (list.length > 0) rawPairwiseAddress = list
   }
+  const pairwiseAddress = mergePairwiseAddresses(
+    options.personas,
+    cast.map((c) => c.name),
+    rawPairwiseAddress
+  )
 
   let retrievalQueries: StagedRetrievalQueries | undefined
   if (isRecord(doc.retrievalQueries)) {
@@ -1848,6 +1946,10 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
     mentioned.length >= 2 ? mentioned.slice(0, 5) : pool.slice(0, Math.min(2, pool.length))
   const cast = models.map((model) => castMemberFor(view, model))
   const bg = view.defaultImage()
+  const pairwiseAddress = mergePairwiseAddresses(
+    options.personas,
+    cast.map((c) => c.name)
+  )
   return {
     title: options.title ?? '',
     event: oneLine(options.scene, 300),
@@ -1855,6 +1957,7 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
     outline: [],
     cast,
     background: bg,
+    ...(pairwiseAddress ? { pairwiseAddress } : {}),
     scenes: [
       {
         id: 's1',
@@ -2001,26 +2104,24 @@ export function formatCanonGroundingBrief(options: CanonGroundingBriefOptions = 
   if (ragContext) {
     const sections = ragContext.sections
     if (sections) {
-      const plotText = packExcerptsCleanly(
-        sections.canonPlot,
-        Math.min(remaining, Math.round(maxChars * 0.45))
-      )
+      // 均衡分配 3 栏预算（canonPlot / worldviewLore / dialogueVoice），避免单一类别挤占其它栏目
+      const plotCap = Math.min(remaining, Math.round(maxChars * 0.4))
+      const plotText = packExcerptsCleanly(sections.canonPlot, plotCap)
       if (plotText) {
         ragParts.push(
           `### 相关官方剧情与事件参考（尊重事实与连续性，不要当成背景解说背诵）\n${plotText}`
         )
         remaining -= plotText.length
       }
-      const loreText = packExcerptsCleanly(
-        sections.worldviewLore,
-        Math.min(remaining, Math.round(maxChars * 0.35))
-      )
+      const loreCap = Math.min(remaining, Math.round(maxChars * 0.3))
+      const loreText = packExcerptsCleanly(sections.worldviewLore, loreCap)
       if (loreText) {
         ragParts.push(`### 世界观、地点与角色补充设定\n${loreText}`)
         remaining -= loreText.length
       }
       if (stage !== 'cast' && remaining > 120) {
-        const voiceText = packExcerptsCleanly(sections.dialogueVoice, remaining)
+        const voiceCap = Math.min(remaining, Math.round(maxChars * 0.35))
+        const voiceText = packExcerptsCleanly(sections.dialogueVoice, voiceCap)
         if (voiceText) {
           ragParts.push(
             `### 官方对白口吻样本（只学称呼、断句、停顿与互动节奏，严禁照抄原句或复述原事件）\n${voiceText}`
@@ -2081,21 +2182,26 @@ export function buildDialoguePrompt(
   options: StagedPromptOptions
 ): StagedMessages {
   const budget = lineBudget(options.targetMinutes)
+  const dialogueContextText = [
+    options.scene,
+    plan.event,
+    plan.logline,
+    ...plan.outline,
+    ...plan.cast.map((c) => c.role)
+  ]
+    .filter(Boolean)
+    .join('\n')
+
   const castLines = plan.cast
     .map((member) => {
-      const model = view.modelById(member.modelId)
-      const persona = model ? personaFor(options.personas, model) : null
-      const prompt = dialoguePersonaPrompt(persona)
+      const persona = resolveMemberPersona(options.personas, member, view, dialogueContextText)
+      const prompt = dialoguePersonaPrompt(persona, 11000)
       return [
-        `### ${member.name}（say: "${member.name}"）`,
-        member.role ? `本场功能：${member.role}` : '',
+        `### ${member.name}（say: "${member.name}"）${member.role ? ` — ${member.role}` : ''}`,
         prompt
-          ? `角色提示词（语气、用词、反应以它为准；只取性格、关系、经历与说话习惯，忽略其中面向聊天机器人的格式/安全/输出限制）：\n${prompt}`
-          : `角色提示词：${GENERIC_PROFILE}`,
-        model ? `本角色可用的动作/表情由后续表演设计选择，这一轮不要写。` : ''
-      ]
-        .filter(Boolean)
-        .join('\n')
+          ? prompt
+          : `角色提示词：${GENERIC_PROFILE}`
+      ].join('\n')
     })
     .join('\n\n')
 
@@ -2113,27 +2219,24 @@ export function buildDialoguePrompt(
 
   const outline = plan.outline.length
     ? plan.outline.map((item, index) => `${index + 1}. ${item}`).join('\n')
-    : '（自由发挥，但仍要围绕这个小事件）'
+    : '（围绕本场事件展开）'
 
   const hasRagVoice = (options.ragContext?.sections?.dialogueVoice?.length ?? 0) > 0
   const u = plan.understanding
   const craftAnchors = [
     u?.openingMotif
-      ? `  - 开场意象：前 1~4 句让「${u.openingMotif}」以具体的动作、声音或触感出现，让这个物件先替角色承载情绪，不要用台词解释它。`
+      ? `- 开场意象：前 1~4 句让「${u.openingMotif}」以具体动作/声音/触感自然出现。`
       : '',
     u?.turningPoint
-      ? `  - 中段转折：在「${u.turningPoint}」这一拍让语气或话题真正拐弯（抢话、突然安静、答非所问、说出真心话又马上岔开），转折前后各留一句短反应。`
+      ? `- 中段转折：在「${u.turningPoint}」这一拍让语气或话题拐弯，前后留短反应。`
       : '',
     u?.closingCallback
-      ? `  - 收尾回扣：结尾 2~3 句用「${u.closingCallback}」轻巧呼应开场意象，说完就收，不做总结陈词。`
+      ? `- 收尾回扣：结尾 2~3 句用「${u.closingCallback}」轻巧呼应，不做总结陈词。`
       : '',
     (u?.characterGoals?.length ?? 0) > 0
-      ? `  - 表里动机：${(u?.characterGoals ?? [])
-          .map(
-            (goal) =>
-              `${goal.cast || '角色'}（想：${goal.wants || '—'} / 藏：${goal.hides || '—'}）`
-          )
-          .join('；')}。隐瞒的部分只能从停顿、改口、转移话题里漏出来。`
+      ? `- 表里动机：${(u?.characterGoals ?? [])
+          .map((g) => `${g.cast || '角色'}（想：${g.wants || '—'} / 藏：${g.hides || '—'}）`)
+          .join('；')}（隐瞒面只从停顿/改口/岔开话题漏出）。`
       : ''
   ]
     .filter(Boolean)
@@ -2145,14 +2248,22 @@ export function buildDialoguePrompt(
     plan,
     ragContext: options.ragContext,
     stage: 'dialogue',
-    maxChars: 2600
+    maxChars: 2200
   })
-  const addressBlock = formatPairwiseAddressBlock(plan)
+  const mergedAddresses = mergePairwiseAddresses(
+    options.personas,
+    plan.cast.map((c) => c.name),
+    plan.pairwiseAddress
+  )
+  const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
+  const researchBriefBlock = options.researchBrief?.trim()
+    ? `\n## 前置探索核实简报（记忆线索与官方事件锚点）\n${options.researchBrief.trim()}\n`
+    : ''
   const hasWxs = plan.cast.some((c) =>
     /笑梦|宁宁|司|类|emu|nene|tsukasa|rui/i.test(`${c.name} ${c.path}`)
   )
   const termHint = hasWxs
-    ? '\n- 术语固定：笑梦口号必须写 **Wonderhoy**，宁宁的机器人必须写 **宁宁号**。'
+    ? '\n- 术语固定：笑梦口号写 **Wonderhoy**，宁宁的机器人写 **宁宁号**。'
     : ''
 
   const a = plan.cast[0]
@@ -2166,8 +2277,8 @@ export function buildDialoguePrompt(
         speaker: a.name,
         lines: [
           '今天也……一起练吧。',
-          '我把上次那首的副歌重新编了一下，\n你听听看？',
-          '（……其实昨晚改完之后，一直有点没底。）'
+          '我把副歌重新编了一下，\n你听听看？',
+          '（……其实昨晚改完后，一直有点没底。）'
         ]
       },
       ...(b && b.name !== a.name
@@ -2177,8 +2288,6 @@ export function buildDialoguePrompt(
               lines: [
                 '诶，什么时候弄的？',
                 '……我看看。',
-                '嗯，这里第二段是不是太满了？\n不是说不好，就是……有点急着往前跑。',
-                '（……明明才熬过一次通宵，干嘛还要这么拼。）',
                 { content: '……先让我再听一遍。', closeWindowAfter: true }
               ]
             }
@@ -2192,79 +2301,45 @@ export function buildDialoguePrompt(
               lines: [{ content: '……我刚到，你们已经在听新编曲了？', pauseBefore: 1.0 }]
             }
           ]
-        : []),
-      {
-        speaker: a.name,
-        lines: ['啊。', '（……果然还是被听出来了啊。）']
-      },
-      ...(b && b.name !== a.name
-        ? [
-            {
-              speaker: b.name,
-              lines: ['……我可没说不好听。', '下次改谱之前，好歹先喝口热茶歇一歇。']
-            }
-          ]
-        : []),
-      { speaker: a.name, lines: ['……嗯。'] }
+        : [])
     ]
   }
 
+  const minLines = Math.max(10, Math.round(budget * 0.92))
+  const maxLines = Math.max(14, Math.round(budget * 1.2))
+
   return {
     system: [
-      '你是 Project SEKAI 风格视觉小说的编剧。',
-      '这是五阶段创作的第二轮：只写台词稿——谁在第几句说什么。',
-      '不要写动作、表情、镜头或旁白式描写；这些由后续舞台与表演轮次负责。',
-      '台词稿会被逐字使用，后续轮次不会改一个字，所以这一轮把话的口吻、断行和停顿写准。只输出一个 JSON 对象。',
+      '你是 Project SEKAI 视觉小说编剧。这是五阶段创作的第二轮：只写台词稿（禁止写动作/表情/镜头/旁白括号）。',
+      '以「出场角色完整重写人设」作为第一真相源——角色的性格、重要记忆、关系边界、语言与风格、会说与绝不会说、称呼规范压倒一切通用猜测。只输出一个 JSON 对象。',
       options.systemPrompt?.trim() ?? ''
     ]
       .filter(Boolean)
       .join('\n'),
-    user: `## 这一场
-小事件：${plan.event || options.scene}
-${plan.logline ? `一句话：${plan.logline}` : ''}
-${plan.background ? `开场背景：${plan.background}` : ''}
-出场角色（共 ${plan.cast.length} 名）：
-${castBlock(plan)}
-
-${scenesSummary ? `## 分幕安排（可给 turn 标 scene: "s1"/"s2"/"s3"）\n${scenesSummary}\n` : ''}${groundingBrief}${addressBlock}## 大纲（参考，不必逐条对应）
-${outline}
-
-## 角色（请完整阅读每个人的提示词）
+    user: `## 出场角色完整人设（第一真相源：语气、记忆、禁忌与称呼严格以此为准）
 ${castLines}
-${
-  fewShotExcerpts
-    ? `
-## 官方对白节奏样例（只学习称呼、断句、停顿、换行与互动节奏，严禁照抄原句或复述原事件）
-${fewShotExcerpts}
-`
-    : ''
-}
-## 台词要求（按 ${budget} 句的场次计算，约 ${options.targetMinutes} 分钟）
-- 语言：中文；总共 ${Math.max(10, Math.round(budget * 0.92))}~${Math.max(14, Math.round(budget * 1.2))} 句（目标约 ${budget} 句，按 PJSK 配音与停留约 7 秒/句换算）；
-  少于 ${Math.max(10, Math.round(budget * 0.92))} 句或超过 ${Math.max(14, Math.round(budget * 1.2))} 句都视为不合格。
-- 用 turns 组织：一个角色的一次发言 = 一个 turn，turn 里放 1~6 条 lines。
-  lines 元素优先直接写字符串；需要刻意沉默/转场收窗时可写成对象 \`{"content":"...","pauseBefore":1.0,"closeWindowAfter":true}\`（pauseBefore 仅在重大停顿或反应前用 \`1.0\` 或 \`1.5\`，其余句留空即 \`0\`）。
-  **贴近官方 PJSK 的自然连说节奏（平均每轮约 1.8~2.2 句）**：避免机械一问一答交替（A-B-A-B）——约 1/3 的 turn 用 1 句短反应/抢话（至少 ${Math.max(4, Math.round(budget * 0.25))} 个），约 1/2 的 turn 用 2~3 句自然连说（先接一句短反应或内心心声，再顺势说出想法），少数情绪最重或回忆处可用 4~6 条（5~6 条的稍长一段全片最多 1 处，严禁多处连排长独白）。
-- 句长与排版（对应官方 30 字宽文本框）：
-  - 平均 18~21 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
-  - 约 1/7 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
-- **内心独白（（……），全片约 10%~16% / 3~6 句）**：自然穿插全角括号内心独白（如 \`（……她其实也很在意吧）\`、\`（现在这样笑出来，反而更难受……）\`），用来写角色顾虑、犹豫、暗自观察或表里动机的隐瞒面；**严禁夹带 \`（微笑）\` \`(挠头)\` \`（叹气）\` 等舞台动作/神态括号**，也禁止 \`她转过头\` 之类第三人称动作叙述。
-- 节奏要贴合场景和角色性格自然流动，不要刻意凑齐任何“标准比例”；有对话往来、短反应、适当留白即可。
-- **反套路与官方质感（Show, Don't Tell）**：
-  - 禁止心理咨询式独白和直白情绪总结（如「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「我终于明白了」「内心深处」）。用具体物件、转移话题、打断、迟疑停顿（……、——）来侧面流露情绪。
-  - 结尾最后 2 句严禁升华说教或大团圆总结；像官方剧情一样收在一个安静的动作余韵、日常小约定、轻描淡写的吐槽或未说完的半句话里。
-  - 角色化学反应：允许抢话、听错、各说各的再重新对上、用口头禅或小名互怼；不要每句都接得严丝合缝像在念对白稿。
-  - 欲言又止：全片至少 3~4 处把话说到一半改成破折号或省略号，或先答非所问再绕回来。${craftAnchors ? `\n${craftAnchors}` : ''}${termHint}
-
-## 写完后自检（不要输出自检过程）
-- 总句数是否在 ${Math.max(10, Math.round(budget * 0.92))}~${Math.max(14, Math.round(budget * 1.2))} 句？
-- 是否有自然的 2~3 句连说、足够短反应与 3~6 句 \`（……）\` 内心独白？
-- 出场角色是否均来自上方名单（共 ${plan.cast.length} 名），每行不超过 30 字宽、最多 3 行？
+${addressBlock}
+## 本场事件与分幕
+事件：${plan.event || options.scene}${plan.logline ? ` | 梗概：${plan.logline}` : ''}${plan.background ? ` | 背景：${plan.background}` : ''}
+出场：
+${castBlock(plan)}
+${scenesSummary ? `\n分幕：\n${scenesSummary}` : ''}
+大纲：
+${outline}
+${researchBriefBlock}${groundingBrief}${
+      fewShotExcerpts
+        ? `\n## 官方对白节奏样例（只学断句停顿，严禁照抄）\n${fewShotExcerpts}\n`
+        : ''
+    }## 写作与格式规范（目标约 ${budget} 句，范围 ${minLines}~${maxLines} 句 / ${options.targetMinutes} 分钟）
+- 中文输出，用 \`turns\`（\`speaker\` + \`lines\` 1~6 条，可带 \`scene\`/\`pauseBefore\` 1.0|1.5/\`closeWindowAfter\`）。
+- 贴近官方连说节奏：1/3 单句短反应（>=${Math.max(4, Math.round(budget * 0.25))} 个），1/2 为 2~3 句自然连说，情绪最重处可用 5~6 条（最多 1 处）；平均 18~21 字，每行 <=30 字宽、最多 3 行。
+- 内心独白用全角括号 \`（……）\`（全片 3~6 句 / 10%~16%）；**严禁** \`（微笑）\`/\`*叹气*\` 等动作描写或第三人称旁白。
+- Show, Don't Tell：禁止心理咨询套话、AI 总结腔与结尾说教，允许抢话、欲言又止（……、——）与日常余韵收尾。${craftAnchors ? `\n${craftAnchors}` : ''}${termHint}
 
 ## 输出 JSON
 ${JSON.stringify(example, null, 2)}
 
-只输出 JSON 对象本身，不要 markdown 或解释。`
+只输出 JSON 对象本身。`
   }
 }
 
@@ -2564,7 +2639,18 @@ export function buildEmotionPrompt(
     .join('\n')
 
   const cast = plan.cast
-    .map((member) => `- ${member.name}：${member.role || '出场角色'}`)
+    .map((member) => {
+      const persona = resolveMemberPersona(
+        options.personas,
+        member,
+        undefined,
+        `${options.scene}\n${plan.event}`
+      )
+      const acting = actingPersonaPrompt(persona, 1600)
+      return acting
+        ? `- ${member.name}（${member.role || '出场角色'}）：\n${acting}`
+        : `- ${member.name}：${member.role || '出场角色'}`
+    })
     .join('\n')
 
   const firstId = dialogue.lines[0]?.id ?? 'l1'
@@ -3101,30 +3187,31 @@ export interface DialoguePolishOptions {
   ragContext?: RagRetrieveResult | null
 }
 
-/** 只给被点名改写的说话者一小段口吻基线，避免润色把所有人改成同一种语气。 */
+/** 给被点名或全部说话者提供完整语言风格/会说与绝不会说/称呼基线，确保润色与 Critic 贴合重写人设。 */
 function formatSpeakerVoiceBlock(
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
   flaggedIds: string[],
-  options: DialoguePolishOptions
+  options: DialoguePolishOptions,
+  allSpeakers = false
 ): string {
-  if (!options.view || !options.personas || options.personas.length === 0) return ''
+  if (!options.personas || options.personas.length === 0) return ''
   const flagged = new Set(flaggedIds)
-  const speakers = new Set(
-    dialogue.lines.filter((line) => flagged.has(line.id)).map((line) => line.speaker)
-  )
+  const speakers = allSpeakers
+    ? new Set(plan.cast.map((c) => c.name))
+    : new Set(dialogue.lines.filter((line) => flagged.has(line.id)).map((line) => line.speaker))
+  const contextText = `${options.scene ?? ''}\n${plan.event}\n${plan.logline}`
   const rows: string[] = []
   for (const name of speakers) {
     const member = plan.cast.find((entry) => entry.name === name)
     if (!member) continue
-    const model = options.view.modelById(member.modelId)
-    const persona = model ? personaFor(options.personas, model) : null
-    const prompt = dialoguePersonaPrompt(persona).replace(/\s+/g, ' ').trim()
+    const persona = resolveMemberPersona(options.personas, member, options.view, contextText)
+    const prompt = dialoguePersonaPrompt(persona, 3200).trim()
     if (!prompt) continue
-    rows.push(`- ${name}：${prompt.slice(0, 420)}`)
+    rows.push(`### ${name}\n${prompt}`)
   }
   return rows.length > 0
-    ? `## 说话者口吻基线（改写必须保持这个人说话的样子）\n${rows.join('\n')}\n\n`
+    ? `## 说话者口吻基线（严格核对「语言与风格」「会说与绝不会说」「称呼」「核心禁忌」）\n${rows.join('\n\n')}\n\n`
     : ''
 }
 
@@ -3163,7 +3250,12 @@ export function buildDialoguePolishPrompt(
     .filter(Boolean)
     .join('\n\n')
 
-  const addressBlock = formatPairwiseAddressBlock(plan)
+  const mergedAddresses = mergePairwiseAddresses(
+    options.personas ?? [],
+    plan.cast.map((c) => c.name),
+    plan.pairwiseAddress
+  )
+  const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
   const anchorBlock = formatDirectingAnchorBlock(plan)
   const userPrompt = packExcerptsCleanly([options.scene ?? ''], 900)
   const speakerVoiceBlock = formatSpeakerVoiceBlock(plan, dialogue, flaggedIds, options)
@@ -3201,6 +3293,52 @@ ${lineBlocks}
 ${JSON.stringify(example, null, 2)}
 
 只输出 JSON 对象本身，不要 markdown 或解释。`
+  }
+}
+
+/**
+ * Stage 2.5 人设 Critic 精修提示词（供 hybrid / 增强润色阶段核查台词是否背离重写人设）：
+ * 逐句对照角色「语言与风格」「会说与绝不会说」「称呼规范」与剧情潜台词深度，仅对明显偏离人设/偏平淡的句子做外科微调。
+ */
+export function buildPersonaCriticPrompt(
+  plan: StagedCastPlan,
+  dialogue: StagedDialogue,
+  options: DialoguePolishOptions = {},
+  issues: DialogueLintIssue[] = []
+): StagedMessages {
+  const mergedAddresses = mergePairwiseAddresses(
+    options.personas ?? [],
+    plan.cast.map((c) => c.name),
+    plan.pairwiseAddress
+  )
+  const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
+  const anchorBlock = formatDirectingAnchorBlock(plan)
+  const speakerVoiceBlock = formatSpeakerVoiceBlock(plan, dialogue, [], options, true)
+  const issueNote =
+    issues.length > 0
+      ? `\n## 规则 Linter 已发现问题（必须一并修复）\n${issues
+          .map((i) => `- [${i.lineId}] (${i.code}) ${i.message}`)
+          .join('\n')}\n`
+      : ''
+  const linesBlock = dialogue.lines
+    .map((line) => `- ${line.id} ${line.speaker}：${line.content.replace(/\n/g, ' / ')}`)
+    .join('\n')
+
+  return {
+    system: [
+      '你是 Project SEKAI 重写人设审校 Critic（dialogue-persona-critic）。',
+      '你的任务是逐句对照每个角色的真实重写人设（「语言与风格」「会说与绝不会说」「人际称呼」「心理模型」），找出仍然像通用 AI、OOC、称呼写错、或潜台词太直白浅薄的台词，给出精准外科替换；已经贴合人设的句子不要改动。',
+      '只输出 JSON 对象：{"critique":"简评","replacements":[{"id":"l3","content":"..."}]}；若全篇都已足够贴合人设，replacements 输出空数组 []。'
+    ].join('\n'),
+    user: `${anchorBlock}${addressBlock}${speakerVoiceBlock}${issueNote}## 待审校台词稿（共 ${dialogue.lines.length} 句）
+${linesBlock}
+
+## 审校清单
+1. 核对每句用词是否符合该角色的「语言与风格」「会说与绝不会说」（如奏禁用～/♪、真冬低平破碎留白、瑞希表面轻快暗藏闪避、优男/优等生面具边界）。
+2. 核对称呼是否严格符合「角色两两称呼表」，不得把姓氏/网名/正式称呼混用。
+3. 将直白说教或平淡应付的台词改写为更有潜台词、动作留白或真实记忆呼应的对白（禁止夹带括号动作描写；每行 <=30 字宽、最多 3 行）。
+
+只输出 JSON 对象：{"critique":"...","replacements":[...]}`
   }
 }
 
@@ -4037,14 +4175,19 @@ export function buildDirectionPrompt(
   options: StagedPromptOptions,
   staging?: StagedStaging
 ): StagedMessages {
+  const contextText = `${options.scene}\n${plan.event}\n${plan.logline}`
   const castLines = plan.cast
     .map((member) => {
       const profile =
         typeof personasStagedApi.characterActingProfile === 'function'
           ? personasStagedApi.characterActingProfile(member.name, member.role)
           : null
+      const persona = resolveMemberPersona(options.personas, member, view, contextText)
+      const actingPrompt = actingPersonaPrompt(persona, 2200)
       const note = profile?.actingNote ? `（演技特点：${profile.actingNote}）` : ''
-      return `- ${member.name}（modelId=${member.modelId}）${member.role ? ` — ${member.role}` : ''}${note}`
+      return `- ${member.name}（modelId=${member.modelId}）${member.role ? ` — ${member.role}` : ''}${note}${
+        actingPrompt ? `\n${actingPrompt}` : ''
+      }`
     })
     .join('\n')
 
@@ -6359,16 +6502,29 @@ export function buildDirectorReviewPrompt(
   }
 
   const seChoices = view.seList(options.scene, 14)
+  const reviewContextText = `${options.scene}\n${plan.event}\n${plan.logline}`
   const castMotionHints = plan.cast
     .map((m) => {
       const model = view.modelById(m.modelId)
       if (!model) return ''
       const motions = view.promptMotions(model).slice(0, 14)
       const facials = view.promptFacials(model).slice(0, 12)
-      return `- ${m.name}(modelId=${m.modelId}) 动作样本: ${motions.join(', ')} | 表情样本: ${facials.join(', ')}`
+      const persona = resolveMemberPersona(options.personas, m, view, reviewContextText)
+      const actingBrief = actingPersonaPrompt(persona, 1200)
+      return `- ${m.name}(modelId=${m.modelId}) 动作样本: ${motions.join(', ')} | 表情样本: ${facials.join(', ')}${
+        actingBrief ? `\n  人设演技基调：\n  ${actingBrief.replace(/\n/g, '\n  ')}` : ''
+      }`
     })
     .filter(Boolean)
     .join('\n')
+  const reviewAddressBlock = formatPairwiseAddressBlock({
+    ...plan,
+    pairwiseAddress: mergePairwiseAddresses(
+      options.personas,
+      plan.cast.map((c) => c.name),
+      plan.pairwiseAddress
+    )
+  })
 
   return {
     system: [
@@ -6388,8 +6544,8 @@ export function buildDirectorReviewPrompt(
 ## 成稿统计
 共 ${snippets.length} 片段 / ${talkCount} 句 Talk | PlaySe=${playSeCount} | ChangeBgm=${bgmCount} | 独立 Motion=${standaloneMotionCount} | Move=${moveCount} | Wait=${waitCount}
 
-## 角色可用动作/表情参考
-${castMotionHints}
+## 角色演技基调与可用动作/表情参考
+${castMotionHints}${reviewAddressBlock}
 
 ## 常用 PlaySe 参考
 ${seChoices}

@@ -2,7 +2,14 @@ import { ILogObj, Logger } from 'tslog'
 import type { LlmSettings } from '../config'
 import type { CatalogModel, ResourceCatalog } from '../resources/resourceCatalog'
 import type { StoryData } from '../../common/types/Story'
-import { extractJson, LlmClient, type ChatMessage, type ChatResult, type ChatUsage } from './llm'
+import {
+  extractJson,
+  LlmClient,
+  LlmError,
+  type ChatMessage,
+  type ChatResult,
+  type ChatUsage
+} from './llm'
 import { loadPersonas, type PersonaEntry } from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
@@ -19,6 +26,7 @@ import {
   buildDirectorReviewPrompt,
   buildEmotionPrompt,
   buildEmotionRepairPrompt,
+  buildPersonaCriticPrompt,
   buildQuickCastPrompt,
   buildStagingPrompt,
   composeStory,
@@ -47,7 +55,11 @@ import {
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
-import { runAgenticStoryGeneration, type DirectorReviewRecord } from './agentTools'
+import {
+  createStoryAgentToolkit,
+  runAgenticStoryGeneration,
+  type DirectorReviewRecord
+} from './agentTools'
 import {
   sanitizeIrodoriCaption
 } from '../../common/tts/irodori'
@@ -240,6 +252,7 @@ export class StoryWriter {
     const chunks = loadStoryCorpus({
       localDirs: rag.localDirs,
       personas: rag.includePersonas ? this.getPersonas() : [],
+      personaDirs: rag.includePersonas ? this.settings.personaDirs : [],
       includePersonas: rag.includePersonas
     })
     if (chunks.length === 0) {
@@ -405,9 +418,11 @@ export class StoryWriter {
     const result =
       pipeline === 'agent'
         ? await this.generateAgentic({ prompt, view, personas, targetMinutes, options })
-        : pipeline === 'staged'
-          ? await this.generateStaged({ prompt, view, personas, targetMinutes, options })
-          : await this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
+        : pipeline === 'hybrid'
+          ? await this.generateHybrid({ prompt, view, personas, targetMinutes, options })
+          : pipeline === 'staged'
+            ? await this.generateStaged({ prompt, view, personas, targetMinutes, options })
+            : await this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
     result.meta.durationMs = Date.now() - startedAt
     return result
   }
@@ -636,7 +651,279 @@ export class StoryWriter {
   }
 
   /**
-   * 三段式生成：选角 → 台词 → 表演设计。
+   * Hybrid 流水线（Workflow + Agent 协同）：
+   * 1. 前置 Agentic Exploration Pre-Pass（2~4 步轻量工具循环，工具不支持/失败时优雅降级）：
+   *    调用 lookup_character / search_official_corpus(search+expand) / search_assets 核实人设记忆、官方事件与云端资源，生成 researchBrief；
+   * 2. Stage 1（受 researchBrief 加持）→ Stage 2 纯台词（完整 11000 字重写人设占主导）→ Stage 2.5 确定性 Linter + 人设 Critic 精修；
+   * 3. 并行 VoiceDirection + Staging → Direction → composeStory → DirectorReview 确定性编译出零穿帮 Live2D 成稿。
+   */
+  private async generateHybrid(args: {
+    prompt: string
+    view: CatalogView
+    personas: PersonaEntry[]
+    targetMinutes: number
+    options: GenerateStoryOptions
+  }): Promise<GenerateStoryResult> {
+    const { prompt, view, personas, targetMinutes, options } = args
+    const retriever = this.getRagRetriever()
+    const explore = await this.runAgenticExplorationPrePass({
+      prompt,
+      view,
+      personas,
+      targetMinutes,
+      retriever,
+      options
+    })
+    return this.generateStaged({
+      prompt,
+      view,
+      personas,
+      targetMinutes,
+      options,
+      hybridContext: {
+        isHybrid: true,
+        researchBrief: explore.researchBrief,
+        preBuiltPlan: explore.preBuiltPlan,
+        extraStages: explore.stages,
+        extraToolCalls: explore.toolCallsUsed,
+        extraUsage: explore.usage,
+        extraLatencyMs: explore.latencyMs
+      }
+    })
+  }
+
+  private async runAgenticExplorationPrePass(args: {
+    prompt: string
+    view: CatalogView
+    personas: PersonaEntry[]
+    targetMinutes: number
+    retriever: AdaptiveRagRetriever | null
+    options: GenerateStoryOptions
+  }): Promise<{
+    researchBrief: string
+    preBuiltPlan: StagedCastPlan | null
+    toolCallsUsed: string[]
+    stages: StoryStageMeta[]
+    usage: ChatUsage | null
+    latencyMs: number
+  }> {
+    const { prompt, view, personas, targetMinutes, retriever, options } = args
+    const exploreTools = new Set([
+      'lookup_character',
+      'search_official_corpus',
+      'search_assets',
+      'plan_story_outline'
+    ])
+    const toolkit = createStoryAgentToolkit({
+      view,
+      personas,
+      emotionLabels: this.emotionLabels,
+      targetMinutes,
+      ragRetriever: retriever,
+      logger: this.logger
+    })
+    const definitions = toolkit.definitions.filter((d) => exploreTools.has(d.function.name))
+    const toolCallsUsed: string[] = []
+    const stages: StoryStageMeta[] = []
+    let usage: ChatUsage | null = null
+    let latencyMs = 0
+    const findings: string[] = []
+    let synthesizedBrief = ''
+    let preBuiltPlan: StagedCastPlan | null = null
+
+    if (!this.llm.enabled) {
+      return { researchBrief: '', preBuiltPlan: null, toolCallsUsed, stages, usage, latencyMs }
+    }
+
+    const castSummary = view
+      .primaryModels()
+      .slice(0, 28)
+      .map((m) => `${view.shortName(m)}(modelId=${m.id}${m.unit ? `,${m.unit}` : ''})`)
+      .join('、')
+    const maxTurns = Math.min(4, Math.max(2, options.maxToolTurns ?? 4))
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          '你是 Project SEKAI 剧情前期调研 Agent（hybrid 探索阶段，仅做资料核实，不写台词正文）。',
+          '请在 1~2 轮内并行调用 lookup_character、search_official_corpus（必要时用 mode:"expand" 读全集）和 search_assets（核实云端背景/BGM/SE/服装），最后用简洁 JSON 总结研究简报：',
+          '{"researchBrief":"角色记忆、关系边界、官方事件与云端素材核实结论","recommendedAssets":{"background":"...","bgm":"...","outfits":{...}},"optionalPlan":{可选 cast/scenes/understanding}}'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: `场景要求：${prompt}\n可选角色摘要：${castSummary}\n请核实出场角色记忆与人设边界、近期官方事件与精确云端素材 ID，输出研究简报 JSON。`
+      }
+    ]
+
+    const tryParseExploreBrief = (rawContent: string): void => {
+      try {
+        const parsed = extractJson(rawContent)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
+        const rec = parsed as Record<string, unknown>
+        if (typeof rec.researchBrief === 'string' && rec.researchBrief.trim()) {
+          synthesizedBrief = rec.researchBrief.trim()
+        } else if (typeof rec.summary === 'string' && rec.summary.trim()) {
+          synthesizedBrief = rec.summary.trim()
+        }
+        const planCandidate = rec.optionalPlan ?? (Array.isArray(rec.cast) ? rec : null)
+        if (planCandidate && typeof planCandidate === 'object') {
+          const normalized = normalizeCastPlan(planCandidate, view, {
+            scene: prompt,
+            personas,
+            targetMinutes
+          })
+          if (normalized && normalized.cast.length > 0) {
+            preBuiltPlan = normalized
+          }
+        }
+      } catch {
+        // 非 JSON 总结则忽略，回退已收集工具摘要或常规 Stage 1
+      }
+    }
+
+    const summarizeToolOutput = (toolName: string, output: string): void => {
+      try {
+        const parsed = JSON.parse(output) as Record<string, unknown>
+        if (toolName === 'lookup_character' && Array.isArray(parsed.characters)) {
+          const names = parsed.characters
+            .map((c) => {
+              const r = c as Record<string, unknown>
+              return `${String(r.shortName ?? r.name ?? '')}(id=${String(r.modelId ?? '')})`
+            })
+            .filter(Boolean)
+          if (names.length > 0) findings.push(`核实角色：${names.join('、')}`)
+        } else if (toolName === 'search_assets') {
+          const bgs = Array.isArray(parsed.backgrounds)
+            ? parsed.backgrounds.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
+            : []
+          const bgms = Array.isArray(parsed.bgm)
+            ? parsed.bgm.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
+            : []
+          if (bgs.length > 0 || bgms.length > 0) {
+            findings.push(`核实云端素材：背景[${bgs.join('/')}] BGM[${bgms.join('/')}]`)
+          }
+        } else if (toolName === 'search_official_corpus') {
+          const stories = Array.isArray(parsed.availableStories)
+            ? parsed.availableStories
+                .slice(0, 3)
+                .map((s) => String((s as Record<string, unknown>).story ?? ''))
+            : []
+          const expanded =
+            parsed.context && typeof parsed.context === 'object'
+              ? String((parsed.context as Record<string, unknown>).text ?? '').slice(0, 420)
+              : ''
+          if (stories.length > 0) findings.push(`官方参考活动：${stories.join('、')}`)
+          if (expanded) findings.push(`官方上下文展开：\n${expanded}`)
+        }
+      } catch {
+        // 忽略摘要解析错误
+      }
+    }
+
+    try {
+      for (let turn = 0; turn < maxTurns; turn++) {
+        const isLast = turn === maxTurns - 1
+        const res = await this.llm.chat(
+          isLast
+            ? [
+                ...messages,
+                {
+                  role: 'user',
+                  content:
+                    '请立即综合已获取信息输出研究简报 JSON（含 researchBrief 与可选 recommendedAssets / optionalPlan），不要再调用工具。'
+                }
+              ]
+            : messages,
+          isLast
+            ? { json: true, temperature: 0.3, signal: options.signal }
+            : { tools: definitions, toolChoice: 'auto', temperature: 0.3, signal: options.signal }
+        )
+        stages.push({
+          stage: 'hybrid-explore',
+          model: res.model,
+          latencyMs: res.latencyMs,
+          usage: res.usage,
+          ok: true
+        })
+        latencyMs += res.latencyMs
+        usage = mergeUsage(usage, res.usage)
+
+        const calls = res.toolCalls ?? []
+        if (calls.length > 0) {
+          messages.push({
+            role: 'assistant',
+            content: res.content || null,
+            tool_calls: calls
+          })
+          for (const call of calls) {
+            toolCallsUsed.push(call.function.name)
+            const out = await toolkit.execute(call.function.name, call.function.arguments, options.signal)
+            summarizeToolOutput(call.function.name, out)
+            messages.push({
+              role: 'tool',
+              tool_call_id: call.id,
+              name: call.function.name,
+              content: out
+            })
+          }
+          continue
+        }
+
+        tryParseExploreBrief(res.content)
+        break
+      }
+    } catch (error) {
+      if (options.signal?.aborted) throw error
+      const note =
+        error instanceof LlmError && error.toolCallingUnsupported
+          ? '底层模型不支持工具调用，hybrid 已优雅降级至直接工作流'
+          : `hybrid 探索预检降级：${errorMessage(error)}`
+      this.logger.warn(`[AI] ${note}`)
+      stages.push({
+        stage: 'hybrid-explore',
+        model: this.llm.model,
+        latencyMs: 0,
+        usage: null,
+        ok: false,
+        note
+      })
+    }
+
+    const saved = toolkit.getSavedPlan()
+    if (!preBuiltPlan && saved && saved.cast.length > 0) {
+      preBuiltPlan = normalizeCastPlan(
+        {
+          title: saved.title,
+          event: saved.event,
+          logline: saved.logline,
+          outline: saved.beats,
+          cast: saved.cast,
+          scenes: saved.scenes,
+          pairwiseAddress: saved.pairwiseAddress,
+          understanding: saved.understanding
+        },
+        view,
+        { scene: prompt, personas, targetMinutes }
+      )
+    }
+
+    const researchBrief = [synthesizedBrief, ...findings]
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, 2200)
+    return {
+      researchBrief,
+      preBuiltPlan,
+      toolCallsUsed,
+      stages,
+      usage,
+      latencyMs
+    }
+  }
+
+  /**
+   * 三段式生成（staged）与混合生成（hybrid）共用主干：选角 → 台词 → 润色/Critic → 并行声演与舞台 → 演技设计 → 合成校验。
    *
    * 选角和表演失败都可以降级（按目录顺序选角 / 无动作合成），只有台词稿不可用
    * 才会失败；台词一经生成就逐字进入最终剧本，表演段不能改写它。
@@ -647,22 +934,32 @@ export class StoryWriter {
     personas: PersonaEntry[]
     targetMinutes: number
     options: GenerateStoryOptions
+    hybridContext?: {
+      isHybrid: boolean
+      researchBrief?: string
+      preBuiltPlan?: StagedCastPlan | null
+      extraStages?: StoryStageMeta[]
+      extraToolCalls?: string[]
+      extraUsage?: ChatUsage | null
+      extraLatencyMs?: number
+    }
   }): Promise<GenerateStoryResult> {
-    const { prompt, view, personas, targetMinutes, options } = args
+    const { prompt, view, personas, targetMinutes, options, hybridContext } = args
     const promptOptions: StagedPromptOptions = {
       scene: prompt,
       personas,
       targetMinutes,
       systemPrompt: this.settings.systemPrompt,
-      emotionLabels: this.emotionLabels
+      emotionLabels: this.emotionLabels,
+      ...(hybridContext?.researchBrief ? { researchBrief: hybridContext.researchBrief } : {})
     }
 
-    const stages: StoryStageMeta[] = []
+    const stages: StoryStageMeta[] = [...(hybridContext?.extraStages ?? [])]
     const warnings: string[] = []
     const details: string[] = []
-    let usage: ChatUsage | null = null
+    let usage: ChatUsage | null = hybridContext?.extraUsage ?? null
     let model = this.llm.model
-    let latencyMs = 0
+    let latencyMs = hybridContext?.extraLatencyMs ?? 0
 
     const runStage = async (
       stage: string,
@@ -726,19 +1023,21 @@ export class StoryWriter {
 
     // ---- 1. 选角与微事件（含深度意图理解、称呼表与多面 RAG 查询） ----------------------------------------------
     const castPromptOptions: StagedPromptOptions = { ...promptOptions, ragContext: preCastRag }
-    let plan: StagedCastPlan | null = null
-    try {
-      const result = await runStage('cast', buildCastPrompt(view, castPromptOptions))
-      plan = normalizeCastPlan(parseStageJson(result), view, castPromptOptions)
-      if (!plan) {
-        markStageFailed('没有返回目录中的角色')
-        warnings.push('选角结果没有可用角色，已按目录顺序回退')
+    let plan: StagedCastPlan | null = hybridContext?.preBuiltPlan ?? null
+    if (!plan) {
+      try {
+        const result = await runStage('cast', buildCastPrompt(view, castPromptOptions))
+        plan = normalizeCastPlan(parseStageJson(result), view, castPromptOptions)
+        if (!plan) {
+          markStageFailed('没有返回目录中的角色')
+          warnings.push('选角结果没有可用角色，已按目录顺序回退')
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error
+        const message = errorMessage(error)
+        details.push(`选角：${message}`)
+        warnings.push(`选角失败，已按目录顺序回退：${message}`)
       }
-    } catch (error) {
-      if (options.signal?.aborted) throw error
-      const message = errorMessage(error)
-      details.push(`选角：${message}`)
-      warnings.push(`选角失败，已按目录顺序回退：${message}`)
     }
     if (!plan) plan = fallbackCastPlan(view, promptOptions)
     if (plan.cast.length === 0) {
@@ -911,10 +1210,11 @@ export class StoryWriter {
       }
     }
 
-    // ---- 2.2 反套路对白质检与条件外科润色（零成本确定性 Linter + 仅在问题严格减少时采纳） --------------------
-    if (this.settings.polishDialogue === true) {
-      const lintBefore = lintDialogueFidelity(dialogue, plan)
-      if (lintBefore.shouldPolish) {
+    // ---- 2.2 反套路对白质检与人设 Critic 润色（零成本确定性 Linter + 条件外科润色 / hybrid 人设审校） --------
+    if (this.settings.polishDialogue === true || hybridContext?.isHybrid) {
+      const lintContext = { ...plan, personas }
+      let lintBefore = lintDialogueFidelity(dialogue, lintContext)
+      if (this.settings.polishDialogue === true && lintBefore.shouldPolish) {
         try {
           const polishResult = await runStage(
             'dialogue-polish',
@@ -931,7 +1231,7 @@ export class StoryWriter {
             parseStageJson(polishResult),
             new Set(lintBefore.flaggedLineIds)
           )
-          const lintAfter = lintDialogueFidelity(polished, plan)
+          const lintAfter = lintDialogueFidelity(polished, lintContext)
           const beforeChars = countDialogueChars(dialogue)
           const afterChars = countDialogueChars(polished)
           if (
@@ -943,6 +1243,7 @@ export class StoryWriter {
               `[AI] dialogue-polish 采纳：问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}`
             )
             dialogue = polished
+            lintBefore = lintAfter
           } else {
             this.logger.info(
               `[AI] dialogue-polish 未改善（问题 ${lintBefore.issues.length} -> ${lintAfter.issues.length}），保留原稿`
@@ -951,6 +1252,56 @@ export class StoryWriter {
         } catch (error) {
           if (options.signal?.aborted) throw error
           this.logger.warn(`[AI] dialogue-polish 失败，保留原稿：${errorMessage(error)}`)
+        }
+      }
+
+      // hybrid 模式（且有人设或剩余问题时）额外运行一轮靶向「人设 Critic 审校」
+      if (
+        hybridContext?.isHybrid &&
+        this.settings.polishDialogue !== false &&
+        (personas.length > 0 || lintBefore.issues.length > 0)
+      ) {
+        try {
+          const criticResult = await runStage(
+            'dialogue-persona-critic',
+            buildPersonaCriticPrompt(
+              plan,
+              dialogue,
+              {
+                scene: prompt,
+                view,
+                personas,
+                ragContext: postCastRag
+              },
+              lintBefore.issues
+            ),
+            { temperature: 0.3 }
+          )
+          const criticized = applyDialoguePolish(
+            dialogue,
+            parseStageJson(criticResult),
+            new Set(dialogue.lines.map((l) => l.id))
+          )
+          const lintAfterCritic = lintDialogueFidelity(criticized, lintContext)
+          const beforeChars = countDialogueChars(dialogue)
+          const afterChars = countDialogueChars(criticized)
+          const noNewHigh =
+            lintAfterCritic.issues.filter((i) => i.severity === 'high').length <=
+            lintBefore.issues.filter((i) => i.severity === 'high').length
+          if (
+            criticized.lines.length === dialogue.lines.length &&
+            afterChars >= Math.floor(beforeChars * 0.85) &&
+            lintAfterCritic.issues.length <= lintBefore.issues.length &&
+            noNewHigh
+          ) {
+            this.logger.info(
+              `[AI] dialogue-persona-critic 采纳（问题 ${lintBefore.issues.length} -> ${lintAfterCritic.issues.length}）`
+            )
+            dialogue = criticized
+          }
+        } catch (error) {
+          if (options.signal?.aborted) throw error
+          this.logger.warn(`[AI] dialogue-persona-critic 失败，保留原稿：${errorMessage(error)}`)
         }
       }
     }
@@ -1248,14 +1599,16 @@ export class StoryWriter {
     const activeIds = new Set(validated.story.models.map((entry) => entry.id))
     const cast = view.models.filter((entry) => activeIds.has(entry.id)).map((entry) => entry.name)
 
-    // 并行阶段完成顺序不固定；按 5 阶段流水线顺序输出，便于日志与客户端展示。
+    // 并行阶段完成顺序不固定；按流水线顺序输出，便于日志与客户端展示。
     const stageOrder = [
+      'hybrid-explore',
       'cast',
       'dialogue',
       'dialogue-repair',
       'dialogue-expand',
       'dialogue-expand-2',
       'dialogue-polish',
+      'dialogue-persona-critic',
       'emotion',
       'emotion-repair',
       'staging',
@@ -1273,7 +1626,7 @@ export class StoryWriter {
       story: validated.story,
       meta: {
         mode: 'story',
-        pipeline: 'staged',
+        pipeline: hybridContext?.isHybrid ? 'hybrid' : 'staged',
         title: dialogue.title || plan.title || undefined,
         model,
         rounds: stages.length,
@@ -1284,6 +1637,9 @@ export class StoryWriter {
         ttsTranslated,
         cast,
         stages,
+        ...(hybridContext?.extraToolCalls && hybridContext.extraToolCalls.length > 0
+          ? { toolCalls: hybridContext.extraToolCalls }
+          : {}),
         ...(stagedDirectorReview ? { directorReview: stagedDirectorReview } : {}),
         ...(this.summarizeRag(postCastRag) ? { rag: this.summarizeRag(postCastRag) } : {})
       }

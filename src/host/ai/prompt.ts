@@ -7,8 +7,11 @@ import type {
 import { normalizeBgmFile } from '../../common/audio/bgm'
 import {
   GENERIC_PROFILE,
+  actingPersonaPrompt,
   characterActingProfile,
   dialoguePersonaPrompt,
+  extractPairwiseAddressBook,
+  inferUnitFromText,
   personaFor,
   type PersonaEntry
 } from './personas'
@@ -1148,28 +1151,52 @@ export class CatalogView {
   /**
    * 角色档案。剧本只带核心段落；聊天保留完整人设（共情/交互协议对角色回复有用），
    * 但调用方已先做快速选角，池子里通常只有 1~2 人。
+   * 支持 unit-aware `personaFor`、重写人设 11000 字完整对白段及云端 576+ 模型去重与场景服装优选。
    */
-  characterPool(personas: PersonaEntry[], compact = true): string {
+  characterPool(personas: PersonaEntry[], compact = true, sceneContext = ''): string {
     const scope = this.promptScopeModels()
     if (scope.length === 0) return '（资源目录为空，请检查渲染宿主）'
-    return scope
+    const unitHint = inferUnitFromText(sceneContext)
+    const entries = scope
       .map((model) => {
-        const persona = personaFor(personas, model)
-        const prompt = compact ? dialoguePersonaPrompt(persona) : (persona?.prompt?.trim() ?? '')
+        const persona = personaFor(personas, model, {
+          unitHint: unitHint ?? model.unit,
+          contextText: sceneContext
+        })
+        const prompt = compact
+          ? dialoguePersonaPrompt(persona, 11000)
+          : (persona?.prompt?.trim() ?? '')
         const allOutfits = this.outfitsFor(model)
         const frontOutfits = allOutfits.filter((m) => !isBackViewModel(m))
-        const shownOutfits = frontOutfits.length > 0 ? frontOutfits : allOutfits
+        const poolOutfits = frontOutfits.length > 0 ? frontOutfits : allOutfits
+        const preferredOutfit = sceneContext ? this.resolveOutfitVariant(model, sceneContext) : null
+        const shownOutfits = preferredOutfit
+          ? [preferredOutfit, ...poolOutfits.filter((m) => m.id !== preferredOutfit.id)]
+          : poolOutfits
         const outfitSummary = shownOutfits
-          .slice(0, 8)
+          .slice(0, 6)
           .map((m) => `${m.outfitLabel || m.outfitCategory || m.cloudId || m.id}=${m.id}`)
           .join('、')
         const outfitLine =
           shownOutfits.length > 1 ? `\n可选服装（直接写对应 modelId）：${outfitSummary}` : ''
+        const actingNote = persona ? actingPersonaPrompt(persona, 800) : ''
         return `**${this.shortName(model)}** — modelId:${model.id}, model:${model.path}${outfitLine}\n${
           prompt || GENERIC_PROFILE
-        }`
+        }${!compact && actingNote ? '' : actingNote ? `\n【演技基调】${actingNote.split('\n').slice(0, 2).join(' ')}` : ''}`
       })
       .join('\n\n')
+    const addressBook =
+      scope.length >= 2 && scope.length <= 6
+        ? extractPairwiseAddressBook(
+            personas,
+            scope.map((m) => this.shortName(m))
+          )
+        : []
+    if (addressBook.length === 0) return entries
+    const addrLines = addressBook
+      .map((r) => `- ${r.from} → ${r.to}：「${r.zh}」${r.note ? `（${r.note}）` : ''}`)
+      .join('\n')
+    return `${entries}\n\n### 角色称呼规范（必须遵守）\n${addrLines}`
   }
 }
 
@@ -1634,7 +1661,7 @@ export function buildStoryPrompt(
 } {
   const user = fillTemplate(STORY_PROMPT, {
     '{target_minutes}': String(options.targetMinutes),
-    '{character_pool}': view.characterPool(options.personas),
+    '{character_pool}': view.characterPool(options.personas, true, options.scene),
     '{model_table}': view.modelTable(),
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),
@@ -1675,7 +1702,7 @@ export function buildChatPrompt(
 
   const user = fillTemplate(CHAT_PROMPT, {
     '{target_minutes}': String(options.targetMinutes),
-    '{character_pool}': view.characterPool(options.personas, false),
+    '{character_pool}': view.characterPool(options.personas, false, options.scene),
     '{model_table}': view.modelTable(),
     '{id_mapping}': view.idMapping(),
     '{acting_example}': buildActingExample(view),
