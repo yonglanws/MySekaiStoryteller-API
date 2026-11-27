@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const manifestPath = path.join(rootDir, 'native', 'mss-export-rs', 'Cargo.toml')
+const crateDir = path.join(rootDir, 'native', 'mss-export-rs')
+const manifestPath = path.join(crateDir, 'Cargo.toml')
 const mode = process.argv.includes('--test') ? 'test' : 'build'
 
 function tryCargo(args) {
@@ -22,22 +24,45 @@ function findRustupToolchain() {
   return preferred ?? null
 }
 
+function copyNapiAddon(profileDir) {
+  const libFile =
+    process.platform === 'win32'
+      ? 'mss_export_napi.dll'
+      : process.platform === 'darwin'
+        ? 'libmss_export_napi.dylib'
+        : 'libmss_export_napi.so'
+  const srcPath = path.join(crateDir, 'target', profileDir, libFile)
+  if (!fs.existsSync(srcPath)) {
+    return false
+  }
+  const dstPath = path.join(crateDir, 'target', profileDir, 'mss-export-napi.node')
+  fs.copyFileSync(srcPath, dstPath)
+  return true
+}
+
 const subArgs =
   mode === 'test'
-    ? ['test', '--manifest-path', manifestPath]
-    : ['build', '--release', '--manifest-path', manifestPath]
+    ? ['test', '--workspace', '--manifest-path', manifestPath]
+    : ['build', '--release', '--workspace', '--manifest-path', manifestPath]
 
 const probe = spawnSync('cargo', ['--version'], { stdio: 'ignore' })
+let ok = false
 if (probe.status === 0) {
-  if (!tryCargo(subArgs)) process.exit(1)
-  process.exit(0)
+  ok = tryCargo(subArgs)
+} else {
+  const toolchain = findRustupToolchain()
+  if (!toolchain) {
+    console.error('[build-rust-exporter] No usable Rust toolchain found (cargo/rustup unavailable)')
+    process.exit(1)
+  }
+  ok = tryCargo([`+${toolchain}`, ...subArgs])
 }
 
-const toolchain = findRustupToolchain()
-if (toolchain) {
-  if (!tryCargo([`+${toolchain}`, ...subArgs])) process.exit(1)
-  process.exit(0)
-}
+if (!ok) process.exit(1)
 
-console.error('[build-rust-exporter] No usable Rust toolchain found (cargo/rustup unavailable)')
-process.exit(1)
+if (mode === 'build') {
+  if (!copyNapiAddon('release')) {
+    console.error('[build-rust-exporter] Failed to stage mss-export-napi.node in target/release')
+    process.exit(1)
+  }
+}

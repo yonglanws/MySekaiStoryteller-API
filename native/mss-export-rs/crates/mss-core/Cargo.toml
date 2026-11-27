@@ -1,0 +1,11 @@
+[package]
+name = "mss-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Deterministic 60Hz story timeline planning, static-span analysis, and segment partitioning"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

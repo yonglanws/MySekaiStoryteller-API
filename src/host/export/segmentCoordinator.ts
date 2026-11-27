@@ -5,7 +5,13 @@ import { ILogObj, Logger } from 'tslog'
 import type { ExportDiagnostics } from '../../common/types/ExportDiagnostics'
 import type { ExportTask } from '../servers/VideoApiServer'
 import type { ExportResultPayload, PreparedSegmentPlan } from '../pool/renderPool'
-import { planRustSegments, runRustConcatSegments } from './rustExporter'
+import {
+  bakeStoryPlanRust,
+  planRustSegments,
+  runRustConcatSegments,
+  type RustStoryPlanInput,
+  type RustStoryPlanResult
+} from './rustExporter'
 import { normalizeVideoCodec, type VideoCodec } from '../../shared/ffmpeg'
 
 const MIN_PARALLEL_SEGMENT_FRAMES = 300
@@ -24,9 +30,16 @@ interface ActiveSegmentJob {
   cancelled: boolean
 }
 
-function splitSegmentsFallback(start: number, end: number, jobs: number): Array<{ start: number; end: number }> {
+function splitSegmentsFallback(
+  start: number,
+  end: number,
+  jobs: number
+): Array<{ start: number; end: number }> {
   const frames = Math.max(0, end - start)
-  const n = Math.max(1, Math.min(jobs, Math.max(1, Math.floor(frames / MIN_PARALLEL_SEGMENT_FRAMES))))
+  const n = Math.max(
+    1,
+    Math.min(jobs, Math.max(1, Math.floor(frames / MIN_PARALLEL_SEGMENT_FRAMES)))
+  )
   const out: Array<{ start: number; end: number }> = []
   for (let i = 0; i < n; i++) {
     const s = start + Math.floor((frames * i) / n)
@@ -60,6 +73,10 @@ export class SegmentCoordinator {
 
   isSubTask(taskId: string): boolean {
     return this.subTaskToParent.has(taskId)
+  }
+
+  async planStoryWithStaticSpans(input: RustStoryPlanInput): Promise<RustStoryPlanResult | null> {
+    return bakeStoryPlanRust(input)
   }
 
   shouldUseParallelSegments(task: ExportTask): boolean {
@@ -101,7 +118,10 @@ export class SegmentCoordinator {
     await Promise.allSettled(Array.from(this.jobs.keys()).map((id) => this.cancel(id)))
   }
 
-  private async dispatchTracked(job: ActiveSegmentJob, subTask: ExportTask): Promise<ExportResultPayload> {
+  private async dispatchTracked(
+    job: ActiveSegmentJob,
+    subTask: ExportTask
+  ): Promise<ExportResultPayload> {
     if (job.cancelled) {
       return { taskId: subTask.taskId, success: false, error: 'Export cancelled by user' }
     }
@@ -296,7 +316,8 @@ export class SegmentCoordinator {
         encodedFrames: totalFrames,
         videoDurationMs,
         wallMs,
-        avgPumpFps: maxSegPumpMs > 0 ? Math.round((totalFrames / (maxSegPumpMs / 1000)) * 10) / 10 : 0
+        avgPumpFps:
+          maxSegPumpMs > 0 ? Math.round((totalFrames / (maxSegPumpMs / 1000)) * 10) / 10 : 0
       }
 
       const diagnostics: ExportDiagnostics | undefined = prepared.diagnostics

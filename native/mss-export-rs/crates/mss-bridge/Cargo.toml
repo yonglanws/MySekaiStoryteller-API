@@ -1,0 +1,13 @@
+[package]
+name = "mss-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "High-throughput local Rust binary WebSocket bridge for direct MP4 chunk and video frame streaming"
+
+[dependencies]
+mss-encode = { path = "../mss-encode" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = "0.24"
