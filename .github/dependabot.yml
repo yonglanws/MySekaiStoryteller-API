@@ -9,3 +9,13 @@ updates:
       include: 'scope'
     labels:
       - 'Chore: Dependencies'
+
+  - package-ecosystem: 'cargo'
+    directory: '/native/mss-export-rs'
+    schedule:
+      interval: 'weekly'
+    commit-message:
+      prefix: 'chore'
+      include: 'scope'
+    labels:
+      - 'Chore: Dependencies'

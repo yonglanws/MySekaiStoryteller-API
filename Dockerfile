@@ -59,7 +59,7 @@ RUN set -eux; \
     rustc --version && cargo --version
 
 # Install Node dependencies (cache-friendly layer)
-COPY package.json package-lock.json .npmrc ./
+COPY package.json package-lock.json ./
 
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
@@ -125,7 +125,7 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/out ./out
 COPY --from=builder /app/out-host ./out-host
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/scripts ./scripts
+COPY --from=builder /app/scripts/init-config.mjs ./scripts/init-config.mjs
 COPY --from=builder /app/native/mss-export-rs/target/release/mss-export-napi.node ./native/mss-export-rs/target/release/mss-export-napi.node
 COPY --from=builder /app/native/mss-export-rs/target/release/mss-export-rs ./native/mss-export-rs/target/release/mss-export-rs
 COPY config.example.yaml ./config.example.yaml

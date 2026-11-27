@@ -111,6 +111,66 @@ const TASK_RECORD_MAX_ENTRIES = 200
 const FILES_PAGE_SIZE_DEFAULT = 20
 const FILES_PAGE_SIZE_MAX = 100
 
+function readPackageVersion(): string {
+  const candidates = [
+    path.resolve(__dirname, '..', '..', '..', 'package.json'),
+    path.resolve(process.cwd(), 'package.json')
+  ]
+  for (const pkgPath of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { version?: unknown }
+      if (typeof parsed.version === 'string' && parsed.version.trim()) {
+        return parsed.version.trim()
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return '2.0.0'
+}
+
+const PACKAGE_VERSION = readPackageVersion()
+
+interface ParsedByteRange {
+  start: number
+  end: number
+}
+
+function parseSingleByteRange(
+  rangeHeader: string,
+  fileSize: number
+): ParsedByteRange | 'unsatisfiable' | 'ignore' {
+  const trimmed = rangeHeader.trim()
+  if (!/^bytes=/i.test(trimmed)) return 'ignore'
+  const spec = trimmed.replace(/^bytes=/i, '').trim()
+  if (!spec || spec.includes(',') || fileSize <= 0) return 'unsatisfiable'
+
+  const match = spec.match(/^(\d*)-(\d*)$/)
+  if (!match) return 'unsatisfiable'
+  const [, startStr, endStr] = match
+  if (startStr === '' && endStr === '') return 'unsatisfiable'
+
+  if (startStr === '') {
+    const suffixLength = Number(endStr)
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return 'unsatisfiable'
+    return {
+      start: Math.max(0, fileSize - suffixLength),
+      end: fileSize - 1
+    }
+  }
+
+  const start = Number(startStr)
+  if (!Number.isSafeInteger(start) || start < 0 || start >= fileSize) return 'unsatisfiable'
+
+  if (endStr === '') {
+    return { start, end: fileSize - 1 }
+  }
+
+  const rawEnd = Number(endStr)
+  if (!Number.isSafeInteger(rawEnd) || rawEnd < start) return 'unsatisfiable'
+  return { start, end: Math.min(rawEnd, fileSize - 1) }
+}
+
 const CLEANUP_EXTENSIONS = new Set(['.mp4', '.json', '.log', '.txt'])
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 const ORPHAN_FRAMES_VIDEO_RE = /^\.mss-frames-video-.*\.mp4$/
@@ -199,6 +259,7 @@ export class VideoApiServer {
   private totalFilesCleaned: number = 0
   private rateLimitMap: Map<string, RateLimitEntry> = new Map()
   private extraHealthProvider: ((authed: boolean) => Record<string, unknown>) | null = null
+  private draining = false
   /** 最近完成的导出（滚动窗口，供 /api/v1/status 观测并行负载） */
   private recentExports: Array<{
     taskId: string
@@ -277,6 +338,17 @@ export class VideoApiServer {
 
   setExtraHealthProvider(provider: (authed: boolean) => Record<string, unknown>): void {
     this.extraHealthProvider = provider
+  }
+
+  /** 进入关停排空状态：拒绝新的导出/生成请求（HTTP 503），仅允许在途任务完成。 */
+  beginDraining(): void {
+    if (this.draining) return
+    this.draining = true
+    this.logger.info('[API] Server entered draining mode; rejecting new export/generate requests')
+  }
+
+  isDraining(): boolean {
+    return this.draining
   }
 
   /** 是否仍有在途导出（关停排空用） */
@@ -376,13 +448,12 @@ export class VideoApiServer {
   }
 
   private startCleanupInterval(): void {
-    const ONE_HOUR = 60 * 60 * 1000
     this.cleanupInterval = setInterval(() => {
       this.cleanupOldExports()
       this.cleanupStaleTempFiles()
       this.cleanupRateLimitMap()
       this.cleanupTaskRecords()
-    }, ONE_HOUR)
+    }, CLEANUP_INTERVAL_MS)
     this.cleanupInterval.unref?.()
   }
 
@@ -659,9 +730,19 @@ export class VideoApiServer {
   private setupRoutes(): void {
     this.app.get('/api/v1/health', (req: Request, res: Response) => {
       const authed = this.isAuthorized(req)
+      const rawRustExporter = getRustExporterInfoSync(this.video.useRustExporter !== false)
+      const rustExporter = authed
+        ? rawRustExporter
+        : {
+            available: rawRustExporter.available,
+            enabled: rawRustExporter.enabled,
+            mode: rawRustExporter.mode,
+            version: rawRustExporter.version
+          }
       res.json({
         status: 'ok',
-        version: '2.0.0',
+        version: PACKAGE_VERSION,
+        draining: this.draining,
         activeExports: this.activeExports.size,
         queuedExports: this.exportQueue.length,
         pendingExports: this.pendingExports.size,
@@ -686,7 +767,7 @@ export class VideoApiServer {
           idleChainGapSec: this.video.idleChainGapSec,
           ttsMode: this.video.ttsMode
         },
-        rustExporter: getRustExporterInfoSync(this.video.useRustExporter !== false),
+        rustExporter,
         ...(this.extraHealthProvider ? this.extraHealthProvider(authed) : {})
       })
     })
@@ -704,6 +785,14 @@ export class VideoApiServer {
     })
 
     this.app.post('/api/v1/export', async (req: Request, res: Response) => {
+      if (this.draining) {
+        res.setHeader('Retry-After', '5')
+        res.status(503).json({
+          success: false,
+          message: 'Server is shutting down and not accepting new requests'
+        })
+        return
+      }
       if (!this.enforceRateLimit(req, res)) {
         return
       }
@@ -769,7 +858,7 @@ export class VideoApiServer {
       res.json(this.getCleanupStats())
     })
 
-    this.app.get('/api/v1/files', (req: Request, res: Response) => {
+    this.app.get('/api/v1/files', async (req: Request, res: Response) => {
       const page = Math.max(1, parseInt(req.query.page as string) || 1)
       const limit = Math.min(
         FILES_PAGE_SIZE_MAX,
@@ -778,19 +867,29 @@ export class VideoApiServer {
       const sort = (req.query.sort as string) === 'asc' ? 'asc' : 'desc'
 
       try {
-        const allFiles = fs
-          .readdirSync(this.outputDir)
-          .filter((f) => CLEANUP_EXTENSIONS.has(path.extname(f).toLowerCase()))
-          .map((f) => {
+        const entries = await fs.promises.readdir(this.outputDir)
+        const matching = entries.filter((f) =>
+          CLEANUP_EXTENSIONS.has(path.extname(f).toLowerCase())
+        )
+        const statEntries = await Promise.all(
+          matching.map(async (f) => {
             const filePath = path.join(this.outputDir, f)
-            const stats = fs.statSync(filePath)
-            return {
-              filename: f,
-              size: stats.size,
-              createdAt: stats.birthtimeMs,
-              modifiedAt: stats.mtimeMs
+            try {
+              const stats = await fs.promises.stat(filePath)
+              if (!stats.isFile()) return null
+              return {
+                filename: f,
+                size: stats.size,
+                createdAt: stats.birthtimeMs,
+                modifiedAt: stats.mtimeMs
+              }
+            } catch {
+              return null
             }
           })
+        )
+        const allFiles = statEntries
+          .filter((item): item is NonNullable<typeof item> => item !== null)
           .sort((a, b) =>
             sort === 'desc' ? b.modifiedAt - a.modifiedAt : a.modifiedAt - b.modifiedAt
           )
@@ -823,7 +922,7 @@ export class VideoApiServer {
       }
     })
 
-    this.app.get('/api/v1/download/:filename', (req: Request, res: Response) => {
+    this.app.get('/api/v1/download/:filename', async (req: Request, res: Response) => {
       const filename = req.params.filename as string
 
       if (
@@ -848,13 +947,13 @@ export class VideoApiServer {
       let stats: fs.Stats
       let realFilePath: string
       try {
-        const realOutputDir = fs.realpathSync(resolvedOutputDir)
-        realFilePath = fs.realpathSync(filePath)
+        const realOutputDir = await fs.promises.realpath(resolvedOutputDir)
+        realFilePath = await fs.promises.realpath(filePath)
         if (!realFilePath.startsWith(realOutputDir + path.sep)) {
           res.status(404).json({ error: 'File not found' })
           return
         }
-        stats = fs.statSync(realFilePath)
+        stats = await fs.promises.stat(realFilePath)
       } catch {
         this.logger.error(`[API] Download requested but file not found: ${filePath}`)
         res.status(404).json({ error: 'File not found' })
@@ -877,14 +976,43 @@ export class VideoApiServer {
                 ? 'video/webm'
                 : 'application/octet-stream'
 
-      this.logger.info(`[API] Downloading file: ${realFilePath}, size=${stats.size} bytes`)
-
       res.setHeader('Content-Type', contentType)
-      res.setHeader('Content-Length', stats.size)
+      res.setHeader('Accept-Ranges', 'bytes')
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
       res.setHeader('Cache-Control', 'no-cache')
 
-      const stream = fs.createReadStream(realFilePath)
+      const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : undefined
+      let streamOptions: { start: number; end: number } | undefined
+
+      if (rangeHeader) {
+        const parsedRange = parseSingleByteRange(rangeHeader, stats.size)
+        if (parsedRange === 'unsatisfiable') {
+          res.setHeader('Content-Range', `bytes */${stats.size}`)
+          res.status(416).end()
+          return
+        }
+        if (parsedRange !== 'ignore') {
+          streamOptions = parsedRange
+          res.status(206)
+          res.setHeader(
+            'Content-Range',
+            `bytes ${parsedRange.start}-${parsedRange.end}/${stats.size}`
+          )
+          res.setHeader('Content-Length', parsedRange.end - parsedRange.start + 1)
+          this.logger.info(
+            `[API] Downloading file range: ${realFilePath}, bytes=${parsedRange.start}-${parsedRange.end}/${stats.size}`
+          )
+        }
+      }
+
+      if (!streamOptions) {
+        res.setHeader('Content-Length', stats.size)
+        this.logger.info(`[API] Downloading file: ${realFilePath}, size=${stats.size} bytes`)
+      }
+
+      const stream = streamOptions
+        ? fs.createReadStream(realFilePath, streamOptions)
+        : fs.createReadStream(realFilePath)
       stream.pipe(res)
 
       stream.on('error', (err) => {
@@ -1058,6 +1186,9 @@ export class VideoApiServer {
     timeoutMs = DEFAULT_EXPORT_TIMEOUT_MS,
     signal?: AbortSignal
   ): Promise<ApiExportResponse & { videoPath?: string; fileSize?: number; downloadUrl?: string }> {
+    if (this.draining) {
+      throw new Error('Server is shutting down and not accepting new requests')
+    }
     if (!this.dispatcher) {
       throw new Error('No render worker available. Please ensure the render pool is running.')
     }

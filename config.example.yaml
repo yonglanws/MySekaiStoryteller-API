@@ -13,19 +13,21 @@
 # │ 绝大多数用户只需关注以下 4 项，其余保持默认即可开箱运行：                      │
 # │   1. AI 剧本模型：修改下方 llm.baseUrl + llm.model，并在 .env/环境中设置     │
 # │      MSS_LLM_API_KEY=sk-...（密钥绝不写入 config.yaml）                     │
-# │   2. 语音合成 TTS：暂无外部 TTS 服务时，将 tts.enabled 设为 false            │
-# │      （或 MSS_TTS_ENABLED=false），视频仍可正常导出（仅无角色配音）            │
-# │   3. 视频帧率与硬件加速：按机器条件选 video.fps (60/30) 与 video.encoder     │
-# │      (auto/intel/nvidia/amd/libx264)；Docker/纯环境变量场景推荐直接设        │
+# │   2. 语音合成 TTS：模板默认 tts.enabled: false（无外部 TTS 服务也能直接导出）；│
+# │      接入 GPT-SoVITS / IrodoriTTS 后将其改为 true（或 MSS_TTS_ENABLED=true） │
+# │   3. 视频帧率与硬件加速：模板推荐 1080p/60fps/crf=27（省略 config.yaml 时内置 │
+# │      schema 兜底为 720p/30fps/scale=1.5/crf=18）；Docker/纯环境变量场景推荐设 │
 # │      MSS_GPU_PROFILE=intel|nvidia|amd|cpu（别名 MSS_GPU_MODE）              │
 # │      与 MSS_MEMORY_PROFILE=low|standard（4–8GB 内存主机/NAS 用 low）         │
-# │   4. 零本地资源纯云端模式：assets.cloudOnly 默认已为 true，无需手动下载       │
-# │      Live2D 模型/背景/BGM，导出时自动按需拉取并缓存                          │
+# │   4. 零本地资源纯云端模式：本模板默认 assets.cloudOnly: true，无需手动下载     │
+# │      Live2D 模型/背景/BGM，导出时自动按需拉取并缓存；如需使用本地 resources/  │
+# │      目录覆盖云端资源，请将 assets.cloudOnly 设为 false                      │
 # └───────────────────────────────────────────────────────────────────────────┘
 #
 # 优先级：细粒度 MSS_* 环境变量 > 组合预设 (MSS_GPU_PROFILE / MSS_MEMORY_PROFILE)
 #         > config.yaml (可用 MSS_CONFIG_PATH 指定自定义路径) > 内置默认值
-# config.yaml 与 .env 均已被 .gitignore 忽略，可放心存放私有配置
+# 宿主启动时会自动加载根目录 .env（可用 MSS_ENV_FILE 指定路径），但绝不覆盖已有环境
+# 变量（Shell / Docker / systemd 注入优先）。config.yaml 与 .env 均已 .gitignore。
 
 # ---------------------------------------------------------------------------
 # 服务监听
@@ -118,7 +120,7 @@ paths:
 # TTS 语音合成（GPT-SoVITS / IrodoriTTS）
 # ---------------------------------------------------------------------------
 tts:
-  enabled: true                   # 关闭后导出仍会成功，只是没有角色配音（env: MSS_TTS_ENABLED）
+  enabled: false                  # 模板默认关闭以便零 TTS 服务开箱运行；接入 TTS 后设为 true（内置 schema 默认 true，env: MSS_TTS_ENABLED）
   provider: gpt-sovits            # gpt-sovits | irodori（env: MSS_TTS_PROVIDER）
   apiBaseUrl: http://127.0.0.1:9880   # GSV: http://host:9880；Irodori: http://host:8088（env: MSS_TTS_API_BASE_URL）
   timeoutMs: 120000               # 单次 TTS 请求超时（env: MSS_TTS_TIMEOUT_MS）
@@ -129,13 +131,15 @@ tts:
   speedFactor: 1.0                # 语速倍率
   gptWeightsPath: ""              # 可选：全局默认 GPT 权重（GSV 服务端本地路径）
   sovitsWeightsPath: ""           # 可选：全局默认 SoVITS 权重
-  # IrodoriTTS 推理默认值（provider=irodori 时生效，env: MSS_IRODORI_MODEL / MSS_IRODORI_NUM_STEPS）
+  # IrodoriTTS 推理默认值（provider=irodori 时生效；支持 MSS_IRODORI_MODEL / MSS_IRODORI_NUM_STEPS /
+  # MSS_IRODORI_TIMBRE_LOCK_MODE / MSS_IRODORI_CFG_SCALE_CAPTION / MSS_IRODORI_SPECIAL_CFG_SCALE_CAPTION /
+  # MSS_IRODORI_SPEAKER_KV_SCALE / MSS_IRODORI_SPEAKER_KV_MIN_T）
   irodori:
     model: irodori-tts
     responseFormat: wav
     numSteps: 40
     cfgScaleText: 3.0
-    cfgScaleCaption: 3.0
+    cfgScaleCaption: 3.5          # env: MSS_IRODORI_CFG_SCALE_CAPTION
     cfgScaleSpeaker: 5.0
     durationScale: 1.0
     chunkingEnabled: true
@@ -143,11 +147,11 @@ tts:
     seed: -1                      # -1 = 每次随机
     defaultLoraAdapter: ""        # 角色未填 loraAdapter 时的全局默认
     defaultCaption: ""            # 角色未填 caption 时的全局默认
-    speakerKvScale: 1.15          # 早期去噪步说话人 K/V 缩放（锁住角色底色，避免情绪导致音色漂移）
-    speakerKvMinT: 0.9            # speakerKvScale 生效的最小时间步（默认 0.9）
+    speakerKvScale: 1.15          # 早期去噪步说话人 K/V 缩放（锁住角色底色，避免情绪导致音色漂移；env: MSS_IRODORI_SPEAKER_KV_SCALE）
+    speakerKvMinT: 0.9            # speakerKvScale 生效的最小时间步（默认 0.9；env: MSS_IRODORI_SPEAKER_KV_MIN_T）
     # speakerKvMaxLayers: 12      # 可选：限制 speakerKvScale 作用的最大层数
-    timbreLockMode: normal        # normal = 普通句锁定基础参考音频，仅特殊高潮句解锁；off = 按 emotion 切参考音频
-    specialSceneCfgScaleCaption: 3.6  # 特殊场景（哭喊/耳语/爆发）时的 cfg_scale_caption 引导强度
+    timbreLockMode: off           # off（默认）= 依赖 LoRA+speakerKvScale 锁身份并按 emotion 切参考音频；normal = 普通句锁定基础参考音频，仅高潮句解锁（env: MSS_IRODORI_TIMBRE_LOCK_MODE）
+    specialSceneCfgScaleCaption: 4.2  # 特殊场景（哭喊/耳语/爆发）时的 cfg_scale_caption 引导强度（env: MSS_IRODORI_SPECIAL_CFG_SCALE_CAPTION）
     emotionLabels: [平静, 开心, 生气, 伤心, 害羞, 惊讶]
   # 角色专属声音（未列出的角色使用上方默认值）
   characters: []
@@ -298,8 +302,8 @@ assets:
                                   # 自动暴露全 26 位角色及换装变体+知名配角、~1400 云端背景、~420 剧情/区域 BGM 与 SE；
                                   # 剧本可写背景名（如 神山高校 天台·黄昏）、曲名（Slapstick!!）或云端 id；
                                   # 导出前按需物化到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_CATALOG）
-  cloudOnly: true                 # 严格纯云端模式：完全忽略旧本地资源（models.yaml / bgm.yaml / 非 cloud/ 图片与音频 / voices），
-                                  # 即使本地有旧 Live2D 模型也只用云端目录并按需物化到 resources/*/cloud/（env: MSS_ASSETS_CLOUD_ONLY）
+  cloudOnly: true                 # 严格纯云端模式（零本地资源开箱推荐）：完全忽略旧本地资源（models.yaml / bgm.yaml / 非 cloud/ 图片与音频 / voices），
+                                  # 只用云端目录并按需物化到 resources/*/cloud/；如需让本地 resources/ 文件优先覆盖云端资源，请改为 false（内置 schema 默认 false；env: MSS_ASSETS_CLOUD_ONLY）
   cloudCatalogTtlHours: 6         # 目录缓存有效期（小时）；过期后台刷新，失败沿用旧快照
                                   # （env: MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS）
 

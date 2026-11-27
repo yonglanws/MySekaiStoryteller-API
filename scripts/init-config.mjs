@@ -281,6 +281,7 @@ export function buildConfigYaml(cfg) {
     '  source: moesekai',
     '  region: jp',
     '  cloudCatalog: true',
+    '  # true = 零本地资源纯云端模式；改为 false 可让本地 resources/ 文件优先覆盖云端资源',
     `  cloudOnly: ${cfg.cloudOnly}`,
     '  cloudCatalogTtlHours: 6',
     '',
@@ -521,7 +522,9 @@ export async function runInitConfig(argv, cwd = process.cwd()) {
     `  secrets     : MSS_LLM_API_KEY=${finalCfg.llmKey ? '[set]' : '[empty]'}, MSS_API_KEY=${finalCfg.apiKey ? '[set]' : '[empty]'}\n`
   )
   if (!finalCfg.llmKey) {
-    stdout.write('\n提示：请在 .env 中填入 MSS_LLM_API_KEY 后再调用 AI 剧本生成接口。\n')
+    stdout.write(
+      '\n提示：请在 .env 中填入 MSS_LLM_API_KEY 后再调用 AI 剧本生成接口（宿主启动时会自动加载 .env）。\n'
+    )
   }
 
   return { status: 'ok', outConfigPath, outEnvPath }

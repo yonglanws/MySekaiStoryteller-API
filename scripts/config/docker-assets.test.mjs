@@ -44,6 +44,7 @@ function collectKnownHostEnvVars() {
   const known = new Set(ALLOWED_EXTRA_MSS_ENV_VARS)
   const sources = [
     'src/host/config.ts',
+    'src/host/env.ts',
     'src/host/main.ts',
     'src/shared/ffmpeg.ts',
     'src/host/export/rustExporter.ts',
@@ -184,12 +185,17 @@ test('Dockerfile is multi-stage, aligned with package-lock Playwright version, a
     '/app/out',
     '/app/out-host',
     '/app/node_modules',
-    '/app/scripts',
+    '/app/scripts/init-config.mjs',
     'mss-export-napi.node',
     'mss-export-rs'
   ]) {
     assert.ok(dockerfile.includes(artifact), `Dockerfile runtime stage must copy: ${artifact}`)
   }
+  assert.doesNotMatch(
+    dockerfile,
+    /^COPY\s+--from=builder\s+\/app\/scripts\s+\.\/scripts$/m,
+    'Dockerfile runtime stage must not copy the entire scripts/ test directory'
+  )
   assert.match(
     dockerfile,
     /^COPY\s+personas\s+\.\/personas$/m,

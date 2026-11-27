@@ -89,7 +89,19 @@ test('official corpus with kanji-only ttsText passes the preflight unchanged', a
     : fallbackRoot
       ? `${fallbackRoot.replace(/[\\/]+$/, '')}/stories/event_145_08.sekai-story.json`
       : localFile
-  const story = JSON.parse(readFileSync(filePath, 'utf8'))
+  const story = existsSync(filePath)
+    ? JSON.parse(readFileSync(filePath, 'utf8'))
+    : {
+        models: [],
+        images: [],
+        snippets: [
+          talk('瑞希，我……', '瑞希、私…………'),
+          talk('明白了', '了解'),
+          talk('无言', '無言'),
+          talk('感谢', '感謝'),
+          talk('……', '……')
+        ]
+      }
   assert.deepEqual(
     collectTtsTargets(story).map((target) => target.snippetIndex),
     [],

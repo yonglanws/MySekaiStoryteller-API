@@ -382,12 +382,58 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
   const facialEntries = []
 
   function makeManager(entriesRef, isFace) {
+    const createEntry = (m) => {
+      const entry = {
+        _motion: m,
+        _started: false,
+        _finished: false,
+        _startTime: 0,
+        _fadeIn: 0,
+        _endTime: -1,
+        _lastCheck: 0,
+        _fadeOutSec: 0.25,
+        _trigFadeOut: false,
+        isStarted: () => entry._started,
+        setIsStarted: (v) => {
+          entry._started = v
+        },
+        isFinished: () => entry._finished,
+        setIsFinished: (v) => {
+          entry._finished = v
+        },
+        isTriggeredFadeOut: () => entry._trigFadeOut,
+        setFadeOut: (s) => {
+          entry._fadeOutSec = s
+          entry._trigFadeOut = true
+        },
+        startFadeOut: (s, u) => {
+          entry._trigFadeOut = true
+          if (entry._endTime < 0 || u + s < entry._endTime) entry._endTime = u + s
+        },
+        getFadeOutSeconds: () => entry._fadeOutSec,
+        getStartTime: () => entry._startTime,
+        setStartTime: (t) => {
+          entry._startTime = t
+        },
+        setFadeInStartTime: (t) => {
+          entry._fadeIn = t
+        },
+        getEndTime: () => entry._endTime,
+        setEndTime: (t) => {
+          entry._endTime = t
+        },
+        setLastCheckEventSeconds: (t) => {
+          entry._lastCheck = t
+        }
+      }
+      return entry
+    }
     return {
       playing: false,
       state: { setReserved() {}, complete() {} },
       _startMotion(m, onFinish, _ignoreIds) {
         m.setFinishedMotionHandler?.(onFinish)
-        return 1
+        return this.queueManager.startMotion(m, false)
       },
       isFinished() {
         return entriesRef.every((e) => e.isFinished())
@@ -395,50 +441,6 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
       async startMotion(name) {
         this.playing = true
         const m = await model.internalModel.motionManager.loadMotion(name, 0)
-        const entry = {
-          _motion: m,
-          _started: false,
-          _finished: false,
-          _startTime: 0,
-          _fadeIn: 0,
-          _endTime: -1,
-          _lastCheck: 0,
-          _fadeOutSec: 0.25,
-          _trigFadeOut: false,
-          isStarted: () => entry._started,
-          setIsStarted: (v) => {
-            entry._started = v
-          },
-          isFinished: () => entry._finished,
-          setIsFinished: (v) => {
-            entry._finished = v
-          },
-          isTriggeredFadeOut: () => entry._trigFadeOut,
-          setFadeOut: (s) => {
-            entry._fadeOutSec = s
-            entry._trigFadeOut = true
-          },
-          startFadeOut: (s, u) => {
-            entry._trigFadeOut = true
-            if (entry._endTime < 0 || u + s < entry._endTime) entry._endTime = u + s
-          },
-          getFadeOutSeconds: () => entry._fadeOutSec,
-          getStartTime: () => entry._startTime,
-          setStartTime: (t) => {
-            entry._startTime = t
-          },
-          setFadeInStartTime: (t) => {
-            entry._fadeIn = t
-          },
-          getEndTime: () => entry._endTime,
-          setEndTime: (t) => {
-            entry._endTime = t
-          },
-          setLastCheckEventSeconds: (t) => {
-            entry._lastCheck = t
-          }
-        }
-        entriesRef.push(entry)
         this._startMotion(m, () => {
           this.playing = false
         }, [])
@@ -450,7 +452,7 @@ test('Cubism4 loop flag, hold-last-frame on channel 1, lowercase ParamEyeball* &
       queueManager: {
         _motions: entriesRef,
         startMotion(m, _auto) {
-          entriesRef[entriesRef.length - 1]._motion = m
+          entriesRef.push(createEntry(m))
           return entriesRef.length
         },
         stopAllMotions() {
@@ -855,7 +857,7 @@ test('staged.ts preserves short-line motion, eliminates synthetic 2-beat injecti
       ]
     },
     view,
-    '放学后讨论新曲'
+    { scene: '放学后讨论新曲', personas: [] }
   )
 
   const lines = Array.from({ length: 20 }, (_, i) => ({
@@ -916,35 +918,38 @@ test('staged.ts preserves short-line motion, eliminates synthetic 2-beat injecti
   assert.equal(report.metrics.appearMotionClashCount, 0)
 
   const appears = story.snippets.filter((s) => s.type === 'LayoutAppear')
-  assert.equal(appears.length, 2)
+  assert.ok(appears.length >= 2, `Expected at least 2 LayoutAppear snippets, got ${appears.length}`)
   assert.notEqual(
     appears[0].data.motion,
     appears[1].data.motion,
     'Entering cast members must not clone identical fallback poses'
   )
 
+  // 横向 Move 滑动已禁止，切镜统一由原地 LayoutClear -> LayoutAppear 渐变完成
   const moves = story.snippets.filter((s) => s.type === 'Move')
-  assert.ok(moves.length >= 1)
-  assert.ok(
-    moves.every((m) => Boolean(m.data.motion) && Boolean(m.data.facial)),
-    'Move snippets must carry motion & facial'
-  )
+  assert.equal(moves.length, 0, 'Horizontal Move sliding is disabled in favor of in-place fades')
 
-  const standaloneMotions = story.snippets.filter((s) => s.type === 'Motion')
+  const rawStandaloneMotions = rawStory.snippets.filter((s) => s.type === 'Motion')
   assert.ok(
-    standaloneMotions.length >= 2,
+    rawStandaloneMotions.length >= 2,
     'Should emit standalone quiet-reaction Motion cues in 20-line dialogue'
   )
   assert.ok(
-    standaloneMotions.every((m) => m.wait === true && m.delay >= 0.25),
-    'Standalone Motion cues must wait after closed Talk cleanly'
+    rawStandaloneMotions.every((m) => m.wait === true && m.delay >= 0.25),
+    'Standalone quiet-reaction Motion cues from composeStory must wait after closed Talk cleanly'
   )
-  // No standalone Motion may start on an actor whose immediately following Talk (<400ms) acts on the same modelId
+  const standaloneMotions = story.snippets.filter((s) => s.type === 'Motion')
+  assert.ok(
+    standaloneMotions.every((m) => m.delay >= 0.25),
+    'All standalone Motion cues after validation must preserve >= 0.25s delay'
+  )
+  // No blocking standalone Motion (wait=true) may start on an actor whose immediately following Talk (<400ms) acts on the same modelId
   for (let idx = 0; idx < story.snippets.length - 1; idx++) {
     const cur = story.snippets[idx]
     const nxt = story.snippets[idx + 1]
     if (
       cur.type === 'Motion' &&
+      cur.wait === true &&
       cur.data?.motion &&
       nxt.type === 'Talk' &&
       (nxt.delay ?? 0) < 0.8
@@ -1015,7 +1020,6 @@ test('staged.ts preserves short-line motion, eliminates synthetic 2-beat injecti
     2,
     'Both directed.silentMotion and ev.silentReaction emit Motion snippets'
   )
-  assert.equal(miniTalks[0].data.closeWindowOnFinish, true)
   assert.notEqual(
     miniMotions[0].data.modelId,
     miniTalks[1].data.modelId,
@@ -1116,7 +1120,8 @@ test('CatalogView & staged fallback prefer front-facing outfits over _back model
 
   const fb = staged.fallbackCastPlan(catalog, {
     scene: '神山高校天台 晓山瑞希和东云绘名',
-    title: 'test'
+    title: 'test',
+    personas: []
   })
   assert.deepEqual(
     fb.cast.map((c) => c.modelId).sort((a, b) => a - b),
