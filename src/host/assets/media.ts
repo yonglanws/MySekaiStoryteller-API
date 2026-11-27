@@ -4,7 +4,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import type { AssetsSettings } from '../config'
 import { ffmpegPath } from '../../shared/ffmpeg'
-import { assertHttpUrl, atomicWrite, fetchJson, request, type RequestOptions } from './http'
+import { assertHttpUrl, atomicWrite, fetchBuffer, fetchJson, type RequestOptions } from './http'
 import { mapPool } from './shared'
 import { appendNamedManifest, type NamedManifestEntry } from './manifest'
 import { soundtrackKey, soundtrackLabel, type SoundtrackIndex } from './soundtracks'
@@ -421,8 +421,7 @@ async function fetchFiles(
       }
 
       options.onProgress?.(`下载 ${bundle.kind} ${bundle.name} …`)
-      const response = await request(new URL(picked.url, origin).href, requestOpts)
-      const buffer = Buffer.from(await response.arrayBuffer())
+      const buffer = await fetchBuffer(new URL(picked.url, origin).href, requestOpts)
       atomicWrite(target, buffer)
       options.onProgress?.(
         `完成 ${relativeTo(options.outDir, target)}（${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB）`
@@ -546,7 +545,7 @@ export async function downloadMediaFile(
     ? `${options.saveAsName}${path.extname(pickedBase)}`
     : pickedBase
   const target = path.join(dir, fileName)
-  if (fs.existsSync(target) && !options.force) {
+  if (fs.existsSync(target) && fs.statSync(target).size > 0 && !options.force) {
     const existingLoop = options.kind === 'bgm' ? extractAudioLoopMetadata(target) : null
     return {
       file: relativeTo(options.outDir, target),
@@ -555,16 +554,47 @@ export async function downloadMediaFile(
       ...(existingLoop ? { loop: existingLoop } : {})
     }
   }
-  const response = await request(new URL(picked.url, origin).href, requestOpts)
-  const buffer = Buffer.from(await response.arrayBuffer())
+  const primaryUrl = new URL(picked.url, origin).href
+  const downloadUrls = [primaryUrl]
+  if (isCanonicalAssetOrigin(origin)) {
+    const parsed = new URL(primaryUrl)
+    for (const base of candidates) {
+      const altOrigin = apiOrigin(base)
+      if (altOrigin !== origin && isCanonicalAssetOrigin(altOrigin)) {
+        const altUrl = `${altOrigin}${parsed.pathname}${parsed.search}`
+        if (!downloadUrls.includes(altUrl)) downloadUrls.push(altUrl)
+      }
+    }
+  }
+  let buffer: Buffer | null = null
+  let lastDownloadError: unknown = null
+  for (let i = 0; i < downloadUrls.length; i++) {
+    const url = downloadUrls[i]
+    const hasBackup = i < downloadUrls.length - 1
+    try {
+      const buf = await fetchBuffer(url, {
+        ...requestOpts,
+        retries: hasBackup ? Math.min(requestOpts.retries, 1) : requestOpts.retries
+      })
+      if (buf.byteLength === 0) throw new Error(`${url}: empty response body`)
+      buffer = buf
+      break
+    } catch (error) {
+      lastDownloadError = error
+    }
+  }
+  if (!buffer) {
+    throw lastDownloadError instanceof Error
+      ? lastDownloadError
+      : new Error(String(lastDownloadError ?? `failed to download ${primaryUrl}`))
+  }
   atomicWrite(target, buffer)
   let loop = options.kind === 'bgm' ? extractAudioLoopMetadata(buffer) : null
   if (!loop && options.kind === 'bgm') {
     const metaCompanion = files.find((f) => /\.(hca|wav)$/i.test(f.name) && f.name !== picked.name)
     if (metaCompanion) {
       try {
-        const metaResp = await request(new URL(metaCompanion.url, origin).href, requestOpts)
-        const metaBuf = Buffer.from(await metaResp.arrayBuffer())
+        const metaBuf = await fetchBuffer(new URL(metaCompanion.url, origin).href, requestOpts)
         loop = extractAudioLoopMetadata(metaBuf)
       } catch {
         // best-effort companion loop extraction
@@ -1047,8 +1077,13 @@ export async function downloadSeFile(options: {
         })
       if (!hit) continue
 
-      const response = await request(new URL(hit.url, origin).href, requestOpts)
-      const buffer = Buffer.from(await response.arrayBuffer())
+      let buffer: Buffer
+      try {
+        buffer = await fetchBuffer(new URL(hit.url, origin).href, requestOpts)
+        if (buffer.byteLength === 0) throw new Error('empty SE response body')
+      } catch {
+        continue
+      }
       const hitTarget = path.join(seDir, path.posix.basename(hit.name))
       atomicWrite(hitTarget, buffer)
 

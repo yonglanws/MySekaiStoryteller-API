@@ -4,8 +4,8 @@ import type { AssetsSettings } from '../config'
 import {
   assetUrl,
   atomicWrite,
+  fetchBuffer as httpFetchBuffer,
   fetchJson,
-  request,
   withSlash,
   writeFileFastAsync,
   type RequestOptions
@@ -149,10 +149,112 @@ export interface FetchAssetsResult {
 const DEFAULT_CONCURRENCY = 6
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_RETRIES = 2
+const CANONICAL_MIRROR_PREF_TTL_MS = 5 * 60_000
 
-async function fetchBuffer(url: string, options: RequestOptions): Promise<Buffer> {
-  const response = await request(url, options)
-  return Buffer.from(await response.arrayBuffer())
+let preferredCanonicalSite: { origin: string; until: number } | null = null
+
+export function resetCanonicalSitePreference(): void {
+  preferredCanonicalSite = null
+}
+
+function activePreferredCanonicalSite(sites: readonly string[]): string | null {
+  if (!preferredCanonicalSite) return null
+  if (Date.now() > preferredCanonicalSite.until) {
+    preferredCanonicalSite = null
+    return null
+  }
+  return sites.includes(preferredCanonicalSite.origin) ? preferredCanonicalSite.origin : null
+}
+
+/**
+ * 为 canonical 资源 URL 生成包含主站与备用镜像（`storage.pjsk.moe` ↔ `storage.exmeaning.com`）
+ * 的候选下载列表；非 canonical 地址原样返回。
+ */
+export function canonicalFallbackUrls(
+  url: string,
+  sites: readonly string[] = CANONICAL_ASSET_SITES
+): string[] {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return [url]
+  }
+  if (!sites.includes(parsed.origin)) return [url]
+
+  const sticky = activePreferredCanonicalSite(sites)
+  const orderedOrigins = [
+    ...(sticky ? [sticky] : []),
+    parsed.origin,
+    ...sites.filter((site) => site !== parsed.origin && site !== sticky)
+  ]
+
+  const out: string[] = []
+  const seen = new Set<string>()
+  const push = (candidate: string): void => {
+    if (!seen.has(candidate)) {
+      seen.add(candidate)
+      out.push(candidate)
+    }
+  }
+
+  for (const origin of orderedOrigins) {
+    push(`${origin}${parsed.pathname}${parsed.search}`)
+  }
+
+  const versionedMatch = /^\/(jp|cn|tw|kr|en)@[^/]+(\/.*)$/.exec(parsed.pathname)
+  if (versionedMatch) {
+    for (const origin of orderedOrigins) {
+      if (origin === parsed.origin) continue
+      push(`${origin}/${versionedMatch[1]}${versionedMatch[2]}${parsed.search}`)
+    }
+  }
+
+  return out
+}
+
+async function fetchBuffer(
+  url: string,
+  options: RequestOptions & { expectedSize?: number }
+): Promise<Buffer> {
+  const candidates = canonicalFallbackUrls(url)
+  let lastError: Error | null = null
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i]
+    const hasMoreMirrors = i < candidates.length - 1
+    const attemptOptions: RequestOptions = {
+      ...options,
+      retries: hasMoreMirrors ? Math.min(options.retries, 1) : options.retries
+    }
+    try {
+      const buffer = await httpFetchBuffer(candidate, attemptOptions)
+      if (buffer.byteLength === 0) {
+        throw new Error(`${candidate}: empty response body`)
+      }
+      if (
+        typeof options.expectedSize === 'number' &&
+        options.expectedSize > 0 &&
+        buffer.byteLength !== options.expectedSize
+      ) {
+        throw new Error(
+          `${candidate}: size mismatch (expected ${options.expectedSize}, got ${buffer.byteLength})`
+        )
+      }
+      if (candidates.length > 1) {
+        const origin = new URL(candidate).origin
+        if (CANONICAL_ASSET_SITES.includes(origin as (typeof CANONICAL_ASSET_SITES)[number])) {
+          preferredCanonicalSite = { origin, until: Date.now() + CANONICAL_MIRROR_PREF_TTL_MS }
+        }
+      }
+      return buffer
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (options.signal?.aborted) throw lastError
+    }
+  }
+
+  throw lastError ?? new Error(`${url}: fetch failed`)
 }
 
 const bundleLocks = new Map<string, Promise<void>>()
@@ -197,12 +299,18 @@ function isCanonicalSiteHost(url: string): boolean {
 }
 
 function canonicalSitesFor(preferredUrl?: string): string[] {
+  const sticky = activePreferredCanonicalSite(CANONICAL_ASSET_SITES)
   const trimmed = (preferredUrl ?? '').trim()
+  const base: string[] = []
+  if (sticky) base.push(sticky)
   if (trimmed && isCanonicalSiteHost(trimmed)) {
     const origin = new URL(trimmed).origin
-    return [origin, ...CANONICAL_ASSET_SITES.filter((site) => site !== origin)]
+    if (!base.includes(origin)) base.push(origin)
   }
-  return [...CANONICAL_ASSET_SITES]
+  for (const site of CANONICAL_ASSET_SITES) {
+    if (!base.includes(site)) base.push(site)
+  }
+  return base
 }
 
 function parseCanonicalLibraryRoot(
@@ -824,6 +932,11 @@ async function downloadBundle(
         file.canonicalUrl ?? file.storageUrl ?? assetUrl(libraryRoot, `${bundle}/${file.path}`)
       const data = await fetchBuffer(url, options)
       if (isIndividualMotionClipFile(file)) {
+        try {
+          JSON.parse(data.toString('utf-8'))
+        } catch {
+          throw new Error(`${url}: invalid JSON in motion clip`)
+        }
         await writeFileFastAsync(dest, data)
       } else {
         atomicWrite(dest, data)
@@ -857,6 +970,26 @@ interface Model3JsonShape {
     Motions?: Record<string, Array<{ File: string; FadeInTime: number; FadeOutTime: number }>>
   }
   Groups?: Array<{ Target: string; Name: string; Ids: string[] }>
+}
+
+function cachedCanonicalFileValid(
+  filePath: string,
+  expectedSize?: number,
+  requireJson = false
+): boolean {
+  try {
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile() || stat.size <= 0) return false
+    if (typeof expectedSize === 'number' && expectedSize > 0 && stat.size !== expectedSize) {
+      return false
+    }
+    if (requireJson) {
+      JSON.parse(fs.readFileSync(filePath, 'utf-8'))
+    }
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function downloadCanonicalModelBundle(
@@ -928,35 +1061,60 @@ async function downloadCanonicalModelBundle(
   const mocRel = refs.Moc || `${variant}.moc3`
   const mocDest = path.join(destDir, ...mocRel.split('/'))
   let mocBuffer: Buffer
-  if (!options.force && fs.existsSync(mocDest)) {
+  if (!options.force && cachedCanonicalFileValid(mocDest, mocMember.size)) {
     mocBuffer = fs.readFileSync(mocDest)
   } else {
     const mocFile = manifest.files.find((f) => f.kind === 'moc')
     if (!mocFile?.canonicalUrl) throw new Error(`${entry.id}: missing moc URL`)
-    mocBuffer = await fetchBuffer(mocFile.canonicalUrl, options)
+    mocBuffer = await fetchBuffer(mocFile.canonicalUrl, {
+      ...options,
+      expectedSize: mocMember.size
+    })
     atomicWrite(mocDest, mocBuffer)
     bytes += mocBuffer.length
   }
 
-  const downloads: Array<{ url: string; dest: string }> = []
+  const downloads: Array<{
+    url: string
+    dest: string
+    expectedSize?: number
+    requireJson?: boolean
+  }> = []
   if (physicsMember) {
     const phyRel = refs.Physics || `${variant}.physics3.json`
     const phyFile = manifest.files.find((f) => f.kind === 'physics')
     if (phyFile?.canonicalUrl) {
-      downloads.push({ url: phyFile.canonicalUrl, dest: path.join(destDir, ...phyRel.split('/')) })
+      downloads.push({
+        url: phyFile.canonicalUrl,
+        dest: path.join(destDir, ...phyRel.split('/')),
+        expectedSize: physicsMember.size,
+        requireJson: true
+      })
     }
   }
   for (let i = 0; i < textureMembers.length; i++) {
     const texRel = refs.Textures?.[i] ?? `${variant}.2048/texture_${String(i).padStart(2, '0')}.png`
     const texFile = manifest.files.find((f) => f.kind === textureMembers[i].role)
     if (texFile?.canonicalUrl) {
-      downloads.push({ url: texFile.canonicalUrl, dest: path.join(destDir, ...texRel.split('/')) })
+      downloads.push({
+        url: texFile.canonicalUrl,
+        dest: path.join(destDir, ...texRel.split('/')),
+        expectedSize: textureMembers[i].size
+      })
     }
   }
 
   await mapPool(downloads, options.concurrency ?? DEFAULT_CONCURRENCY, async (item) => {
-    if (!options.force && fs.existsSync(item.dest)) return
-    const buf = await fetchBuffer(item.url, options)
+    if (
+      !options.force &&
+      cachedCanonicalFileValid(item.dest, item.expectedSize, item.requireJson)
+    ) {
+      return
+    }
+    const buf = await fetchBuffer(item.url, { ...options, expectedSize: item.expectedSize })
+    if (item.requireJson) {
+      JSON.parse(buf.toString('utf-8'))
+    }
     atomicWrite(item.dest, buf)
     bytes += buf.length
   })
@@ -969,9 +1127,9 @@ function resolveMotionBundles(entry: MoesekaiIndexEntry): {
   required: string[]
   optional: string[]
 } {
-  const raw = (
-    entry.motions?.length ? entry.motions : entry.motion ? [entry.motion] : []
-  ).filter((bundle): bundle is string => typeof bundle === 'string' && bundle.length > 0)
+  const raw = (entry.motions?.length ? entry.motions : entry.motion ? [entry.motion] : []).filter(
+    (bundle): bundle is string => typeof bundle === 'string' && bundle.length > 0
+  )
   const required = [...new Set(raw)]
   const seen = new Set(required)
   const isV2 =
@@ -1108,6 +1266,7 @@ export async function downloadModel(
         raw = JSON.parse(await fs.promises.readFile(file, 'utf-8'))
       } catch (error) {
         progress(`跳过无法解析的动作 ${path.relative(motionDir, file)}: ${String(error)}`)
+        await fs.promises.unlink(file).catch(() => undefined)
         return null
       }
       const fallbackName = path.basename(file).replace(/\.(?:sse-motion|live2d-motion)\.json$/, '')

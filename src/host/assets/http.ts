@@ -5,6 +5,9 @@ import path from 'node:path'
 
 export const ASSET_USER_AGENT = 'MySekaiStoryteller-API/1.0 (moesekai asset fetcher)'
 const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
+const DEFAULT_BODY_STALL_TIMEOUT_MS = 30_000
+const DEFAULT_RETRY_DELAY_MS = 500
+let atomicWriteSeq = 0
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function withSlash(value: string): string {
@@ -61,9 +64,18 @@ async function ensureDirCached(dir: string): Promise<void> {
 
 export function atomicWrite(file: string, data: Buffer | string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  fs.writeFileSync(tmp, data)
-  fs.renameSync(tmp, file)
+  const tmp = `${file}.${process.pid}.${Date.now()}.${++atomicWriteSeq}.tmp`
+  try {
+    fs.writeFileSync(tmp, data)
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    try {
+      fs.rmSync(tmp, { force: true })
+    } catch {
+      // ignore cleanup errors
+    }
+    throw error
+  }
 }
 
 /**
@@ -90,7 +102,108 @@ export async function writeFileFastAsync(file: string, data: Buffer | string): P
 export interface RequestOptions {
   timeoutMs: number
   retries: number
+  /** 流式读取响应体期间的单次空闲超时（毫秒）；未设置时默认 min(timeoutMs, 30_000) */
+  stallTimeoutMs?: number
+  /** 重试退避基数（毫秒，默认 500；主要用于单测加速） */
+  retryDelayMs?: number
   signal?: AbortSignal
+}
+
+class NonRetryableHttpError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'NonRetryableHttpError'
+  }
+}
+
+function errorFromReason(reason: unknown, fallback: string): Error {
+  if (reason instanceof Error) return reason
+  if (reason === undefined || reason === null) return new Error(fallback)
+  return new Error(String(reason))
+}
+
+function retryBackoffMs(attempt: number, baseMs?: number): number {
+  const base = Math.max(0, baseMs ?? DEFAULT_RETRY_DELAY_MS)
+  if (base === 0) return 0
+  return base * 2 ** attempt + Math.random() * Math.min(250, base)
+}
+
+async function readResponseBuffer(
+  response: Response,
+  controller: AbortController,
+  stallTimeoutMs: number
+): Promise<Buffer> {
+  const contentEncoding = response.headers.get('content-encoding')
+  const contentLengthHeader = response.headers.get('content-length')
+  const expectedLength =
+    !contentEncoding && contentLengthHeader && /^\d+$/.test(contentLengthHeader.trim())
+      ? Number(contentLengthHeader.trim())
+      : null
+
+  let buffer: Buffer
+  const body = response.body
+  if (!body || typeof body.getReader !== 'function') {
+    buffer = Buffer.from(await response.arrayBuffer())
+  } else {
+    const reader = body.getReader()
+    const chunks: Uint8Array[] = []
+    let totalBytes = 0
+    let abortReason: Error | null = null
+    let stallTimer: ReturnType<typeof setTimeout> | null = null
+
+    const armStallTimer = (): void => {
+      if (stallTimer) clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        abortReason = new Error(`response body stalled after ${stallTimeoutMs}ms`)
+        controller.abort(abortReason)
+        void reader.cancel(abortReason).catch(() => undefined)
+      }, stallTimeoutMs)
+    }
+
+    const onControllerAbort = (): void => {
+      if (!abortReason) {
+        abortReason = errorFromReason(controller.signal.reason, 'aborted')
+      }
+      void reader.cancel(abortReason).catch(() => undefined)
+    }
+    controller.signal.addEventListener('abort', onControllerAbort, { once: true })
+
+    try {
+      if (controller.signal.aborted) {
+        throw errorFromReason(controller.signal.reason, 'aborted')
+      }
+      armStallTimer()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value && value.byteLength > 0) {
+          chunks.push(value)
+          totalBytes += value.byteLength
+          armStallTimer()
+        }
+      }
+      if (abortReason) throw abortReason
+      if (controller.signal.aborted) {
+        throw errorFromReason(controller.signal.reason, 'aborted')
+      }
+    } finally {
+      if (stallTimer) clearTimeout(stallTimer)
+      controller.signal.removeEventListener('abort', onControllerAbort)
+      try {
+        reader.releaseLock()
+      } catch {
+        // ignore if already closed/cancelled
+      }
+    }
+    buffer = Buffer.concat(chunks, totalBytes)
+  }
+
+  if (expectedLength !== null && buffer.byteLength < expectedLength) {
+    throw new Error(
+      `truncated response body: expected ${expectedLength} bytes, got ${buffer.byteLength}`
+    )
+  }
+  return buffer
 }
 
 export async function request(url: string, options: RequestOptions): Promise<Response> {
@@ -98,6 +211,9 @@ export async function request(url: string, options: RequestOptions): Promise<Res
   let lastError: Error | null = null
 
   for (let attempt = 0; attempt <= options.retries; attempt++) {
+    if (options.signal?.aborted) {
+      throw errorFromReason(options.signal.reason, `${url}: aborted`)
+    }
     const controller = new AbortController()
     const timer = setTimeout(
       () => controller.abort(new Error(`timeout after ${options.timeoutMs}ms`)),
@@ -114,27 +230,86 @@ export async function request(url: string, options: RequestOptions): Promise<Res
       if (response.ok) return response
 
       if (!RETRY_STATUS.has(response.status) || attempt >= options.retries) {
-        throw new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
+        throw new NonRetryableHttpError(`${url}: HTTP ${response.status} ${response.statusText}`)
       }
       await response.body?.cancel().catch(() => undefined)
       lastError = new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
-      if (lastError.name === 'AbortError' || options.signal?.aborted) throw lastError
+      if (error instanceof NonRetryableHttpError || options.signal?.aborted) throw lastError
       if (attempt >= options.retries) throw lastError
     } finally {
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', onAbort)
     }
-    await sleep(500 * 2 ** attempt + Math.random() * 250)
+    await sleep(retryBackoffMs(attempt, options.retryDelayMs))
   }
 
   throw lastError ?? new Error(`${url}: request failed`)
 }
 
+/**
+ * 带完整响应体超时、流式卡死（stall）检测、Content-Length 截断校验与重试的二进制下载。
+ * 解决 Node/undici 在收到响应头后读取响应体时连接中断（`TypeError: terminated`）
+ * 或 TCP 假死（无超时）导致下载无限挂起/零重试的问题。
+ */
+export async function fetchBuffer(url: string, options: RequestOptions): Promise<Buffer> {
+  const parsed = assertHttpUrl(url, 'fetchBuffer')
+  const stallTimeoutMs = Math.max(
+    1,
+    Math.min(options.timeoutMs, options.stallTimeoutMs ?? DEFAULT_BODY_STALL_TIMEOUT_MS)
+  )
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt <= options.retries; attempt++) {
+    if (options.signal?.aborted) {
+      throw errorFromReason(options.signal.reason, `${url}: aborted`)
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(
+      () => controller.abort(new Error(`timeout after ${options.timeoutMs}ms`)),
+      options.timeoutMs
+    )
+    const onAbort = (): void => controller.abort(options.signal?.reason)
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const response = await fetch(parsed, {
+        headers: { 'user-agent': ASSET_USER_AGENT, accept: '*/*' },
+        redirect: 'follow',
+        signal: controller.signal
+      })
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined)
+        const httpError = new Error(`${url}: HTTP ${response.status} ${response.statusText}`)
+        if (!RETRY_STATUS.has(response.status)) {
+          throw new NonRetryableHttpError(httpError.message)
+        }
+        if (attempt >= options.retries) throw httpError
+        lastError = httpError
+      } else {
+        return await readResponseBuffer(response, controller, stallTimeoutMs)
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (error instanceof NonRetryableHttpError || options.signal?.aborted) throw lastError
+      if (attempt >= options.retries) throw lastError
+    } finally {
+      clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
+    }
+    await sleep(retryBackoffMs(attempt, options.retryDelayMs))
+  }
+
+  throw lastError ?? new Error(`${url}: request failed`)
+}
+
+export async function fetchText(url: string, options: RequestOptions): Promise<string> {
+  const buffer = await fetchBuffer(url, options)
+  return buffer.toString('utf-8')
+}
+
 export async function fetchJson<T>(url: string, options: RequestOptions): Promise<T> {
-  const response = await request(url, options)
-  const text = await response.text()
+  const text = await fetchText(url, options)
   try {
     return JSON.parse(text) as T
   } catch {
