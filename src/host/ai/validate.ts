@@ -2363,7 +2363,9 @@ function diversifyActingAndPreTalkMotions(
     const promptM = view.promptMotions(m)
     const promptSet = new Set(promptM)
     const rest = (m.motions ?? []).filter((name) => !promptSet.has(name))
-    return [...promptM, ...rest].filter((name) => !facialSemanticsMod.isSpecialOrStandingMotion(name))
+    return [...promptM, ...rest].filter((name) =>
+      facialSemanticsMod.isMotionAutoPickAllowed(name, m.path)
+    )
   }
 
   const fullFacialsFor = (modelId: number): string[] => {
@@ -2566,10 +2568,14 @@ function diversifyActingAndPreTalkMotions(
         }
         let appMot = toStr(data.motion).trim()
         if (appMot && !facialSemanticsMod.isSpecialOrStandingMotion(appMot)) {
+          const model = view.modelById(mid)
           const mCounts = getMap(motionCountsByActor, mid)
           const sCounts = getMap(stemCountsByActor, mid)
           const stem = facialSemanticsMod.parseMotionStem(appMot).stem
-          if ((mCounts.get(appMot) ?? 0) >= 1 || (sCounts.get(stem) ?? 0) >= 2) {
+          const forbiddenAppMot =
+            !facialSemanticsMod.isCharacterSignatureMotionAllowed(appMot, model?.path) ||
+            /animal/i.test(appMot)
+          if (forbiddenAppMot || (mCounts.get(appMot) ?? 0) >= 1 || (sCounts.get(stem) ?? 0) >= 2) {
             const nextTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
             const nd = nextTalk && isRecord(nextTalk.data) ? nextTalk.data : {}
             const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
@@ -2616,7 +2622,16 @@ function diversifyActingAndPreTalkMotions(
         const sCounts = getMap(stemCountsByActor, actorId)
         const stem = facialSemanticsMod.parseMotionStem(mot).stem
         const prevM = lastBodyMotionByActor.get(actorId)
-        if (mot === prevM || (mCounts.get(mot) ?? 0) >= 1 || (sCounts.get(stem) ?? 0) >= 2) {
+        const actorModel = view.modelById(actorId)
+        const forbiddenMot =
+          !facialSemanticsMod.isCharacterSignatureMotionAllowed(mot, actorModel?.path) ||
+          /animal/i.test(mot)
+        if (
+          forbiddenMot ||
+          mot === prevM ||
+          (mCounts.get(mot) ?? 0) >= 1 ||
+          (sCounts.get(stem) ?? 0) >= 2
+        ) {
           const nearTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
           const nd = nearTalk && isRecord(nearTalk.data) ? nearTalk.data : {}
           const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
@@ -2722,9 +2737,15 @@ function diversifyActingAndPreTalkMotions(
         const usedStem = sCounts.get(stem) ?? 0
         const prevM = lastBodyMotionByActor.get(actorId)
         const isSignatureComedy =
-          cheerfulScene && /wandahoi/i.test(motion) && usedExact < 2
+          cheerfulScene &&
+          /wandahoi/i.test(motion) &&
+          facialSemanticsMod.isCharacterSignatureMotionAllowed(motion, model.path) &&
+          usedExact < 2
+        const forbiddenMot =
+          !facialSemanticsMod.isCharacterSignatureMotionAllowed(motion, model.path) ||
+          /animal/i.test(motion)
         const needsVariety =
-          !isSignatureComedy && (motion === prevM || usedExact >= 1 || usedStem >= 2)
+          forbiddenMot || (!isSignatureComedy && (motion === prevM || usedExact >= 1 || usedStem >= 2))
         if (needsVariety) {
           const freshM = pickFreshMotion(
             actorId,

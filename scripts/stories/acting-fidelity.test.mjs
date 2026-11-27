@@ -2083,3 +2083,123 @@ test('C2 Round 3: cheerful banter clears sticky tenseTracker, listener_forced_sm
   assert.equal(audit.passed, true, `unexpected diagnostics: ${JSON.stringify(audit.diagnostics)}`)
   assert.equal(audit.score, 100, `expected 100 score, got ${audit.score}`)
 })
+
+test('C2 Round 4: excludes cross-character wandahoi/m-tsukasa/animal motions and clears tenseTracker on warm resolution closures', () => {
+  // 1) Cross-character exclusive motion guard
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-happy-wandahoi01',
+      modelPath: '16airi_normal/16airi_normal.model3.json',
+      emotion: '开心',
+      content: '好耶！一起加油吧！'
+    }).ok,
+    false,
+    'wandahoi must be excluded for non-Emu/Tsukasa characters such as Airi'
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'm-tsukasa-wandahoi01',
+      modelPath: '09rui_normal/09rui_normal.model3.json',
+      emotion: '开心',
+      content: '哼哼，很棒的主意。'
+    }).ok,
+    false,
+    'm-tsukasa-* must be excluded for non-Tsukasa characters'
+  )
+  assert.equal(
+    isMotionCompatibleWithLine({
+      motion: 'w-happy-wandahoi01',
+      modelPath: '14emu_normal/14emu_normal.model3.json',
+      emotion: '开心',
+      content: 'Wonderhoy☆！'
+    }).ok,
+    true,
+    'wandahoi remains allowed for Emu'
+  )
+
+  // 2) Full validation strips wandahoi / m-tsukasa / animal from Airi & Rui and passes warm 01_n25/06_n25 endings
+  const crossView = new CatalogView({
+    models: [
+      {
+        id: 16,
+        name: '桃井爱莉',
+        shortName: '爱莉',
+        path: '16airi_normal/16airi_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-happy-wandahoi01',
+          'm-tsukasa-wandahoi01',
+          'w-normalanimal-tiltheadnod0101',
+          'w-normal-nod01',
+          'w-normal-nod02',
+          'w-normal-forward01',
+          'w-normal-glad01',
+          'w-normal-relief01',
+          'w-normal-shy01'
+        ],
+        facials: ['face_normal_01', 'face_smile_01', 'face_smile_02', 'face_smallmouth_01', 'face_sad_01', 'face_closeeye_02'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 1,
+        name: '晓山瑞希',
+        shortName: '瑞希',
+        path: '20mizuki_normal/20mizuki_normal.model3.json',
+        motions: [
+          'w-normal-default01',
+          'w-happy-wandahoi01',
+          'w-normalanimal-tiltheadnod0101',
+          'w-normal-nod01',
+          'w-normal-nod02',
+          'w-normal-relief01',
+          'w-normal-forward01',
+          'w-normal-sad01'
+        ],
+        facials: ['face_normal_01', 'face_smile_01', 'face_smallmouth_01', 'face_sad_01', 'face_closeeye_02'],
+        defaultMotion: 'w-normal-default01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_rooftop.jpg'],
+    imageDetails: [{ file: 'bg_rooftop.jpg', name: '天台', description: '天台' }],
+    voices: [],
+    bgm: ['bgm00003.mp3'],
+    bgmDetails: [{ file: 'bgm00003.mp3', name: 'Daily', description: '日常' }]
+  })
+
+  const raw = {
+    models: [
+      { id: 16, model: '16airi_normal/16airi_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
+      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
+    ],
+    images: [{ id: 1, image: 'bg_rooftop.jpg' }],
+    bgm: ['bgm00003.mp3'],
+    snippets: [
+      { type: 'ChangeLayoutMode', wait: false, progressBehavior: 'Now', delay: 0, data: { mode: 'Normal' } },
+      { type: 'ChangeBackgroundImage', wait: false, progressBehavior: 'Now', delay: 0, data: { imageId: 1 } },
+      { type: 'LayoutAppear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 16, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 }, motion: 'w-happy-wandahoi01', facial: 'face_sad_01' } },
+      { type: 'LayoutAppear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 1, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 }, motion: 'w-normalanimal-tiltheadnod0101', facial: 'face_sad_01' } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0.5, data: { speaker: '瑞希', emotion: '伤心', content: '……对不起，都是我的错。', modelId: 1, actions: [{ at: 0, modelId: 1, motion: 'w-normal-sad01', facial: 'face_sad_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '爱莉', emotion: '平静', content: '……不过，你要是还不想回去，我就在这儿多陪你吹一会儿。', modelId: 16, actions: [{ at: 0, modelId: 16, motion: 'm-tsukasa-wandahoi01', facial: 'face_smallmouth_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '瑞希', emotion: '平静', content: '……嗯。再吹一会儿吧。', modelId: 1, actions: [{ at: 0, modelId: 1, motion: 'w-normal-nod02', facial: 'face_smile_01' }] } },
+      { type: 'Talk', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { speaker: '爱莉', emotion: '开心', content: '行吧，这页就留作今晚四个人的涂鸦——\n至于新曲，明天二十五点再说。', modelId: 16, closeWindowOnFinish: true, actions: [{ at: 0, modelId: 16, motion: 'w-normal-nod01', facial: 'face_closeeye_02' }] } },
+      { type: 'LayoutClear', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { modelId: 16, from: { side: 'Left', offset: 0 }, to: { side: 'Left', offset: 0 } } },
+      { type: 'LayoutClear', wait: false, progressBehavior: 'Now', delay: 0, data: { modelId: 1, from: { side: 'Right', offset: 0 }, to: { side: 'Right', offset: 0 } } },
+      { type: 'BlackOut', wait: true, progressBehavior: 'WaitFinished', delay: 0, data: { duration: 600 } }
+    ]
+  }
+
+  const { story, lint } = validateAndFixStory(raw, crossView)
+  assert.equal(lint.passed, true, `expected lint pass: ${lint.issues.join('; ')}`)
+  const leakedSig = story.snippets.some((sn) => {
+    const d = sn.data || {}
+    if (/wandahoi|animal/i.test(d.motion || '')) return true
+    return Array.isArray(d.actions) && d.actions.some((a) => /wandahoi|animal/i.test(a?.motion || ''))
+  })
+  assert.equal(leakedSig, false, 'wandahoi / m-tsukasa-* / animal motions must not leak to Airi or Mizuki')
+
+  const audit = auditStoryActingAndFidelity(story, crossView)
+  assert.equal(audit.passed, true, `unexpected diagnostics: ${JSON.stringify(audit.diagnostics)}`)
+  assert.equal(audit.score, 100, `expected 100 score, got ${audit.score}`)
+})

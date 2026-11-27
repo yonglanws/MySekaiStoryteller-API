@@ -40,6 +40,7 @@ import {
   isCalmReassureResolution,
   isCheerfulComedyContext,
   isFacialCompatibleWithLine,
+  isMotionAutoPickAllowed,
   isMotionCompatibleWithLine,
   isPositiveOnlyFacial,
   isSmileLikeFacial,
@@ -1196,7 +1197,9 @@ function resolveActorCatalogInfo(
     const promptF = view!.promptFacials(catalogModel)
     const promptM = view!.promptMotions(catalogModel)
     const facials = [...promptF, ...catalogModel.facials.filter((f) => !promptF.includes(f))]
-    const motions = [...promptM, ...catalogModel.motions.filter((m) => !promptM.includes(m))]
+    const motions = [...promptM, ...catalogModel.motions.filter((m) => !promptM.includes(m))].filter(
+      (m) => isMotionAutoPickAllowed(m, catalogModel.path)
+    )
     return {
       path: catalogModel.path,
       facials,
