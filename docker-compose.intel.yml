@@ -1,0 +1,21 @@
+# =============================================================================
+# MySekaiStoryteller-API — Intel iGPU / Arc Hardware Acceleration Overlay
+# =============================================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.intel.yml up -d
+#
+# Tip: If your host's `render` or `video` group ID differs from the container's,
+# check with `getent group video render` and set VIDEO_GID / RENDER_GID in .env.
+# =============================================================================
+
+services:
+  mysekai-storyteller:
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - '${VIDEO_GID:-video}'
+      - '${RENDER_GID:-render}'
+    ipc: host
+    environment:
+      MSS_GPU_MODE: intel
+      LIBVA_DRIVER_NAME: '${LIBVA_DRIVER_NAME:-iHD}'

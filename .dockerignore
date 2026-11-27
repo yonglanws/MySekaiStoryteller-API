@@ -1,0 +1,50 @@
+# VCS & editor metadata
+.git
+.github
+.gitignore
+.gitattributes
+.idea
+.vscode
+.zcode
+.mimosa
+
+# Build & runtime outputs (rebuilt cleanly inside Docker builder stage)
+node_modules
+out
+out-host
+dist
+build
+coverage
+*.tsbuildinfo
+.eslintcache
+logs
+*.log
+output
+tests
+native/mss-export-rs/target
+
+# Persistent runtime data & user-specific secrets/configs
+apifile
+cache
+personas
+config.yaml
+.env
+.env.*
+!.env.example
+
+# Local media assets (use cloudOnly or bind-mount ./resources at runtime)
+resources/models/*
+resources/images/*
+resources/audio/*
+resources/voices/*
+resources/stories/*
+resources/inapp
+
+# Docs & unrelated local artifacts
+doc
+docs
+documents
+*.md
+astrbot_plugin_msst
+astrbot_plugin_msst.zip
+docker-compose*.yml
