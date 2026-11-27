@@ -355,6 +355,12 @@ const AssetsSchema = z.object({
    * 由宿主从公开资源站生成目录并按需物化。默认开启。
    */
   cloudCatalog: z.boolean().default(true),
+  /**
+   * 严格纯云端模式：开启后完全忽略本地旧资源（models/models.yaml、
+   * images/、audio/bgm/bgm.yaml 与非 cloud/ 音频、audio/se/ 非 cloud/ 音效、voices/），
+   * 所有目录枚举与导出物化均只使用云端目录与 cloud/ 缓存子目录。
+   */
+  cloudOnly: z.boolean().default(false),
   /** 云端目录缓存有效期（小时）；过期后后台刷新，失败沿用旧快照 */
   cloudCatalogTtlHours: z.number().default(6)
 })
@@ -704,6 +710,11 @@ function applyEnvOverrides(config: Omit<HostConfig, 'rootDir' | 'paths'>): void 
       env.MSS_ASSETS_CLOUD_CATALOG.toLowerCase()
     )
   }
+  if (env.MSS_ASSETS_CLOUD_ONLY !== undefined) {
+    config.assets.cloudOnly = !['0', 'false', 'no', 'off'].includes(
+      env.MSS_ASSETS_CLOUD_ONLY.toLowerCase()
+    )
+  }
   if (env.MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS) {
     const v = parseInt(env.MSS_ASSETS_CLOUD_CATALOG_TTL_HOURS, 10)
     if (Number.isFinite(v) && v > 0) config.assets.cloudCatalogTtlHours = v
@@ -788,16 +799,27 @@ export function loadHostConfig(): HostConfig {
     config.assets.assetBase = config.assets.assetBase.replace(/\/+$/, '')
   }
 
-  // BGM 设置以资源根下的 bgm.yaml 为准（从 config.yaml 的 bgm 节搬出来独立维护），
-  // 文件不存在时沿用 config.yaml 的 bgm 节，行为与旧版一致。
-  const bgmFromManifest = readBgmManifest(paths.resources)
+  // 严格纯云端模式下忽略本地 audio/bgm/bgm.yaml 与本地 bg1.mp3；
+  // 非纯云端模式保持以资源根下的 bgm.yaml 为准（文件不存在时沿用 config.yaml 的 bgm 节）。
+  const bgmFromManifest = config.assets.cloudOnly ? null : readBgmManifest(paths.resources)
   if (bgmFromManifest) {
     config.bgm = bgmFromManifest
   }
 
-  // 零本地资源云端优先兜底：当 bgm.yaml 不存在、默认 audio/bgm/bg1.mp3 也不在磁盘上、
-  // 且启用了 cloudCatalog 时，回落到已校验的云端日常 BGM（bgm00003），避免去云端查不存在的 bg1。
-  if (
+  // 云端优先兜底：
+  // 1) cloudOnly=true 时始终把旧默认本地 BGM（audio/bgm/bg1.mp3 / bg1.mp3 / bg1）替换为 bgm00003；
+  // 2) 非 cloudOnly 时，当 bgm.yaml 不存在、默认 audio/bgm/bg1.mp3 也不在磁盘上且启用 cloudCatalog 时回落。
+  const normalizedBgmPath = config.bgm.path.trim().replace(/^\/+/, '').toLowerCase()
+  const isDefaultLocalBgm =
+    normalizedBgmPath === DEFAULT_LOCAL_BGM_PATH.toLowerCase() ||
+    normalizedBgmPath === 'bg1.mp3' ||
+    normalizedBgmPath === 'bg1'
+  if (config.assets.cloudOnly) {
+    config.assets.cloudCatalog = true
+    if (!config.bgm.path || isDefaultLocalBgm) {
+      config.bgm.path = DEFAULT_CLOUD_BGM_ID
+    }
+  } else if (
     !bgmFromManifest &&
     config.bgm.path === DEFAULT_LOCAL_BGM_PATH &&
     !fs.existsSync(path.join(paths.resources, 'audio', 'bgm', 'bg1.mp3')) &&
