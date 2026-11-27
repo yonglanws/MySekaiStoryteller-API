@@ -1,12 +1,21 @@
 import { Muxer, StreamTarget } from 'mp4-muxer'
 import { ExportLogger } from './ExportLogger'
 import { GpuYuv420Converter } from './GpuYuv420Converter'
+import {
+  BINARY_WS_HEADER_BYTES,
+  BINARY_WS_KIND_WRITE_FILE_AT,
+  BinaryWsClient,
+  DEFAULT_BINARY_WS_HIGH_WATER_BYTES,
+  DEFAULT_BINARY_WS_LOW_WATER_BYTES,
+  fetchBinaryStreamEndpoint,
+  writeBinaryHeader
+} from './BinaryWsClient'
 
 const DEFAULT_MAX_PROBE_MS = 150
 const PROBE_WARMUP_FRAMES = 2
 const PROBE_FRAME_COUNT = 5
-const BINARY_WS_HIGH_WATER_BYTES = 32 * 1024 * 1024
-const BINARY_WS_LOW_WATER_BYTES = 16 * 1024 * 1024
+const BINARY_WS_HIGH_WATER_BYTES = DEFAULT_BINARY_WS_HIGH_WATER_BYTES
+const BINARY_WS_LOW_WATER_BYTES = DEFAULT_BINARY_WS_LOW_WATER_BYTES
 const VALID_COLOR_PRIMARIES = new Set<VideoColorPrimaries>(['bt709', 'bt470bg', 'smpte170m'])
 const VALID_COLOR_TRANSFER = new Set<VideoTransferCharacteristics>([
   'bt709',
@@ -93,12 +102,10 @@ export class WebCodecsMp4Encoder {
   private activeMuxerCodec: 'avc' | 'hevc' = 'avc'
   private totalWrittenBytes = 0
   private dequeueWaiter: (() => void) | null = null
-  private binWs: WebSocket | null = null
+  private binClient: BinaryWsClient | null = null
   private usingBinaryWs = false
-  private binWsClosingIntentionally = false
   private lastWsBackpressureWarnAtMs = 0
   private binStreamId = 1
-  private binCtrlResolvers: Array<(msg: { ok?: boolean; error?: string; op?: string }) => void> = []
 
   constructor(opts: {
     width: number
@@ -390,15 +397,15 @@ export class WebCodecsMp4Encoder {
         onData: (data: Uint8Array, position: number) => {
           this.totalWrittenBytes = Math.max(this.totalWrittenBytes, position + data.byteLength)
           if (this.usingBinaryWs) {
-            const ws = this.binWs
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
+            const client = this.binClient
+            if (!client || !client.isOpen) {
               this.encodeError =
                 this.encodeError ?? new Error('Binary WS closed unexpectedly during export')
               this.wakeDequeueWaiter()
               return
             }
             try {
-              const buffered = typeof ws.bufferedAmount === 'number' ? ws.bufferedAmount : 0
+              const buffered = client.bufferedAmount
               if (buffered > BINARY_WS_HIGH_WATER_BYTES) {
                 const now = Date.now()
                 if (now - this.lastWsBackpressureWarnAtMs >= 5000) {
@@ -408,15 +415,10 @@ export class WebCodecsMp4Encoder {
                   )
                 }
               }
-              const pkt = new Uint8Array(16 + data.byteLength)
-              const dv = new DataView(pkt.buffer)
-              dv.setUint32(0, this.binStreamId, true)
-              dv.setUint8(4, 1) // KIND_WRITE_FILE_AT
-              dv.setUint8(5, 0)
-              dv.setUint16(6, 0, true)
-              dv.setBigUint64(8, BigInt(position), true)
-              pkt.set(data, 16)
-              ws.send(pkt)
+              const pkt = new Uint8Array(BINARY_WS_HEADER_BYTES + data.byteLength)
+              writeBinaryHeader(pkt, this.binStreamId, BINARY_WS_KIND_WRITE_FILE_AT, position)
+              pkt.set(data, BINARY_WS_HEADER_BYTES)
+              client.sendBinary(pkt)
               return
             } catch (err) {
               const wrapped = err instanceof Error ? err : new Error(String(err))
@@ -503,91 +505,21 @@ export class WebCodecsMp4Encoder {
   }
 
   private async tryOpenBinaryStream(filePath: string): Promise<boolean> {
-    if (
-      typeof window === 'undefined' ||
-      typeof WebSocket === 'undefined' ||
-      typeof fetch !== 'function' ||
-      typeof location === 'undefined' ||
-      !location.protocol.startsWith('http')
-    ) {
-      return false
-    }
+    const info = await fetchBinaryStreamEndpoint()
+    if (!info?.wsUrl) return false
     try {
-      const token = new URLSearchParams(location.search).get('token') || ''
-      const headers: Record<string, string> = token ? { 'x-mss-bridge-token': token } : {}
-      const infoRes = await fetch('/bridge/binary-stream-endpoint', { headers })
-      if (!infoRes.ok) return false
-      const info = (await infoRes.json()) as { ok?: boolean; wsUrl?: string }
-      if (!info?.ok || !info.wsUrl) return false
-      const fullWsUrl = info.wsUrl.startsWith('/')
-        ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${info.wsUrl}`
-        : info.wsUrl
-      const ws = new WebSocket(fullWsUrl)
-      ws.binaryType = 'arraybuffer'
-      await new Promise<void>((resolve, reject) => {
-        const cleanup = (): void => {
-          ws.removeEventListener('open', onOpen)
-          ws.removeEventListener('error', onErr)
-          ws.removeEventListener('close', onClose)
-        }
-        const onOpen = (): void => {
-          cleanup()
-          resolve()
-        }
-        const onErr = (): void => {
-          cleanup()
-          reject(new Error('Binary WS connection error'))
-        }
-        const onClose = (): void => {
-          cleanup()
-          reject(new Error('Binary WS closed during handshake'))
-        }
-        ws.addEventListener('open', onOpen)
-        ws.addEventListener('error', onErr)
-        ws.addEventListener('close', onClose)
-      })
-
-      this.binWsClosingIntentionally = false
-      ws.addEventListener('message', (ev) => {
-        try {
-          const parsed = JSON.parse(String(ev.data)) as {
-            ok?: boolean
-            error?: string
-            op?: string
+      const client = await BinaryWsClient.connect(info.wsUrl, {
+        highWaterBytes: BINARY_WS_HIGH_WATER_BYTES,
+        lowWaterBytes: BINARY_WS_LOW_WATER_BYTES,
+        onAsyncError: (err) => {
+          if (!this.isDisposed) {
+            this.encodeError = this.encodeError ?? err
+            this.wakeDequeueWaiter()
           }
-          if (parsed.op === 'async-error' || (parsed.ok === false && this.binCtrlResolvers.length === 0)) {
-            if (!this.isDisposed) {
-              this.encodeError =
-                this.encodeError ?? new Error(parsed.error || 'Binary WS async write error')
-              this.wakeDequeueWaiter()
-            }
-            return
-          }
-          const resolver = this.binCtrlResolvers.shift()
-          resolver?.(parsed)
-        } catch {
-          // ignore malformed ctrl reply
         }
       })
-      ws.addEventListener('error', () => {
-        if (!this.isDisposed) {
-          this.encodeError = this.encodeError ?? new Error('Binary WS transport error')
-          this.wakeDequeueWaiter()
-        }
-      })
-      ws.addEventListener('close', () => {
-        while (this.binCtrlResolvers.length > 0) {
-          const resolver = this.binCtrlResolvers.shift()
-          resolver?.({ ok: false, error: 'Binary WS closed unexpectedly' })
-        }
-        if (!this.isDisposed && !this.binWsClosingIntentionally) {
-          this.encodeError =
-            this.encodeError ?? new Error('Binary WS closed unexpectedly during export')
-          this.wakeDequeueWaiter()
-        }
-      })
-      this.binWs = ws
-      const ack = await this.sendBinaryControl({
+      this.binClient = client
+      const ack = await client.sendControl({
         op: 'open-file',
         streamId: this.binStreamId,
         path: filePath,
@@ -604,43 +536,10 @@ export class WebCodecsMp4Encoder {
     }
   }
 
-  private sendBinaryControl(
-    payload: Record<string, unknown>
-  ): Promise<{ ok?: boolean; error?: string; op?: string }> {
-    const ws = this.binWs
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.resolve({ ok: false, error: 'Binary WS not open' })
-    }
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        const idx = this.binCtrlResolvers.indexOf(done)
-        if (idx >= 0) this.binCtrlResolvers.splice(idx, 1)
-        resolve({ ok: false, error: 'Binary WS control ack timeout' })
-      }, 15_000)
-      const done = (msg: { ok?: boolean; error?: string; op?: string }): void => {
-        clearTimeout(timer)
-        resolve(msg)
-      }
-      this.binCtrlResolvers.push(done)
-      ws.send(JSON.stringify(payload))
-    })
-  }
-
   private closeBinaryWs(): void {
-    const ws = this.binWs
-    this.binWs = null
-    this.binWsClosingIntentionally = true
-    while (this.binCtrlResolvers.length > 0) {
-      const resolver = this.binCtrlResolvers.shift()
-      resolver?.({ ok: false, error: 'Binary WS closed' })
-    }
-    if (ws) {
-      try {
-        ws.close()
-      } catch {
-        /* ignore */
-      }
-    }
+    const client = this.binClient
+    this.binClient = null
+    client?.close()
   }
 
   private wakeDequeueWaiter(): void {
@@ -652,22 +551,12 @@ export class WebCodecsMp4Encoder {
   }
 
   private async waitEncodeQueueReady(): Promise<void> {
-    if (
-      this.usingBinaryWs &&
-      this.binWs &&
-      this.binWs.readyState === WebSocket.OPEN &&
-      typeof this.binWs.bufferedAmount === 'number' &&
-      this.binWs.bufferedAmount > BINARY_WS_HIGH_WATER_BYTES
-    ) {
-      while (
-        !this.isDisposed &&
-        !this.encodeError &&
-        this.binWs &&
-        this.binWs.readyState === WebSocket.OPEN &&
-        this.binWs.bufferedAmount > BINARY_WS_LOW_WATER_BYTES
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 8))
-      }
+    if (this.usingBinaryWs && this.binClient) {
+      await this.binClient.waitBufferReady({
+        isCancelled: () => this.isDisposed || Boolean(this.encodeError),
+        highWaterBytes: BINARY_WS_HIGH_WATER_BYTES,
+        lowWaterBytes: BINARY_WS_LOW_WATER_BYTES
+      })
       if (this.encodeError) throw this.encodeError
     }
     const queueLimit = this.useGpuYuvReadback ? 8 : 11
@@ -859,8 +748,11 @@ export class WebCodecsMp4Encoder {
     this.muxer = null
 
     await this.writeChain
-    if (this.binWs) {
-      const closed = await this.sendBinaryControl({ op: 'close', streamId: this.binStreamId })
+    if (this.binClient) {
+      const closed = await this.binClient.sendControl(
+        { op: 'close', streamId: this.binStreamId },
+        60_000
+      )
       this.closeBinaryWs()
       if (!closed?.ok) {
         throw new Error(closed?.error || 'Binary WS close failed')
@@ -923,14 +815,8 @@ export class WebCodecsMp4Encoder {
     }
     this.encoder = null
     this.muxer = null
-    if (this.binWs) {
-      if (this.binWs.readyState === WebSocket.OPEN) {
-        try {
-          this.binWs.send(JSON.stringify({ op: 'abort', streamId: this.binStreamId }))
-        } catch {
-          /* ignore */
-        }
-      }
+    if (this.binClient) {
+      this.binClient.sendAbort(this.binStreamId)
       this.closeBinaryWs()
     } else if (!this.usingBinaryWs && this.filePath) {
       void window.electron?.ipcRenderer

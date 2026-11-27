@@ -406,10 +406,9 @@ impl PipeSession {
                     ));
                 }
                 let n_frames = (data.len() / frame_bytes) as u64;
-                if n_frames == 1 && (dedup || repeat > 1) {
-                    self.last_out_frame.clear();
-                    self.last_out_frame.extend_from_slice(data);
-                }
+                let last_start = data.len() - frame_bytes;
+                self.last_out_frame.clear();
+                self.last_out_frame.extend_from_slice(&data[last_start..]);
                 for r in 0..repeat {
                     let mut buf = self.take_recycled_buf();
                     buf.clear();
@@ -1012,5 +1011,59 @@ mod tests {
             low_power: true,
         };
         assert_ne!(qsv_lp.fallback_spec(), qsv_lp.fallback_software());
+    }
+
+    #[test]
+    fn yuv420p_retains_last_frame_for_repeat_even_when_dedup_is_false() {
+        let width = 4u32;
+        let height = 4u32;
+        let frame_bytes = (width as usize * height as usize * 3) / 2;
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+        let (_recycle_tx, recycle_rx) = mpsc::channel::<Vec<u8>>();
+        let mut session = PipeSession {
+            output: PathBuf::from("test.mp4"),
+            partial: PathBuf::from("test.partial.mp4"),
+            format: PipeFormat::Yuv420p,
+            width,
+            height,
+            convert_in_rust: false,
+            dedup_default: false,
+            encoder_label: "test".into(),
+            started: Instant::now(),
+            child: Arc::new(Mutex::new(None)),
+            aborted: Arc::new(AtomicBool::new(false)),
+            tx: Some(tx),
+            recycle_rx,
+            spare: Vec::new(),
+            writer: None,
+            frames: 0,
+            deduped_frames: 0,
+            last_in_hash: None,
+            last_in_frame: Vec::new(),
+            last_out_frame: Vec::new(),
+        };
+
+        // Single-frame write with dedup=false followed by repeat_last_frame(2)
+        let frame_a = vec![0x11u8; frame_bytes];
+        session.write_chunk(&frame_a, Some(1), 1, Some(false)).unwrap();
+        session.repeat_last_frame(2).unwrap();
+
+        // Multi-frame write with dedup=false should retain only the trailing frame
+        let mut batch = vec![0x22u8; frame_bytes];
+        batch.extend(std::iter::repeat_n(0x33u8, frame_bytes));
+        session.write_chunk(&batch, Some(2), 1, Some(false)).unwrap();
+        session.repeat_last_frame(1).unwrap();
+
+        assert_eq!(session.frame_count(), 6);
+        assert_eq!(session.deduped_frame_count(), 3);
+
+        session.tx.take();
+        let emitted: Vec<Vec<u8>> = rx.iter().collect();
+        assert_eq!(emitted.len(), 5);
+        assert_eq!(emitted[0], vec![0x11u8; frame_bytes]);
+        assert_eq!(emitted[1], vec![0x11u8; frame_bytes]);
+        assert_eq!(emitted[2], vec![0x11u8; frame_bytes]);
+        assert_eq!(emitted[3], batch);
+        assert_eq!(emitted[4], vec![0x33u8; frame_bytes]);
     }
 }
