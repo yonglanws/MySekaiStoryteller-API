@@ -23,7 +23,7 @@ const DEFAULT_CACHE_DIR = 'cache/semantic-build'
 const DEFAULT_CATALOG_CACHE = 'cache/moesekai/catalog.json'
 const STORAGE_ORIGIN = 'https://storage.pjsk.moe'
 const STORAGE_BACKUP_ORIGIN = 'https://storage.exmeaning.com'
-const DEFAULT_CN_CORPUS = 'd:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/cn'
+const DEFAULT_CN_CORPUS = process.env.MSS_CN_CORPUS_DIR || ''
 
 const CHAR_META = {
   1: { name: '星乃一歌', shortName: '一歌', unit: 'Leo/need' },
@@ -622,7 +622,7 @@ async function buildSeSemantics({ cacheDir, catalogCache, existingFile }) {
   // 从语料收集 SE 周边台词上下文
   const seContext = new Map()
   const dirs = [
-    DEFAULT_CN_CORPUS,
+    ...(DEFAULT_CN_CORPUS ? [DEFAULT_CN_CORPUS] : []),
     path.join(cacheDir, 'cn_events'),
     path.join(cacheDir, 'cn_stories')
   ]

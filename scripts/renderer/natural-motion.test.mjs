@@ -318,7 +318,7 @@ test('official lip curve, coefficient reset, smooth() chain and release lengths'
   let silent = 0
   for (let i = 0; i < 60; i++) silent = timing.smoothLipValue(0, silent)
   assert.ok(silent <= 1e-4, `silent ${silent}`)
-  // 旧 ournotes policy 已整体删除。
+  // 旧 fallback preset 已移除。
   assert.equal(timing.MOUTH_SYNC_FALLBACK_PRESET, undefined)
 })
 

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 const DEFAULT_OUT = 'src/host/assets/bgm-semantics.json'
 const DEFAULT_CACHE_DIR = 'cache/semantic-build'
 const DEFAULT_CATALOG_CACHE = 'cache/moesekai/catalog.json'
-const DEFAULT_CN_CORPUS = 'd:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/cn'
+const DEFAULT_CN_CORPUS = process.env.MSS_CN_CORPUS_DIR || ''
 const STORAGE_ORIGIN = 'https://storage.pjsk.moe'
 const STORAGE_BACKUP_ORIGIN = 'https://storage.exmeaning.com'
 const JP_MASTER_BASE = 'https://metadata.pjsk.moe/jp/master'
@@ -672,7 +672,7 @@ export async function buildBgmSemantics(options = {}) {
 
   // 扫描语料统计情绪/场景共现
   const scenarios = [
-    ...readJsonDir(DEFAULT_CN_CORPUS),
+    ...(DEFAULT_CN_CORPUS ? readJsonDir(DEFAULT_CN_CORPUS) : []),
     ...readJsonDir(path.join(cacheDir, 'cn_events')),
     ...readJsonDir(path.join(cacheDir, 'cn_stories')),
     ...readJsonDir(path.join(cacheDir, 'jp_new_stories'))

@@ -18,6 +18,8 @@
 
 > [!IMPORTANT]
 > 本项目基于 [Untitled-Story/MySekaiStoryteller](https://github.com/Untitled-Story/MySekaiStoryteller) 二次开发，专注做后台 HTTP API 渲染与 AI 自动编剧。需要桌面端可视化编辑器请前往原项目。
+>
+> **从 `v0.2.0` 升级？** `v1.0.0-beta1` 对整体架构进行了彻底重构（原生 Rust 引擎 + 二进制 WS 管道、零本地云端素材体系、内置 58 份 PJSK 人设与三段式 AI 编剧、原生 Docker 与配置体系等），请务必先阅读 [CHANGELOG.md](CHANGELOG.md) 与 [系统架构指南](doc/architecture.md)。
 
 ## 它能做什么
 
@@ -158,7 +160,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 | [部署指南](doc/host-deployment.md) | Docker 一键部署、`.env` 自动加载、全量环境变量、GPU 加速、低内存预设与 systemd |
 | [故障排除](doc/troubleshooting.md) | 浏览器启动失败、软渲染太慢、云端下载失败、人设/配音与动作表情异常排查 |
 | [开发与验证](doc/development.md) | 模块化源码结构、构建与自动发现测试命令、E2E 与成片检查清单 |
-| [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) | 开发环境搭建、代码规范、PR 检查清单与自托管安全加固 |
+| [贡献指南](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [更新日志](CHANGELOG.md) | 开发环境搭建、PR 检查清单、自托管加固与版本迁移说明 |
 
 ## English Summary
 
@@ -168,7 +170,7 @@ node -e 'const fs = require("node:fs"); process.stdout.write(JSON.stringify({sto
 - **Built-in personas & 3-stage AI writer**: Bundles **58** rewritten PJSK character personas in `personas/pjsk/` (auto-discovered locally and in Docker) plus OpenAI-compatible 3-stage script generation (`staged` / `hybrid` / `single`) and semantic RAG.
 - **Fast deterministic export**: Virtual 60Hz clock, WebCodecs GPU YUV420 encoding, Rust `/bridge/rs-stream` binary WebSocket rawvideo piping, hardware encoding (NVENC / QSV / VAAPI / AMF), and optional GPT-SoVITS / IrodoriTTS lip-synced audio.
 - **Quick start**: `cp .env.example .env` (set `MSS_LLM_API_KEY`) → `docker compose up -d --build`, or locally `npm ci && npm run init && npm run build && npm start`.
-- **Key docs**: [Architecture](doc/architecture.md) · [API Reference](doc/api.md) · [Deployment](doc/host-deployment.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Video License (EN)](VIDEO-LICENSE.md)
+- **Key docs**: [Architecture](doc/architecture.md) · [API Reference](doc/api.md) · [Deployment](doc/host-deployment.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Video License (EN)](VIDEO-LICENSE.md)
 
 ## 相关项目与协议
 

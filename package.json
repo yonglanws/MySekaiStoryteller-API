@@ -1,6 +1,6 @@
 {
   "name": "my-sekai-storyteller-api",
-  "version": "2.0.0",
+  "version": "1.0.0-beta.1",
   "description": "Headless pure-API Live2D video rendering framework in Project SEKAI style",
   "license": "GPL-3.0",
   "main": "./out-host/host/main.js",

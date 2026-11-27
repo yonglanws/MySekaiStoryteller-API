@@ -48,14 +48,7 @@
 | [开发与验证](development.md) | 模块化源码结构、npm 与 Rust 构建/测试命令、自动发现回归测试与成片检查 |
 | [贡献指南](../CONTRIBUTING.md) | 开发工作流、代码风格与 PR 提交规范 |
 | [安全策略](../SECURITY.md) | 漏洞反馈与自托管安全加固检查清单 |
-
-## 历史规划与早期记录（仅供参考）
-
-下面几份文件是开发早期留下的基准调研和对齐记录，相关设计已被现行实现吸收或演进，仅作背景参考，实际行为以上面正式文档和源码为准：
-
-- [ai-script-quality-plan.md](ai-script-quality-plan.md)：早期多阶段提示词与官方 40 句基线统计
-- [moesekai-parity-plan.md](moesekai-parity-plan.md)：动作时序、入场、双人站位与日语 TTS 早期对齐记录
-- [sekai-exporter-parity-plan.md](sekai-exporter-parity-plan.md)：60fps 帧基、Talk 自动推进与逐帧对比早期重构记录
+| [更新日志](../CHANGELOG.md) | 版本演进记录与 `v1.0.0-beta1` 架构大改说明 |
 
 ## 配置与格式的最终依据
 

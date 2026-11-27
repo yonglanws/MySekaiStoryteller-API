@@ -126,7 +126,7 @@ function readPackageVersion(): string {
       // try next candidate
     }
   }
-  return '2.0.0'
+  return '1.0.0-beta.1'
 }
 
 const PACKAGE_VERSION = readPackageVersion()

@@ -3,7 +3,7 @@
  * 生成全量背景简体中文语义索引（src/host/assets/background-names.json）：
  * - 修复 EffectType === 8 (ScenarioTelop) 与 EffectType === 18 (PlaceInfo) 混淆，
  *   PlaceInfo 权重高于 Telop，且过滤「文化祭当日」「几天后」「25点」等纯时间/日期/日程标题；
- * - 优先从简体中文剧情语料（msst-ai-lab/corpus/raw/cn、storage.exmeaning.com server=cn
+ * - 优先从简体中文剧情语料（`MSS_CN_CORPUS_DIR` / `--corpus`、storage.exmeaning.com server=cn
  *   活动/主线/特别/区域对话）、sekai-master-db-cn-diff/areas.json、事件/角色共现提取语义；
  * - 对同地点多时段/光照变体保留独立标签（timeOfDay: 白天/黄昏/夜晚/深夜/通用，indoor: 室内/室外），
  *   并通过同源前缀继承、活动/角色共现、结构前缀规则覆盖全量 ~1,389 张云端背景。
@@ -17,7 +17,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const DEFAULT_OUT = 'src/host/assets/background-names.json'
-const DEFAULT_CN_CORPUS = 'd:/Users/桌面/mzkbot/msst-ai-lab/corpus/raw/cn'
+const DEFAULT_CN_CORPUS = process.env.MSS_CN_CORPUS_DIR || ''
 const DEFAULT_CACHE_DIR = 'cache/semantic-build'
 const DEFAULT_CATALOG_CACHE = 'cache/moesekai/catalog.json'
 const STORAGE_ORIGIN = 'https://storage.pjsk.moe'
@@ -641,7 +641,7 @@ function buildScenarioCorpus({ corpora, cacheDir }) {
     for (const dir of corpora) entries.push(...readJsonDir(dir, 'cn-corpus'))
     return entries
   }
-  if (fs.existsSync(DEFAULT_CN_CORPUS)) {
+  if (DEFAULT_CN_CORPUS && fs.existsSync(DEFAULT_CN_CORPUS)) {
     entries.push(...readJsonDir(DEFAULT_CN_CORPUS, 'cn-corpus'))
   }
   const cacheSubdirs = [
