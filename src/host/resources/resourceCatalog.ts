@@ -10,6 +10,8 @@ import {
   type SoundtrackIndex
 } from '../assets/soundtracks'
 import type { CloudCatalogData } from '../assets/cloudCatalog'
+import bgmSemanticsData from '../assets/bgm-semantics.json'
+import seSemanticsData from '../assets/se-semantics.json'
 import { CURATED_SCENARIO_SES, resolveScenarioSe } from '../ai/scenarioCues'
 
 export interface CatalogModel {
@@ -70,6 +72,9 @@ export interface CatalogBgm {
   unit?: string
   tags?: string[]
   source?: 'local' | 'cloud'
+  loopStartMs?: number
+  loopEndMs?: number
+  durationMs?: number
 }
 
 export interface CatalogSeItem {
@@ -145,17 +150,103 @@ function fileStem(file: string): string {
   return path.basename(file).replace(/\.[^.]+$/, '')
 }
 
+interface BgmSemanticMeta {
+  name?: string
+  category?: string
+  mood?: string
+  tempo?: string
+  unit?: string
+  description?: string
+  tags?: string[]
+}
+
+interface BgmSemanticsFile {
+  tracks?: Record<string, BgmSemanticMeta>
+}
+
+interface SeSemanticMeta {
+  id?: string
+  file?: string
+  category?: string
+  description?: string
+  tags?: string[]
+}
+
+interface SeSemanticsFile {
+  cues?: Record<string, SeSemanticMeta>
+}
+
+interface LoopSidecarMeta {
+  loopStartMs?: number
+  loopEndMs?: number
+  durationMs?: number
+}
+
+const bgmSemantics = (bgmSemanticsData as BgmSemanticsFile).tracks ?? {}
+const seSemantics = (seSemanticsData as SeSemanticsFile).cues ?? {}
+
+function lookupBgmSemantic(stem: string): BgmSemanticMeta | null {
+  return (
+    bgmSemantics[stem] ??
+    bgmSemantics[stem.toLowerCase()] ??
+    bgmSemantics[stem.replace(/_\d+$/, '')] ??
+    null
+  )
+}
+
+function lookupSeSemantic(stem: string): SeSemanticMeta | null {
+  return (
+    seSemantics[stem] ??
+    seSemantics[stem.toLowerCase()] ??
+    seSemantics[stem.replace(/_\d+$/, '')] ??
+    null
+  )
+}
+
+function readLoopSidecar(audioFullPath: string): LoopSidecarMeta | null {
+  const sidecarPath = `${audioFullPath}.loop.json`
+  if (!fs.existsSync(sidecarPath)) return null
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf-8')) as Record<string, unknown>
+    const out: LoopSidecarMeta = {}
+    if (typeof parsed.loopStartMs === 'number' && Number.isFinite(parsed.loopStartMs)) {
+      out.loopStartMs = parsed.loopStartMs
+    }
+    if (typeof parsed.loopEndMs === 'number' && Number.isFinite(parsed.loopEndMs)) {
+      out.loopEndMs = parsed.loopEndMs
+    }
+    if (typeof parsed.durationMs === 'number' && Number.isFinite(parsed.durationMs)) {
+      out.durationMs = parsed.durationMs
+    }
+    return Object.keys(out).length > 0 ? out : null
+  } catch {
+    return null
+  }
+}
+
 function inferLocalSeMetadata(relFile: string, stem: string): CatalogSeItem {
   const lowerStem = stem.toLowerCase()
   const curated = CURATED_SCENARIO_SES.find((c) => c.id.toLowerCase() === lowerStem)
+  const sem = lookupSeSemantic(stem)
   if (curated) {
+    const tags = [...new Set([...curated.tags, ...(sem?.tags ?? [])])]
     return {
       file: relFile,
       id: curated.id,
       name: curated.id,
       category: curated.category,
       description: curated.description,
-      tags: [...curated.tags]
+      tags
+    }
+  }
+  if (sem) {
+    return {
+      file: relFile,
+      id: sem.id || stem,
+      name: sem.id || stem,
+      category: sem.category || 'se',
+      description: sem.description || `本地音效（${stem}）`,
+      tags: sem.tags?.length ? [...sem.tags] : [stem]
     }
   }
   if (/^se_run_/i.test(lowerStem)) {
@@ -609,7 +700,7 @@ export class ResourceCatalog {
 
     const imageFiles = listFiles('images', IMAGE_EXTENSIONS)
     const imageDetails = this.loadImageDetails(resourcesDir, imageFiles)
-    const bgmFiles = listFiles('audio/bgm', AUDIO_EXTENSIONS)
+    const bgmFiles = this.listAudioFilesRecursive(resourcesDir, path.join('audio', 'bgm'))
     const bgmDetails = this.loadBgmDetails(resourcesDir, bgmFiles)
     const localSeFiles = this.listSeFiles(resourcesDir)
 
@@ -890,35 +981,38 @@ export class ResourceCatalog {
     }
   }
 
-  /** 扫描本地 `audio/se/` 与 `audio/se/cloud/`，同名 stem 优先根目录文件。 */
-  private listSeFiles(resourcesDir: string): string[] {
-    const seDir = path.join(resourcesDir, 'audio', 'se')
-    if (!fs.existsSync(seDir)) {
+  /** 递归扫描本地音频目录（根目录优先，其次 `cloud/` 等子目录），按 stem 去重。 */
+  private listAudioFilesRecursive(resourcesDir: string, relRoot: string): string[] {
+    const baseDir = path.join(resourcesDir, relRoot)
+    if (!fs.existsSync(baseDir)) {
       return []
     }
-    const scanDir = (dir: string, prefix: string): string[] => {
-      if (!fs.existsSync(dir)) return []
-      return fs
-        .readdirSync(dir)
-        .filter((f) => {
-          try {
-            return (
-              fs.statSync(path.join(dir, f)).isFile() &&
-              AUDIO_EXTENSIONS.has(path.extname(f).toLowerCase())
-            )
-          } catch {
-            return false
-          }
-        })
-        .sort()
-        .map((f) => (prefix ? `${prefix}/${f}` : f))
+    const rootFiles: string[] = []
+    const nestedFiles: string[] = []
+    const walk = (dir: string, prefix: string): void => {
+      const entries = fs.readdirSync(dir).sort()
+      for (const name of entries) {
+        const full = path.join(dir, name)
+        let stat: fs.Stats
+        try {
+          stat = fs.statSync(full)
+        } catch {
+          continue
+        }
+        if (stat.isDirectory()) {
+          walk(full, prefix ? `${prefix}/${name}` : name)
+        } else if (stat.isFile() && AUDIO_EXTENSIONS.has(path.extname(name).toLowerCase())) {
+          const rel = prefix ? `${prefix}/${name}` : name
+          if (prefix) nestedFiles.push(rel)
+          else rootFiles.push(rel)
+        }
+      }
     }
+    walk(baseDir, '')
 
-    const rootFiles = scanDir(seDir, '')
-    const cloudFiles = scanDir(path.join(seDir, 'cloud'), 'cloud')
     const out: string[] = []
     const seenStems = new Set<string>()
-    for (const rel of [...rootFiles, ...cloudFiles]) {
+    for (const rel of [...rootFiles, ...nestedFiles]) {
       const stem = fileStem(rel).toLowerCase()
       if (seenStems.has(stem)) continue
       seenStems.add(stem)
@@ -927,54 +1021,97 @@ export class ResourceCatalog {
     return out
   }
 
+  /** 扫描本地 `audio/se/` 与 `audio/se/cloud/`（含子目录），同名 stem 优先根目录文件。 */
+  private listSeFiles(resourcesDir: string): string[] {
+    return this.listAudioFilesRecursive(resourcesDir, path.join('audio', 'se'))
+  }
+
   /**
-   * 读取 BGM 清单（audio/bgm/bgm.yaml）。返回带描述的曲目列表，
-   * 只保留在磁盘上真实存在的文件；未登记或格式非法时返回空列表。
+   * 读取 BGM 清单（audio/bgm/bgm.yaml），并自动补全磁盘上其余带官方语义或循环元数据
+   * 的曲目（例如 `audio/bgm/cloud/*.mp3`），使 `cloudCatalog: false` 时也能使用完整曲库。
    *
-   * 清单里 name/description 为空时，用 fetch:media 缓存的官方曲名索引补全
-   * （bgm00003 → Slapstick!! / 剧情 BGM）；人工写过的字段优先，不覆盖。
+   * 人工在 bgm.yaml 显式登记的条目保持原有字段与优先级不变；未登记但有 `bgm-semantics.json`、
+   * `soundtracks.json`、`.loop.json` 或位于子目录的真实磁盘曲目会自动语义丰富化并纳入 `bgmDetails`。
    */
   private loadBgmDetails(resourcesDir: string, bgmFiles: string[]): CatalogBgm[] {
     const manifestPath = path.join(resourcesDir, 'audio', 'bgm', 'bgm.yaml')
-    if (!fs.existsSync(manifestPath)) {
-      return []
-    }
-
-    let manifest: BgmManifest | null | undefined
-    try {
-      manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as
-        | BgmManifest
-        | null
-        | undefined
-    } catch (err) {
-      this.logger.warn('[Catalog] Failed to parse audio/bgm/bgm.yaml', err)
-      return []
-    }
-    if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.bgm)) {
-      return []
-    }
-
     const soundtracks = this.loadSoundtracks(resourcesDir)
     const known = new Set(bgmFiles)
     const details: CatalogBgm[] = []
-    for (const entry of manifest.bgm) {
-      const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
-      if (!file) continue
-      if (!known.has(file)) {
-        this.logger.warn(`[Catalog] bgm.yaml entry missing on disk, skipped: ${file}`)
-        continue
-      }
+    const listedFiles = new Set<string>()
 
+    if (fs.existsSync(manifestPath)) {
+      let manifest: BgmManifest | null | undefined
+      try {
+        manifest = yaml.load(fs.readFileSync(manifestPath, 'utf-8')) as
+          | BgmManifest
+          | null
+          | undefined
+      } catch (err) {
+        this.logger.warn('[Catalog] Failed to parse audio/bgm/bgm.yaml', err)
+        manifest = null
+      }
+      if (manifest && typeof manifest === 'object' && Array.isArray(manifest.bgm)) {
+        for (const entry of manifest.bgm) {
+          const file = typeof entry?.file === 'string' ? entry.file.trim() : ''
+          if (!file) continue
+          if (!known.has(file)) {
+            this.logger.warn(`[Catalog] bgm.yaml entry missing on disk, skipped: ${file}`)
+            continue
+          }
+
+          const soundtrack = soundtracks?.tracks.get(soundtrackKey(file))
+          const label = soundtrack ? soundtrackLabel(soundtrack) : null
+          const rawName = (entry.name || '').trim()
+          const rawDescription = (entry.description || '').trim()
+          const nameIsPlaceholder = !rawName || rawName === file || rawName === soundtrackKey(file)
+          const loopMeta = readLoopSidecar(
+            path.join(resourcesDir, 'audio', 'bgm', ...file.split('/'))
+          )
+
+          details.push({
+            file,
+            name: nameIsPlaceholder ? label?.name || file : rawName,
+            description: rawDescription || label?.description || '',
+            ...(loopMeta ?? {})
+          })
+          listedFiles.add(file.toLowerCase())
+        }
+      }
+    }
+
+    for (const file of bgmFiles) {
+      if (listedFiles.has(file.toLowerCase())) continue
+      const stem = fileStem(file)
+      const sem = lookupBgmSemantic(stem)
       const soundtrack = soundtracks?.tracks.get(soundtrackKey(file))
       const label = soundtrack ? soundtrackLabel(soundtrack) : null
-      const rawName = (entry.name || '').trim()
-      const rawDescription = (entry.description || '').trim()
-      const nameIsPlaceholder = !rawName || rawName === file || rawName === soundtrackKey(file)
+      const loopMeta = readLoopSidecar(path.join(resourcesDir, 'audio', 'bgm', ...file.split('/')))
+      const isNested = file.includes('/')
+      if (!sem && !label && !loopMeta && !isNested) continue
+
+      const name =
+        label?.name && label.name !== stem ? label.name : sem?.name || label?.name || stem
+      const baseDesc = sem?.description || label?.description || (isNested ? `本地配乐（${stem}）` : '')
+      const hasCat =
+        label?.description &&
+        baseDesc &&
+        !baseDesc.includes(label.description.replace(/\s*BGM$/, ''))
+      const description =
+        hasCat && label?.description ? `${baseDesc}（${label.description}）` : baseDesc
 
       details.push({
         file,
-        name: nameIsPlaceholder ? label?.name || file : rawName,
-        description: rawDescription || label?.description || ''
+        name,
+        description,
+        id: stem,
+        ...(sem?.mood ? { mood: sem.mood } : {}),
+        ...(sem?.tempo ? { tempo: sem.tempo } : {}),
+        ...(sem?.category ? { category: sem.category } : {}),
+        ...(sem?.unit ? { unit: sem.unit } : {}),
+        ...(sem?.tags?.length ? { tags: [...sem.tags] } : {}),
+        source: 'local',
+        ...(loopMeta ?? {})
       })
     }
     return details

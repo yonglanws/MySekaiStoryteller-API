@@ -289,3 +289,102 @@ test('config loads agentMaxSteps with MSS_LLM_AGENT_MAX_STEPS override and passe
   assert.equal(out.meta.agentSteps, 4)
   assert.equal(out.meta.toolCalls.length, 3)
 })
+
+test('staged pipeline does not waste a dialogue-expand call on 34-line / 680-char 3-minute scripts', async (t) => {
+  const twoCastCatalog = {
+    get: () => ({
+      models: [
+        {
+          id: 1,
+          name: '晓山瑞希',
+          shortName: '瑞希',
+          path: '20mizuki_normal/20mizuki_normal.model3.json',
+          motions: ['w-normal-default01', 'w-normal-nod01', 'w-normal-sigh01'],
+          facials: ['face_smile_01', 'face_normal_01', 'face_sad_01'],
+          defaultMotion: 'w-normal-default01',
+          defaultFacial: 'face_smile_01'
+        },
+        {
+          id: 2,
+          name: '东云绘名',
+          shortName: '绘名',
+          path: '21ena_normal/21ena_normal.model3.json',
+          motions: ['e-normal-default01', 'e-normal-nod01', 'e-normal-sigh01'],
+          facials: ['face_normal_01', 'face_sad_01', 'face_smile_01'],
+          defaultMotion: 'e-normal-default01',
+          defaultFacial: 'face_normal_01'
+        }
+      ],
+      images: ['bg_room.jpg'],
+      imageDetails: [{ file: 'bg_room.jpg', name: '房间', description: '瑞希的房间' }],
+      voices: [],
+      bgm: ['bgm00003.mp3'],
+      bgmDetails: [{ file: 'bgm00003.mp3', name: '日常', description: '轻松的日常' }]
+    })
+  }
+  const lines34 = Array.from({ length: 34 }, (_, idx) => ({
+    id: `l${idx + 1}`,
+    speaker: idx % 2 === 0 ? '瑞希' : '绘名',
+    content: `这是第${String(idx + 1).padStart(2, '0')}句刚好二十个字的对话台词啦。`
+  }))
+  const server = http.createServer(async (req, res) => {
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    const system = body.messages?.[0]?.content ?? ''
+    let payload
+    if (system.includes('第一轮')) {
+      payload = {
+        title: '夜晚谈心',
+        event: '房间谈心',
+        logline: '两人聊近况',
+        background: 'bg_room.jpg',
+        cast: [
+          { modelId: 1, name: '瑞希', role: '发起' },
+          { modelId: 2, name: '绘名', role: '回应' }
+        ],
+        outline: ['起', '转', '合']
+      }
+    } else if (system.includes('第二轮')) {
+      payload = {
+        title: '夜晚谈心',
+        turns: lines34.map((l) => ({ speaker: l.speaker, lines: [l.content] }))
+      }
+    } else if (system.includes('舞台监督')) {
+      payload = {
+        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'normal', activeCast: ['瑞希', '绘名'], bgm: 'bgm00003.mp3' }],
+        events: []
+      }
+    } else if (system.includes('精细演技导演')) {
+      payload = {
+        background: 'bg_room.jpg',
+        bgm: 'bgm00003.mp3',
+        lines: lines34.map((l) => ({ id: l.id, facial: 'face_normal_01' }))
+      }
+    } else {
+      throw new Error(`unexpected stage: ${system.slice(0, 40)}`)
+    }
+    res.setHeader('content-type', 'application/json')
+    res.end(JSON.stringify({ model: 'mock', choices: [{ message: { content: JSON.stringify(payload) } }] }))
+  })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(() => server.close())
+
+  process.env.MSS_TEST_LLM_KEY = 'test-key'
+  const settings = makeSettings(`http://127.0.0.1:${server.address().port}/v1`, {
+    pipeline: 'staged',
+    targetMinutes: 3,
+    translateForTts: false
+  })
+  const writer = new StoryWriter(
+    new LlmClient(settings, new Logger({ type: 'hidden' })),
+    settings,
+    twoCastCatalog,
+    new Logger({ type: 'hidden' })
+  )
+  const out = await writer.generate({ prompt: '夜晚瑞希和绘名聊天', targetMinutes: 3, translateForTts: false })
+  assert.ok(!out.meta.stages.some((s) => s.stage === 'dialogue-expand'), '34 lines / 680 chars must not trigger dialogue-expand')
+  assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 34)
+})

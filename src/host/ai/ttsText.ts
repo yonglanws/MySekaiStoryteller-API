@@ -161,7 +161,7 @@ export async function ensureJapaneseTtsText(
 ): Promise<EnsureJapaneseTtsResult> {
   const baseChunkSize = Math.max(1, options.chunkSize ?? 20)
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? 3))
-  const retries = Math.max(0, Math.floor(options.retries ?? 1))
+  const retries = Math.max(0, Math.floor(options.retries ?? 2))
   let translated = 0
 
   // 预先清洗已有 Talk 的 content 与 ttsText 中的零宽字符（保留 Irodori Emoji）
@@ -176,11 +176,16 @@ export async function ensureJapaneseTtsText(
     }
   }
 
-  // 第一轮按正常批量翻译；仍缺时再补翻，批量缩小以降低“一条坏掉整块丢弃”的影响。
+  // 第一轮按正常批量翻译；仍缺时再补翻，最终残余少数台词切至单句粒度防止坏句拖累整块。
   for (let attempt = 0; attempt <= retries; attempt++) {
     const targets = collectTtsTargets(story)
     if (targets.length === 0) break
-    const chunkSize = attempt === 0 ? baseChunkSize : Math.max(1, Math.min(5, baseChunkSize))
+    const chunkSize =
+      attempt === 0
+        ? baseChunkSize
+        : attempt >= 2 && targets.length <= 6
+          ? 1
+          : Math.max(1, Math.min(5, baseChunkSize))
     if (attempt > 0) {
       logger.info(`[TTS] 仍有 ${targets.length} 条缺少日文 ttsText，开始第 ${attempt + 1} 轮补翻`)
     }
@@ -681,6 +686,12 @@ export function alignStoryTtsEmotionsAndCaptions(
           p.data.ttsSpeed = p.isShouting || p.hasBreathOrPantCue ? 1.05 : 1.03
         } else if (emo === '惊讶') {
           p.data.ttsSpeed = 1.04
+        } else if (emo === '开心') {
+          p.data.ttsSpeed = 1.02
+        } else if (emo === '害羞') {
+          p.data.ttsSpeed = 0.97
+        } else {
+          p.data.ttsSpeed = 1.0
         }
       } else if (emo === '伤心') {
         if (!p.isShouting && p.hasPositiveSurfaceWords && p.data.ttsSpeed > 0.94) {

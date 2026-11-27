@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import fs from 'node:fs'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
 import { Logger } from 'tslog'
 import { LlmClient } from '../../out-host/host/ai/llm.js'
 import { StoryWriter } from '../../out-host/host/ai/storyWriter.js'
 import { CatalogView } from '../../out-host/host/ai/prompt.js'
+import { ResourceCatalog } from '../../out-host/host/resources/resourceCatalog.js'
 import { validateAndFixStory } from '../../out-host/host/ai/validate.js'
 import {
+  applyDirectorReviewPatches,
+  buildCastPrompt,
   buildDialoguePrompt,
   buildDirectionPrompt,
   buildEmotionPrompt,
@@ -1581,4 +1587,201 @@ test('staged pipeline directorReview stage patches PlaySe/Wait/acting while pres
   assert.ok(talks[0].data.ttsText.includes('😊'))
   assert.ok(talks[1].data.ttsText.includes('😮‍💨'), 'ZWJ emoji 😮‍💨 must remain intact')
   assert.ok(talks[2].data.ttsText.includes('🌬️'), 'VS16 emoji 🌬️ must remain intact')
+})
+
+test('buildCastPrompt locks cast to explicitly named duo even when prompt mentions 活动风格', () => {
+  const view = new CatalogView({
+    models: [
+      {
+        id: 1,
+        characterId: 1,
+        name: '星乃一歌',
+        shortName: '一歌',
+        unit: 'Leo/need',
+        path: '01ichika/01ichika.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_normal_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 2,
+        characterId: 2,
+        name: '天马咲希',
+        shortName: '咲希',
+        unit: 'Leo/need',
+        path: '02saki/02saki.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_normal_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      },
+      {
+        id: 3,
+        characterId: 3,
+        name: '望月穗波',
+        shortName: '穗波',
+        unit: 'Leo/need',
+        path: '03honami/03honami.model3.json',
+        motions: ['w-normal-nod01'],
+        facials: ['face_normal_01'],
+        defaultMotion: 'w-normal-nod01',
+        defaultFacial: 'face_normal_01'
+      }
+    ],
+    images: ['bg_park.jpg'],
+    imageDetails: [{ file: 'bg_park.jpg', name: '公园·夜晚', description: '夜色下的公园' }],
+    voices: [],
+    bgm: [],
+    bgmDetails: []
+  })
+
+  const prompt = buildCastPrompt(view, {
+    scene: '2026 年活动风格：夜色下的公园里，咲希和穗波仰望星空等待流星雨。',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(prompt.user.includes('严格只选这 2 名角色'))
+  assert.ok(!prompt.user.includes('本场偏向团体/活动场景：建议选 **3~5 名角色**'))
+
+  const groupPrompt = buildCastPrompt(view, {
+    scene: '放学后咲希和穗波叫上大家一起在教室排练。',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(groupPrompt.user.includes('建议选 **3~5 名角色**'))
+})
+
+test('buildDialoguePrompt encourages internal monologues and 2-3 line natural turns', () => {
+  const view = new CatalogView(catalog.get())
+  const plan = normalizeCastPlan(castReply, view, { scene: '聊天', personas: [], targetMinutes: 3 })
+  const built = buildDialoguePrompt(view, plan, {
+    scene: '两人在天台聊起心事',
+    personas: [],
+    targetMinutes: 3
+  })
+  assert.ok(built.user.includes('内心独白'))
+  assert.ok(built.user.includes('2~3 句自然连说'))
+  assert.ok(built.user.includes('（……'))
+})
+
+test('ResourceCatalog unlocks on-disk audio/bgm/cloud/*.mp3 and audio/se/cloud/*.mp3 with semantics even when cloudCatalog=false', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mss-local-audio-sem-'))
+  try {
+    fs.mkdirSync(path.join(root, 'models'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'models', 'models.yaml'), 'models: []\n', 'utf8')
+
+    fs.mkdirSync(path.join(root, 'audio', 'bgm', 'cloud'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'audio', 'bgm', 'bg1.mp3'), 'x')
+    fs.writeFileSync(
+      path.join(root, 'audio', 'bgm', 'bgm.yaml'),
+      'enabled: true\npath: audio/bgm/bg1.mp3\nvolume: 0.2\nbgm:\n  - file: bg1.mp3\n    name: 默认轻音乐\n    description: 轻缓居家\n',
+      'utf8'
+    )
+    fs.writeFileSync(path.join(root, 'audio', 'bgm', 'cloud', 'bgm00016.mp3'), 'x')
+    fs.writeFileSync(
+      path.join(root, 'audio', 'bgm', 'cloud', 'bgm00016.mp3.loop.json'),
+      JSON.stringify({ loopStartMs: 0, loopEndMs: 55389.388, durationMs: 55397.007 }),
+      'utf8'
+    )
+    fs.writeFileSync(path.join(root, 'audio', 'bgm', 'cloud', 'bgm00045.mp3'), 'x')
+
+    fs.mkdirSync(path.join(root, 'audio', 'se', 'cloud'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'audio', 'se', 'se00053_b.mp3'), 'x')
+    fs.writeFileSync(path.join(root, 'audio', 'se', 'cloud', 'se00028_b.mp3'), 'x')
+    fs.writeFileSync(path.join(root, 'audio', 'se', 'cloud', 'se00122_b.mp3'), 'x')
+
+    const rc = new ResourceCatalog(new Logger({ type: 'hidden' }), { paths: { resources: root } }, null)
+    const data = rc.get()
+
+    assert.ok(data.bgm.includes('cloud/bgm00016.mp3'))
+    assert.ok(data.bgm.includes('cloud/bgm00045.mp3'))
+    const bgm16 = data.bgmDetails.find((b) => b.file === 'cloud/bgm00016.mp3')
+    assert.ok(bgm16)
+    assert.equal(bgm16.name, '泪水顺心而下')
+    assert.equal(bgm16.mood, '感伤忧郁')
+    assert.equal(bgm16.source, 'local')
+    assert.equal(bgm16.loopEndMs, 55389.388)
+    assert.equal(bgm16.durationMs, 55397.007)
+
+    const bgm45 = data.bgmDetails.find((b) => b.file === 'cloud/bgm00045.mp3')
+    assert.ok(bgm45)
+    assert.equal(bgm45.unit, 'Leo/need')
+
+    const view = new CatalogView(data)
+    assert.equal(view.canonicalBgm('bgm00016'), 'cloud/bgm00016.mp3')
+    assert.equal(view.canonicalBgm('泪水顺心而下'), 'cloud/bgm00016.mp3')
+
+    const sePrompt = view.seList('翻乐谱 震惊', 20)
+    assert.ok(sePrompt.includes('cloud/se00028_b.mp3'))
+    assert.ok(sePrompt.includes('cloud/se00122_b.mp3'))
+    assert.ok(!sePrompt.includes('se00043_b.mp3'), 'non-existent curated SE must not be advertised')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('applyDirectorReviewPatches preserves ttsText when update_talk content is unchanged and resetCameraIfNeeded avoids spurious CameraMove', () => {
+  const patched = applyDirectorReviewPatches(
+    {
+      snippets: [
+        {
+          type: 'Talk',
+          data: {
+            speaker: '瑞希',
+            content: '今天也一起练吧。',
+            ttsText: '今日も一緒に練習しよう。😊',
+            emotion: '开心',
+            ttsCaption: '明るく話す。',
+            ttsSpeed: 1.02
+          }
+        }
+      ]
+    },
+    {
+      dramaticArc: 'ok',
+      emotionalContinuityAndVoice: 'ok',
+      audioAndSeDesign: 'ok',
+      stageRhythm: 'ok',
+      actingNaturalness: 'ok',
+      concreteFixes: [],
+      operations: [{ op: 'update_talk', index: 0, content: '今天也一起练吧。', closeWindowOnFinish: true }]
+    }
+  )
+  assert.equal(patched.story.snippets[0].data.ttsText, '今日も一緒に練習しよう。😊')
+  assert.equal(patched.story.snippets[0].data.emotion, '开心')
+  assert.equal(patched.story.snippets[0].data.ttsCaption, '明るく話す。')
+
+  const view = new CatalogView(catalog.get())
+  const plan = normalizeCastPlan(castReply, view, { scene: '聊天', personas: [], targetMinutes: 1 })
+  const dialogue = {
+    title: '测试',
+    lines: [
+      { id: 'l1', speaker: '瑞希', content: '第一句。' },
+      { id: 'l2', speaker: '绘名', content: '第二句。' }
+    ]
+  }
+  const direction = normalizeDirection(
+    { background: 'bg_room.jpg', lines: [{ id: 'l1', facial: 'face_smile_01' }, { id: 'l2', facial: 'face_normal_01' }] },
+    view,
+    plan,
+    dialogue
+  )
+  const staging = {
+    scenes: [
+      {
+        id: 's1',
+        fromLineId: 'l1',
+        fromIndex: 0,
+        background: 'bg_room.jpg',
+        ambient: 'normal',
+        transitionIn: 'black',
+        activeCast: [1, 2]
+      }
+    ],
+    events: [{ lineId: 'l1', lineIndex: 0, camera: { kind: 'zoomIn', scale: 1.1, durationMs: 400 } }]
+  }
+  const story = composeStory(view, plan, dialogue, direction, staging)
+  assert.ok(story.snippets.some((s) => s.type === 'CameraZoom' && s.data.scale === 1))
+  assert.ok(!story.snippets.some((s) => s.type === 'CameraMove'), 'zoom reset must not emit spurious CameraMove')
 })

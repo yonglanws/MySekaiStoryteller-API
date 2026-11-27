@@ -1245,19 +1245,41 @@ function titleOrDefault(value: unknown, fallback: string): string {
   return oneLine(value, 64) || fallback
 }
 
+const EXPLICIT_GROUP_INTENT_RE =
+  /大家|全员|全体|全团|全队|众人|成员们|其他成员|其余成员|队友们|三人|四人|五人|聚会|团建|live|演唱会|文化祭/i
+const META_EVENT_STYLE_RE = /活动风格|活动剧情|活动卡面|活动向|20\d\d\s*年活动/g
+
+function findMentionedPrimaryModels(scene: string, models: CatalogModel[]): CatalogModel[] {
+  const seenChar = new Set<string>()
+  const picked: CatalogModel[] = []
+  for (const model of models) {
+    const key =
+      typeof model.characterId === 'number'
+        ? `char:${model.characterId}`
+        : `name:${model.name.toLowerCase()}`
+    if (seenChar.has(key)) continue
+    if (
+      (model.name && scene.includes(model.name)) ||
+      (model.shortName && model.shortName.length >= 2 && scene.includes(model.shortName))
+    ) {
+      seenChar.add(key)
+      picked.push(model)
+    }
+  }
+  return picked
+}
+
 function isGroupPrompt(scene: string, view: CatalogView): boolean {
   if (view.models.length < 3) return false
-  const mentionedCount = view.models.filter(
-    (m) =>
-      (m.name && scene.includes(m.name)) ||
-      (m.shortName && m.shortName.length >= 2 && scene.includes(m.shortName))
-  ).length
+  const mentionedCount = findMentionedPrimaryModels(scene, view.primaryModels()).length
   if (mentionedCount >= 3) return true
-  if (mentionedCount === 2 && !/大家|全员|团体|社团|排练|活动|聚会|live|演唱会|成员/i.test(scene)) {
-    return false
+  const cleanedScene = scene.replace(META_EVENT_STYLE_RE, '')
+  if (mentionedCount >= 1) {
+    return EXPLICIT_GROUP_INTENT_RE.test(cleanedScene)
   }
-  return /大家|全员|团体|社团|排练|活动|聚会|live|演唱会|成员|25时|nightcord|leo\/need|mmj|vbs|ws|wxs|文化祭|sekai/i.test(
-    scene
+  return (
+    EXPLICIT_GROUP_INTENT_RE.test(cleanedScene) ||
+    /社团|排练|25时|nightcord|leo\/need|mmj|vbs|ws|wxs|sekai/i.test(cleanedScene)
   )
 }
 
@@ -1305,6 +1327,9 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
       .slice(0, Math.max(0, 12 - subMentioned.length))
   ]
 
+  const mentionedModels = findMentionedPrimaryModels(options.scene, primary)
+  const cleanedSceneForGroup = options.scene.replace(META_EVENT_STYLE_RE, '')
+  const asksForGroup = EXPLICIT_GROUP_INTENT_RE.test(cleanedSceneForGroup)
   const groupStyle = isGroupPrompt(options.scene, view)
   const models = mainRoster
     .map((model) => {
@@ -1430,12 +1455,19 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
     maxChars: 1500
   })
 
+  const mentionedLabels = mentionedModels
+    .map((m) => `${view.shortName(m)}(modelId=${m.id})`)
+    .join('、')
   const castRule =
     view.models.length <= 2
       ? '从角色池选 1~2 名角色（默认 2 人；仅明确要求独白时选 1 人）。'
-      : groupStyle
-        ? '本场偏向团体/活动场景：建议选 **3~5 名角色** 参演，用 scenes 或 stageGroup 安排每幕 1~2 人在场（官方 Normal 模式每次最多 2 人同台，通过 2 人交叠淡出淡入轮换上场）。'
-        : '按场景需要选 **2~5 名角色**（双人对话选 2 人，日常同框为主、内心独白或思索时也允许切单人 Center 留白；团体/活动场景选 3~5 人并按场景或对话轮换保持每次最多 2 人在场；仅明确独白选 1 人）。'
+      : mentionedModels.length >= 2 && !asksForGroup
+        ? `用户已明确点名出场角色（${mentionedLabels}），且未要求其他成员或群像加入：**本次严格只选这 ${mentionedModels.length} 名角色**，严禁擅自加入未点名的同组合队友或其他无关角色。`
+        : mentionedModels.length === 1 && !asksForGroup
+          ? `用户已明确点名「${mentionedLabels}」：若描述为单人独白则只选这 1 人；若需要对手戏且剧情隐含另一位搭档，最多再配 1 名最相关角色（共 1~2 人），切勿无故拉入未提及的多余队友。`
+          : groupStyle
+            ? '本场偏向团体/活动场景：建议选 **3~5 名角色** 参演，用 scenes 或 stageGroup 安排每幕 1~2 人在场（官方 Normal 模式每次最多 2 人同台，通过 2 人交叠淡出淡入轮换上场）。'
+            : '按场景需要选 **2~5 名角色**（双人对话选 2 人，日常同框为主、内心独白或思索时也允许切单人 Center 留白；团体/活动场景选 3~5 人并按场景或对话轮换保持每次最多 2 人在场；仅明确独白选 1 人），严禁擅自加入未提及的多余角色。'
 
   return {
     system: [
@@ -2085,7 +2117,11 @@ export function buildDialoguePrompt(
       {
         scene: plan.scenes?.[0]?.id || 's1',
         speaker: a.name,
-        lines: ['今天也……一起练吧。', '我把上次那首的副歌重新编了一下，\n你听听看？']
+        lines: [
+          '今天也……一起练吧。',
+          '我把上次那首的副歌重新编了一下，\n你听听看？',
+          '（……其实昨晚改完之后，一直有点没底。）'
+        ]
       },
       ...(b && b.name !== a.name
         ? [
@@ -2095,7 +2131,7 @@ export function buildDialoguePrompt(
                 '诶，什么时候弄的？',
                 '……我看看。',
                 '嗯，这里第二段是不是太满了？\n不是说不好，就是……有点急着往前跑。',
-                '不过，副歌前那一段我挺喜欢的。\n像是……在犹豫要不要继续往前走。',
+                '（……明明才熬过一次通宵，干嘛还要这么拼。）',
                 { content: '……先让我再听一遍。', closeWindowAfter: true }
               ]
             }
@@ -2110,12 +2146,15 @@ export function buildDialoguePrompt(
             }
           ]
         : []),
-      { speaker: a.name, lines: ['啊。'] },
+      {
+        speaker: a.name,
+        lines: ['啊。', '（……果然还是被听出来了啊。）']
+      },
       ...(b && b.name !== a.name
         ? [
             {
               speaker: b.name,
-              lines: ['……果然还是被你听出来了。', '不过，我没说不喜欢。']
+              lines: ['……我可没说不好听。', '下次改谱之前，好歹先喝口热茶歇一歇。']
             }
           ]
         : []),
@@ -2158,13 +2197,11 @@ ${fewShotExcerpts}
   少于 ${Math.max(10, Math.round(budget * 0.92))} 句或超过 ${Math.max(14, Math.round(budget * 1.2))} 句都视为不合格。
 - 用 turns 组织：一个角色的一次发言 = 一个 turn，turn 里放 1~6 条 lines。
   lines 元素优先直接写字符串；需要刻意沉默/转场收窗时可写成对象 \`{"content":"...","pauseBefore":1.0,"closeWindowAfter":true}\`（pauseBefore 仅在重大停顿或反应前用 \`1.0\` 或 \`1.5\`，其余句留空即 \`0\`）。
-  整场约 ${Math.max(6, Math.round(budget / 2.1))} 个 turns，长短要有明显起伏（官方一半以上是单句）：
-  约 45% 的 turn 只放 1 条（短反应、抢话、被打断），至少 ${Math.max(6, Math.round(budget * 0.4))} 个；
-  约 1/5 的 turn 放 2 条；剩下约 1/3 放 3~5 条，只有情绪最重或回忆处才允许写成 5~6 条的稍长一段（全片最多 1 处即可，严禁多处连排长独白或重复车轱辘把篇幅拖超）。
+  **贴近官方 PJSK 的自然连说节奏（平均每轮约 1.8~2.2 句）**：避免机械一问一答交替（A-B-A-B）——约 1/3 的 turn 用 1 句短反应/抢话（至少 ${Math.max(4, Math.round(budget * 0.25))} 个），约 1/2 的 turn 用 2~3 句自然连说（先接一句短反应或内心心声，再顺势说出想法），少数情绪最重或回忆处可用 4~6 条（5~6 条的稍长一段全片最多 1 处，严禁多处连排长独白）。
 - 句长与排版（对应官方 30 字宽文本框）：
-  - 平均 17~20 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
-  - 约 1/6 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
-- 只写角色真正说出口的话或括号内心独白（如 \`（……她其实也很在意吧）\`）；**严禁夹带 \`（微笑）\` \`(挠头)\` \`（叹气）\` 等舞台动作/神态括号**，也禁止 \`她转过头\` 之类第三人称动作叙述。
+  - 平均 18~21 字；长句（27~45 字）可在自然的呼吸/从句标点后加 \`\\n\` 分成 2~3 行，每行**不超过 30 个字宽**（全角=1，半角=0.5），**最多 3 行**；
+  - 约 1/7 的句子是 2~6 字短反应（「…………」「……嗯。」「真的？」「诶？」「等一下。」）。
+- **内心独白（（……），全片约 10%~16% / 3~6 句）**：自然穿插全角括号内心独白（如 \`（……她其实也很在意吧）\`、\`（现在这样笑出来，反而更难受……）\`），用来写角色顾虑、犹豫、暗自观察或表里动机的隐瞒面；**严禁夹带 \`（微笑）\` \`(挠头)\` \`（叹气）\` 等舞台动作/神态括号**，也禁止 \`她转过头\` 之类第三人称动作叙述。
 - 节奏要贴合场景和角色性格自然流动，不要刻意凑齐任何“标准比例”；有对话往来、短反应、适当留白即可。
 - **反套路与官方质感（Show, Don't Tell）**：
   - 禁止心理咨询式独白和直白情绪总结（如「其实我一直想说」「谢谢你总是这么温柔」「今天的经历让我明白」「我终于明白了」「内心深处」）。用具体物件、转移话题、打断、迟疑停顿（……、——）来侧面流露情绪。
@@ -2174,7 +2211,7 @@ ${fewShotExcerpts}
 
 ## 写完后自检（不要输出自检过程）
 - 总句数是否在 ${Math.max(10, Math.round(budget * 0.92))}~${Math.max(14, Math.round(budget * 1.2))} 句？
-- 是否有约 ${Math.max(6, Math.round(budget * 0.4))} 个单条 turn、足够短反应与长句，且没有拖沓重复独白？
+- 是否有自然的 2~3 句连说、足够短反应与 3~6 句 \`（……）\` 内心独白？
 - 出场角色是否均来自上方名单（共 ${plan.cast.length} 名），每行不超过 30 字宽、最多 3 行？
 
 ## 输出 JSON
@@ -3227,6 +3264,7 @@ export function buildStagingPrompt(
   const midLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.45)]?.id ?? 'l1'
   const lateLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.72)]?.id ?? 'l1'
 
+  const firstSe = view.seDetailsList()[0]?.file ?? 'se00053_b.mp3'
   const example = {
     scenes: [
       {
@@ -3234,8 +3272,6 @@ export function buildStagingPrompt(
         fromLineId: 'l1',
         background: plan.background || view.defaultImage() || 'bg_room.jpg',
         ambient: 'normal',
-        telop: '放学后',
-        placeInfo: '放学后的教室',
         transitionIn: 'black',
         activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name),
         bgm: firstBgm || ''
@@ -3252,16 +3288,16 @@ export function buildStagingPrompt(
       },
       {
         lineId: lateLine,
-        se: { file: 'se00053_b.mp3', timing: 'before' },
-        camera: { kind: 'zoomIn', scale: 1.08, durationMs: 500 }
+        se: { file: firstSe, timing: 'before' },
+        silentReaction: { modelId: plan.cast[0]?.modelId ?? 1 }
       }
     ]
   }
 
   const presenceRule =
     plan.cast.length === 2
-      ? '- **双人同框与单人思考留白（Normal 模式，一律原地淡入淡出）**：本场 2 人，日常对话保持两人在场（Left / Right）；但当角色出现内心独白（如括号心理描写）、独自思索或沉重特写时，**必须在第一句独白（`lineId`）就用 `events[].stageGroup: { activeCast: [角色名] }` 短暂切到单人 Center**（先双人同时 `LayoutClear` 原地淡出，再等淡出完成后 `LayoutAppear(Center)` 原地淡入；**严禁第一句独白还站在 Left/Right 到第二句才切，也严禁 `Move` 横向滑动**），思考结束在紧接的下一句非独白台词切回两人 Left / Right 同框，无需为了“全片同场”而把无关倾听者死板留在台上。此外**同一时间地点连续对话只写 1 幕（s1）即可，切勿硬拆成 s2/s3**；仅当真正切换地点、跳过时段、切入回忆或出入 SEKAI 时才新开幕次。'
-      : '- **多人动态分组与自然分幕（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），按对话节奏在幕次或 events.stageGroup 中轮换 1~2 人在场，通过 `LayoutClear` + `LayoutAppear` 原地淡出淡入切换，严禁 3 人以上同时挤在台上，也严禁横向滑动。同一时间地点无需硬拆幕次，仅切换地点/时段/回忆/SEKAI 时再新开幕。'
+      ? '- **双人动态聚焦切镜（单人 Center <-> 双人 Left/Right，一律原地淡入淡出）**：本场 2 人，除开场双人同框（Left/Right）外，要善用 `events[].stageGroup` 进行干净的镜头聚焦切换——每当出现内心独白（`（……）`）、情绪转折/坦白单人重音句、或需要拉近倾听/压迫感时，**在第一句就用 `events[].stageGroup` 短暂切到单人 Center**（`activeCast: [角色名]`，先双人同时 `LayoutClear` 原地淡出，再 `LayoutAppear(Center)` 原地淡入，**严禁 `Move` 横向滑动**），并在 1~4 句后切回双人 Left/Right 同框（整场 35 句约安排 3~6 次单双人焦点切换）。同一时间地点连续对话只写 1 幕（s1），仅切换地点、跳过时段、切入回忆或出入 SEKAI 时再新开幕次。'
+      : '- **多人动态分组与单人特写切镜（Normal 模式 <=2 人同台）**：本场 >=3 人，始终保持 `Normal` 模式（Left / Right 双人或单人 Center），积极利用 `events.stageGroup` 随着对话焦点在 1 人特写（Center）与 2 人同框（Left/Right）之间通过 `LayoutClear` + `LayoutAppear` 原地淡出淡入轮换（约 24~35 次入出场节奏），严禁 3 人以上同时挤在台上，也严禁横向滑动。同一时间地点无需硬拆幕次，仅切换地点/时段/回忆/SEKAI 时再新开幕。'
 
   return {
     system: [
@@ -3293,11 +3329,13 @@ ${view.seList(stagingQuery, 32)}
 ## 舞台与摄影规则
 ${presenceRule}
 - **严禁滑动入出场与横向滑位**：所有 \`LayoutAppear\` / \`LayoutClear\` 必须原地渐变淡入淡出（\`from.side === to.side, offset: 0\`），禁止使用 \`walkInCast\` / \`walkOutCast\` / \`LeftOver\` / \`RightOver\` 画外滑入滑出，也禁止 \`Move\` 左右偏移滑行或从 Left/Right 滑到 Center。
-- **静默反应 / 受惊抖动 / 全息**：
+- **克制镜头、震动与开场字幕条（严禁每场套模板）**：
   - 说话后需要角色沉默留白或低头反应时，设 \`silentReaction: { modelId }\`（无需强行把 \`closeWindowAfter: true\` 挂在紧接瞬时动作之前）；仅在停顿 \`Wait >= 300ms\` 或场景/幕次切换前才设置 \`closeWindowAfter: true\`。
-  - 突发惊吓可用 \`characterShake: { modelId, axis: "X"|"Y" }\`；大喊/震惊句可用 \`camera: { kind: "shakeWindow" }\` 或 \`shakeScreen\`。
+  - **镜头（CameraZoom / CameraMove）克制原则**：官方日常谈心、后台会议、安静独白场次大多 **0~1 次**（切忌平均塞 4~8 次推进平移！）；仅在真正的高潮爆发、重大揭示或舞台演出切镜时用 \`1~3\` 次，且高潮过后及时用 \`zoomReset\` 复位。
+  - **震动（CharacterShake / ShakeWindow / ShakeScreen）极稀缺**：\`CharacterShake\` 仅在真实物理碰撞或猛然吓一跳时偶用（日常对话/安静谈心禁用）；\`ShakeWindow\` / \`ShakeScreen\` 仅用于大喊/突发惊吓。
+  - **开场 Telop / PlaceInfo 按需选用**：仅在时间/地点需要明确交代或跳幕时才写 \`telop\` / \`placeInfo\`，安静延续或私密谈心可直接入戏，不必每场千篇一律加 \`Telop + PlaceInfo\`。
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
-- **特效与场景**：可选 \`Telop\`（开场/跳时间小标题）、\`PlaceInfo\`（地点条）、\`SideFade\`（\`transitionIn: "sideFade"\`）、回忆（\`transitionIn: "flashback"\`, \`isFlashback: true\`）、出入 SEKAI（\`sekaiIn\`/\`sekaiOut\`）、天气/氛围粒子（${CURATED_SCENARIO_EFFECTS.join('/')}）。
+- **特效与转场**：跳时间/换场地优先善用 \`SideFade\`（\`transitionIn: "sideFade"\`），回忆段务必配 \`transitionIn: "flashback"\`, \`isFlashback: true\`（自动接 \`WhiteOut -> se00053_b -> FlashbackIn -> WhiteIn\`），时段/氛围变化用 \`ambient\`（\`normal\`/\`evening\`/\`night\`），出入 SEKAI 用 \`sekaiIn\`/\`sekaiOut\`，天候粒子用（${CURATED_SCENARIO_EFFECTS.join('/')}）。
 - **BGM 与停顿节奏**：首幕（s1）必须从可用 BGM 清单选定契合开场氛围的曲目（例如追逐/对峙/低落选戏剧或沉重曲，日常/喜剧选轻快日常曲）；若刻意做冷开场，最多留 2~4 句静音并在第 5 句（l5）前用 \`bgmCut\` 切入 BGM，**严禁前段大段无声**。大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。中后段转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
 - **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
@@ -3409,11 +3447,7 @@ export function fallbackStaging(
       background: normalizeBackground(view, ps.background),
       ambient,
       ...(ps.telop ? { telop: ps.telop } : {}),
-      ...(ps.placeInfo
-        ? { placeInfo: ps.placeInfo }
-        : idx === 0 && lines.length >= 12 && bgDetail?.name && bgDetail.name !== bgDetail.file
-          ? { placeInfo: bgDetail.name }
-          : {}),
+      ...(ps.placeInfo ? { placeInfo: ps.placeInfo } : {}),
       transitionIn: ps.transitionIn,
       ...(ps.isFlashback ? { isFlashback: true } : {}),
       ...(ps.isSekai ? { isSekai: true } : {}),
@@ -4556,6 +4590,17 @@ export function composeStory(
     linesSinceLastBodyMotion: number
   }
   const totalBodyMotions = new Map<number, number>()
+  const storyMotionCounts = new Map<number, Map<string, number>>()
+  const getOverusedMotions = (modelId: number, extra?: ReadonlyArray<string>): Set<string> => {
+    const out = new Set<string>(extra ?? [])
+    const counts = storyMotionCounts.get(modelId)
+    if (counts) {
+      for (const [m, c] of counts) {
+        if (c >= 2) out.add(m)
+      }
+    }
+    return out
+  }
   const preferredSide = new Map<number, 'Left' | 'Right'>()
   if (cast.length === 2) {
     preferredSide.set(cast[0].modelId, 'Left')
@@ -4574,6 +4619,12 @@ export function composeStory(
     st.linesSinceLastBodyMotion = 0
     if (modelId !== undefined) {
       totalBodyMotions.set(modelId, (totalBodyMotions.get(modelId) ?? 0) + 1)
+      let actorCounts = storyMotionCounts.get(modelId)
+      if (!actorCounts) {
+        actorCounts = new Map<string, number>()
+        storyMotionCounts.set(modelId, actorCounts)
+      }
+      actorCounts.set(motionName, (actorCounts.get(motionName) ?? 0) + 1)
     }
     if (st.recentBodyMotions.at(-1) !== motionName) {
       st.recentBodyMotions.push(motionName)
@@ -4585,7 +4636,8 @@ export function composeStory(
   let flashbackActive = false
   let currentEffect = ''
   let currentBgm = ''
-  let cameraDirty = false
+  let cameraZoomDirty = false
+  let cameraMoveDirty = false
   let shakeScreenActive = false
   let lastSpeakerId: number | null = null
   const lastEmotionByActor = new Map<number, string>()
@@ -4614,22 +4666,27 @@ export function composeStory(
   }
 
   const resetCameraIfNeeded = (): void => {
-    if (!cameraDirty) return
-    snippets.push({
-      type: 'CameraZoom',
-      wait: true,
-      progressBehavior: 'WaitFinished',
-      delay: 0,
-      data: { scale: 1, duration: 400, ease: 'OutQuad' }
-    })
-    snippets.push({
-      type: 'CameraMove',
-      wait: false,
-      progressBehavior: 'Now',
-      delay: 0,
-      data: { x: 0, y: 0, duration: 400, ease: 'OutQuad' }
-    })
-    cameraDirty = false
+    if (!cameraZoomDirty && !cameraMoveDirty) return
+    if (cameraZoomDirty) {
+      snippets.push({
+        type: 'CameraZoom',
+        wait: !cameraMoveDirty,
+        progressBehavior: !cameraMoveDirty ? 'WaitFinished' : 'Now',
+        delay: 0,
+        data: { scale: 1, duration: 400, ease: 'OutQuad' }
+      })
+      cameraZoomDirty = false
+    }
+    if (cameraMoveDirty) {
+      snippets.push({
+        type: 'CameraMove',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { x: 0, y: 0, duration: 400, ease: 'OutQuad' }
+      })
+      cameraMoveDirty = false
+    }
   }
 
   const stopShakeScreenIfNeeded = (): void => {
@@ -4813,7 +4870,7 @@ export function composeStory(
         : pickAppearFallbackMotion(
             view,
             id,
-            usedEntryMotions,
+            getOverusedMotions(id, [...usedEntryMotions]),
             firstFutureTalkMotion,
             surroundingTense
           )
@@ -5396,7 +5453,7 @@ export function composeStory(
           view,
           member.modelId,
           actorState.lastAppearMotion,
-          new Set(actorState.recentBodyMotions)
+          getOverusedMotions(member.modelId, actorState.recentBodyMotions)
         )
         return swapped || rawMotion
       }
@@ -5518,14 +5575,16 @@ export function composeStory(
         })
         const repeatedTooLong =
           allowStaleCheck &&
-          currentSpeakerMotion === actorState.lastBodyMotion &&
-          actorState.consecutiveSameBodyMotion >= 4
+          (currentSpeakerMotion === actorState.lastBodyMotion &&
+            actorState.consecutiveSameBodyMotion >= 4 ||
+            ((storyMotionCounts.get(member.modelId)?.get(currentSpeakerMotion) ?? 0) >= 3 &&
+              !(currentSpeakerMotion === actorState.lastBodyMotion && actorState.consecutiveSameBodyMotion <= 2)))
         if (!motionCompat || repeatedTooLong) {
           const replacement = pickFollowupMotion(
             view,
             member.modelId,
             currentSpeakerMotion,
-            new Set(actorState.recentBodyMotions),
+            getOverusedMotions(member.modelId, actorState.recentBodyMotions),
             { line, prevTense: precededByTense, restrained: speakerRestrained }
           )
           if (replacement && replacement !== currentSpeakerMotion) {
@@ -5700,7 +5759,7 @@ export function composeStory(
     const hasZeroMotionActorOnStage = [...onStage.entries()].some(
       ([pid, pst]) => index > pst.appearedAtLine && (totalBodyMotions.get(pid) ?? 0) === 0
     )
-    const minSilentGap = hasZeroMotionActorOnStage ? 2 : 3
+    const minSilentGap = hasZeroMotionActorOnStage ? 1 : 2
     if (
       !explicitSilentReaction &&
       !pendingListenerMotion &&
@@ -5710,7 +5769,7 @@ export function composeStory(
       index < dialogue.lines.length - 1 &&
       !ev?.move &&
       index - lastSilentReactionLine >= minSilentGap &&
-      silentReactionsEmitted < Math.max(2, Math.round(dialogue.lines.length * 0.24))
+      silentReactionsEmitted < Math.max(2, Math.round(dialogue.lines.length * 0.42))
     ) {
       const turnBoundary = nextLine && nextLine.speaker !== line.speaker
       const pauseOrEllipsis =
@@ -5821,7 +5880,7 @@ export function composeStory(
           delay: 0,
           data: { scale: cam.scale ?? 1.1, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
         })
-        cameraDirty = true
+        cameraZoomDirty = true
       } else if (cam.kind === 'pan') {
         snippets.push({
           type: 'CameraMove',
@@ -5830,7 +5889,7 @@ export function composeStory(
           delay: 0,
           data: { x: cam.x ?? 60, y: cam.y ?? 0, duration: cam.durationMs ?? 500, ease: 'OutQuad' }
         })
-        cameraDirty = true
+        cameraMoveDirty = true
       } else if (cam.kind === 'shakeWindow') {
         snippets.push({
           type: 'ShakeWindow',
@@ -5962,7 +6021,7 @@ export function composeStory(
             view,
             targetId,
             targetState.lastBodyMotion,
-            new Set(targetState.recentBodyMotions),
+            getOverusedMotions(targetId, targetState.recentBodyMotions),
             { line, prevTense: silentPrecededByTense, restrained: targetRestrained }
           )
         const rawSilentFacial = ev?.silentReaction?.facial || fromPendingListener?.facial || ''
@@ -6207,7 +6266,7 @@ export function buildDirectorReviewPrompt(
       '1. 戏剧弧光与句长节奏（开场抓手、情绪转折、收尾余韵）',
       '2. 情绪连贯与人物口吻',
       '3. 音频设计（开场 BGM、高潮静音切停 ChangeBgm stop:true、PlaySe 物理/情绪音效）',
-      '4. 舞台节奏（Wait 呼吸留白、独立 Motion 静默反应、原地淡入淡出与高潮震动/镜头）',
+      '4. 舞台节奏（Wait 呼吸留白、独立 Motion 静默反应、原地单双人焦点淡入淡出切镜；日常/谈心保持 CameraZoom 与 CharacterShake 克制不滥用）',
       '5. 表情与动作自然度（避免机械循环，也不要无故频繁乱动；自然不死板）',
       '若发现具体薄弱处，请在 operations 中输出精准局部修补（最多 12 条）；若成稿已经精良，operations 可为空数组。严禁编造不在清单中的动作/表情/音效，严禁输出 markdown。'
     ].join('\n'),
@@ -6385,9 +6444,13 @@ export function applyDirectorReviewPatches<T extends { snippets: Array<Record<st
     }
     if (op.op === 'update_talk' && str(target.type) === 'Talk') {
       if (typeof op.content === 'string' && op.content.trim()) {
-        d.content = op.content.trim()
-        // 仅当中文正文发生实质改写时清空旧 ttsText 以便后续重翻；未改正文时完整保留含 Irodori Emoji 的 ttsText
-        if (typeof d.ttsText === 'string' && d.ttsText) delete d.ttsText
+        const nextContent = op.content.trim()
+        const prevContent = str(d.content).trim()
+        if (nextContent !== prevContent) {
+          d.content = nextContent
+          // 仅当中文正文发生实质改写时清空旧 ttsText 以便后续重翻；未改正文时完整保留含 Irodori Emoji 的 ttsText
+          if (typeof d.ttsText === 'string' && d.ttsText) delete d.ttsText
+        }
       }
       if (typeof op.emotion === 'string') d.emotion = op.emotion
       if (typeof op.closeWindowOnFinish === 'boolean') {
