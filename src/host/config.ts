@@ -339,9 +339,8 @@ const LlmSchema = z.object({
   repairRounds: z.number().default(2),
   /**
    * 剧本生成流水线：
-   * - staged（默认）：选角 → 只写台词（完整人设）→ 单独设计动作/表情/背景
-   * - hybrid：Agent 工具探索取证（人设/语料展开/云端素材）→ 完整重写人设精写对白与人设 Critic 润色 → 确定性舞台/配音/演技编译
-   * - agent：带工具调用的 Agent 导演/编剧循环（失败时自动回退 staged）
+   * - staged（默认）：选角 → 只写台词（完整人设）→ 并行声演/舞台 + 演技设计
+   * - hybrid / agent：统一三段式上下文隔离 + 工具驱动流水线（Phase 1 只读工具探索锁定规划 → Phase 2 丢弃工具历史纯台词+人设Critic → Phase 3 并行编译 + 轻量导演终审）
    * - single：一次调用直接写完整剧本，省调用次数
    * chat 模式始终走 single。
    */

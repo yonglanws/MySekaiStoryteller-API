@@ -5,12 +5,18 @@ import type { StoryData } from '../../common/types/Story'
 import {
   extractJson,
   LlmClient,
-  LlmError,
   type ChatMessage,
   type ChatResult,
   type ChatUsage
 } from './llm'
-import { loadPersonas, type PersonaEntry } from './personas'
+import {
+  inferUnitFromText,
+  loadPersonas,
+  normalizeUnit,
+  resolvePersonaByName,
+  type PersonaEntry,
+  type PersonaLookupOptions
+} from './personas'
 import { buildChatPrompt, buildStoryPrompt, CatalogView } from './prompt'
 import {
   applyDialoguePolish,
@@ -42,6 +48,7 @@ import {
   normalizeDirectorReviewResult,
   normalizeVoiceDirectionPlan,
   normalizeStaging,
+  resolveCastPersonas,
   softenPunctuation,
   type LlmPipeline,
   type StagedCastPlan,
@@ -56,8 +63,8 @@ import {
 import { validateAndFixStory, type ValidationResult } from './validate'
 import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
 import {
-  createStoryAgentToolkit,
-  runAgenticStoryGeneration,
+  buildLocalizedDirectorReviewHints,
+  runPhase1Exploration,
   type DirectorReviewRecord
 } from './agentTools'
 import {
@@ -400,8 +407,38 @@ export class StoryWriter {
 
     const mode = options.mode ?? 'story'
     const data = this.catalog.get()
-    let view = filterByCast(new CatalogView(data), options.cast)
+    const view = filterByCast(new CatalogView(data), options.cast)
     const personas = this.getPersonas()
+    const result = await this.generateWithContext(options, prompt, mode, view, personas)
+    result.meta.durationMs = Date.now() - startedAt
+    return result
+  }
+
+  /** 允许已持有 CatalogView 与人设数组的调用方（如 runAgenticStoryGeneration）直接复用统一流水线。 */
+  async generateFromView(
+    options: GenerateStoryOptions,
+    view: CatalogView,
+    personas: PersonaEntry[]
+  ): Promise<GenerateStoryResult> {
+    const startedAt = Date.now()
+    const prompt = options.prompt?.trim()
+    if (!prompt) throw new StoryGenerationError('场景描述不能为空', [])
+
+    const mode = options.mode ?? 'story'
+    const filteredView = filterByCast(view, options.cast)
+    const result = await this.generateWithContext(options, prompt, mode, filteredView, personas)
+    result.meta.durationMs = Date.now() - startedAt
+    return result
+  }
+
+  private async generateWithContext(
+    options: GenerateStoryOptions,
+    prompt: string,
+    mode: StoryMode,
+    initialView: CatalogView,
+    personas: PersonaEntry[]
+  ): Promise<GenerateStoryResult> {
+    let view = initialView
     const targetMinutes = options.targetMinutes ?? this.settings.targetMinutes
     const pipeline: LlmPipeline =
       mode === 'chat'
@@ -410,21 +447,33 @@ export class StoryWriter {
           ? 'agent'
           : (options.pipeline ?? this.settings.pipeline ?? 'single')
 
-    // staged 自带选角段；single/chat 先做一次很短的选角，避免主提示词装入全部人设。
+    // single/chat 先做一次很短的选角，避免主提示词装入全部人设。
     if (mode === 'chat' || pipeline === 'single') {
       view = await this.resolveFastCast(view, prompt, options)
+      return this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
     }
 
-    const result =
-      pipeline === 'agent'
-        ? await this.generateAgentic({ prompt, view, personas, targetMinutes, options })
-        : pipeline === 'hybrid'
-          ? await this.generateHybrid({ prompt, view, personas, targetMinutes, options })
-          : pipeline === 'staged'
-            ? await this.generateStaged({ prompt, view, personas, targetMinutes, options })
-            : await this.generateSingle({ mode, prompt, view, personas, targetMinutes, options })
-    result.meta.durationMs = Date.now() - startedAt
-    return result
+    if (pipeline === 'agent' || pipeline === 'hybrid') {
+      return this.generateUnified({
+        prompt,
+        view,
+        personas,
+        targetMinutes,
+        options,
+        requestedPipeline: pipeline,
+        explore: true
+      })
+    }
+
+    return this.generateUnified({
+      prompt,
+      view,
+      personas,
+      targetMinutes,
+      options,
+      requestedPipeline: 'staged',
+      explore: false
+    })
   }
 
   private async generateSingle(args: {
@@ -569,397 +618,54 @@ export class StoryWriter {
   }
 
   /**
-   * Agentic Tool-Calling 模式：允许模型自主调用人设、motion3 表情语义、官方语料与双重校验工具。
-   * 当模型/网关不支持原生 tool calling 时自动切至 ReAct JSON 信封；若仍受阻则安全回退 staged 流水线。
+   * 统一三段式上下文隔离 + 工具驱动流水线（合并 `hybrid` 与 `agent`，并与 `staged` 共享核心编译骨干）：
+   * - Phase 1（explore=true 时启用）：只读工具探索（lookup_character / search_official_corpus / search_assets，支持 Native + ReAct JSON + staged-fallback）锁定规划；
+   * - Phase 2：彻底丢弃 Phase 1 工具消息，独立上下文纯写台词 + 确定性 Linter（仅限已解析出场人设）+ Critic/Polish；
+   * - Phase 3：并行声演与舞台调度 + 演技导演 + 合成校验 + 单一轻量导演终审（含 onlyIssues 局部演技推荐）。
    */
-  private async generateAgentic(args: {
+  private async generateUnified(args: {
     prompt: string
     view: CatalogView
     personas: PersonaEntry[]
     targetMinutes: number
     options: GenerateStoryOptions
+    requestedPipeline: 'staged' | 'hybrid' | 'agent'
+    explore: boolean
   }): Promise<GenerateStoryResult> {
-    const { prompt, view, personas, targetMinutes, options } = args
+    const { prompt, view, personas, targetMinutes, options, requestedPipeline, explore } = args
     const retriever = this.getRagRetriever()
-    try {
-      const agentRes = await runAgenticStoryGeneration({
+
+    let exploreResult: Awaited<ReturnType<typeof runPhase1Exploration>> | null = null
+    if (explore) {
+      exploreResult = await runPhase1Exploration({
         llm: this.llm,
         view,
         personas,
         scene: prompt,
         targetMinutes,
         emotionLabels: this.emotionLabels,
-        systemPrompt: this.settings.systemPrompt,
-        maxToolTurns: options.maxToolTurns ?? this.settings.agentMaxSteps,
         ragRetriever: retriever,
         logger: this.logger,
+        maxToolTurns: options.maxToolTurns ?? this.settings.agentMaxSteps,
         signal: options.signal
       })
-      // 先对齐错标「平静」并补齐 ttsCaption / ttsSpecialScene，让后续翻译器拿到准确的声演上下文
-      const alignedBefore = alignStoryTtsEmotionsAndCaptions(agentRes.story, {
-        emotionLabels: this.emotionLabels
-      })
-      let ttsTranslated = 0
-      if (options.translateForTts ?? this.settings.translateForTts) {
-        ttsTranslated = await this.translateTtsText(agentRes.story, options.signal)
-      }
-      const alignedAfter = alignStoryTtsEmotionsAndCaptions(agentRes.story, {
-        emotionLabels: this.emotionLabels
-      })
-      const totalEmo = alignedBefore.updatedEmotions + alignedAfter.updatedEmotions
-      const totalCap = alignedBefore.updatedCaptions + alignedAfter.updatedCaptions
-      const totalSpec = alignedBefore.updatedSpecialScenes + alignedAfter.updatedSpecialScenes
-      if (totalEmo > 0 || totalCap > 0 || alignedAfter.updatedEmojis > 0 || totalSpec > 0) {
-        this.logger.info(
-          `[TTS] 情绪对齐（agent）：emotion=${totalEmo} caption=${totalCap} emoji=${alignedAfter.updatedEmojis} special=${totalSpec}`
-        )
-      }
-      return {
-        story: agentRes.story,
-        meta: {
-          mode: 'story',
-          pipeline: 'agent',
-          ...(agentRes.title ? { title: agentRes.title } : {}),
-          model: agentRes.model,
-          rounds: agentRes.rounds,
-          warnings: agentRes.warnings,
-          usage: agentRes.usage,
-          latencyMs: agentRes.latencyMs,
-          durationMs: 0,
-          ttsTranslated,
-          cast: agentRes.story.models.map(
-            (m) => view.shortName(view.modelById(m.id) ?? (m as never)) || String(m.id)
-          ),
-          toolCalls: agentRes.toolCallsUsed,
-          agentMode: agentRes.modeUsed,
-          agentSteps: agentRes.rounds,
-          ...(agentRes.directorReview ? { directorReview: agentRes.directorReview } : {})
-        }
-      }
-    } catch (error) {
-      if (options.signal?.aborted) throw error
-      const reason = errorMessage(error)
-      this.logger.warn(`[AI] Agentic 模式回退至 staged 流水线：${reason}`)
-      const fallback = await this.generateStaged({ prompt, view, personas, targetMinutes, options })
-      fallback.meta.agentMode = 'staged-fallback'
-      fallback.meta.warnings = [
-        `[Agentic->staged-fallback] ${reason}`,
-        ...(fallback.meta.warnings ?? [])
-      ]
-      return fallback
-    }
-  }
-
-  /**
-   * Hybrid 流水线（Workflow + Agent 协同）：
-   * 1. 前置 Agentic Exploration Pre-Pass（2~4 步轻量工具循环，工具不支持/失败时优雅降级）：
-   *    调用 lookup_character / search_official_corpus(search+expand) / search_assets 核实人设记忆、官方事件与云端资源，生成 researchBrief；
-   * 2. Stage 1（受 researchBrief 加持）→ Stage 2 纯台词（完整 11000 字重写人设占主导）→ Stage 2.5 确定性 Linter + 人设 Critic 精修；
-   * 3. 并行 VoiceDirection + Staging → Direction → composeStory → DirectorReview 确定性编译出零穿帮 Live2D 成稿。
-   */
-  private async generateHybrid(args: {
-    prompt: string
-    view: CatalogView
-    personas: PersonaEntry[]
-    targetMinutes: number
-    options: GenerateStoryOptions
-  }): Promise<GenerateStoryResult> {
-    const { prompt, view, personas, targetMinutes, options } = args
-    const retriever = this.getRagRetriever()
-    const explore = await this.runAgenticExplorationPrePass({
-      prompt,
-      view,
-      personas,
-      targetMinutes,
-      retriever,
-      options
-    })
-    return this.generateStaged({
-      prompt,
-      view,
-      personas,
-      targetMinutes,
-      options,
-      hybridContext: {
-        isHybrid: true,
-        researchBrief: explore.researchBrief,
-        preBuiltPlan: explore.preBuiltPlan,
-        extraStages: explore.stages,
-        extraToolCalls: explore.toolCallsUsed,
-        extraUsage: explore.usage,
-        extraLatencyMs: explore.latencyMs
-      }
-    })
-  }
-
-  private async runAgenticExplorationPrePass(args: {
-    prompt: string
-    view: CatalogView
-    personas: PersonaEntry[]
-    targetMinutes: number
-    retriever: AdaptiveRagRetriever | null
-    options: GenerateStoryOptions
-  }): Promise<{
-    researchBrief: string
-    preBuiltPlan: StagedCastPlan | null
-    toolCallsUsed: string[]
-    stages: StoryStageMeta[]
-    usage: ChatUsage | null
-    latencyMs: number
-  }> {
-    const { prompt, view, personas, targetMinutes, retriever, options } = args
-    const exploreTools = new Set([
-      'lookup_character',
-      'search_official_corpus',
-      'search_assets',
-      'plan_story_outline'
-    ])
-    const toolkit = createStoryAgentToolkit({
-      view,
-      personas,
-      emotionLabels: this.emotionLabels,
-      targetMinutes,
-      ragRetriever: retriever,
-      logger: this.logger
-    })
-    const definitions = toolkit.definitions.filter((d) => exploreTools.has(d.function.name))
-    const toolCallsUsed: string[] = []
-    const stages: StoryStageMeta[] = []
-    let usage: ChatUsage | null = null
-    let latencyMs = 0
-    const findings: string[] = []
-    let synthesizedBrief = ''
-    let preBuiltPlan: StagedCastPlan | null = null
-
-    if (!this.llm.enabled) {
-      return { researchBrief: '', preBuiltPlan: null, toolCallsUsed, stages, usage, latencyMs }
     }
 
-    const castSummary = view
-      .primaryModels()
-      .slice(0, 28)
-      .map((m) => `${view.shortName(m)}(modelId=${m.id}${m.unit ? `,${m.unit}` : ''})`)
-      .join('、')
-    const maxTurns = Math.min(4, Math.max(2, options.maxToolTurns ?? 4))
-    const messages: ChatMessage[] = [
-      {
-        role: 'system',
-        content: [
-          '你是 Project SEKAI 剧情前期调研 Agent（hybrid 探索阶段，仅做资料核实，不写台词正文）。',
-          '请在 1~2 轮内并行调用 lookup_character、search_official_corpus（必要时用 mode:"expand" 读全集）和 search_assets（核实云端背景/BGM/SE/服装），最后用简洁 JSON 总结研究简报：',
-          '{"researchBrief":"角色记忆、关系边界、官方事件与云端素材核实结论","recommendedAssets":{"background":"...","bgm":"...","outfits":{...}},"optionalPlan":{可选 cast/scenes/understanding}}'
-        ].join('\n')
-      },
-      {
-        role: 'user',
-        content: `场景要求：${prompt}\n可选角色摘要：${castSummary}\n请核实出场角色记忆与人设边界、近期官方事件与精确云端素材 ID，输出研究简报 JSON。`
-      }
-    ]
-
-    const tryParseExploreBrief = (rawContent: string): void => {
-      try {
-        const parsed = extractJson(rawContent)
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
-        const rec = parsed as Record<string, unknown>
-        if (typeof rec.researchBrief === 'string' && rec.researchBrief.trim()) {
-          synthesizedBrief = rec.researchBrief.trim()
-        } else if (typeof rec.summary === 'string' && rec.summary.trim()) {
-          synthesizedBrief = rec.summary.trim()
-        }
-        const planCandidate = rec.optionalPlan ?? (Array.isArray(rec.cast) ? rec : null)
-        if (planCandidate && typeof planCandidate === 'object') {
-          const normalized = normalizeCastPlan(planCandidate, view, {
-            scene: prompt,
-            personas,
-            targetMinutes
-          })
-          if (normalized && normalized.cast.length > 0) {
-            preBuiltPlan = normalized
-          }
-        }
-      } catch {
-        // 非 JSON 总结则忽略，回退已收集工具摘要或常规 Stage 1
-      }
-    }
-
-    const summarizeToolOutput = (toolName: string, output: string): void => {
-      try {
-        const parsed = JSON.parse(output) as Record<string, unknown>
-        if (toolName === 'lookup_character' && Array.isArray(parsed.characters)) {
-          const names = parsed.characters
-            .map((c) => {
-              const r = c as Record<string, unknown>
-              return `${String(r.shortName ?? r.name ?? '')}(id=${String(r.modelId ?? '')})`
-            })
-            .filter(Boolean)
-          if (names.length > 0) findings.push(`核实角色：${names.join('、')}`)
-        } else if (toolName === 'search_assets') {
-          const bgs = Array.isArray(parsed.backgrounds)
-            ? parsed.backgrounds.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
-            : []
-          const bgms = Array.isArray(parsed.bgm)
-            ? parsed.bgm.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
-            : []
-          if (bgs.length > 0 || bgms.length > 0) {
-            findings.push(`核实云端素材：背景[${bgs.join('/')}] BGM[${bgms.join('/')}]`)
-          }
-        } else if (toolName === 'search_official_corpus') {
-          const stories = Array.isArray(parsed.availableStories)
-            ? parsed.availableStories
-                .slice(0, 3)
-                .map((s) => String((s as Record<string, unknown>).story ?? ''))
-            : []
-          const expanded =
-            parsed.context && typeof parsed.context === 'object'
-              ? String((parsed.context as Record<string, unknown>).text ?? '').slice(0, 420)
-              : ''
-          if (stories.length > 0) findings.push(`官方参考活动：${stories.join('、')}`)
-          if (expanded) findings.push(`官方上下文展开：\n${expanded}`)
-        }
-      } catch {
-        // 忽略摘要解析错误
-      }
-    }
-
-    try {
-      for (let turn = 0; turn < maxTurns; turn++) {
-        const isLast = turn === maxTurns - 1
-        const res = await this.llm.chat(
-          isLast
-            ? [
-                ...messages,
-                {
-                  role: 'user',
-                  content:
-                    '请立即综合已获取信息输出研究简报 JSON（含 researchBrief 与可选 recommendedAssets / optionalPlan），不要再调用工具。'
-                }
-              ]
-            : messages,
-          isLast
-            ? { json: true, temperature: 0.3, signal: options.signal }
-            : { tools: definitions, toolChoice: 'auto', temperature: 0.3, signal: options.signal }
-        )
-        stages.push({
-          stage: 'hybrid-explore',
-          model: res.model,
-          latencyMs: res.latencyMs,
-          usage: res.usage,
-          ok: true
-        })
-        latencyMs += res.latencyMs
-        usage = mergeUsage(usage, res.usage)
-
-        const calls = res.toolCalls ?? []
-        if (calls.length > 0) {
-          messages.push({
-            role: 'assistant',
-            content: res.content || null,
-            tool_calls: calls
-          })
-          for (const call of calls) {
-            toolCallsUsed.push(call.function.name)
-            const out = await toolkit.execute(call.function.name, call.function.arguments, options.signal)
-            summarizeToolOutput(call.function.name, out)
-            messages.push({
-              role: 'tool',
-              tool_call_id: call.id,
-              name: call.function.name,
-              content: out
-            })
-          }
-          continue
-        }
-
-        tryParseExploreBrief(res.content)
-        break
-      }
-    } catch (error) {
-      if (options.signal?.aborted) throw error
-      const note =
-        error instanceof LlmError && error.toolCallingUnsupported
-          ? '底层模型不支持工具调用，hybrid 已优雅降级至直接工作流'
-          : `hybrid 探索预检降级：${errorMessage(error)}`
-      this.logger.warn(`[AI] ${note}`)
-      stages.push({
-        stage: 'hybrid-explore',
-        model: this.llm.model,
-        latencyMs: 0,
-        usage: null,
-        ok: false,
-        note
-      })
-    }
-
-    const saved = toolkit.getSavedPlan()
-    if (!preBuiltPlan && saved && saved.cast.length > 0) {
-      preBuiltPlan = normalizeCastPlan(
-        {
-          title: saved.title,
-          event: saved.event,
-          logline: saved.logline,
-          outline: saved.beats,
-          cast: saved.cast,
-          scenes: saved.scenes,
-          pairwiseAddress: saved.pairwiseAddress,
-          understanding: saved.understanding
-        },
-        view,
-        { scene: prompt, personas, targetMinutes }
-      )
-    }
-
-    const researchBrief = [synthesizedBrief, ...findings]
-      .filter(Boolean)
-      .join('\n')
-      .slice(0, 2200)
-    return {
-      researchBrief,
-      preBuiltPlan,
-      toolCallsUsed,
-      stages,
-      usage,
-      latencyMs
-    }
-  }
-
-  /**
-   * 三段式生成（staged）与混合生成（hybrid）共用主干：选角 → 台词 → 润色/Critic → 并行声演与舞台 → 演技设计 → 合成校验。
-   *
-   * 选角和表演失败都可以降级（按目录顺序选角 / 无动作合成），只有台词稿不可用
-   * 才会失败；台词一经生成就逐字进入最终剧本，表演段不能改写它。
-   */
-  private async generateStaged(args: {
-    prompt: string
-    view: CatalogView
-    personas: PersonaEntry[]
-    targetMinutes: number
-    options: GenerateStoryOptions
-    hybridContext?: {
-      isHybrid: boolean
-      researchBrief?: string
-      preBuiltPlan?: StagedCastPlan | null
-      extraStages?: StoryStageMeta[]
-      extraToolCalls?: string[]
-      extraUsage?: ChatUsage | null
-      extraLatencyMs?: number
-    }
-  }): Promise<GenerateStoryResult> {
-    const { prompt, view, personas, targetMinutes, options, hybridContext } = args
     const promptOptions: StagedPromptOptions = {
       scene: prompt,
       personas,
       targetMinutes,
       systemPrompt: this.settings.systemPrompt,
       emotionLabels: this.emotionLabels,
-      ...(hybridContext?.researchBrief ? { researchBrief: hybridContext.researchBrief } : {})
+      ...(exploreResult?.researchBrief ? { researchBrief: exploreResult.researchBrief } : {})
     }
 
-    const stages: StoryStageMeta[] = [...(hybridContext?.extraStages ?? [])]
+    const stages: StoryStageMeta[] = [...(exploreResult?.stages ?? [])]
     const warnings: string[] = []
     const details: string[] = []
-    let usage: ChatUsage | null = hybridContext?.extraUsage ?? null
+    let usage: ChatUsage | null = exploreResult?.usage ?? null
     let model = this.llm.model
-    let latencyMs = hybridContext?.extraLatencyMs ?? 0
+    let latencyMs = exploreResult?.latencyMs ?? 0
 
     const runStage = async (
       stage: string,
@@ -1004,10 +710,9 @@ export class StoryWriter {
         maxTokens: this.settings.maxTokens
       })
 
-    // ---- 0.5 Pass A：选角前快速检索（<= 1500 字符，0 额外 LLM 调用） -----------------------------------------
-    const retriever = this.getRagRetriever()
+    // ---- 0.5 Pass A：选角前快速检索（仅在 Phase 1 未直接锁定规划时执行，<= 1500 字符） -------------------
     let preCastRag: RagRetrieveResult | null = null
-    if (retriever) {
+    if (retriever && !exploreResult?.preBuiltPlan) {
       try {
         preCastRag = await retriever.retrieve({
           prompt,
@@ -1023,7 +728,7 @@ export class StoryWriter {
 
     // ---- 1. 选角与微事件（含深度意图理解、称呼表与多面 RAG 查询） ----------------------------------------------
     const castPromptOptions: StagedPromptOptions = { ...promptOptions, ragContext: preCastRag }
-    let plan: StagedCastPlan | null = hybridContext?.preBuiltPlan ?? null
+    let plan: StagedCastPlan | null = exploreResult?.preBuiltPlan ?? null
     if (!plan) {
       try {
         const result = await runStage('cast', buildCastPrompt(view, castPromptOptions))
@@ -1210,9 +915,35 @@ export class StoryWriter {
       }
     }
 
-    // ---- 2.2 反套路对白质检与人设 Critic 润色（零成本确定性 Linter + 条件外科润色 / hybrid 人设审校） --------
-    if (this.settings.polishDialogue === true || hybridContext?.isHybrid) {
-      const lintContext = { ...plan, personas }
+    // ---- 2.2 反套路对白质检与人设 Critic 润色（零成本确定性 Linter + 条件外科润色 / 统一人设审校） --------
+    const dialogueContextText = [
+      prompt,
+      plan.event,
+      plan.logline,
+      ...plan.outline,
+      ...plan.cast.map((c) => c.role),
+      ...(plan.understanding?.explicitRequests ?? []),
+      plan.understanding?.relationshipDynamic ?? ''
+    ]
+      .filter(Boolean)
+      .join('\n')
+    const castUnitHint =
+      inferUnitFromText(dialogueContextText) ??
+      plan.cast
+        .map((c) => normalizeUnit(view.modelById(c.modelId)?.unit))
+        .find((u): u is string => Boolean(u))
+    const resolvedCastPersonas = resolveCastPersonas(personas, plan.cast, view, dialogueContextText)
+    const dialogueLookupOptions: PersonaLookupOptions | undefined =
+      castUnitHint || dialogueContextText
+        ? {
+            ...(castUnitHint ? { unitHint: castUnitHint } : {}),
+            ...(dialogueContextText ? { contextText: dialogueContextText } : {})
+          }
+        : undefined
+    const lintPersonas = resolvedCastPersonas.length > 0 ? resolvedCastPersonas : []
+
+    if (this.settings.polishDialogue === true || explore) {
+      const lintContext = { ...plan, personas: lintPersonas }
       let lintBefore = lintDialogueFidelity(dialogue, lintContext)
       if (this.settings.polishDialogue === true && lintBefore.shouldPolish) {
         try {
@@ -1255,11 +986,11 @@ export class StoryWriter {
         }
       }
 
-      // hybrid 模式（且有人设或剩余问题时）额外运行一轮靶向「人设 Critic 审校」
+      // 统一探索模式（且有人设或剩余问题时）运行靶向「人设 Critic 审校」
       if (
-        hybridContext?.isHybrid &&
+        explore &&
         this.settings.polishDialogue !== false &&
-        (personas.length > 0 || lintBefore.issues.length > 0)
+        (resolvedCastPersonas.length > 0 || lintBefore.issues.length > 0)
       ) {
         try {
           const criticResult = await runStage(
@@ -1399,19 +1130,22 @@ export class StoryWriter {
     dialogue = applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
 
     // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、称呼表、emotion 与 ttsCaption。
+    const translationPersonas = resolvedCastPersonas.length > 0 ? resolvedCastPersonas : personas
     let dialogueTts: Promise<Map<string, string> | null> | null = null
     if (translateForTts) {
       dialogueTts = this.translateDialogue(
         dialogue,
-        personas,
+        translationPersonas,
         options.signal,
         plan.pairwiseAddress,
-        postCastRag
+        postCastRag,
+        dialogueLookupOptions
       ).catch((error) => {
-        if (options.signal?.aborted) return null
+        if (options.signal?.aborted) throw error
         this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
         return null
       })
+      void dialogueTts.catch(() => undefined)
     }
 
     // ---- 4. 精细演技导演（带完整情绪段与舞台/分镜上下文） -------------------------------------------------
@@ -1506,13 +1240,18 @@ export class StoryWriter {
       }
     }
 
-    // ---- 5.5 导演终审（可选/生产长篇默认开启；安全外科修补，绝不破坏既有 ttsText 与 Irodori Emoji） ----------
+    // ---- 5.5 单一轻量导演终审（合并演技审计 + 仅问题句局部推荐 onlyIssues + 外科 operations 修补） ----------
     let stagedDirectorReview: DirectorReviewRecord | undefined
     const shouldRunDirectorReview =
       options.directorReview ??
       (this.settings.polishDialogue === true && dialogue.lines.length >= 12)
     if (shouldRunDirectorReview) {
       try {
+        const reviewHints = buildLocalizedDirectorReviewHints(
+          validated.story,
+          view,
+          targetMinutes
+        )
         const reviewResult = await runStage(
           'director-review',
           buildDirectorReviewPrompt(
@@ -1522,7 +1261,8 @@ export class StoryWriter {
               models: Array<{ id: number }>
               snippets: Array<Record<string, unknown>>
             },
-            promptOptions
+            promptOptions,
+            reviewHints
           ),
           { temperature: 0.3 }
         )
@@ -1569,9 +1309,10 @@ export class StoryWriter {
       ttsTranslated += await this.translateTtsText(
         validated.story,
         options.signal,
-        personas,
+        translationPersonas,
         plan.pairwiseAddress,
-        postCastRag
+        postCastRag,
+        dialogueLookupOptions
       )
     }
     const alignedStaged = alignStoryTtsEmotionsAndCaptions(validated.story, {
@@ -1626,7 +1367,7 @@ export class StoryWriter {
       story: validated.story,
       meta: {
         mode: 'story',
-        pipeline: hybridContext?.isHybrid ? 'hybrid' : 'staged',
+        pipeline: requestedPipeline,
         title: dialogue.title || plan.title || undefined,
         model,
         rounds: stages.length,
@@ -1637,8 +1378,12 @@ export class StoryWriter {
         ttsTranslated,
         cast,
         stages,
-        ...(hybridContext?.extraToolCalls && hybridContext.extraToolCalls.length > 0
-          ? { toolCalls: hybridContext.extraToolCalls }
+        ...(exploreResult
+          ? {
+              toolCalls: exploreResult.toolCallsUsed,
+              agentMode: exploreResult.modeUsed,
+              agentSteps: exploreResult.agentSteps
+            }
           : {}),
         ...(stagedDirectorReview ? { directorReview: stagedDirectorReview } : {}),
         ...(this.summarizeRag(postCastRag) ? { rag: this.summarizeRag(postCastRag) } : {})
@@ -1656,8 +1401,12 @@ export class StoryWriter {
     personas: PersonaEntry[],
     signal?: AbortSignal,
     pairwiseAddress?: StagedPairwiseAddress[],
-    ragContext?: RagRetrieveResult | null
+    ragContext?: RagRetrieveResult | null,
+    lookupOptions?: PersonaLookupOptions
   ): Promise<Map<string, string>> {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error('Aborted')
+    }
     const slots = dialogue.lines.map((line) => ({
       line,
       data: {
@@ -1682,7 +1431,7 @@ export class StoryWriter {
     const startedAt = Date.now()
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext),
+      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext, lookupOptions),
       this.logger
     )
     const result = new Map<string, string>()
@@ -1696,17 +1445,14 @@ export class StoryWriter {
     return result
   }
 
-  private speakerStyleHint(speaker: string | undefined, personas: PersonaEntry[]): string {
+  private speakerStyleHint(
+    speaker: string | undefined,
+    personas: PersonaEntry[],
+    lookupOptions?: PersonaLookupOptions
+  ): string {
     const name = speaker?.trim()
-    if (!name) return ''
-    const lower = name.toLowerCase()
-    const matched = personas.find(
-      (entry) =>
-        entry.name.toLowerCase() === lower ||
-        entry.aliases.some((alias) => alias.toLowerCase() === lower) ||
-        entry.name.includes(name) ||
-        name.includes(entry.name)
-    )
+    if (!name || personas.length === 0) return ''
+    const matched = resolvePersonaByName(personas, name, lookupOptions)
     if (!matched?.prompt) return ''
     const firstLine = matched.prompt
       .split(/\r?\n/)
@@ -1719,7 +1465,8 @@ export class StoryWriter {
     signal?: AbortSignal,
     personas: PersonaEntry[] = this.getPersonas(),
     pairwiseAddress?: StagedPairwiseAddress[],
-    ragContext?: RagRetrieveResult | null
+    ragContext?: RagRetrieveResult | null,
+    lookupOptions?: PersonaLookupOptions
   ): TtsBatchTranslator {
     const addressLines = (pairwiseAddress ?? [])
       .map((a) => `${a.from}→${a.to}: ${a.ja || a.zh}`)
@@ -1753,6 +1500,21 @@ export class StoryWriter {
     ].join('\n')
 
     return async (texts, items?: TtsTranslationItem[]) => {
+      const effectiveLookup =
+        lookupOptions ??
+        (() => {
+          const itemContext = (items ?? [])
+            .flatMap((it) => [it.speaker ?? '', it.text ?? ''])
+            .filter(Boolean)
+            .join('\n')
+          const inferredUnit = inferUnitFromText(itemContext)
+          return inferredUnit || itemContext
+            ? {
+                ...(inferredUnit ? { unitHint: inferredUnit } : {}),
+                ...(itemContext ? { contextText: itemContext } : {})
+              }
+            : undefined
+        })()
       const hasContext = Boolean(
         items?.some((item) => item.speaker || item.emotion || item.ttsCaption)
       )
@@ -1760,7 +1522,7 @@ export class StoryWriter {
         hasContext && items
           ? `把下面 ${items.length} 条台词结合角色与声演指令翻译成日语，只输出长度相同的 JSON 字符串数组：\n${JSON.stringify(
               items.map((item) => {
-                const style = this.speakerStyleHint(item.speaker, personas)
+                const style = this.speakerStyleHint(item.speaker, personas, effectiveLookup)
                 return {
                   text: item.text,
                   ...(item.speaker ? { speaker: item.speaker } : {}),
@@ -1794,11 +1556,34 @@ export class StoryWriter {
     signal?: AbortSignal,
     personas: PersonaEntry[] = this.getPersonas(),
     pairwiseAddress?: StagedPairwiseAddress[],
-    ragContext?: RagRetrieveResult | null
+    ragContext?: RagRetrieveResult | null,
+    lookupOptions?: PersonaLookupOptions
   ): Promise<number> {
+    const inferredLookup =
+      lookupOptions ??
+      (() => {
+        const storyContext = story.snippets
+          .filter(
+            (s): s is Extract<(typeof story.snippets)[number], { type: 'Talk' }> => s.type === 'Talk'
+          )
+          .slice(0, 10)
+          .flatMap((s) => [s.data.speaker ?? '', s.data.content ?? ''])
+          .filter(Boolean)
+          .join('\n')
+        const modelUnits = story.models
+          .map((m) => normalizeUnit((m as { unit?: string }).unit) ?? '')
+          .filter(Boolean)
+        const unitHint = modelUnits[0] ?? inferUnitFromText(storyContext)
+        return unitHint || storyContext
+          ? {
+              ...(unitHint ? { unitHint } : {}),
+              ...(storyContext ? { contextText: storyContext } : {})
+            }
+          : undefined
+      })()
     const { translated } = await ensureJapaneseTtsText(
       story,
-      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext),
+      this.ttsTranslator(signal, personas, pairwiseAddress, ragContext, inferredLookup),
       this.logger
     )
     return translated

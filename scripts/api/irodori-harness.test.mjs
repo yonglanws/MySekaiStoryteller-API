@@ -652,70 +652,9 @@ test('alignStoryTtsEmotionsAndCaptions repairs crying-scene emotion, emojis, cap
 
 test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, and zero happy emojis', async (t) => {
   const labels = ['平静', '开心', '生气', '伤心', '害羞', '惊讶']
-  const agentDraft = {
-    models: [
-      { id: 1, model: '20mizuki_normal/20mizuki_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 },
-      { id: 2, model: '21ena_normal/21ena_normal.model3.json', normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
-    ],
-    images: [{ id: 1, image: 'bg_room.jpg' }],
-    snippets: [
-      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
-      { type: 'ChangeBackgroundImage', wait: false, delay: 0, data: { imageId: 1 } },
-      {
-        type: 'LayoutAppear',
-        wait: true,
-        delay: 0,
-        data: {
-          modelId: 1,
-          from: { side: 'Left', offset: 0 },
-          to: { side: 'Left', offset: 0 },
-          motion: 'w-normal-default01',
-          facial: 'face_normal_01',
-          moveSpeed: 'Normal'
-        }
-      },
-      {
-        type: 'LayoutAppear',
-        wait: true,
-        delay: 0,
-        data: {
-          modelId: 2,
-          from: { side: 'Right', offset: 0 },
-          to: { side: 'Right', offset: 0 },
-          motion: 'e-normal-default01',
-          facial: 'face_sad_01',
-          moveSpeed: 'Normal'
-        }
-      },
-      ...Array.from({ length: 7 }, (_, i) => ({
-        type: 'Talk',
-        wait: true,
-        delay: 0,
-        data: {
-          speaker: i % 2 === 0 ? '瑞希' : '绘名',
-          modelId: i % 2 === 0 ? 1 : 2,
-          content:
-            i === 2
-              ? '没关系的。我都知道。'
-              : i === 6
-                ? '瑞希——！！别走啊！！'
-                : '对不起……我真的回不去了。',
-          emotion: i === 2 ? '平静' : '伤心',
-          actions: [
-            {
-              at: 0,
-              modelId: i % 2 === 0 ? 1 : 2,
-              facial: 'face_sad_01',
-              motion: i % 2 === 0 ? 'w-normal-nod01' : 'e-normal-sigh01'
-            }
-          ]
-        }
-      }))
-    ]
-  }
 
   let translatePrompt = ''
-  let turn = 0
+  let exploreTurn = 0
   const server = http.createServer(async (req, res) => {
     let raw = ''
     req.setEncoding('utf8')
@@ -739,36 +678,99 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
           )
         )
       }
-    } else if (turn === 0) {
-      turn += 1
-      message = {
-        content: null,
-        tool_calls: [
-          {
-            id: 'call_save',
-            type: 'function',
-            function: {
-              name: 'save_story_draft',
-              arguments: JSON.stringify(agentDraft)
+    } else if (system.includes('hybrid 探索阶段')) {
+      if (exploreTurn === 0 && Array.isArray(body.tools) && body.tools.length > 0) {
+        exploreTurn += 1
+        message = {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_lookup',
+              type: 'function',
+              function: {
+                name: 'lookup_character',
+                arguments: JSON.stringify({ characters: ['瑞希', '绘名'] })
+              }
             }
-          }
-        ]
+          ]
+        }
+      } else {
+        message = {
+          content: JSON.stringify({
+            researchBrief: '瑞希和绘名天台崩溃哭戏。',
+            optionalPlan: {
+              title: '天台哭戏',
+              event: '瑞希和绘名哭戏',
+              background: 'bg_room.jpg',
+              cast: [
+                { modelId: 1, name: '瑞希', role: '哭泣坦白' },
+                { modelId: 2, name: '绘名', role: '急切挽留' }
+              ]
+            }
+          })
+        }
+      }
+    } else if (system.includes('第二轮')) {
+      message = {
+        content: JSON.stringify({
+          title: '天台哭戏',
+          lines: Array.from({ length: 7 }, (_, i) => ({
+            id: `l${i + 1}`,
+            speaker: i % 2 === 0 ? '瑞希' : '绘名',
+            content:
+              i === 2
+                ? '没关系的。我都知道。'
+                : i === 6
+                  ? '瑞希——！！别走啊！！'
+                  : '对不起……我真的回不去了。'
+          }))
+        })
+      }
+    } else if (system.includes('情绪标注员')) {
+      message = {
+        content: JSON.stringify({
+          lines: Array.from({ length: 7 }, (_, i) => ({
+            id: `l${i + 1}`,
+            emotion: i === 2 ? '平静' : '伤心',
+            ttsCaption:
+              i === 6
+                ? '声を震わせながら叫ぶように泣き叫んでいる。'
+                : '声を震わせながら静かに泣いている。',
+            ttsSpeed: i === 6 ? 1.05 : 0.94,
+            ttsSpecialScene: i === 6
+          }))
+        })
+      }
+    } else if (system.includes('舞台监督')) {
+      message = {
+        content: JSON.stringify({
+          scenes: [
+            {
+              id: 's1',
+              fromLineId: 'l1',
+              background: 'bg_room.jpg',
+              ambient: 'evening',
+              activeCast: ['瑞希', '绘名'],
+              bgm: 'bgm00003.mp3'
+            }
+          ],
+          events: []
+        })
+      }
+    } else if (system.includes('精细演技导演')) {
+      message = {
+        content: JSON.stringify({
+          background: 'bg_room.jpg',
+          bgm: 'bgm00003.mp3',
+          lines: Array.from({ length: 7 }, (_, i) => ({
+            id: `l${i + 1}`,
+            facial: 'face_sad_01',
+            motion: i % 2 === 0 ? 'w-normal-nod01' : 'e-normal-sigh01'
+          }))
+        })
       }
     } else {
-      turn += 1
-      message = {
-        content: null,
-        tool_calls: [
-          {
-            id: 'call_final',
-            type: 'function',
-            function: {
-              name: 'finalize_story_draft',
-              arguments: JSON.stringify({ note: 'ok' })
-            }
-          }
-        ]
-      }
+      throw new Error(`unexpected stage: ${system.slice(0, 60)}`)
     }
 
     res.setHeader('content-type', 'application/json')
@@ -799,6 +801,7 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
     agentMaxSteps: 8,
     jsonMode: 'off',
     translateForTts: true,
+    polishDialogue: false,
     targetMinutes: 0.3,
     systemPrompt: '',
     personaDirs: [],
@@ -813,6 +816,7 @@ test('StoryWriter native agent pipeline enforces crying TTS emotions, captions, 
     labels
   )
   const { story, meta } = await writer.generate({ prompt: '瑞希和绘名哭戏', pipeline: 'agent' })
+  assert.equal(meta.pipeline, 'agent')
   assert.equal(meta.agentMode, 'native')
   assert.ok(translatePrompt.includes('ttsCaption'), 'pre-translation alignment passes ttsCaption to translator')
 

@@ -15,12 +15,11 @@ import {
   LlmError,
   type ChatMessage,
   type ChatUsage,
-  type LlmToolCall,
   type LlmToolDefinition
 } from './llm'
 import * as officialLinterMod from './officialLinter'
 import * as personasMod from './personas'
-import { buildActingExample, isBackViewModel, isStandingMotion, type CatalogView } from './prompt'
+import { isBackViewModel, isStandingMotion, type CatalogView } from './prompt'
 import * as scenarioCuesMod from './scenarioCues'
 import {
   applyVoiceDirectionPlan,
@@ -30,14 +29,18 @@ import {
   composeStory,
   fallbackDirection,
   fallbackStaging,
+  normalizeCastPlan,
   normalizeDialogue,
   normalizeDirection,
   normalizeStaging,
   normalizeVoiceDirectionPlan,
+  resolveCastPersonas,
   type StagedCastPlan,
   type StagedDialogue,
   type StagedDirection,
   type StagedDirectionLine,
+  type StagedDirectorActingHint,
+  type StagedDirectorReviewHints,
   type StagedPairwiseAddress,
   type StagedScenePlan,
   type StagedStaging
@@ -1382,7 +1385,17 @@ function findModel(
     ) ??
     null
   if (!matched) return null
-  const outfitHint = [options.unitHint, options.contextText].filter(Boolean).join(' ').trim()
+  const charOutfitSignal =
+    typeof character === 'string' &&
+    character.trim() &&
+    character.trim().toLowerCase() !== matched.name.toLowerCase() &&
+    character.trim().toLowerCase() !== (matched.shortName ?? '').toLowerCase()
+      ? character.trim()
+      : ''
+  const outfitHint = [options.unitHint, charOutfitSignal, options.contextText]
+    .filter(Boolean)
+    .join(' ')
+    .trim()
   if (outfitHint) {
     return view.resolveOutfitVariant(matched, outfitHint) ?? matched
   }
@@ -1471,6 +1484,88 @@ function isStoryObjectCandidate(val: unknown): boolean {
   if (!val || typeof val !== 'object' || Array.isArray(val)) return false
   const rec = val as Record<string, unknown>
   return Array.isArray(rec.snippets)
+}
+
+export function buildLocalizedDirectorReviewHints(
+  story: StoryData,
+  view: CatalogView,
+  targetMinutes?: number
+): StagedDirectorReviewHints {
+  const storyObj = story as unknown as Record<string, unknown>
+  const telemetry = buildDirectorStageTelemetry(storyObj, targetMinutes)
+  const actingReport = runActingAndFidelityAudit(story, view)
+  const snippets = Array.isArray(story.snippets)
+    ? (story.snippets as unknown as Array<Record<string, unknown>>)
+    : []
+
+  const issuesByIdx = new Map<number, string[]>()
+  for (const d of actingReport.diagnostics) {
+    const arr = issuesByIdx.get(d.snippetIndex) ?? []
+    arr.push(`${d.code}: ${d.message}`)
+    issuesByIdx.set(d.snippetIndex, arr)
+  }
+
+  const actingIssueHints: StagedDirectorActingHint[] = []
+  if (issuesByIdx.size > 0) {
+    const lastFacial = new Map<number, string>()
+    const lastMotion = new Map<number, string>()
+    let prevContent = ''
+    let prevEmotion = ''
+    let prevTense = false
+
+    for (let idx = 0; idx < snippets.length; idx++) {
+      const s = snippets[idx]
+      if (!s || s.type !== 'Talk') continue
+      const d = (s.data && typeof s.data === 'object' ? s.data : {}) as Record<string, unknown>
+      const content = typeof d.content === 'string' ? d.content : ''
+      const emotion = typeof d.emotion === 'string' ? d.emotion : ''
+      const modelId = typeof d.modelId === 'number' ? d.modelId : -1
+      const speaker = typeof d.speaker === 'string' ? d.speaker : ''
+      const model = view.modelById(modelId) ?? findModel(view, modelId, speaker)
+
+      if (model && issuesByIdx.has(idx) && actingIssueHints.length < 10) {
+        const profile = getActingProfile(`${model.name} ${model.path}`)
+        const advised = recommendForLine(view, model, {
+          content,
+          emotion,
+          prevContent,
+          prevEmotion,
+          prevTense,
+          isMonologue: /^[（(]/.test(content.trim()) && /[）)]$/.test(content.trim()),
+          restrainedRole: profile.restrained,
+          prevFacial: lastFacial.get(model.id),
+          prevMotion: lastMotion.get(model.id),
+          limit: 3
+        })
+        if (advised.facials[0]) lastFacial.set(model.id, advised.facials[0])
+        if (advised.motions[0]) lastMotion.set(model.id, advised.motions[0])
+        actingIssueHints.push({
+          snippetIndex: idx,
+          speaker: speaker || view.shortName(model),
+          issues: issuesByIdx.get(idx) ?? [],
+          recommendedFacials: advised.facials.slice(0, 3),
+          recommendedMotions: advised.motions.slice(0, 3)
+        })
+      }
+
+      const ctx = inferDramaticMoodFallback({
+        content,
+        emotion,
+        prevContent,
+        prevEmotion
+      })
+      prevTense = ctx.tense
+      prevContent = content
+      prevEmotion = emotion
+    }
+  }
+
+  const estMin = ((telemetry.talkCount * 7) / 60).toFixed(1)
+  return {
+    telemetrySummary: `声画遥测：Talk=${telemetry.talkCount}（约 ${estMin} 分钟），BGM=${telemetry.bgmCueCount}，PlaySe=${telemetry.playSeCount}，独立 Motion=${telemetry.standaloneMotionCount}，Wait=${telemetry.waitCount}，不同动作=${telemetry.distinctMotionsUsed}，不同表情=${telemetry.distinctFacialsUsed}`,
+    reviewFocusPoints: telemetry.reviewFocusPoints.slice(0, 6),
+    actingIssueHints
+  }
 }
 
 function buildDirectorStageTelemetry(
@@ -2528,14 +2623,61 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
     const speakerNames = Array.from(
       new Set(dialogueLines.map((l) => l.speaker).filter(Boolean))
     )
+    const auditContextText = [
+      savedPlan?.event ?? '',
+      savedPlan?.logline ?? '',
+      ...speakerNames,
+      ...dialogueLines.slice(0, 6).map((l) => l.content)
+    ]
+      .filter(Boolean)
+      .join('\n')
+    const auditUnitHint = personasMod.inferUnitFromText(auditContextText)
+    const auditLookupOpts: personasMod.PersonaLookupOptions | undefined =
+      auditUnitHint || auditContextText
+        ? {
+            ...(auditUnitHint ? { unitHint: auditUnitHint } : {}),
+            ...(auditContextText ? { contextText: auditContextText } : {})
+          }
+        : undefined
     const seededAddresses = [
-      ...personasMod.extractPairwiseAddressBook(personas, speakerNames).map((r) => ({
-        from: r.from,
-        to: r.to,
-        zh: r.zh
-      })),
+      ...personasMod
+        .extractPairwiseAddressBook(personas, speakerNames, auditLookupOpts)
+        .map((r) => ({
+          from: r.from,
+          to: r.to,
+          zh: r.zh
+        })),
       ...(savedPlan?.pairwiseAddress ?? [])
     ]
+    const auditCast = (
+      savedPlan?.cast?.length
+        ? savedPlan.cast.map((c) => {
+            const m = view.modelById(c.modelId)
+            return {
+              modelId: c.modelId,
+              name: c.name,
+              fullName: m?.name ?? c.name,
+              path: m?.path ?? '',
+              role: c.role ?? ''
+            }
+          })
+        : speakerNames
+            .map((sp) => findModel(view, undefined, sp, auditLookupOpts))
+            .filter((m): m is CatalogModel => Boolean(m))
+            .map((m) => ({
+              modelId: m.id,
+              name: view.shortName(m),
+              fullName: m.name,
+              path: m.path,
+              role: ''
+            }))
+    )
+    const resolvedAuditPersonas =
+      auditCast.length > 0
+        ? resolveCastPersonas(personas, auditCast, view, auditContextText)
+        : speakerNames
+            .map((sp) => personasMod.resolvePersonaByName(personas, sp, auditLookupOpts))
+            .filter((p): p is personasMod.PersonaEntry => Boolean(p))
     const dialogueLint = lintDialogueFidelity(
       {
         title: savedPlan?.title ?? '',
@@ -2543,14 +2685,8 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       },
       {
         ...(seededAddresses.length > 0 ? { pairwiseAddress: seededAddresses } : {}),
-        personas,
-        cast: view.primaryModels().map((m) => ({
-          modelId: m.id,
-          name: view.shortName(m),
-          fullName: m.name,
-          path: m.path,
-          role: ''
-        }))
+        personas: resolvedAuditPersonas,
+        cast: auditCast
       }
     )
     const bodyMotions = countBodyMotionsByModel(rawAuditStory)
@@ -2843,13 +2979,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         list.length >= 2
           ? personasMod.extractPairwiseAddressBook(
               personas,
-              list.map((m) => view.shortName(m))
+              list.map((m) => view.shortName(m)),
+              lookupOpts
             )
           : []
       return JSON.stringify({
         characters: list.map((m) => {
           const persona = personasMod.personaFor(personas, m, {
-            unitHint: effectiveUnitHint || m.unit,
+            unitHint: effectiveUnitHint || personasMod.normalizeUnit(m.unit),
             ...(contextText ? { contextText } : {})
           })
           const profile = getActingProfile(`${m.name} ${m.path}`)
@@ -3373,6 +3510,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             scenarios: s.scenarios.slice(0, 4)
           }))
         } catch (error) {
+          if (signal?.aborted) throw error
           logger.debug(`[AgentTool] RAG query failed: ${String(error)}`)
         }
       }
@@ -3431,7 +3569,13 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       }
       if (resolvedCast.length === 0 && savedPlan?.cast?.length) {
         for (const c of savedPlan.cast) {
-          pushCastModel(findModel(view, c.modelId, c.name), c.role)
+          pushCastModel(
+            findModel(view, c.modelId, c.name, {
+              ...(unitHint ? { unitHint } : {}),
+              contextText
+            }),
+            c.role
+          )
         }
       }
 
@@ -3545,7 +3689,11 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       const pairwiseMap = new Map<string, StagedPairwiseAddress>()
       for (const r of personasMod.extractPairwiseAddressBook(
         personas,
-        resolvedCast.map((c) => c.name)
+        resolvedCast.map((c) => c.name),
+        {
+          ...(unitHint ? { unitHint } : {}),
+          ...(contextText ? { contextText } : {})
+        }
       )) {
         pairwiseMap.set(`${r.from}::${r.to}`, { from: r.from, to: r.to, zh: r.zh })
       }
@@ -3609,27 +3757,68 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
       }
 
-      // 保留调用方显式附带的 ttsCaption/ttsSpeed/ttsSpecialScene 与可选单句 motion/facial 覆盖
-      const explicitLineMeta = new Map<
-        number,
-        { motion?: string; facial?: string; ttsCaption?: string; ttsSpeed?: number; ttsSpecialScene?: boolean }
-      >()
-      if (rawLinesInput.length === normalizedDialogue.lines.length) {
-        rawLinesInput.forEach((raw, idx) => {
-          if (!raw || typeof raw !== 'object') return
+      // 保留调用方显式附带的 ttsCaption/ttsSpeed/ttsSpecialScene 与可选单句 motion/facial 覆盖（同时支持 turns 与 lines）
+      type ExplicitLineMeta = {
+        motion?: string
+        facial?: string
+        ttsCaption?: string
+        ttsSpeed?: number
+        ttsSpecialScene?: boolean
+      }
+      const extractMeta = (r: Record<string, unknown>): ExplicitLineMeta => ({
+        ...(typeof r.motion === 'string' && r.motion.trim() ? { motion: r.motion.trim() } : {}),
+        ...(typeof r.facial === 'string' && r.facial.trim() ? { facial: r.facial.trim() } : {}),
+        ...(typeof r.ttsCaption === 'string' && r.ttsCaption.trim()
+          ? { ttsCaption: r.ttsCaption.trim() }
+          : {}),
+        ...(typeof r.ttsSpeed === 'number' && Number.isFinite(r.ttsSpeed)
+          ? { ttsSpeed: r.ttsSpeed }
+          : {}),
+        ...(r.ttsSpecialScene === true ? { ttsSpecialScene: true } : {})
+      })
+      const flatRawEntries: Array<{ content: string; meta: ExplicitLineMeta }> = []
+      if (rawTurns.length > 0) {
+        for (const turn of rawTurns) {
+          if (!turn || typeof turn !== 'object') continue
+          const tObj = turn as Record<string, unknown>
+          const turnLines = Array.isArray(tObj.lines) ? tObj.lines : []
+          for (const entry of turnLines) {
+            if (typeof entry === 'string') {
+              const content = entry.trim()
+              if (content) flatRawEntries.push({ content, meta: {} })
+            } else if (entry && typeof entry === 'object') {
+              const r = entry as Record<string, unknown>
+              const content = typeof r.content === 'string' ? r.content.trim() : typeof r.text === 'string' ? r.text.trim() : ''
+              if (content) flatRawEntries.push({ content, meta: extractMeta(r) })
+            }
+          }
+        }
+      } else {
+        for (const raw of rawLinesInput) {
+          if (!raw || typeof raw !== 'object') continue
           const r = raw as Record<string, unknown>
-          explicitLineMeta.set(idx, {
-            ...(typeof r.motion === 'string' && r.motion.trim() ? { motion: r.motion.trim() } : {}),
-            ...(typeof r.facial === 'string' && r.facial.trim() ? { facial: r.facial.trim() } : {}),
-            ...(typeof r.ttsCaption === 'string' && r.ttsCaption.trim()
-              ? { ttsCaption: r.ttsCaption.trim() }
-              : {}),
-            ...(typeof r.ttsSpeed === 'number' && Number.isFinite(r.ttsSpeed)
-              ? { ttsSpeed: r.ttsSpeed }
-              : {}),
-            ...(r.ttsSpecialScene === true ? { ttsSpecialScene: true } : {})
-          })
+          const content = typeof r.content === 'string' ? r.content.trim() : typeof r.text === 'string' ? r.text.trim() : ''
+          if (content) flatRawEntries.push({ content, meta: extractMeta(r) })
+        }
+      }
+
+      const explicitLineMeta = new Map<number, ExplicitLineMeta>()
+      if (flatRawEntries.length === normalizedDialogue.lines.length) {
+        flatRawEntries.forEach((entry, idx) => {
+          explicitLineMeta.set(idx, entry.meta)
         })
+      } else if (flatRawEntries.length > 0) {
+        let cursor = 0
+        for (let idx = 0; idx < normalizedDialogue.lines.length; idx++) {
+          const normContent = normalizedDialogue.lines[idx].content.trim()
+          const foundAt = flatRawEntries.findIndex(
+            (entry, pos) => pos >= cursor && (entry.content === normContent || normContent.includes(entry.content))
+          )
+          if (foundAt >= 0) {
+            explicitLineMeta.set(idx, flatRawEntries[foundAt].meta)
+            cursor = foundAt + 1
+          }
+        }
       }
 
       let dialogue: StagedDialogue = {
@@ -3646,7 +3835,11 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         })
       }
 
-      const dialogueLint = lintDialogueFidelity(dialogue, { ...plan, personas })
+      const resolvedWorkflowPersonas = resolveCastPersonas(personas, plan.cast, view, contextText)
+      const dialogueLint = lintDialogueFidelity(dialogue, {
+        ...plan,
+        personas: resolvedWorkflowPersonas
+      })
       const useLlmStages = Boolean(llm?.enabled && args.runLlmStages !== false)
       const stagePromptOpts = {
         scene: event || title,
@@ -3668,7 +3861,10 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                     ],
                     { json: true, temperature: 0.25, signal }
                   )
-                  .catch(() => null)
+                  .catch((error) => {
+                    if (signal?.aborted) throw error
+                    return null
+                  })
               : Promise.resolve(null),
             llm
               .chat(
@@ -3684,7 +3880,10 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
                 ],
                 { json: true, signal }
               )
-              .catch(() => null)
+              .catch((error) => {
+                if (signal?.aborted) throw error
+                return null
+              })
           ])
           if (emoRes) {
             const voicePlan = normalizeVoiceDirectionPlan(
@@ -3699,7 +3898,8 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           if (stgRes) {
             staging = normalizeStaging(extractJson(stgRes.content), view, plan, dialogue)
           }
-        } catch {
+        } catch (error) {
+          if (signal?.aborted) throw error
           // 回退到确定性编译
         }
       }
@@ -3721,7 +3921,8 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
           )
           const parsedDir = normalizeDirection(extractJson(dirRes.content), view, plan, dialogue)
           if (parsedDir.lines.length > 0) direction = parsedDir
-        } catch {
+        } catch (error) {
+          if (signal?.aborted) throw error
           // 回退确定性表演编译
         }
       }
@@ -3817,6 +4018,23 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
       const shouldSave = args.autoSaveDraft !== false
       const storyObj = story as unknown as Record<string, unknown>
       if (shouldSave) {
+        const preservedUnderstanding =
+          savedPlan?.understanding ??
+          (args.turningPoint || args.openingMotif || args.closingCallback
+            ? {
+                explicitRequests: [],
+                ...(typeof args.turningPoint === 'string'
+                  ? { turningPoint: args.turningPoint }
+                  : {}),
+                ...(typeof args.openingMotif === 'string'
+                  ? { openingMotif: args.openingMotif }
+                  : {}),
+                ...(typeof args.closingCallback === 'string'
+                  ? { closingCallback: args.closingCallback }
+                  : {}),
+                canonHooks: []
+              }
+            : undefined)
         savedPlan = {
           title: plan.title,
           logline: plan.logline,
@@ -3834,6 +4052,7 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             ...(s.isSekai ? { isSekai: true } : {})
           })),
           beats: plan.outline,
+          ...(preservedUnderstanding ? { understanding: preservedUnderstanding } : {}),
           ...(plan.pairwiseAddress ? { pairwiseAddress: plan.pairwiseAddress } : {})
         }
         savedDraft = structuredClone(storyObj)
@@ -3986,26 +4205,66 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
         }))
         .filter((l) => l.content.trim().length > 0)
       const speakerNames = Array.from(new Set(lines.map((l) => l.speaker).filter(Boolean)))
+      const validateContextText = [
+        typeof args.title === 'string' ? args.title : (savedPlan?.title ?? ''),
+        savedPlan?.event ?? '',
+        savedPlan?.logline ?? '',
+        ...speakerNames,
+        ...lines.slice(0, 6).map((l) => l.content)
+      ]
+        .filter(Boolean)
+        .join('\n')
+      const validateUnitHint = personasMod.inferUnitFromText(validateContextText)
+      const validateLookupOpts: personasMod.PersonaLookupOptions | undefined =
+        validateUnitHint || validateContextText
+          ? {
+              ...(validateUnitHint ? { unitHint: validateUnitHint } : {}),
+              ...(validateContextText ? { contextText: validateContextText } : {})
+            }
+          : undefined
       const seededAddresses = [
-        ...personasMod.extractPairwiseAddressBook(personas, speakerNames).map((r) => ({
-          from: r.from,
-          to: r.to,
-          zh: r.zh
-        })),
+        ...personasMod
+          .extractPairwiseAddressBook(personas, speakerNames, validateLookupOpts)
+          .map((r) => ({
+            from: r.from,
+            to: r.to,
+            zh: r.zh
+          })),
         ...(savedPlan?.pairwiseAddress ?? [])
       ]
+      const validateCast = savedPlan?.cast?.length
+        ? savedPlan.cast.map((c) => {
+            const m = view.modelById(c.modelId)
+            return {
+              modelId: c.modelId,
+              name: c.name,
+              fullName: m?.name ?? c.name,
+              path: m?.path ?? '',
+              role: c.role ?? ''
+            }
+          })
+        : speakerNames
+            .map((sp) => findModel(view, undefined, sp, validateLookupOpts))
+            .filter((m): m is CatalogModel => Boolean(m))
+            .map((m) => ({
+              modelId: m.id,
+              name: view.shortName(m),
+              fullName: m.name,
+              path: m.path,
+              role: ''
+            }))
+      const resolvedValidatePersonas =
+        validateCast.length > 0
+          ? resolveCastPersonas(personas, validateCast, view, validateContextText)
+          : speakerNames
+              .map((sp) => personasMod.resolvePersonaByName(personas, sp, validateLookupOpts))
+              .filter((p): p is personasMod.PersonaEntry => Boolean(p))
       const lint = lintDialogueFidelity(
         { title: typeof args.title === 'string' ? args.title : (savedPlan?.title ?? ''), lines },
         {
           ...(seededAddresses.length > 0 ? { pairwiseAddress: seededAddresses } : {}),
-          personas,
-          cast: view.primaryModels().map((m) => ({
-            modelId: m.id,
-            name: view.shortName(m),
-            fullName: m.name,
-            path: m.path,
-            role: ''
-          }))
+          personas: resolvedValidatePersonas,
+          cast: validateCast
         }
       )
       const stageDirectionFixes = lines
@@ -4216,7 +4475,14 @@ export function createStoryAgentToolkit(deps: StoryAgentToolkitDeps): StoryAgent
             target.delay = opObj.delay
           }
           if (op === 'update_talk') {
-            if (typeof opObj.content === 'string') d.content = opObj.content
+            if (typeof opObj.content === 'string' && opObj.content.trim()) {
+              const nextContent = opObj.content.trim()
+              const prevContent = typeof d.content === 'string' ? d.content.trim() : ''
+              if (nextContent !== prevContent) {
+                d.content = nextContent
+                if (typeof d.ttsText === 'string' && d.ttsText) delete d.ttsText
+              }
+            }
             if (typeof opObj.emotion === 'string') d.emotion = opObj.emotion
             if (typeof opObj.ttsCaption === 'string') d.ttsCaption = opObj.ttsCaption
             if (typeof opObj.ttsSpeed === 'number' && Number.isFinite(opObj.ttsSpeed)) {
@@ -4638,6 +4904,7 @@ export interface AgenticGenerationOptions {
   ragRetriever?: AdaptiveRagRetriever | null
   logger: Logger<ILogObj>
   maxToolTurns?: number
+  directorReview?: boolean
   signal?: AbortSignal
 }
 
@@ -4650,77 +4917,57 @@ export interface AgenticGenerationResult {
   model: string
   usage: ChatUsage | null
   toolCallsUsed: string[]
-  modeUsed: 'native' | 'react-json'
+  modeUsed: 'native' | 'react-json' | 'staged-fallback'
   directorReview?: DirectorReviewRecord
 }
 
-/**
- * 压缩已被更新草稿取代的历史大体积工具调用载荷，防止多轮反复重传 20~30KB 完整草稿或全量推荐导致上下文膨胀。
- * 保持 OpenAI tool_calls / tool 消息配对结构 100% 合法，仅替换较早回合的冗余大块 JSON。
- */
-function compactSupersededAgentMessages(messages: ChatMessage[]): void {
-  const COMPACT_THRESHOLD = 3200
-  const COMPACTABLE_TOOLS = new Set([
-    'save_story_draft',
-    'validate_dialogue_draft',
-    'recommend_acting_for_lines'
-  ])
-  // 找到最近一次 save_story_draft 所在的 assistant 消息下标；只压缩严格早于它的历史大载荷
-  let latestSaveAssistantIdx = -1
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (
-      m.role === 'assistant' &&
-      m.tool_calls?.some((tc) => tc.function.name === 'save_story_draft')
-    ) {
-      latestSaveAssistantIdx = i
-      break
-    }
-  }
-  if (latestSaveAssistantIdx <= 1) return
-
-  const compactedCallIds = new Set<string>()
-  for (let i = 0; i < latestSaveAssistantIdx; i++) {
-    const m = messages[i]
-    if (m.role === 'assistant' && m.tool_calls) {
-      for (const tc of m.tool_calls) {
-        if (
-          COMPACTABLE_TOOLS.has(tc.function.name) &&
-          tc.function.arguments.length > COMPACT_THRESHOLD
-        ) {
-          tc.function.arguments = JSON.stringify({
-            _compacted: true,
-            tool: tc.function.name,
-            note: 'superseded by newer workspace draft'
-          })
-          compactedCallIds.add(tc.id)
-        }
-      }
-    } else if (
-      m.role === 'tool' &&
-      m.tool_call_id &&
-      compactedCallIds.has(m.tool_call_id) &&
-      typeof m.content === 'string' &&
-      m.content.length > COMPACT_THRESHOLD
-    ) {
-      m.content = JSON.stringify({
-        _compacted: true,
-        tool: m.name ?? '',
-        note: 'superseded by newer workspace draft'
-      })
-    }
-  }
+export interface Phase1ExploreOptions {
+  llm: LlmClient
+  view: CatalogView
+  personas: personasMod.PersonaEntry[]
+  scene: string
+  targetMinutes: number
+  emotionLabels?: string[]
+  ragRetriever?: AdaptiveRagRetriever | null
+  logger: Logger<ILogObj>
+  maxToolTurns?: number
+  signal?: AbortSignal
 }
 
+export interface Phase1ExploreStage {
+  stage: string
+  model: string
+  latencyMs: number
+  usage: ChatUsage | null
+  ok: boolean
+  note?: string
+}
+
+export interface Phase1ExploreResult {
+  researchBrief: string
+  preBuiltPlan: StagedCastPlan | null
+  toolCallsUsed: string[]
+  modeUsed: 'native' | 'react-json' | 'staged-fallback'
+  agentSteps: number
+  stages: Phase1ExploreStage[]
+  usage: ChatUsage | null
+  latencyMs: number
+}
+
+const PHASE1_EXPLORE_TOOLS = new Set([
+  'lookup_character',
+  'search_official_corpus',
+  'search_assets'
+])
+
 /**
- * 运行多步自主 Agentic Tool-Calling 剧本导演闭环：
- * 1. 支持多轮自主探索、规划、台词与表演语义查询、草稿暂存（save_story_draft）、逐句表演审校（critique_story_draft）、局部修补（patch_story_draft）与确认交卷（finalize_story_draft）；
- * 2. 优先使用 OpenAI 原生 tools / function calling，同时兼容部分代理把 ReAct tool_call 写在 content 的情况；
- * 3. 若底层模型或网关不支持原生 tools（返回 400/404/422/501），自动无缝切换至 ReAct JSON 工具信封模式，同样可调用全部工具并自检定稿。
+ * 统一三段式流水线 Phase 1：精简只读探索与规划锁定（lookup_character / search_official_corpus / search_assets）。
+ * 支持原生 function calling 与 ReAct JSON 信封自动切换，不支持或非中止异常时优雅降级至 staged-fallback。
+ * 所有工具对话消息严格局限在本函数作用域内，绝不带入 Phase 2 纯对白上下文。
  */
-export async function runAgenticStoryGeneration(
-  options: AgenticGenerationOptions
-): Promise<AgenticGenerationResult> {
+export async function runPhase1Exploration(
+  options: Phase1ExploreOptions
+): Promise<Phase1ExploreResult> {
   const {
     llm,
     view,
@@ -4728,181 +4975,124 @@ export async function runAgenticStoryGeneration(
     scene,
     targetMinutes,
     emotionLabels = [],
-    ragRetriever,
+    ragRetriever = null,
     logger,
     signal
   } = options
-  const maxToolTurns = Math.max(2, options.maxToolTurns ?? 16)
+
   const toolkit = createStoryAgentToolkit({
     view,
     personas,
     emotionLabels,
     targetMinutes,
     ragRetriever,
-    llm,
     logger
   })
+  const definitions = toolkit.definitions.filter((d) => PHASE1_EXPLORE_TOOLS.has(d.function.name))
+  const toolCallsUsed: string[] = []
+  const stages: Phase1ExploreStage[] = []
+  const totalUsage: ChatUsage = {}
+  let hasUsage = false
+  let latencyMs = 0
+  let agentSteps = 0
+  const findings: string[] = []
+  let synthesizedBrief = ''
+  let preBuiltPlan: StagedCastPlan | null = null
+
+  if (!llm.enabled) {
+    return {
+      researchBrief: '',
+      preBuiltPlan: null,
+      toolCallsUsed,
+      modeUsed: 'staged-fallback',
+      agentSteps: 0,
+      stages,
+      usage: null,
+      latencyMs: 0
+    }
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Aborted')
+  }
 
   const castSummary = view
     .primaryModels()
-    .map((m, idx) =>
-      idx < 14
-        ? `${view.shortName(m)}(modelId=${m.id}, path=${m.path})`
-        : `${view.shortName(m)}(modelId=${m.id})`
-    )
-    .join('；')
-  const emotionNote =
-    emotionLabels.length > 0
-      ? `每条 Talk 填 emotion（可选：${emotionLabels.join('、')}，日常陈述选「${emotionLabels.includes('平静') ? '平静' : emotionLabels[0]}」）；**严禁在哭泣/悲伤/道歉/恳求/对峙段中间掉回「平静」**（即使台词表面说「没关系」「只是吓了一跳」也必须标「伤心」），但当剧情真正进入结尾释怀、夕阳缓和或安静接纳余韵时，允许自然过渡到温和释放的「平静」或「开心」让情绪弧光呼吸。请同时为哭腔/情绪转折/高潮句写简短日语 \`ttsCaption\`（仅描述语气/呼吸/颤抖/停顿，严禁出現年龄/性别/声线词）与 \`ttsSpeed\`（沉重哭诉 0.90~0.96，急促喊叫 1.04~1.12），全片最痛哭/撕裂高潮（<= 15%）设 \`ttsSpecialScene: true\`。`
-      : ''
+    .slice(0, 28)
+    .map((m) => `${view.shortName(m)}(modelId=${m.id}${m.unit ? `,${m.unit}` : ''})`)
+    .join('、')
+  const maxTurns = Math.min(4, Math.max(2, options.maxToolTurns ?? 4))
 
-  const sharedRules = [
-    '你是 Project SEKAI 风格视觉小说导演 Agent。请用高效 4~5 步闭环完成高质感创作，杜绝冗余情绪标注轮次：',
-    '- **第 1 步（并行批量探索）**：在同 1 轮并行调用 `lookup_character({ characters: [...全部出场角色], unitHint, contextText, includeExpressions: true })` + `search_assets({ kinds: ["background","bgm","se","outfit"], queries: [...] })` + `search_official_corpus({ query, cast: [...] })`；若找到契合的官方剧集，可用 `search_official_corpus({ mode: "expand", scenarioId })` 细读上下文！**以 `lookup_character` 返回的完整重写人设作为第一真相源**（记忆、语癖、禁忌、称呼表）。',
-    '- **第 2 步（推荐：工作流编译 OR 直接起草）**：强烈推荐调用 `compile_dialogue_workflow`——只需传入调研好的 `title`/`event`/`background`/`bgm`/`cast`/`scenes` 与纯台词 `lines`（或 `turns`），编译器会自动完成零冲突 Live2D Staging + VoiceDirection + Acting + `composeStory` 并存入工作区草稿，无需手写 150 条原始 snippet！（也可手动调用 `save_story_draft`）。**严禁**把几十句台词重发给 `validate_dialogue_draft` 或 `recommend_acting_for_lines`。',
-    "- **第 3 步（真正 5 维导演终审 + 外科修补 + 一步定稿）**：结合 `save_story_draft` 返回的 `directorTelemetry` 与诊断，调用 `submit_director_review`，以导演视角切实审视：（1）戏剧弧光、总句数时长达标与凝练句长（2）情绪连贯与人物口吻（3）开场/静音切停 BGM 与 `PlaySe` 物理音效（4）舞台镜头与节奏（单人 Center 特写与双人 Left/Right 原地淡入淡出切镜、`SideFade`/`FlashbackIn`/`AmbientColor`、独立 `Motion` 静默拍、`Wait` 留白，以及克制的镜头/震动使用）（5）全量动作库多样性与表情自然度（严禁 `nod01`/`sad01` 刷屏，确保每位角色都有丰富动作）；在同一次 `submit_director_review` 中用 `operations` 落地所有具体修补并设 `finalizeIfReady: true` 一步交卷！",
-    '创作指南（基于 5,138 集近期加权官方 PJSK 规律，灵活自然切忌死板套指标）：',
-    '1. **持续情绪、动作多样性与真伪笑脸分辨**：泣不成声、悲伤倾诉、冲突崩溃段应自然维持 `face_cry_*` / `face_sad_*` 连续 4~8+ 句；充分利用角色全量动作库（含 `nod02/03`、`forward02`、`sigh01`、`lookaway01`、`fidget01`、`relief01` 及贴合气氛的跨风格变体），同一词根整场不要重复超过 2~3 次，确保每位在场角色都有多样身体动作，并在句间/转折前点缀独立 `Motion` 节拍（约 16~22 次/40句）。严禁在悲伤/哭泣/愤怒/惊愕台词中误用嘴角上扬（`ParamMouthForm >= 0.2`）的苦笑/强颜欢笑脸（如 `face_trouble_02`）或欢快动作（`w-normal-glad*`/`w-happy-*`/`greeting`）；先前处于「生气/伤心」的听者严禁突然切为 `face_smile_*`；`delicious`/`eat`/`drink` 与 `sleep` 仅限真实吃喝或睡眠台词；真冬保持克制内敛。',
-    '2. **电影感切镜、听者反应与原地淡入淡出（严禁滑动）**：近期官方 PJSK 剧集高频穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（内心独白、连续说话或情绪爆发切单人 `Center`），所有 `LayoutAppear` / `LayoutClear` 一律采用原地渐变淡入淡出（`from.side === to.side, offset: 0`），**严禁使用 `LeftOver`/`RightOver`/`Under` 画外滑入滑出，也严禁 `Move` 横向滑位或 Center <-> Left/Right 滑动**；转场善用 `SideFade`、`FlashbackIn/Out` 与 `AmbientColor`。听者反应优先用切镜、句间独立 `Motion` 静默反应拍、短促「……」回应或双人同框句首 `at: 0` 纯 `facial` 微调，严禁在说话者句中 `at: 0.45..0.85` 塞入听者错峰身体动作。',
-    '3. **声画节拍与镜头/震动/字幕分级**：开场必须由 `ChangeBgm` 起乐，情绪高潮/转折前善用 `ChangeBgm({stop:true})` 制造静音留白，物理/情绪节拍务必配 `PlaySe`；**镜头/震动严格按剧种分级**：日常/谈心/排练/后台戏保持 `CameraZoom`/`CameraMove` 0 次与 `CharacterShake` 0 次；而高潮对峙/爆发/Live 演出/受惊冲击戏应在关键爆点主动配置 `1~2` 次 `CameraZoom`（随后复位 1.0）及 `1~2` 次 `CharacterShake`/`ShakeScreen`；`Telop`/`PlaceInfo` 仅在明确需要交代时空时可选使用、不要每场模板双挂；片尾用 `closeWindowOnFinish: true` + 留白/缓慢 `BlackOut` 收束余韵。',
-    '4. **凝练对白、`closeWindowOnFinish` 与排版**：多用 4~14 字短促反应、停顿与潜台词和中等句交错，避免连续长篇书面说教或重复独白拖长；台词只写说出口的话或完整括号心里话，严禁「（微笑）」「（叹气）」等动作括号；每条 Talk 最多 3 行（每行<=30字宽），不写 `ttsText`；约 90% Talk `delay=0`，仅重停顿用 `1.0/1.5` 或独立 `Wait`；`closeWindowOnFinish: true` **仅**用于真实停顿（`Wait >= 300ms`）或转场/淡出（`BlackOut`/`SideFade`/`Telop`/`LayoutClear`）之前，**严禁**在瞬时 `Motion` / `PlaySe` / `ChangeBgm` 后立刻接下句 `Talk` 时设 `closeWindowOnFinish: true` 导致对话框闪烁。',
-    emotionNote,
-    options.systemPrompt?.trim() ?? ''
-  ]
-    .filter(Boolean)
-    .join('\n')
+  const baseSystemPrompt = [
+    '你是 Project SEKAI 剧情前期调研 Agent（hybrid 探索阶段 / 统一只读资料核实，不写台词正文，不写 Live2D 片段）。',
+    '请在 1~3 轮内调用 lookup_character、search_official_corpus（含 mode:"search"、"expand" 与 "list_stories"）和 search_assets（核实云端服装/背景/BGM/SE），最后用简洁 JSON 总结研究简报：',
+    '{"researchBrief":"角色记忆、关系边界、官方事件与云端素材核实结论","recommendedAssets":{"background":"...","bgm":"...","outfits":{...}},"optionalPlan":{可选 cast/scenes/understanding}}'
+  ].join('\n')
+  const userContent = `场景要求：${scene}\n可选角色摘要：${castSummary}\n请核实出场角色记忆与人设边界、近期官方事件与精确云端素材 ID，输出研究简报 JSON。`
 
-  const targetTalkMin = Math.max(8, Math.round(targetMinutes * 9.5))
-  const targetTalkMax = Math.max(targetTalkMin + 4, Math.round(targetMinutes * 12))
-  const exampleSnippet = buildActingExample(view)
-  const userPrompt = [
-    `场景要求：${scene}`,
-    `目标时长：约 ${targetMinutes} 分钟（按 PJSK 配音与停顿约 7 秒/句换算，全片严格控制在 ${targetTalkMin}~${targetTalkMax} 句 Talk；凝练抓重点，严禁连排重复独白拉长）`,
-    `可选角色摘要：${castSummary}`,
-    `JSON 结构示例：\n\`\`\`json\n${exampleSnippet}\n\`\`\``,
-    '请充分利用工具核实角色人设、表情与动作语义、背景/BGM/SE 资源和官方语料，通过规划→起草→逐句导演审校→局部修补完成高质量剧本。'
-  ].join('\n\n')
-
-  const totalUsage: ChatUsage = {}
-  let totalLatency = 0
-  let lastModel = llm.model
-  const toolCallsUsed: string[] = []
-  let rounds = 0
-
-  const tryFinalize = (
-    rawContent: string,
-    context: { finishReason?: string; enforceActingStrict?: boolean } = {}
-  ):
-    | { ok: true; story: StoryData; warnings: string[] }
-    | { ok: false; error: string; candidateObj?: Record<string, unknown> } => {
+  const tryParseExploreBrief = (rawContent: string): void => {
     try {
-      const parsed = extractJson(rawContent, { finishReason: context.finishReason })
-      if (
-        parsed &&
-        typeof parsed === 'object' &&
-        !Array.isArray(parsed) &&
-        (parsed as Record<string, unknown>).use_saved_draft === true
-      ) {
-        const draft = toolkit.getSavedDraft()
-        if (!draft) {
-          return { ok: false, error: '当前没有已保存草稿（use_saved_draft=true 无效）' }
+      const parsed = extractJson(rawContent)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
+      const rec = parsed as Record<string, unknown>
+      if (typeof rec.researchBrief === 'string' && rec.researchBrief.trim()) {
+        synthesizedBrief = rec.researchBrief.trim()
+      } else if (typeof rec.summary === 'string' && rec.summary.trim()) {
+        synthesizedBrief = rec.summary.trim()
+      }
+      const planCandidate = rec.optionalPlan ?? rec.plan ?? (Array.isArray(rec.cast) ? rec : null)
+      if (planCandidate && typeof planCandidate === 'object') {
+        const normalized = normalizeCastPlan(planCandidate, view, {
+          scene,
+          personas,
+          targetMinutes
+        })
+        if (normalized && normalized.cast.length > 0) {
+          preBuiltPlan = normalized
         }
-        return finalizeStoryCandidate(draft, context.enforceActingStrict ?? false)
       }
-      return finalizeStoryCandidate(parsed, context.enforceActingStrict ?? false)
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
-      }
+    } catch {
+      // 非 JSON 总结则忽略，回退已收集工具摘要或常规 Stage 1
     }
   }
 
-  const finalizeStoryCandidate = (
-    candidate: unknown,
-    enforceActingStrict: boolean
-  ):
-    | { ok: true; story: StoryData; warnings: string[] }
-    | { ok: false; error: string; candidateObj?: Record<string, unknown> } => {
+  const summarizeToolOutput = (toolName: string, output: string): void => {
     try {
-      const prepared =
-        candidate && typeof candidate === 'object' && !Array.isArray(candidate)
-          ? structuredClone(candidate as Record<string, unknown>)
-          : candidate
-      if (
-        prepared &&
-        typeof prepared === 'object' &&
-        !Array.isArray(prepared) &&
-        Array.isArray((prepared as Record<string, unknown>).snippets)
-      ) {
-        // 在 validateAndFixStory 的表情冲突修复前先对齐错标「平静」的哭泣/悲伤台词，防止 face_sad_*/face_cry_* 被覆盖
-        alignStoryTtsEmotionsAndCaptions(prepared as unknown as StoryData, { emotionLabels })
-      }
-      const { story, warnings } = validateAndFixStory(prepared, view, logger, { emotionLabels })
-      const actingReport = runActingAndFidelityAudit(story, view)
-      const report = actingReport.officialReport
-      const issues: string[] = []
-      if (!report.passed && report.issues.length > 0) {
-        issues.push(`官方剧本检查未通过：${report.issues.slice(0, 4).join('；')}`)
-      }
-      if (
-        enforceActingStrict &&
-        actingReport.talkCount >= 6 &&
-        actingReport.zeroMotionModelIds.length > 0
-      ) {
-        issues.push(
-          `角色 ${actingReport.zeroMotionModelIds.join(',')} 全程 0 身体动作，请通过 patch_story_draft 为其补齐自然的动作切换`
-        )
-      }
-      if (enforceActingStrict && actingReport.talkCount >= 4) {
-        const highActing = actingReport.diagnostics.filter(
-          (d) => d.severity === 'high' && (d.field === 'facial' || d.field === 'motion')
-        )
-        if (highActing.length > 0) {
-          const sample = highActing
-            .slice(0, 3)
-            .map(
-              (d) =>
-                `snippets[${d.snippetIndex}](${d.speaker}): ${d.message}` +
-                (d.recommendedFacials.length > 0
-                  ? `，推荐表情[${d.recommendedFacials.slice(0, 2).join(',')}]`
-                  : '') +
-                (d.recommendedMotions.length > 0
-                  ? `，推荐动作[${d.recommendedMotions.slice(0, 2).join(',')}]`
-                  : '')
-            )
-            .join('；')
-          issues.push(`表情/动作与剧情情绪冲突：${sample}`)
+      const parsed = JSON.parse(output) as Record<string, unknown>
+      if (toolName === 'lookup_character' && Array.isArray(parsed.characters)) {
+        const names = parsed.characters
+          .map((c) => {
+            const r = c as Record<string, unknown>
+            return `${String(r.shortName ?? r.name ?? '')}(id=${String(r.modelId ?? '')})`
+          })
+          .filter(Boolean)
+        if (names.length > 0) findings.push(`核实角色：${names.join('、')}`)
+      } else if (toolName === 'search_assets') {
+        const bgs = Array.isArray(parsed.backgrounds)
+          ? parsed.backgrounds.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
+          : []
+        const bgms = Array.isArray(parsed.bgm)
+          ? parsed.bgm.slice(0, 3).map((b) => String((b as Record<string, unknown>).name ?? ''))
+          : []
+        if (bgs.length > 0 || bgms.length > 0) {
+          findings.push(`核实云端素材：背景[${bgs.join('/')}] BGM[${bgms.join('/')}]`)
         }
+      } else if (toolName === 'search_official_corpus') {
+        const stories = Array.isArray(parsed.availableStories)
+          ? parsed.availableStories
+              .slice(0, 3)
+              .map((s) => String((s as Record<string, unknown>).story ?? ''))
+          : []
+        const expanded =
+          parsed.context && typeof parsed.context === 'object'
+            ? String((parsed.context as Record<string, unknown>).text ?? '').slice(0, 420)
+            : ''
+        if (stories.length > 0) findings.push(`官方参考活动：${stories.join('、')}`)
+        if (expanded) findings.push(`官方上下文展开：\n${expanded}`)
       }
-      if (issues.length > 0) {
-        return {
-          ok: false,
-          error: issues.join(' | '),
-          ...(candidate && typeof candidate === 'object' && !Array.isArray(candidate)
-            ? { candidateObj: candidate as Record<string, unknown> }
-            : {})
-        }
-      }
-      return { ok: true, story, warnings }
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error)
-      }
+    } catch {
+      // 忽略摘要解析错误
     }
-  }
-
-  const recoverSavedDraftIfValid = (): {
-    ok: true
-    story: StoryData
-    warnings: string[]
-  } | null => {
-    const draft = toolkit.getSavedDraft()
-    if (!draft) return null
-    const res = finalizeStoryCandidate(draft, false)
-    if (res.ok) return res
-    return null
   }
 
   const tryExtractEnvelopeToolCall = (
@@ -4915,7 +5105,9 @@ export async function runAgenticStoryGeneration(
       if (rec.tool_call && typeof rec.tool_call === 'object') {
         const tc = rec.tool_call as Record<string, unknown>
         const fnName = typeof tc.name === 'string' ? tc.name.trim() : ''
-        if (fnName) return { name: fnName, arguments: tc.arguments }
+        if (fnName && PHASE1_EXPLORE_TOOLS.has(fnName)) {
+          return { name: fnName, arguments: tc.arguments }
+        }
       }
     } catch {
       return null
@@ -4923,43 +5115,56 @@ export async function runAgenticStoryGeneration(
     return null
   }
 
-  // ---- 模式 1：OpenAI 原生 function calling ----
+  const recordUsage = (delta: ChatUsage | null): void => {
+    if (!delta) return
+    hasUsage = true
+    addUsage(totalUsage, delta)
+  }
+
+  let modeUsed: Phase1ExploreResult['modeUsed'] = 'native'
+  let switchToReact = false
+
+  // ---- Mode 1: 原生 function calling ---------------------------------------------------
   const nativeMessages: ChatMessage[] = [
-    { role: 'system', content: sharedRules },
-    { role: 'user', content: userPrompt }
+    { role: 'system', content: baseSystemPrompt },
+    { role: 'user', content: userContent }
   ]
 
-  let switchToReactFallback = false
-  for (let turn = 0; turn < maxToolTurns; turn++) {
-    rounds += 1
-    const isFinalTurn = turn >= maxToolTurns - 1
-    try {
-      const hasDraft = Boolean(toolkit.getSavedDraft())
+  try {
+    for (let turn = 0; turn < maxTurns; turn++) {
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new Error('Aborted')
+      }
+      const isLast = turn === maxTurns - 1
       const res = await llm.chat(
-        isFinalTurn
+        isLast
           ? [
               ...nativeMessages,
               {
                 role: 'user',
-                content: hasDraft
-                  ? '工具调用轮次已达上限。若工作区草稿已就绪请直接输出 {"use_saved_draft":true}，否则输出完整合法的 StoryData JSON（仅含 models、images、snippets）。'
-                  : '工具调用轮次已达上限，请立即综合以上已获取信息直接输出最终完整合法的 StoryData JSON（仅含 models、images、snippets）。'
+                content:
+                  '请立即综合已获取信息输出研究简报 JSON（含 researchBrief 与可选 recommendedAssets / optionalPlan），不要再调用工具。'
               }
             ]
           : nativeMessages,
-        isFinalTurn
-          ? { json: true, signal }
-          : {
-              tools: toolkit.definitions,
-              toolChoice: 'auto',
-              signal
-            }
+        isLast
+          ? { json: true, temperature: 0.3, signal }
+          : { tools: definitions, toolChoice: 'auto', temperature: 0.3, signal }
       )
-      totalLatency += res.latencyMs
-      lastModel = res.model
-      addUsage(totalUsage, res.usage)
+      agentSteps += 1
+      stages.push({
+        stage: 'hybrid-explore',
+        model: res.model,
+        latencyMs: res.latencyMs,
+        usage: res.usage,
+        ok: true
+      })
+      latencyMs += res.latencyMs
+      recordUsage(res.usage)
 
-      const calls: LlmToolCall[] = res.toolCalls ?? []
+      const calls = (res.toolCalls ?? []).filter((c) =>
+        PHASE1_EXPLORE_TOOLS.has(c.function.name)
+      )
       if (calls.length > 0) {
         nativeMessages.push({
           role: 'assistant',
@@ -4968,349 +5173,274 @@ export async function runAgenticStoryGeneration(
         })
         for (const call of calls) {
           toolCallsUsed.push(call.function.name)
-          const output = await toolkit.execute(call.function.name, call.function.arguments, signal)
+          const out = await toolkit.execute(call.function.name, call.function.arguments, signal)
+          summarizeToolOutput(call.function.name, out)
           nativeMessages.push({
             role: 'tool',
             tool_call_id: call.id,
             name: call.function.name,
-            content: output
+            content: out
           })
-        }
-        compactSupersededAgentMessages(nativeMessages)
-        if (toolkit.isFinalized()) {
-          const recovered = recoverSavedDraftIfValid()
-          if (recovered) {
-            const review = toolkit.getDirectorReview()
-            return {
-              story: recovered.story,
-              ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-              warnings: recovered.warnings,
-              rounds,
-              latencyMs: totalLatency,
-              model: lastModel,
-              usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-              toolCallsUsed,
-              modeUsed: 'native',
-              ...(review ? { directorReview: review } : {})
-            }
-          }
         }
         continue
       }
 
-      // 部分代理会在未报错的情况下把 tool_call JSON 放在 content 里
-      if (!isFinalTurn) {
+      if (!isLast) {
         const inlineCall = tryExtractEnvelopeToolCall(res.content)
         if (inlineCall) {
           toolCallsUsed.push(inlineCall.name)
-          const output = await toolkit.execute(inlineCall.name, inlineCall.arguments, signal)
-          nativeMessages.push({ role: 'assistant', content: res.content.slice(0, 12_000) })
+          const out = await toolkit.execute(inlineCall.name, inlineCall.arguments, signal)
+          summarizeToolOutput(inlineCall.name, out)
+          nativeMessages.push({ role: 'assistant', content: res.content.slice(0, 8000) })
           nativeMessages.push({
             role: 'user',
-            content: `工具 ${inlineCall.name} 返回结果：\n${output}\n\n请继续调用下一个工具，或调用 finalize_story_draft / 输出最终 StoryData JSON。`
+            content: `工具 ${inlineCall.name} 返回结果：\n${out}\n\n请继续调研或输出研究简报 JSON。`
           })
-          if (toolkit.isFinalized()) {
-            const recovered = recoverSavedDraftIfValid()
-            if (recovered) {
-              return {
-                story: recovered.story,
-                ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-                warnings: recovered.warnings,
-                rounds,
-                latencyMs: totalLatency,
-                model: lastModel,
-                usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-                toolCallsUsed,
-                modeUsed: 'native'
-              }
-            }
-          }
           continue
         }
       }
 
-      const finalized = tryFinalize(res.content, {
-        finishReason: res.finishReason,
-        enforceActingStrict: !isFinalTurn
+      tryParseExploreBrief(res.content)
+      break
+    }
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (error instanceof LlmError && error.toolCallingUnsupported) {
+      logger.info('[AI] Phase 1 不支持原生 tool calling，切换至 ReAct JSON 工具探索')
+      switchToReact = true
+    } else {
+      const note = `探索预检降级：${error instanceof Error ? error.message : String(error)}`
+      logger.warn(`[AI] ${note}`)
+      modeUsed = 'staged-fallback'
+      stages.push({
+        stage: 'hybrid-explore',
+        model: llm.model,
+        latencyMs: 0,
+        usage: null,
+        ok: false,
+        note
       })
-      if (finalized.ok) {
-        return {
-          story: finalized.story,
-          ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-          warnings: finalized.warnings,
-          rounds,
-          latencyMs: totalLatency,
-          model: lastModel,
-          usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-          toolCallsUsed,
-          modeUsed: 'native'
+    }
+  }
+
+  // ---- Mode 2: ReAct JSON 工具信封回退 -------------------------------------------------
+  if (switchToReact) {
+    modeUsed = 'react-json'
+    const toolCatalogText = definitions
+      .map(
+        (def) =>
+          `- ${def.function.name}: ${def.function.description} 参数: ${JSON.stringify(def.function.parameters)}`
+      )
+      .join('\n')
+    const reactMessages: ChatMessage[] = [
+      {
+        role: 'system',
+        content: [
+          baseSystemPrompt,
+          '',
+          '## 可用只读工具（ReAct JSON 协议）',
+          toolCatalogText,
+          '每一轮只输出一个合法 JSON 对象：',
+          '- 需要调研时输出：{"tool_call":{"name":"工具名","arguments":{...}}}',
+          '- 调研完成时输出：{"researchBrief":"...","recommendedAssets":{...},"optionalPlan":{...}}'
+        ].join('\n')
+      },
+      { role: 'user', content: userContent }
+    ]
+
+    try {
+      for (let turn = 0; turn < maxTurns; turn++) {
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error ? signal.reason : new Error('Aborted')
         }
-      }
-      if (turn + 1 < maxToolTurns) {
-        if (finalized.candidateObj && !toolkit.getSavedDraft()) {
-          await toolkit.execute('save_story_draft', { story: finalized.candidateObj }, signal)
-        }
-        nativeMessages.push({ role: 'assistant', content: res.content.slice(0, 20_000) })
-        nativeMessages.push({
-          role: 'user',
-          content: toolkit.getSavedDraft()
-            ? `输出未通过导演终审：${finalized.error}。草稿已保存在工作区，请使用 patch_story_draft 定点修补问题行后调用 finalize_story_draft，或直接输出修正后的完整 JSON。`
-            : `最终输出未通过校验：${finalized.error}。请修正后输出完整合法的 StoryData JSON（或先调用 save_story_draft 保存后再局部修补）。`
-        })
-        continue
-      }
-      const recovered = recoverSavedDraftIfValid()
-      if (recovered) {
-        return {
-          story: recovered.story,
-          ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-          warnings: recovered.warnings,
-          rounds,
-          latencyMs: totalLatency,
-          model: lastModel,
-          usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-          toolCallsUsed,
-          modeUsed: 'native'
-        }
-      }
-      throw new LlmError(`Agentic 输出未通过校验：${finalized.error}`)
-    } catch (error) {
-      if (error instanceof LlmError && error.toolCallingUnsupported) {
-        logger.info(
-          '[AI] 当前模型/网关不支持原生 tool calling，自动切换至 ReAct JSON 工具信封回退模式'
+        const isLast = turn === maxTurns - 1
+        const res = await llm.chat(
+          isLast
+            ? [
+                ...reactMessages,
+                {
+                  role: 'user',
+                  content:
+                    '请立即综合已获取信息输出研究简报 JSON（含 researchBrief 与可选 recommendedAssets / optionalPlan），不要再输出 tool_call。'
+                }
+              ]
+            : reactMessages,
+          { json: true, temperature: 0.3, signal }
         )
-        switchToReactFallback = true
+        agentSteps += 1
+        stages.push({
+          stage: 'hybrid-explore',
+          model: res.model,
+          latencyMs: res.latencyMs,
+          usage: res.usage,
+          ok: true
+        })
+        latencyMs += res.latencyMs
+        recordUsage(res.usage)
+
+        if (!isLast) {
+          const inlineCall = tryExtractEnvelopeToolCall(res.content)
+          if (inlineCall) {
+            toolCallsUsed.push(inlineCall.name)
+            const out = await toolkit.execute(inlineCall.name, inlineCall.arguments, signal)
+            summarizeToolOutput(inlineCall.name, out)
+            reactMessages.push({ role: 'assistant', content: res.content.slice(0, 8000) })
+            reactMessages.push({
+              role: 'user',
+              content: `工具 ${inlineCall.name} 返回结果：\n${out}\n\n请继续调研或输出研究简报 JSON。`
+            })
+            continue
+          }
+        }
+
+        tryParseExploreBrief(res.content)
         break
       }
-      if (isFinalTurn) {
-        const recovered = recoverSavedDraftIfValid()
-        if (recovered) {
-          const review = toolkit.getDirectorReview()
-          logger.warn(
-            `[AI] Agentic 末轮响应失败（${error instanceof Error ? error.message : String(error)}），已直接采用工作区通过校验的草稿`
-          )
-          return {
-            story: recovered.story,
-            ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-            warnings: recovered.warnings,
-            rounds,
-            latencyMs: totalLatency,
-            model: lastModel,
-            usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-            toolCallsUsed,
-            modeUsed: 'native',
-            ...(review ? { directorReview: review } : {})
-          }
-        }
-      }
-      throw error
+    } catch (error) {
+      if (signal?.aborted) throw error
+      const note = `ReAct 探索降级至直接工作流：${error instanceof Error ? error.message : String(error)}`
+      logger.warn(`[AI] ${note}`)
+      modeUsed = 'staged-fallback'
+      stages.push({
+        stage: 'hybrid-explore',
+        model: llm.model,
+        latencyMs: 0,
+        usage: null,
+        ok: false,
+        note
+      })
     }
   }
 
-  if (!switchToReactFallback) {
-    const recovered = recoverSavedDraftIfValid()
-    if (recovered) {
-      return {
-        story: recovered.story,
-        ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-        warnings: recovered.warnings,
-        rounds,
-        latencyMs: totalLatency,
-        model: lastModel,
-        usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-        toolCallsUsed,
-        modeUsed: 'native'
-      }
-    }
-    throw new LlmError(`Agentic 模式在 ${maxToolTurns} 轮内未输出可通过校验的最终剧本`)
-  }
-
-  // ---- 模式 2：无原生 tools 支持时的 ReAct JSON 工具信封回退 ----
-  const toolCatalogText = toolkit.definitions
-    .map(
-      (def) =>
-        `- ${def.function.name}: ${def.function.description} 参数: ${JSON.stringify(def.function.parameters)}`
-    )
+  const researchBrief = [synthesizedBrief, ...findings]
+    .filter(Boolean)
     .join('\n')
+    .slice(0, 2200)
 
-  const reactMessages: ChatMessage[] = [
+  return {
+    researchBrief,
+    preBuiltPlan,
+    toolCallsUsed,
+    modeUsed,
+    agentSteps,
+    stages,
+    usage: hasUsage ? totalUsage : null,
+    latencyMs
+  }
+}
+
+/**
+ * 向后兼容导出入口：直接委托至统一三段式上下文隔离 + 工具驱动流水线（pipeline: 'agent'）。
+ */
+export async function runAgenticStoryGeneration(
+  options: AgenticGenerationOptions
+): Promise<AgenticGenerationResult> {
+  const { StoryWriter } = await import('./storyWriter')
+  const catalogData = {
+    models: options.view.models,
+    images: options.view.images,
+    imageDetails: options.view.imageDetails,
+    voices: [],
+    bgm: [],
+    bgmDetails: options.view.bgmDetails,
+    seDetails: options.view.seDetails,
+    ...(options.view.cloudOnly ? { cloudOnly: true } : {})
+  }
+  const stubCatalog = {
+    get: () => catalogData
+  } as unknown as import('../resources/resourceCatalog').ResourceCatalog
+  const settings = {
+    enabled: options.llm.enabled,
+    baseUrl: '',
+    apiKeyEnv: '',
+    model: options.llm.model,
+    temperature: 0.85,
+    maxTokens: 8192,
+    timeoutMs: 120_000,
+    retries: 0,
+    repairRounds: 1,
+    pipeline: 'agent' as const,
+    agentMaxSteps: options.maxToolTurns ?? 4,
+    jsonMode: 'auto' as const,
+    translateForTts: false,
+    polishDialogue: false,
+    targetMinutes: options.targetMinutes,
+    systemPrompt: options.systemPrompt ?? '',
+    extraBody: {},
+    personaDirs: [],
+    personas: [],
+    rag: {
+      enabled: Boolean(options.ragRetriever),
+      baseUrl: '',
+      apiKeyEnv: '',
+      model: '',
+      dimensions: 0,
+      queryInstruct: '',
+      timeoutMs: 30_000,
+      batchSize: 32,
+      cacheDir: '',
+      fallbackLexical: true,
+      sekaiStorySearchUrl: '',
+      server: 'cn' as const,
+      localDirs: [],
+      includePersonas: true,
+      rerank: {
+        enabled: false,
+        model: '',
+        baseUrl: '',
+        apiKeyEnv: '',
+        endpointPath: '/rerank',
+        candidatePool: 32,
+        topN: 32,
+        timeoutMs: 30_000,
+        instruction: ''
+      },
+      adaptive: {
+        minScore: 0.42,
+        highScore: 0.62,
+        relativeDropRatio: 0.78,
+        elbowDropDelta: 0.065,
+        minChunks: 0,
+        maxChunks: 12,
+        softCharBudget: 1800,
+        maxCharBudget: 4800,
+        maxPerStory: 2,
+        mergeAdjacentGap: 4,
+        expandAdjacentContext: true
+      }
+    }
+  }
+  const writer = new StoryWriter(
+    options.llm,
+    settings,
+    stubCatalog,
+    options.logger,
+    options.emotionLabels ?? [],
+    options.ragRetriever ?? null
+  )
+  const result = await writer.generateFromView(
     {
-      role: 'system',
-      content: [
-        sharedRules,
-        '',
-        '## 可用工具（ReAct JSON 协议）',
-        toolCatalogText,
-        '每一轮只输出一个合法 JSON 对象：',
-        '- 需要调工具时输出：{"tool_call":{"name":"工具名","arguments":{...}}}',
-        '- 若草稿已通过 save_story_draft + patch_story_draft + critique_story_draft 且确认交卷，可输出：{"use_saved_draft":true}',
-        '- 或直接输出最终剧本：{"final":{...完整StoryData...}}（或直接输出含 models、images、snippets 的 StoryData JSON）。'
-      ].join('\n')
+      prompt: options.scene,
+      targetMinutes: options.targetMinutes,
+      pipeline: 'agent',
+      translateForTts: false,
+      maxToolTurns: options.maxToolTurns,
+      directorReview: options.directorReview,
+      signal: options.signal
     },
-    { role: 'user', content: userPrompt }
-  ]
-
-  for (let turn = 0; turn < maxToolTurns; turn++) {
-    rounds += 1
-    const isFinalTurn = turn >= maxToolTurns - 1
-    let res
-    try {
-      res = await llm.chat(reactMessages, { json: true, signal })
-    } catch (error) {
-      if (isFinalTurn) {
-        const recovered = recoverSavedDraftIfValid()
-        if (recovered) {
-          const review = toolkit.getDirectorReview()
-          logger.warn(
-            `[AI] ReAct 末轮响应失败（${error instanceof Error ? error.message : String(error)}），已直接采用工作区通过校验的草稿`
-          )
-          return {
-            story: recovered.story,
-            ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-            warnings: recovered.warnings,
-            rounds,
-            latencyMs: totalLatency,
-            model: lastModel,
-            usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-            toolCallsUsed,
-            modeUsed: 'react-json',
-            ...(review ? { directorReview: review } : {})
-          }
-        }
-      }
-      throw error
-    }
-    totalLatency += res.latencyMs
-    lastModel = res.model
-    addUsage(totalUsage, res.usage)
-
-    let parsed: Record<string, unknown> | null = null
-    try {
-      const val = extractJson(res.content, { finishReason: res.finishReason })
-      if (val && typeof val === 'object' && !Array.isArray(val)) {
-        parsed = val as Record<string, unknown>
-      }
-    } catch (error) {
-      if (turn + 1 >= maxToolTurns) {
-        const recovered = recoverSavedDraftIfValid()
-        if (recovered) {
-          return {
-            story: recovered.story,
-            ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-            warnings: recovered.warnings,
-            rounds,
-            latencyMs: totalLatency,
-            model: lastModel,
-            usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-            toolCallsUsed,
-            modeUsed: 'react-json'
-          }
-        }
-        throw error
-      }
-      reactMessages.push({ role: 'assistant', content: res.content.slice(0, 20_000) })
-      reactMessages.push({
-        role: 'user',
-        content: `输出不是合法 JSON（${error instanceof Error ? error.message : String(error)}），请严格输出 {"tool_call":...}、{"use_saved_draft":true} 或 {"final":...}。`
-      })
-      continue
-    }
-
-    if (parsed?.tool_call && typeof parsed.tool_call === 'object') {
-      const tc = parsed.tool_call as Record<string, unknown>
-      const fnName = typeof tc.name === 'string' ? tc.name.trim() : ''
-      if (fnName) {
-        toolCallsUsed.push(fnName)
-        const output = await toolkit.execute(fnName, tc.arguments, signal)
-        if (toolkit.isFinalized()) {
-          const recovered = recoverSavedDraftIfValid()
-          if (recovered) {
-            return {
-              story: recovered.story,
-              ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-              warnings: recovered.warnings,
-              rounds,
-              latencyMs: totalLatency,
-              model: lastModel,
-              usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-              toolCallsUsed,
-              modeUsed: 'react-json'
-            }
-          }
-        }
-        reactMessages.push({ role: 'assistant', content: res.content.slice(0, 12_000) })
-        reactMessages.push({
-          role: 'user',
-          content: `工具 ${fnName} 返回结果：\n${output}\n\n请继续调用下一个工具，或输出 {"use_saved_draft":true} / {"final": ...完整StoryData...}。`
-        })
-        continue
-      }
-    }
-
-    const candidateObj =
-      parsed && 'final' in parsed && parsed.final && typeof parsed.final === 'object'
-        ? parsed.final
-        : parsed
-    const finalized = tryFinalize(JSON.stringify(candidateObj), {
-      finishReason: res.finishReason,
-      enforceActingStrict: !isFinalTurn
-    })
-    if (finalized.ok) {
-      return {
-        story: finalized.story,
-        ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-        warnings: finalized.warnings,
-        rounds,
-        latencyMs: totalLatency,
-        model: lastModel,
-        usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-        toolCallsUsed,
-        modeUsed: 'react-json'
-      }
-    }
-    if (turn + 1 < maxToolTurns) {
-      if (finalized.candidateObj && !toolkit.getSavedDraft()) {
-        await toolkit.execute('save_story_draft', { story: finalized.candidateObj }, signal)
-      }
-      reactMessages.push({ role: 'assistant', content: res.content.slice(0, 20_000) })
-      reactMessages.push({
-        role: 'user',
-        content: toolkit.getSavedDraft()
-          ? `剧本未通过导演终审：${finalized.error}。草稿已保存在工作区，请用 patch_story_draft 定点修补问题行后 finalize_story_draft，或直接输出 {"final": ...}。`
-          : `最终剧本未通过校验：${finalized.error}。请修正并输出 {"final": ...}。`
-      })
-      continue
-    }
-    const recovered = recoverSavedDraftIfValid()
-    if (recovered) {
-      return {
-        story: recovered.story,
-        ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-        warnings: recovered.warnings,
-        rounds,
-        latencyMs: totalLatency,
-        model: lastModel,
-        usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-        toolCallsUsed,
-        modeUsed: 'react-json'
-      }
-    }
-    throw new LlmError(`ReAct 回退模式未通过校验：${finalized.error}`)
+    options.view,
+    options.personas
+  )
+  return {
+    story: result.story,
+    ...(result.meta.title ? { title: result.meta.title } : {}),
+    warnings: result.meta.warnings,
+    rounds: result.meta.rounds,
+    latencyMs: result.meta.latencyMs,
+    model: result.meta.model,
+    usage: result.meta.usage,
+    toolCallsUsed: result.meta.toolCalls ?? [],
+    modeUsed: result.meta.agentMode ?? 'native',
+    ...(result.meta.directorReview ? { directorReview: result.meta.directorReview } : {})
   }
-
-  const recovered = recoverSavedDraftIfValid()
-  if (recovered) {
-    return {
-      story: recovered.story,
-      ...(toolkit.getSavedPlan()?.title ? { title: toolkit.getSavedPlan()!.title } : {}),
-      warnings: recovered.warnings,
-      rounds,
-      latencyMs: totalLatency,
-      model: lastModel,
-      usage: Object.keys(totalUsage).length > 0 ? totalUsage : null,
-      toolCallsUsed,
-      modeUsed: 'react-json'
-    }
-  }
-  throw new LlmError(`ReAct 回退模式在 ${maxToolTurns} 轮内未完成剧本生成`)
 }

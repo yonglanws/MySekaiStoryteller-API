@@ -12,6 +12,7 @@ import {
   dialoguePersonaPrompt,
   extractPairwiseAddressBook,
   inferUnitFromText,
+  normalizeUnit,
   personaFor,
   type PersonaEntry
 } from './personas'
@@ -24,7 +25,7 @@ import {
   type DramaticContextMood
 } from './facialSemantics'
 import { getOfficialActingGuidelines } from './corpusExamples'
-import { CURATED_SCENARIO_SES, resolveScenarioSe, sePromptList } from './scenarioCues'
+import { CURATED_SCENARIO_SES, resolveScenarioSe } from './scenarioCues'
 
 // 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
 // 全量清单会占掉提示词绝大部分，而且长编号列表会诱导模型拼出不存在的名称。
@@ -247,6 +248,44 @@ const OUTFIT_QUERY_KEYWORDS: Array<[RegExp, string[]]> = [
   [/礼服|婚礼|正式/, ['礼服']]
 ]
 
+const VS_UNIT_OUTFIT_MATCHERS: Array<{
+  unit: string
+  queryRe: RegExp
+  cloudRe: RegExp
+  labelRe: RegExp
+}> = [
+  {
+    unit: '25时',
+    queryRe: /25时|25点|25時|nightcord|ニーゴ|无人世界|无人[的]?世界|25时风|_night\b/i,
+    cloudRe: /(?:^|[_-])night(?:$|[_-])|niigo/i,
+    labelRe: /无人世界|25时|nightcord/i
+  },
+  {
+    unit: 'Wonderlands x Showtime',
+    queryRe: /wonderlands|w[×x]?s(?:[^a-z]|$)|^ws|奇幻|乐园|剧团|_wonder\b/i,
+    cloudRe: /(?:^|[_-])wonder(?:$|[_-])|wxs/i,
+    labelRe: /奇幻|乐园|wonder|ws风/i
+  },
+  {
+    unit: 'Leo/need',
+    queryRe: /leo[\s/_-]*need|l\/n|(?:^|[^a-z])ln(?:[^a-z]|$)|教室|乐队|_band\b/i,
+    cloudRe: /(?:^|[_-])band(?:$|[_-])|(?:^|[_-])ln(?:$|[_-])/i,
+    labelRe: /教室|乐队|leo/i
+  },
+  {
+    unit: 'MORE MORE JUMP!',
+    queryRe: /more[\s_-]*more[\s_-]*jump|mmj|偶像|舞台|_idol\b/i,
+    cloudRe: /(?:^|[_-])idol(?:$|[_-])|mmj/i,
+    labelRe: /舞台|偶像|mmj/i
+  },
+  {
+    unit: 'Vivid BAD SQUAD',
+    queryRe: /vivid[\s_-]*bad[\s_-]*squad|vbs|街头|street|_street\b/i,
+    cloudRe: /(?:^|[_-])street(?:$|[_-])|vbs/i,
+    labelRe: /街头|street|vbs/i
+  }
+]
+
 const UNIT_QUERY_KEYWORDS: Array<[RegExp, string]> = [
   [/一歌|咲希|穗波|志步|leo\/need|l\/n|神山|天台/i, 'Leo/need'],
   [/实乃理|遥|爱莉|雫|mmj|more more|偶像/i, 'MORE MORE JUMP!'],
@@ -361,6 +400,7 @@ export class CatalogView {
   readonly imageDetails: CatalogImage[]
   readonly bgmDetails: CatalogBgm[]
   readonly seDetails: CatalogSe[]
+  readonly cloudOnly: boolean
 
   constructor(data: ResourceCatalogData & { seDetails?: CatalogSe[] }) {
     this.models = data.models.filter((model) => Boolean(model.path))
@@ -368,6 +408,7 @@ export class CatalogView {
     this.imageDetails = (data.imageDetails ?? []).filter((item) => Boolean(item.file))
     this.bgmDetails = (data.bgmDetails ?? []).filter((item) => Boolean(item.file))
     this.seDetails = (data.seDetails ?? []).filter((item) => Boolean(item.file))
+    this.cloudOnly = Boolean(data.cloudOnly)
   }
 
   withModels(models: CatalogModel[]): CatalogView {
@@ -443,7 +484,7 @@ export class CatalogView {
       )
   }
 
-  /** 按服装关键词（如「校服」「私服」「队服」「泳装」）或云端 id 解析同角色服装。 */
+  /** 按服装关键词（如「校服」「私服」「队服」「泳装」）、VS 分队世界观或云端 id 解析同角色服装。 */
   resolveOutfitVariant(baseModel: CatalogModel, query: string): CatalogModel | null {
     const q = query.trim().toLowerCase()
     if (!q) return null
@@ -459,13 +500,59 @@ export class CatalogView {
     if (exact && (!isBackViewModel(exact) || BACK_VIEW_QUERY_RE.test(query))) return exact
     const nonBack = variants.filter((m) => !isBackViewModel(m))
     const pool = BACK_VIEW_QUERY_RE.test(query) || nonBack.length === 0 ? variants : nonBack
-    const byCat = pool.find(
-      (m) =>
-        (m.outfitCategory ?? '').toLowerCase() === q ||
-        (m.outfitLabel ?? '').toLowerCase().includes(q) ||
-        (m.cloudId ?? '').toLowerCase().includes(q)
+
+    const isVsPool =
+      normalizeUnit(baseModel.unit) === undefined &&
+      (/miku|rin|len|luka|meiko|kaito|初音|镜音|巡音/i.test(`${baseModel.name} ${baseModel.path}`) ||
+        pool.some(
+          (m) =>
+            /(?:_night|_wonder|_band|_idol|_street)\b/i.test(m.cloudId ?? '') ||
+            /无人世界|奇幻世界|教室世界|舞台世界|街头世界/.test(m.outfitLabel ?? '')
+        ))
+    if (isVsPool) {
+      const inferredUnit = inferUnitFromText(query)
+      const vsMatcher =
+        (inferredUnit ? VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.unit === inferredUnit) : null) ??
+        VS_UNIT_OUTFIT_MATCHERS.find((entry) => entry.queryRe.test(query))
+      if (vsMatcher) {
+        const vsHit = pool.find(
+          (m) =>
+            vsMatcher.cloudRe.test(m.cloudId ?? '') ||
+            vsMatcher.cloudRe.test(m.path) ||
+            vsMatcher.labelRe.test(m.outfitLabel ?? '')
+        )
+        if (vsHit) return vsHit
+      }
+    }
+
+    const queryTokens = Array.from(
+      new Set(
+        query
+          .toLowerCase()
+          .split(/[\s,，。！？!?、：:；;（）()「」""''·/|]+/)
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 2)
+      )
     )
-    if (byCat) return byCat
+    let bestTokenMatch: CatalogModel | null = null
+    let bestTokenScore = 0
+    for (const m of pool) {
+      const cat = (m.outfitCategory ?? '').toLowerCase()
+      const label = (m.outfitLabel ?? '').toLowerCase()
+      const cloudId = (m.cloudId ?? '').toLowerCase()
+      let score = 0
+      for (const tok of queryTokens) {
+        if (cat && cat === tok) score += 10 + tok.length
+        else if (label && label.includes(tok)) score += 6 + tok.length
+        else if (cloudId && cloudId.includes(tok)) score += 5 + tok.length
+      }
+      if (score > bestTokenScore) {
+        bestTokenScore = score
+        bestTokenMatch = m
+      }
+    }
+    if (bestTokenMatch) return bestTokenMatch
+
     for (const [pattern, cats] of OUTFIT_QUERY_KEYWORDS) {
       if (!pattern.test(query)) continue
       const hit = pool.find((m) => cats.includes(m.outfitCategory ?? ''))
@@ -1090,10 +1177,15 @@ export class CatalogView {
     return details.map((detail) => formatBgmPromptLine(detail)).join('\n')
   }
 
+  private normalizeFallbackSeFile(file: string): string {
+    if (!this.cloudOnly || !file) return file
+    return file.toLowerCase().startsWith('cloud/') ? file : `cloud/${file}`
+  }
+
   seDetailsList(): CatalogSe[] {
     if (this.seDetails.length > 0) return this.seDetails
     return CURATED_SCENARIO_SES.map((cue) => ({
-      file: cue.file,
+      file: this.normalizeFallbackSeFile(cue.file),
       id: cue.id,
       name: cue.id,
       category: cue.category,
@@ -1117,12 +1209,15 @@ export class CatalogView {
       }
     }
     const curated = resolveScenarioSe(raw)
-    return curated ? curated.file : null
+    return curated ? this.normalizeFallbackSeFile(curated.file) : null
   }
 
   seList(query = '', limit = 30): string {
     if (this.seDetails.length === 0) {
-      return sePromptList()
+      return this.seDetailsList()
+        .slice(0, limit)
+        .map((detail) => `- ${detail.file}（${detail.category ?? 'se'}）：${detail.description}`)
+        .join('\n')
     }
     const keywords = extractQueryKeywords(query)
     const curatedIds = new Set(CURATED_SCENARIO_SES.map((c) => c.id.toLowerCase()))
@@ -1160,7 +1255,7 @@ export class CatalogView {
     const entries = scope
       .map((model) => {
         const persona = personaFor(personas, model, {
-          unitHint: unitHint ?? model.unit,
+          unitHint: unitHint ?? normalizeUnit(model.unit),
           contextText: sceneContext
         })
         const prompt = compact
@@ -1189,7 +1284,11 @@ export class CatalogView {
       scope.length >= 2 && scope.length <= 6
         ? extractPairwiseAddressBook(
             personas,
-            scope.map((m) => this.shortName(m))
+            scope.map((m) => this.shortName(m)),
+            {
+              ...(unitHint ? { unitHint } : {}),
+              ...(sceneContext ? { contextText: sceneContext } : {})
+            }
           )
         : []
     if (addressBook.length === 0) return entries

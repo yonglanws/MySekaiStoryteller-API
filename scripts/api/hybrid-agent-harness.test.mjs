@@ -1016,7 +1016,7 @@ test('hybrid pipeline gracefully falls back when LLM returns toolCallingUnsuppor
     for await (const c of req) chunks.push(c)
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     const sys = body.messages[0]?.content ?? ''
-    if (Array.isArray(body.tools) && body.tools.length > 0) {
+    if ((Array.isArray(body.tools) && body.tools.length > 0) || sys.includes('hybrid 探索阶段')) {
       res.statusCode = 400
       res.setHeader('Content-Type', 'application/json')
       res.end(JSON.stringify({ error: { message: 'tools not supported by model' } }))
@@ -1058,6 +1058,135 @@ test('hybrid pipeline gracefully falls back when LLM returns toolCallingUnsuppor
   const res = await writer.generate({ prompt: '奏和真冬在房间聊两句', pipeline: 'hybrid', targetMinutes: 0.2 })
 
   assert.equal(res.meta.pipeline, 'hybrid')
+  assert.equal(res.meta.agentMode, 'staged-fallback')
   assert.ok(res.meta.stages.some((s) => s.stage === 'hybrid-explore' && !s.ok))
   assert.equal(res.story.snippets.filter((s) => s.type === 'Talk').length, 2)
+})
+
+test('cast-only persona scoping prevents variant OOC false positives on base 真冬 & 彰人, and compile_dialogue_workflow fixes apply', async () => {
+  const dir = makeRewrittenPersonaFixtureDir()
+  try {
+    fs.writeFileSync(
+      path.join(dir, '东云彰人.md'),
+      `# 东云彰人\n\n## 核心机制\nVBS 主唱之一，私下在伙伴面前直率毒舌。\n\n## 语言与风格\n- 口语化：常说「……啧」「啰里啰唆」「别胡说八道」。\n`,
+      'utf8'
+    )
+    fs.writeFileSync(
+      path.join(dir, '优男彰人.md'),
+      `# 优男彰人\n\n## 核心机制\n对外营业的完美好青年模式。\n\n## 语言与风格\n- 口语化：礼貌温和，严禁说「……啧」「啰里啰唆」「别胡说八道」。\n`,
+      'utf8'
+    )
+
+    const personas = loadPersonas({ personaDirs: [dir], personas: [] })
+    const akitoModel = {
+      id: 10,
+      name: '东云彰人',
+      shortName: '彰人',
+      cloudId: '11akito_normal',
+      path: 'cloud/11akito_normal/11akito_normal.model3.json',
+      source: 'cloud',
+      characterId: 11,
+      unit: 'Vivid BAD SQUAD',
+      motions: ['w-normal-default01', 'w-normal-nod01'],
+      facials: ['face_normal_01', 'face_serious_01'],
+      defaultMotion: 'w-normal-default01',
+      defaultFacial: 'face_normal_01'
+    }
+    const view = makeCloudCatalogView([akitoModel])
+    const toolkit = createStoryAgentToolkit({
+      view,
+      personas,
+      emotionLabels: ['平静', '开心', '伤心', '生气'],
+      logger
+    })
+
+    // 1. validate_dialogue_draft: base 真冬 mentioning Nightcord/OWN/绘绘 and base 彰人 saying ……啧/啰里啰唆 must NOT trigger persona_ooc
+    const baseDraft = JSON.parse(
+      await toolkit.execute('validate_dialogue_draft', {
+        title: '私下排练',
+        lines: [
+          { id: 'l1', speaker: '真冬', content: '……今晚 25时 和 Nightcord 那边，绘绘说也会上线。' },
+          { id: 'l2', speaker: '彰人', content: '……啧，啰里啰唆的，别胡说八道了。' }
+        ]
+      })
+    )
+    assert.equal(
+      baseDraft.issues.filter((i) => i.code === 'persona_ooc').length,
+      0,
+      `unexpected OOC on base personas: ${JSON.stringify(baseDraft.issues)}`
+    )
+
+    // 2. plan_story_outline + compile_dialogue_workflow: preserves understanding, aligns turns metadata, and clears stale ttsText on update_talk
+    const planned = JSON.parse(
+      await toolkit.execute('plan_story_outline', {
+        title: '深夜录音',
+        event: '奏和真冬深夜对词',
+        turningPoint: '真冬想起茶杯还没洗',
+        openingMotif: '温热苹果茶',
+        closingCallback: '杯底还留着一点温度',
+        cast: [{ modelId: 1, name: '奏' }, { modelId: 2, name: '真冬' }],
+        scenes: [{ id: 's1', background: '奏的房间·夜晚', ambient: 'night', activeCast: ['奏', '真冬'] }]
+      })
+    )
+    assert.equal(planned.ok, true)
+
+    const compiled = JSON.parse(
+      await toolkit.execute('compile_dialogue_workflow', {
+        turns: [
+          {
+            speaker: '奏',
+            lines: [
+              {
+                content: '真冬，桌上的茶还温着。',
+                motion: 'w-normal-nod01',
+                facial: 'face_smallmouth_01',
+                ttsCaption: '静かで穏やかな声で話している。',
+                ttsSpeed: 0.95
+              }
+            ]
+          },
+          {
+            speaker: '真冬',
+            lines: [
+              {
+                content: '……嗯，在 25时 大家面前才能松一口气。',
+                facial: 'face_closeeye_01'
+              }
+            ]
+          }
+        ]
+      })
+    )
+    assert.equal(compiled.compiled, true)
+    assert.equal(
+      compiled.dialogueLintIssues.filter((i) => i.code === 'persona_ooc').length,
+      0
+    )
+    assert.equal(toolkit.getSavedPlan()?.understanding?.turningPoint, '真冬想起茶杯还没洗')
+
+    const draftBeforePatch = toolkit.getSavedDraft()
+    const talkIdx = draftBeforePatch.snippets.findIndex((s) => s.type === 'Talk')
+    assert.equal(draftBeforePatch.snippets[talkIdx].data.ttsCaption, '静かで穏やかな声で話している。')
+    assert.equal(draftBeforePatch.snippets[talkIdx].data.ttsSpeed, 0.95)
+
+    // Simulate existing ttsText, then patch content via update_talk -> stale ttsText cleared
+    draftBeforePatch.snippets[talkIdx].data.ttsText = '古いセリフ'
+    await toolkit.execute('save_story_draft', { story: draftBeforePatch })
+    await toolkit.execute('patch_story_draft', {
+      operations: [{ op: 'update_talk', index: talkIdx, content: '真冬，先休息五分钟吧。' }]
+    })
+    assert.equal(toolkit.getSavedDraft().snippets[talkIdx].data.ttsText, undefined)
+
+    // 3. AbortSignal in compile_dialogue_workflow / search_official_corpus
+    const ac = new AbortController()
+    ac.abort(new Error('aborted by caller'))
+    const ragRetriever = makeRagRetriever(dir)
+    const abortToolkit = createStoryAgentToolkit({ view, personas, ragRetriever, logger })
+    await assert.rejects(
+      abortToolkit.execute('search_official_corpus', { query: '湖畔' }, ac.signal),
+      (err) => err instanceof Error && /abort/i.test(err.message)
+    )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

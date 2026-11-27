@@ -9,9 +9,11 @@ import {
   extractPairwiseAddressBook,
   inferUnitFromText,
   normalizePjskTerminology,
+  normalizeUnit,
   personaFor,
   planningPersonaPrompt,
-  type PersonaEntry
+  type PersonaEntry,
+  type PersonaLookupOptions
 } from './personas'
 import {
   formatBgmPromptLine,
@@ -1177,7 +1179,7 @@ function personaSummary(persona: PersonaEntry | null, maxChars = 320): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text
 }
 
-function resolveMemberPersona(
+export function resolveMemberPersona(
   personas: PersonaEntry[],
   member: Pick<StagedCastMember, 'modelId' | 'name' | 'fullName' | 'path'>,
   view?: CatalogView,
@@ -1194,20 +1196,40 @@ function resolveMemberPersona(
     defaultMotion: '',
     defaultFacial: ''
   }
-  const unitHint = model.unit ?? inferUnitFromText(contextText)
+  const unitHint = normalizeUnit(model.unit) ?? inferUnitFromText(contextText)
   return personaFor(personas, model, {
     ...(unitHint ? { unitHint } : {}),
     ...(contextText ? { contextText } : {})
   })
 }
 
+export function resolveCastPersonas(
+  personas: PersonaEntry[],
+  cast: ReadonlyArray<Pick<StagedCastMember, 'modelId' | 'name' | 'fullName' | 'path'>>,
+  view?: CatalogView,
+  contextText = ''
+): PersonaEntry[] {
+  if (personas.length === 0) return []
+  const out: PersonaEntry[] = []
+  const seen = new Set<PersonaEntry>()
+  for (const member of cast) {
+    const resolved = resolveMemberPersona(personas, member, view, contextText)
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved)
+      out.push(resolved)
+    }
+  }
+  return out
+}
+
 function mergePairwiseAddresses(
   personas: PersonaEntry[],
   castNames: string[],
-  existing?: StagedPairwiseAddress[]
+  existing?: StagedPairwiseAddress[],
+  lookupOptions?: PersonaLookupOptions
 ): StagedPairwiseAddress[] | undefined {
   const merged = new Map<string, StagedPairwiseAddress>()
-  for (const rule of extractPairwiseAddressBook(personas, castNames)) {
+  for (const rule of extractPairwiseAddressBook(personas, castNames, lookupOptions)) {
     const key = `${rule.from}::${rule.to}`
     merged.set(key, { from: rule.from, to: rule.to, zh: rule.zh })
   }
@@ -1445,15 +1467,16 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
   const richRoster = mainRoster.length <= 6
   const models = mainRoster
     .map((model) => {
+      const normalizedUnit = normalizeUnit(model.unit)
       const persona = personaFor(options.personas, model, {
-        unitHint: sceneUnitHint ?? model.unit,
+        unitHint: sceneUnitHint ?? normalizedUnit,
         contextText: options.scene
       })
       const group = model.unit ? `（${model.unit}）` : persona?.group ? `（${persona.group}）` : ''
       const isFocused =
         richRoster ||
         mentionedSet.has(model.id) ||
-        Boolean(sceneUnitHint && persona?.unit === sceneUnitHint)
+        Boolean(sceneUnitHint && normalizeUnit(persona?.unit) === sceneUnitHint)
       const digest = personaSummary(persona, mentionedSet.has(model.id) ? 2200 : isFocused ? 1100 : 260)
       const outfits = compactOutfitOptions(view, model, options.scene)
       return `- modelId=${model.id} ${view.shortName(model)}${group}${outfits}${
@@ -1468,7 +1491,7 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
           .map((m) => {
             const p = subMentioned.includes(m)
               ? personaFor(options.personas, m, {
-                  unitHint: sceneUnitHint ?? m.unit,
+                  unitHint: sceneUnitHint ?? normalizeUnit(m.unit),
                   contextText: options.scene
                 })
               : null
@@ -1484,7 +1507,11 @@ export function buildCastPrompt(view: CatalogView, options: StagedPromptOptions)
     mentionedModels.length >= 2
       ? extractPairwiseAddressBook(
           options.personas,
-          mentionedModels.map((m) => view.shortName(m))
+          mentionedModels.map((m) => view.shortName(m)),
+          {
+            ...(sceneUnitHint ? { unitHint: sceneUnitHint } : {}),
+            ...(options.scene ? { contextText: options.scene } : {})
+          }
         )
       : []
   const candidateAddressBlock =
@@ -1887,10 +1914,16 @@ export function normalizeCastPlan(
     }
     if (list.length > 0) rawPairwiseAddress = list
   }
+  const planContext = [options.scene, str(doc.event), str(doc.logline), ...outline].filter(Boolean).join('\n')
+  const planUnitHint = inferUnitFromText(planContext)
   const pairwiseAddress = mergePairwiseAddresses(
     options.personas,
     cast.map((c) => c.name),
-    rawPairwiseAddress
+    rawPairwiseAddress,
+    {
+      ...(planUnitHint ? { unitHint: planUnitHint } : {}),
+      ...(planContext ? { contextText: planContext } : {})
+    }
   )
 
   let retrievalQueries: StagedRetrievalQueries | undefined
@@ -1946,9 +1979,15 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
     mentioned.length >= 2 ? mentioned.slice(0, 5) : pool.slice(0, Math.min(2, pool.length))
   const cast = models.map((model) => castMemberFor(view, model))
   const bg = view.defaultImage()
+  const fallbackUnitHint = inferUnitFromText(options.scene)
   const pairwiseAddress = mergePairwiseAddresses(
     options.personas,
-    cast.map((c) => c.name)
+    cast.map((c) => c.name),
+    undefined,
+    {
+      ...(fallbackUnitHint ? { unitHint: fallbackUnitHint } : {}),
+      ...(options.scene ? { contextText: options.scene } : {})
+    }
   )
   return {
     title: options.title ?? '',
@@ -2250,10 +2289,15 @@ export function buildDialoguePrompt(
     stage: 'dialogue',
     maxChars: 2200
   })
+  const dialogueUnitHint = inferUnitFromText(dialogueContextText)
   const mergedAddresses = mergePairwiseAddresses(
     options.personas,
     plan.cast.map((c) => c.name),
-    plan.pairwiseAddress
+    plan.pairwiseAddress,
+    {
+      ...(dialogueUnitHint ? { unitHint: dialogueUnitHint } : {}),
+      ...(dialogueContextText ? { contextText: dialogueContextText } : {})
+    }
   )
   const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
   const researchBriefBlock = options.researchBrief?.trim()
@@ -3250,10 +3294,16 @@ export function buildDialoguePolishPrompt(
     .filter(Boolean)
     .join('\n\n')
 
+  const polishContextText = [options.scene ?? '', plan.event, plan.logline].filter(Boolean).join('\n')
+  const polishUnitHint = inferUnitFromText(polishContextText)
   const mergedAddresses = mergePairwiseAddresses(
     options.personas ?? [],
     plan.cast.map((c) => c.name),
-    plan.pairwiseAddress
+    plan.pairwiseAddress,
+    {
+      ...(polishUnitHint ? { unitHint: polishUnitHint } : {}),
+      ...(polishContextText ? { contextText: polishContextText } : {})
+    }
   )
   const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
   const anchorBlock = formatDirectingAnchorBlock(plan)
@@ -3306,10 +3356,16 @@ export function buildPersonaCriticPrompt(
   options: DialoguePolishOptions = {},
   issues: DialogueLintIssue[] = []
 ): StagedMessages {
+  const polishContextText = [options.scene ?? '', plan.event, plan.logline].filter(Boolean).join('\n')
+  const polishUnitHint = inferUnitFromText(polishContextText)
   const mergedAddresses = mergePairwiseAddresses(
     options.personas ?? [],
     plan.cast.map((c) => c.name),
-    plan.pairwiseAddress
+    plan.pairwiseAddress,
+    {
+      ...(polishUnitHint ? { unitHint: polishUnitHint } : {}),
+      ...(polishContextText ? { contextText: polishContextText } : {})
+    }
   )
   const addressBlock = formatPairwiseAddressBlock({ ...plan, pairwiseAddress: mergedAddresses })
   const anchorBlock = formatDirectingAnchorBlock(plan)
@@ -6417,6 +6473,20 @@ export interface StagedDirectorReviewPatch {
   snippet?: Record<string, unknown>
 }
 
+export interface StagedDirectorActingHint {
+  snippetIndex: number
+  speaker: string
+  issues: string[]
+  recommendedFacials: string[]
+  recommendedMotions: string[]
+}
+
+export interface StagedDirectorReviewHints {
+  telemetrySummary?: string
+  reviewFocusPoints?: string[]
+  actingIssueHints?: StagedDirectorActingHint[]
+}
+
 export interface StagedDirectorReviewResult {
   dramaticArc: string
   emotionalContinuityAndVoice: string
@@ -6428,14 +6498,15 @@ export interface StagedDirectorReviewResult {
 }
 
 /**
- * 为 staged 流水线合成后的成稿构造紧凑的【导演终审】提示词：
- * 传入压缩后的片段时间线与统计摘要，让模型以导演身份审视并输出少量精准外科修补（绝不破坏 ttsText）。
+ * 为 staged / 统一流水线合成后的成稿构造紧凑的【导演终审】提示词：
+ * 传入压缩后的片段时间线、统计摘要与局部问题句演技推荐（onlyIssues），让模型以导演身份审视并输出少量精准外科修补（绝不破坏 ttsText）。
  */
 export function buildDirectorReviewPrompt(
   view: CatalogView,
   plan: StagedCastPlan,
   story: { models: Array<{ id: number }>; snippets: Array<Record<string, unknown>> },
-  options: StagedPromptOptions
+  options: StagedPromptOptions,
+  reviewHints?: StagedDirectorReviewHints
 ): StagedMessages {
   const snippets = story.snippets
   let talkCount = 0
@@ -6517,14 +6588,41 @@ export function buildDirectorReviewPrompt(
     })
     .filter(Boolean)
     .join('\n')
+  const reviewUnitHint = inferUnitFromText(reviewContextText)
   const reviewAddressBlock = formatPairwiseAddressBlock({
     ...plan,
     pairwiseAddress: mergePairwiseAddresses(
       options.personas,
       plan.cast.map((c) => c.name),
-      plan.pairwiseAddress
+      plan.pairwiseAddress,
+      {
+        ...(reviewUnitHint ? { unitHint: reviewUnitHint } : {}),
+        ...(reviewContextText ? { contextText: reviewContextText } : {})
+      }
     )
   })
+  const issueHintsBlock =
+    reviewHints &&
+    (reviewHints.telemetrySummary ||
+      (reviewHints.reviewFocusPoints?.length ?? 0) > 0 ||
+      (reviewHints.actingIssueHints?.length ?? 0) > 0)
+      ? [
+          '',
+          '## 审校重点与问题句局部演技推荐（onlyIssues）',
+          ...(reviewHints.telemetrySummary ? [reviewHints.telemetrySummary] : []),
+          ...(reviewHints.reviewFocusPoints?.map((p) => `- 重点核查：${p}`) ?? []),
+          ...(reviewHints.actingIssueHints?.map(
+            (h) =>
+              `- snippets[${h.snippetIndex}](${h.speaker}): ${h.issues.join('；')}` +
+              (h.recommendedFacials.length > 0
+                ? ` | 推荐表情[${h.recommendedFacials.join(', ')}]`
+                : '') +
+              (h.recommendedMotions.length > 0
+                ? ` | 推荐动作[${h.recommendedMotions.join(', ')}]`
+                : '')
+          ) ?? [])
+        ].join('\n')
+      : ''
 
   return {
     system: [
@@ -6545,7 +6643,7 @@ export function buildDirectorReviewPrompt(
 共 ${snippets.length} 片段 / ${talkCount} 句 Talk | PlaySe=${playSeCount} | ChangeBgm=${bgmCount} | 独立 Motion=${standaloneMotionCount} | Move=${moveCount} | Wait=${waitCount}
 
 ## 角色演技基调与可用动作/表情参考
-${castMotionHints}${reviewAddressBlock}
+${castMotionHints}${reviewAddressBlock}${issueHintsBlock}
 
 ## 常用 PlaySe 参考
 ${seChoices}

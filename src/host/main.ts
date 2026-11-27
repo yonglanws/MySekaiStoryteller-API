@@ -487,6 +487,7 @@ async function bootstrap(): Promise<void> {
           translateForTts?: unknown
           pipeline?: unknown
           agentic?: unknown
+          directorReview?: unknown
           maxToolTurns?: unknown
           agentMaxSteps?: unknown
         },
@@ -565,6 +566,7 @@ async function bootstrap(): Promise<void> {
             typeof body.translateForTts === 'boolean' ? body.translateForTts : undefined,
           pipeline,
           agentic,
+          directorReview: typeof body.directorReview === 'boolean' ? body.directorReview : undefined,
           maxToolTurns,
           signal
         })

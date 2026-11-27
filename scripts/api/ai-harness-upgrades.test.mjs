@@ -400,101 +400,78 @@ test('requirement #9: TTS voice refAudioPaths reset + calm specialScene/speed sm
 test('agentic harness: supports native tool_calls and automatic ReAct JSON fallback', async () => {
   const view = makeView()
   const logger = new Logger({ type: 'hidden' })
-  const validPayload = {
-    models: [
-      { id: 1, model: view.models[0].path, normal_scale: 2.1, small_scale: 1.8, anchor: 0.5 }
-    ],
-    images: [{ id: 1, image: 'bg_room.jpg' }],
-    snippets: [
-      { type: 'ChangeLayoutMode', wait: false, delay: 0, data: { mode: 'Normal' } },
-      {
-        type: 'LayoutAppear',
-        wait: true,
-        delay: 0,
-        data: {
-          modelId: 1,
-          from: { side: 'Center', offset: 0 },
-          to: { side: 'Center', offset: 0 },
-          motion: 'w-normal-nod01',
-          facial: 'face_normal_01',
-          moveSpeed: 'Normal'
-        }
-      },
-      {
-        type: 'Talk',
-        wait: true,
-        delay: 0,
-        data: {
-          speaker: '瑞希',
-          content: '今晚也要继续剪视频吗？',
-          ttsText: '',
-          modelId: 1,
-          closeWindowOnFinish: true
-        }
-      },
-      {
-        type: 'LayoutClear',
-        wait: true,
-        delay: 0,
-        data: {
-          modelId: 1,
-          from: { side: 'Center', offset: 0 },
-          to: { side: 'Center', offset: 0 },
-          motion: '',
-          facial: '',
-          moveSpeed: 'Normal'
-        }
-      },
-      { type: 'BlackOut', wait: true, delay: 0, data: { duration: 600 } }
-    ]
-  }
 
-  // 1) 原生 tool_calls 测试：先查表情工具再交付成稿
-  let callIndex = 0
+  // 1) 原生 tool_calls 测试：Phase 1 调用 lookup_character，然后进入 Phase 2/3
+  let nativeExploreTurn = 0
   const nativeServer = http.createServer(async (req, res) => {
-    for await (const _ of req) {
-      /* drain */
-    }
-    callIndex += 1
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    const sys = body.messages?.[0]?.content ?? ''
     res.setHeader('content-type', 'application/json')
-    if (callIndex === 1) {
-      res.end(
-        JSON.stringify({
-          model: 'mock-agent',
-          choices: [
+
+    let message
+    if (sys.includes('hybrid 探索阶段')) {
+      nativeExploreTurn += 1
+      if (nativeExploreTurn === 1 && Array.isArray(body.tools) && body.tools.length > 0) {
+        message = {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
             {
-              finish_reason: 'tool_calls',
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  {
-                    id: 'tc_1',
-                    type: 'function',
-                    function: {
-                      name: 'inspect_character_expressions',
-                      arguments: JSON.stringify({ modelId: 1, mood: '微笑' })
-                    }
-                  }
-                ]
+              id: 'tc_1',
+              type: 'function',
+              function: {
+                name: 'lookup_character',
+                arguments: JSON.stringify({ characters: ['瑞希'] })
               }
             }
           ]
+        }
+      } else {
+        message = {
+          role: 'assistant',
+          content: JSON.stringify({
+            researchBrief: '已核实瑞希夜谈人设。',
+            optionalPlan: {
+              title: '夜谈',
+              event: '晚上写分镜',
+              background: 'bg_room.jpg',
+              cast: [{ modelId: 1, name: '瑞希', role: '独白' }]
+            }
+          })
+        }
+      }
+    } else if (sys.includes('第二轮：只写台词稿')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          title: '夜谈',
+          turns: [{ speaker: '瑞希', lines: ['今晚也要继续剪视频吗？', '……先喝口热茶吧。'] }]
         })
-      )
-      return
+      }
+    } else if (sys.includes('directStaging')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+          events: []
+        })
+      }
+    } else {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          background: 'bg_room.jpg',
+          lines: [
+            { id: 'l1', facial: 'face_normal_01' },
+            { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }
+          ]
+        })
+      }
     }
-    res.end(
-      JSON.stringify({
-        model: 'mock-agent',
-        choices: [
-          {
-            finish_reason: 'stop',
-            message: { role: 'assistant', content: JSON.stringify(validPayload) }
-          }
-        ]
-      })
-    )
+    res.end(JSON.stringify({ model: 'mock-agent', choices: [{ finish_reason: 'stop', message }] }))
   })
   nativeServer.listen(0, '127.0.0.1')
   await once(nativeServer, 'listening')
@@ -513,7 +490,7 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
         jsonMode: 'auto',
         extraBody: {},
         systemPrompt: '',
-        targetMinutes: 1,
+        targetMinutes: 0.2,
         repairRounds: 1,
         pipeline: 'single',
         condenseDialogue: true,
@@ -530,12 +507,12 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
       view,
       personas: [],
       scene: '晚上写分镜',
-      targetMinutes: 1,
+      targetMinutes: 0.2,
       logger
     })
     assert.equal(res.modeUsed, 'native')
-    assert.deepEqual(res.toolCallsUsed, ['inspect_character_expressions'])
-    assert.equal(res.story.snippets.filter((s) => s.type === 'Talk').length, 1)
+    assert.deepEqual(res.toolCallsUsed, ['lookup_character'])
+    assert.equal(res.story.snippets.filter((s) => s.type === 'Talk').length, 2)
   } finally {
     nativeServer.close()
   }
@@ -547,43 +524,57 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
     req.setEncoding('utf8')
     for await (const chunk of req) raw += chunk
     const body = JSON.parse(raw)
+    const sys = body.messages?.[0]?.content ?? ''
     res.setHeader('content-type', 'application/json')
     if (body.tools) {
       res.statusCode = 400
       res.end(JSON.stringify({ error: { message: 'tools are not supported by this model' } }))
       return
     }
-    reactStep += 1
-    if (reactStep === 1) {
-      res.end(
-        JSON.stringify({
-          model: 'mock-react',
-          choices: [
-            {
-              finish_reason: 'stop',
-              message: {
-                content: JSON.stringify({
-                  tool_call: {
-                    name: 'search_assets',
-                    arguments: { kind: 'background', query: '夜晚' }
-                  }
-                })
-              }
-            }
-          ]
+    let content
+    if (sys.includes('ReAct JSON')) {
+      reactStep += 1
+      if (reactStep === 1) {
+        content = JSON.stringify({
+          tool_call: {
+            name: 'search_assets',
+            arguments: { kind: 'background', query: '夜晚' }
+          }
         })
-      )
-      return
+      } else {
+        content = JSON.stringify({
+          researchBrief: '已核实夜晚房间背景。',
+          optionalPlan: {
+            title: '夜晚剪辑',
+            event: '晚上继续工作',
+            background: 'bg_room.jpg',
+            cast: [{ modelId: 1, name: '瑞希', role: '工作' }]
+          }
+        })
+      }
+    } else if (sys.includes('第二轮：只写台词稿')) {
+      content = JSON.stringify({
+        title: '夜晚剪辑',
+        turns: [{ speaker: '瑞希', lines: ['今晚继续把这段剪完吧。', '……应该来得及。'] }]
+      })
+    } else if (sys.includes('directStaging')) {
+      content = JSON.stringify({
+        scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_room.jpg', ambient: 'night', activeCast: ['瑞希'] }],
+        events: []
+      })
+    } else {
+      content = JSON.stringify({
+        background: 'bg_room.jpg',
+        lines: [
+          { id: 'l1', facial: 'face_normal_01' },
+          { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }
+        ]
+      })
     }
     res.end(
       JSON.stringify({
         model: 'mock-react',
-        choices: [
-          {
-            finish_reason: 'stop',
-            message: { content: JSON.stringify({ final: validPayload }) }
-          }
-        ]
+        choices: [{ finish_reason: 'stop', message: { content } }]
       })
     )
   })
@@ -603,7 +594,7 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
       jsonMode: 'auto',
       extraBody: {},
       systemPrompt: '',
-      targetMinutes: 1,
+      targetMinutes: 0.2,
       repairRounds: 1,
       pipeline: 'single',
       condenseDialogue: true,
@@ -628,11 +619,12 @@ test('agentic harness: supports native tool_calls and automatic ReAct JSON fallb
     const out = await writer.generate({
       prompt: '晚上继续工作',
       pipeline: 'agent',
+      targetMinutes: 0.2,
       translateForTts: false
     })
     assert.equal(out.meta.agentMode, 'react-json')
     assert.deepEqual(out.meta.toolCalls, ['search_assets'])
-    assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 1)
+    assert.equal(out.story.snippets.filter((s) => s.type === 'Talk').length, 2)
   } finally {
     fallbackServer.close()
   }
@@ -844,75 +836,89 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
   const finalized = JSON.parse(await toolkit.execute('finalize_story_draft', {}))
   assert.equal(finalized.finalized, true)
 
-  // 5) Multi-step autonomous loop (>8 turns: 10 tool calls + finalize) succeeds with default maxToolTurns=16
-  let turn = 0
+  // 5) Unified pipeline Phase 1 exploration (<=4 turns) + Phase 2 dialogue + Phase 3 direction via runAgenticStoryGeneration
+  let exploreStep = 0
   const multiStepServer = http.createServer(async (req, res) => {
-    for await (const _ of req) {
-      /* drain */
-    }
-    turn += 1
+    let raw = ''
+    req.setEncoding('utf8')
+    for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw)
+    const sys = body.messages?.[0]?.content ?? ''
     res.setHeader('content-type', 'application/json')
-    const toolPlan = [
-      { name: 'lookup_character', args: { character: '瑞希' } },
-      { name: 'lookup_character', args: { character: '绘名' } },
-      { name: 'search_assets', args: { kind: 'background', query: '天台' } },
-      { name: 'search_assets', args: { kind: 'se', query: '脚步' } },
-      { name: 'search_official_corpus', args: { query: '天台 瑞希 绘名', stage: 'dialogue' } },
-      {
-        name: 'plan_story_outline',
-        args: { title: '天台', cast: [{ name: '瑞希' }, { name: '绘名' }] }
-      },
-      { name: 'inspect_character_expressions', args: { modelId: 1, mood: '伤心' } },
-      {
-        name: 'recommend_acting_for_lines',
-        args: { lines: [{ speaker: '瑞希', content: '对不起……', emotion: '伤心' }] }
-      },
-      { name: 'save_story_draft', args: { story: flawedDraft } },
-      {
-        name: 'patch_story_draft',
-        args: {
-          operations: [
-            { op: 'update_acting', index: 3, motion: 'w-normal-sigh01', facial: 'face_sad_01' }
-          ]
-        }
-      }
-    ]
-    if (turn <= toolPlan.length) {
-      const step = toolPlan[turn - 1]
-      res.end(
-        JSON.stringify({
-          model: 'mock-multi',
-          choices: [
+    let message
+    if (sys.includes('hybrid 探索阶段')) {
+      exploreStep += 1
+      if (exploreStep === 1 && Array.isArray(body.tools) && body.tools.length > 0) {
+        message = {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
             {
-              finish_reason: 'tool_calls',
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  {
-                    id: `tc_${turn}`,
-                    type: 'function',
-                    function: { name: step.name, arguments: JSON.stringify(step.args) }
-                  }
-                ]
-              }
+              id: 'tc_1',
+              type: 'function',
+              function: { name: 'lookup_character', arguments: JSON.stringify({ characters: ['瑞希', '绘名'] }) }
+            },
+            {
+              id: 'tc_2',
+              type: 'function',
+              function: { name: 'search_assets', arguments: JSON.stringify({ kinds: ['background', 'se'], queries: ['天台'] }) }
+            },
+            {
+              id: 'tc_3',
+              type: 'function',
+              function: { name: 'search_official_corpus', arguments: JSON.stringify({ query: '天台 瑞希 绘名', stage: 'dialogue' }) }
             }
           ]
+        }
+      } else {
+        message = {
+          role: 'assistant',
+          content: JSON.stringify({
+            researchBrief: '瑞希和绘名天台和解。',
+            optionalPlan: {
+              title: '天台和解',
+              event: '瑞希和绘名在天台道歉和解',
+              background: 'bg_rooftop.jpg',
+              cast: [
+                { modelId: 1, name: '瑞希', role: '道歉' },
+                { modelId: 2, name: '绘名', role: '倾听' }
+              ]
+            }
+          })
+        }
+      }
+    } else if (sys.includes('第二轮：只写台词稿')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          title: '天台和解',
+          turns: [
+            { speaker: '瑞希', lines: ['对不起，刚才没能及时回应你。'] },
+            { speaker: '绘名', lines: ['……别放在心上，先听我说完。'] }
+          ]
         })
-      )
-      return
+      }
+    } else if (sys.includes('directStaging')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'evening', activeCast: ['瑞希', '绘名'] }],
+          events: []
+        })
+      }
+    } else {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          background: 'bg_rooftop.jpg',
+          lines: [
+            { id: 'l1', facial: 'face_sad_01' },
+            { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }
+          ]
+        })
+      }
     }
-    res.end(
-      JSON.stringify({
-        model: 'mock-multi',
-        choices: [
-          {
-            finish_reason: 'stop',
-            message: { role: 'assistant', content: JSON.stringify({ use_saved_draft: true }) }
-          }
-        ]
-      })
-    )
+    res.end(JSON.stringify({ model: 'mock-multi', choices: [{ finish_reason: 'stop', message }] }))
   })
   multiStepServer.listen(0, '127.0.0.1')
   await once(multiStepServer, 'listening')
@@ -932,7 +938,7 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
       jsonMode: 'off',
       extraBody: {},
       systemPrompt: '',
-      targetMinutes: 1,
+      targetMinutes: 0.2,
       repairRounds: 1,
       pipeline: 'agent',
       agentMaxSteps: 16,
@@ -949,14 +955,14 @@ test('agentic harness: stateful outline -> acting advisor -> draft -> critique -
     view,
     personas: [],
     scene: '瑞希和绘名在天台道歉和解',
-    targetMinutes: 1,
+    targetMinutes: 0.2,
     logger
   })
-  assert.equal(multiRes.rounds, 11)
-  assert.equal(multiRes.toolCallsUsed.length, 10)
+  assert.equal(multiRes.modeUsed, 'native')
+  assert.deepEqual(multiRes.toolCallsUsed, ['lookup_character', 'search_assets', 'search_official_corpus'])
   const talks = multiRes.story.snippets.filter((s) => s.type === 'Talk')
+  assert.equal(talks.length, 2)
   assert.equal(talks[0].data.actions[0].facial, 'face_sad_01')
-  assert.equal(talks[0].data.actions[0].motion, 'w-normal-sigh01')
 })
 
 test('agentic harness: batched inspect_character_expressions, search_assets, listener recommendation & patch_story_draft listenerAction', async () => {
@@ -1301,128 +1307,108 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
   assert.equal(toolkit.isFinalized(), true)
   assert.equal(toolkit.getDirectorReview()?.appliedOperationsCount, 2)
 
-  // 7) End-to-end 3-turn native agent loop + superseded save_story_draft compaction check
-  let callNum = 0
-  const capturedBodies = []
+  // 7) End-to-end unified pipeline via runAgenticStoryGeneration with single Director Review
+  let leanExploreTurn = 0
   const leanServer = http.createServer(async (req, res) => {
     let raw = ''
     req.setEncoding('utf8')
     for await (const c of req) raw += c
-    capturedBodies.push(JSON.parse(raw))
-    callNum += 1
+    const body = JSON.parse(raw)
+    const sys = body.messages?.[0]?.content ?? ''
     res.setHeader('content-type', 'application/json')
-    if (callNum === 1) {
-      res.end(
-        JSON.stringify({
-          model: 'mock-lean',
-          choices: [
+    let message
+    if (sys.includes('hybrid 探索阶段')) {
+      leanExploreTurn += 1
+      if (leanExploreTurn === 1 && Array.isArray(body.tools) && body.tools.length > 0) {
+        message = {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
             {
-              finish_reason: 'tool_calls',
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  {
-                    id: 'c1',
-                    type: 'function',
-                    function: {
-                      name: 'lookup_character',
-                      arguments: JSON.stringify({
-                        characters: ['瑞希', '绘名'],
-                        includeExpressions: true
-                      })
-                    }
-                  },
-                  {
-                    id: 'c2',
-                    type: 'function',
-                    function: {
-                      name: 'search_assets',
-                      arguments: JSON.stringify({
-                        kinds: ['background', 'bgm', 'se'],
-                        queries: ['天台', '脚步']
-                      })
-                    }
-                  }
-                ]
-              }
+              id: 'c1',
+              type: 'function',
+              function: { name: 'lookup_character', arguments: JSON.stringify({ characters: ['瑞希', '绘名'] }) }
+            },
+            {
+              id: 'c2',
+              type: 'function',
+              function: { name: 'search_assets', arguments: JSON.stringify({ kinds: ['background', 'bgm', 'se'], queries: ['天台', '脚步'] }) }
             }
           ]
-        })
-      )
-      return
-    }
-    if (callNum === 2) {
-      res.end(
-        JSON.stringify({
-          model: 'mock-lean',
-          choices: [
-            {
-              finish_reason: 'tool_calls',
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  {
-                    id: 'c3',
-                    type: 'function',
-                    function: {
-                      name: 'save_story_draft',
-                      arguments: JSON.stringify({ story: longDraft })
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        })
-      )
-      return
-    }
-    res.end(
-      JSON.stringify({
-        model: 'mock-lean',
-        choices: [
-          {
-            finish_reason: 'tool_calls',
-            message: {
-              role: 'assistant',
-              content: null,
-              tool_calls: [
-                {
-                  id: 'c4',
-                  type: 'function',
-                  function: {
-                    name: 'submit_director_review',
-                    arguments: JSON.stringify({
-                      dramaticArc: '起承转合清晰',
-                      emotionalContinuityAndVoice: '角色语气自然',
-                      audioAndSeDesign: '补充脚步 PlaySe',
-                      stageRhythm: '补结尾留白',
-                      actingNaturalness: '表情动作连贯',
-                      concreteFixes: ['补 PlaySe'],
-                      operations: [
-                        {
-                          op: 'insert_before',
-                          index: 4,
-                          snippet: {
-                            type: 'PlaySe',
-                            wait: false,
-                            delay: 0,
-                            data: { file: 'se_walk_women_001_1.mp3', volume: 0.9 }
-                          }
-                        }
-                      ],
-                      finalizeIfReady: true
-                    })
-                  }
-                }
+        }
+      } else {
+        message = {
+          role: 'assistant',
+          content: JSON.stringify({
+            researchBrief: '瑞希与绘名天台对话。',
+            optionalPlan: {
+              title: '天台对话',
+              event: '天台对话',
+              background: 'bg_rooftop.jpg',
+              cast: [
+                { modelId: 1, name: '瑞希', role: '起头' },
+                { modelId: 2, name: '绘名', role: '回应' }
               ]
             }
-          }
-        ]
-      })
-    )
+          })
+        }
+      }
+    } else if (sys.includes('第二轮：只写台词稿')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          title: '天台对话',
+          turns: [
+            { speaker: '瑞希', lines: ['风稍微停了一点呢。'] },
+            { speaker: '绘名', lines: ['……嗯，我们回去吧。'] }
+          ]
+        })
+      }
+    } else if (sys.includes('directStaging')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          scenes: [{ id: 's1', fromLineId: 'l1', background: 'bg_rooftop.jpg', ambient: 'evening', activeCast: ['瑞希', '绘名'] }],
+          events: []
+        })
+      }
+    } else if (sys.includes('总导演')) {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          dramaticArc: '起承转合清晰',
+          emotionalContinuityAndVoice: '角色语气自然',
+          audioAndSeDesign: '补充脚步 PlaySe',
+          stageRhythm: '补结尾留白',
+          actingNaturalness: '表情动作连贯',
+          concreteFixes: ['补 PlaySe'],
+          operations: [
+            {
+              op: 'insert_before',
+              index: 4,
+              snippet: {
+                type: 'PlaySe',
+                wait: false,
+                delay: 0,
+                data: { file: 'se_walk_women_001_1.mp3', volume: 0.9 }
+              }
+            }
+          ]
+        })
+      }
+    } else {
+      message = {
+        role: 'assistant',
+        content: JSON.stringify({
+          background: 'bg_rooftop.jpg',
+          lines: [
+            { id: 'l1', facial: 'face_normal_01' },
+            { id: 'l2', motion: 'w-normal-nod01', facial: 'face_normal_01' }
+          ]
+        })
+      }
+    }
+    res.end(JSON.stringify({ model: 'mock-lean', choices: [{ finish_reason: 'stop', message }] }))
   })
   leanServer.listen(0, '127.0.0.1')
   await once(leanServer, 'listening')
@@ -1441,7 +1427,7 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
       jsonMode: 'off',
       extraBody: {},
       systemPrompt: '',
-      targetMinutes: 1,
+      targetMinutes: 0.2,
       repairRounds: 1,
       pipeline: 'agent',
       agentMaxSteps: 12,
@@ -1458,10 +1444,10 @@ test('agentic harness: batched lookup_character with expressions, draft-aware re
     view,
     personas: [],
     scene: '天台对话',
-    targetMinutes: 1,
+    targetMinutes: 0.2,
+    directorReview: true,
     logger
   })
-  assert.equal(leanOut.rounds, 3, 'complete workflow with Director Review finishes in 3 turns')
   assert.ok(leanOut.directorReview, 'directorReview metadata is returned')
   assert.equal(leanOut.directorReview.appliedOperationsCount, 1)
   assert.equal(leanOut.story.snippets.filter((s) => s.type === 'PlaySe').length, 1)
