@@ -14,6 +14,7 @@ import type { ILogObj, Logger } from 'tslog'
 import { DEFAULT_CLOUD_BGM_ID, DEFAULT_LOCAL_BGM_PATH, type AssetsSettings } from '../config'
 import type { StoryData } from '../../common/types/Story'
 import { atomicWrite, request } from './http'
+import { MOTION_BUNDLES_SIDECAR } from './shared'
 import type {
   CloudBackgroundEntry,
   CloudBgmEntry,
@@ -749,8 +750,6 @@ export async function resolveGlobalBgm(
     return false
   }
 }
-
-const MOTION_BUNDLES_SIDECAR = '.motion-bundles.json'
 
 function expectedModelBundles(entry: CloudModelEntry): string[] {
   const bundles = [...(entry.motionBundles ?? [])].filter(Boolean)

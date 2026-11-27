@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import type { AssetsSettings } from '../config'
 import { ffmpegPath } from '../../shared/ffmpeg'
 import { assertHttpUrl, atomicWrite, fetchJson, request, type RequestOptions } from './http'
+import { mapPool } from './shared'
 import { appendNamedManifest, type NamedManifestEntry } from './manifest'
 import { soundtrackKey, soundtrackLabel, type SoundtrackIndex } from './soundtracks'
 
@@ -374,23 +375,6 @@ function bgmManifestEntry(
   if (!info) return { file, name: fallbackName, description: '' }
   const label = soundtrackLabel(info)
   return { file, name: label.name, description: label.description }
-}
-
-async function mapPool<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const run = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++
-      results[index] = await worker(items[index], index)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, () => run()))
-  return results
 }
 
 async function fetchFiles(
