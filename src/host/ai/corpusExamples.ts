@@ -173,15 +173,15 @@ export function getOfficialActingGuidelines(
   options: { castCount?: number; isSekai?: boolean; isFlashback?: boolean } = {}
 ): string {
   const parts: string[] = [
-    '1. 电影感切镜与自然结构：同一时间地点保持 1 幕连贯推进，不硬凑多幕；近期官方 PJSK 剧集（2024~2026）大量穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（近期单人占比超半数），全片及思考模式切换一律采用原地渐变淡入淡出（LayoutClear + LayoutAppear，from.side === to.side, offset: 0），严禁使用 LeftOver/RightOver 滑进滑出或 Move 横向滑动切镜。',
+    '1. 动态聚焦切镜与自然转场（严禁滑动）：同一时间地点保持 1 幕连贯推进，不硬凑多幕；近期官方 PJSK 剧集（2024~2026）大量穿插「单人 Center 特写切镜」与「双人 Left/Right 同框」（独白、情绪对峙或连续独白段切入单人 Center，回应后再切回双人），全片一律采用原地渐变淡入淡出（LayoutClear + LayoutAppear，from.side === to.side, offset: 0），严禁使用 LeftOver/RightOver 滑进滑出或 Move 横向滑动切镜。跳时间/换场景善用 SideFade、AmbientColor（evening/night）与 FlashbackIn/Out。',
     '2. 台词凝练与潜台词：多用 4~14 字短促反应、停顿与中等句交错，避免连续多句 24+ 字书面说教墙；spoken 台词禁写（微笑）/（叹气）等动作括号，内心独白用完整括号行「（……原来如此）」。',
-    '3. 自然不死板的动作与表情节奏（5,138 集近期加权规律，仅供参考切忌机械套指标）：约 70%~80% 台词在句首 at=0 触发 1 个贴合语气的身体动作 + 表情，其余约 20%~25% 可省略动作自然保持姿态（或仅微调表情）；跨句延续同一表情很常见（哭泣/悲伤高潮段应持续保持 face_cry_*/face_sad_* 4~8+ 句而非逐句跳脸），不必每句硬换脸；同时善用角色丰富的动作与表情变体（含不同编号及贴合气氛的跨风格动作），避免整场只循环 4~5 个动作。长句（>=6 秒）后半拍可酌情插 1 条同说话者的并发 Motion（wait:false, delay:2.5~4.5）演完句中神态变化。',
+    '3. 自然丰富的动作与表情节奏（5,138 集近期加权规律，仅供参考切忌机械套指标）：约 70%~80% 台词在句首 at=0 触发 1 个贴合语气的身体动作 + 表情，其余约 20%~25% 可省略动作自然保持姿态（或仅微调表情）；跨句延续同一表情很常见（哭泣/悲伤高潮段应持续保持 face_cry_*/face_sad_* 4~8+ 句而非逐句跳脸）；同时充分调用角色全量动作库（含 nod02/03、forward02、sigh01、lookaway01、fidget01、relief01 及贴合气氛的 w-cute-*/w-cool-*/w-adult-*/w-happy-* 变体），严禁把 w-normal-nod01/sad01 等同一词根反复刷屏超过 2~3 次，并确保每位在场角色都有多样身体动作。情绪转折或停顿前可多插入独立 Motion 静默反应拍（每 40 句约 16~22 处，含长句后的神态微调 Motion）。',
     '4. 听者反应与静默节拍：严禁在说话者台词中途塞入听者错峰身体动作（at: 0.5..0.85）；官方更常通过单人原地渐变反打切镜、句间独立 Motion 静默反应拍或短促「……」回应呈现听者情绪，双人同框长段说话时也可在句首 at=0 轻切听者纯 facial。道歉/悲伤/哭泣/独白语境严禁误用真笑或任何嘴角上扬表情（含 wry_smile，除非台词明确苦笑安抚），禁误挂 surprise/notice，含泪自责禁用 angry，真冬保持克制内敛。',
-    '5. 声音与收尾余韵：96% 以上的官方剧集使用 PlaySe 音效（脚步、开门、衣料、翻纸、惊觉、环境音）；善用 ChangeBgm 的入曲、切曲与高潮前静音留白（stop: true），高潮或惊愕处可点缀 ShakeScreen / CameraZoom；片尾用 HideTalk / 短 Wait 留白再缓慢淡出，不要说完最后一句瞬间黑屏。'
+    '5. 镜头/震动/开场标题克制与声画余韵：96% 以上的官方剧集使用 PlaySe 音效与细腻 BGM 起停（高潮前可用 stop: true 静音留白）；但**严禁公式化滥用镜头、震动与开场字幕**：日常/谈心/排练/后台戏 CameraZoom 与 CameraMove 控制在 0~1 次（仅真正戏剧爆点/揭示高潮才用 1~3 次），CharacterShake 仅用于真实受惊/物理碰撞（平常对话不用），Telop 与 PlaceInfo 仅在时间地点需要明确交代时可选使用、不要每场套模板双挂；片尾用 HideTalk / 短 Wait 留白再缓慢淡出。'
   ]
   if ((options.castCount ?? 2) >= 3) {
     parts.push(
-      '6. 群像轮换：全片保持 Normal 模式（最多 2 人同台），通过 LayoutClear(Now) + LayoutAppear 原地淡出淡入平滑轮换在场组合。'
+      '6. 群像轮换：全片保持 Normal 模式（最多 2 人同台），通过 LayoutClear(Now) + LayoutAppear 原地淡出淡入平滑轮换在场组合，确保每位出场角色都获得充足表情与多样动作戏份。'
     )
   }
   if (options.isSekai) {
@@ -191,7 +191,7 @@ export function getOfficialActingGuidelines(
   }
   if (options.isFlashback) {
     parts.push(
-      '8. 回忆片段：进入前配 BlackOut(white) + se00053_b + FlashbackIn + BlackIn(white)，结束前务必 FlashbackOut 闭合。'
+      '8. 回忆片段：进入前配 BlackOut(white) + se00053_b + FlashbackIn + BlackIn(white)，结束前务必 FlashbackOut 闭合；普通跳时间/转场优先使用 SideFade(Out/In)。'
     )
   }
   return parts.join('\n')

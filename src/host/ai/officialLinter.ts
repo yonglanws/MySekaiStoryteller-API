@@ -38,6 +38,7 @@ import {
   inspectModelFacial,
   inspectModelMotion,
   isCalmReassureResolution,
+  isCheerfulComedyContext,
   isFacialCompatibleWithLine,
   isMotionCompatibleWithLine,
   isPositiveOnlyFacial,
@@ -1254,9 +1255,12 @@ function pickVerifiedReplacementMotion(
     modelId: number
     content: string
     emotion: string
+    prevContent?: string
+    prevEmotion?: string
     prevTense: boolean
     isListener: boolean
     avoidMotion: string
+    cheerfulScene?: boolean
     fallbackMood: 'angry_frustration' | 'sad_regret' | 'awkward' | 'neutral'
   },
   view?: CatalogView
@@ -1268,6 +1272,8 @@ function pickVerifiedReplacementMotion(
     modelPath: actorInfo.path,
     content: params.content,
     emotion: params.emotion,
+    prevContent: params.prevContent,
+    prevEmotion: params.prevEmotion,
     prevTense: params.prevTense,
     isListener: params.isListener,
     restrainedRole: actorInfo.restrained
@@ -1278,13 +1284,34 @@ function pickVerifiedReplacementMotion(
       modelPath: actorInfo.path,
       emotion: params.emotion,
       content: params.content,
+      prevContent: params.prevContent,
+      prevEmotion: params.prevEmotion,
       prevTense: params.prevTense,
       isListener: params.isListener,
-      restrainedRole: actorInfo.restrained
+      restrainedRole: actorInfo.restrained,
+      cheerfulScene: params.cheerfulScene
     }).ok
   )
-  const rawPick =
+  const compatFromPool =
     compat ||
+    pool.find(
+      (m) =>
+        !isSpecialOrStandingMotion(m) &&
+        isMotionCompatibleWithLine({
+          motion: m,
+          modelPath: actorInfo.path,
+          emotion: params.emotion,
+          content: params.content,
+          prevContent: params.prevContent,
+          prevEmotion: params.prevEmotion,
+          prevTense: params.prevTense,
+          isListener: params.isListener,
+          restrainedRole: actorInfo.restrained,
+          cheerfulScene: params.cheerfulScene
+        }).ok
+    )
+  const rawPick =
+    compatFromPool ||
     pickMoodMatchedMotion(
       pool,
       params.fallbackMood,
@@ -1322,9 +1349,24 @@ function repairActingHygieneInvariants(
   // B) 语境限定动作校验、听者强制微笑防泄漏、以及紧张对峙强装欢快纠偏
   const tenseTracker: SceneTenseTracker = { tense: false, calmRun: 0 }
   const actorState = new Map<number, ActorTenseState>()
+  let prevContent = ''
+  let prevEmotion = ''
   let repairedListenerSmiles = 0
   let repairedMotions = 0
   let repairedFacials = 0
+
+  const talkRecordsForComedy = collectTalkEmotionRecords(
+    snippets,
+    Array.isArray(story.models) ? (story.models as JsonRecord[]) : undefined,
+    view
+  )
+  const comedyProbeLines = talkRecordsForComedy.map((rec) => ({
+    content: rec.content,
+    emotion: rec.emotion,
+    sceneId: String(rec.sceneId)
+  }))
+  const talkPosBySnippet = new Map<number, number>()
+  talkRecordsForComedy.forEach((rec, pos) => talkPosBySnippet.set(rec.snippetIndex, pos))
 
   for (let i = 0; i < snippets.length; i++) {
     const snippet = snippets[i]
@@ -1335,6 +1377,8 @@ function repairActingHygieneInvariants(
     if (isFadeOutOrClearTransition(snippet) || kind === 'ChangeBackgroundImage') {
       tenseTracker.tense = false
       tenseTracker.calmRun = 0
+      prevContent = ''
+      prevEmotion = ''
       actorState.clear()
       continue
     }
@@ -1343,6 +1387,49 @@ function repairActingHygieneInvariants(
       const mid = num(data.modelId, -1)
       const actorInfo = resolveActorCatalogInfo(story, mid, view)
       const surrounding = findSurroundingTalkContext(snippets, i, mid, kind === 'LayoutAppear')
+      const stageFacial = str(data.facial).trim()
+      if (stageFacial && surrounding) {
+        const fc = isFacialCompatibleWithLine({
+          facial: stageFacial,
+          modelPath: actorInfo.path,
+          emotion: surrounding.emotion,
+          content: surrounding.content,
+          prevTense: tenseTracker.tense,
+          isMonologue: false,
+          isListener: false,
+          restrainedRole: actorInfo.restrained
+        })
+        if (!fc.ok) {
+          const rec = recommendActingForLine({
+            facials: actorInfo.facials,
+            motions: [],
+            modelPath: actorInfo.path,
+            content: surrounding.content,
+            emotion: surrounding.emotion,
+            prevTense: tenseTracker.tense,
+            restrainedRole: actorInfo.restrained,
+            prevFacial: stageFacial
+          })
+          let rep =
+            rec.facials.find((f) => f !== stageFacial) ??
+            (actorInfo.facials.length > 0
+              ? pickMoodMatchedFacial(
+                  actorInfo.facials,
+                  tenseTracker.tense ? 'serious' : 'neutral',
+                  actorInfo.path,
+                  actorInfo.restrained
+                )
+              : '')
+          if (rep && view && mid !== -1) {
+            const choices = view.animationChoices(mid, 'facial')
+            if (choices.size > 0) rep = view.canonicalAnimation(mid, 'facial', rep) ?? ''
+          }
+          if (rep && rep !== stageFacial) {
+            data.facial = rep
+            repairedFacials += 1
+          }
+        }
+      }
       const mot = str(data.motion).trim()
       if (mot) {
         const mc = isMotionCompatibleWithLine({
@@ -1379,6 +1466,49 @@ function repairActingHygieneInvariants(
       const surrounding = findSurroundingTalkContext(snippets, i, mid, false)
       const checkMotionTarget = (target: JsonRecord, targetId: number): void => {
         const info = resolveActorCatalogInfo(story, targetId, view)
+        const tf = str(target.facial).trim()
+        if (tf && surrounding) {
+          const fc = isFacialCompatibleWithLine({
+            facial: tf,
+            modelPath: info.path,
+            emotion: surrounding.emotion,
+            content: surrounding.content,
+            prevTense: tenseTracker.tense,
+            isMonologue: false,
+            isListener: false,
+            restrainedRole: info.restrained
+          })
+          if (!fc.ok) {
+            const rec = recommendActingForLine({
+              facials: info.facials,
+              motions: [],
+              modelPath: info.path,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              prevTense: tenseTracker.tense,
+              restrainedRole: info.restrained,
+              prevFacial: tf
+            })
+            let rep =
+              rec.facials.find((f) => f !== tf) ??
+              (info.facials.length > 0
+                ? pickMoodMatchedFacial(
+                    info.facials,
+                    tenseTracker.tense ? 'serious' : 'neutral',
+                    info.path,
+                    info.restrained
+                  )
+                : '')
+            if (rep && view && targetId !== -1) {
+              const choices = view.animationChoices(targetId, 'facial')
+              if (choices.size > 0) rep = view.canonicalAnimation(targetId, 'facial', rep) ?? ''
+            }
+            if (rep && rep !== tf) {
+              target.facial = rep
+              repairedFacials += 1
+            }
+          }
+        }
         const mot = str(target.motion).trim()
         if (mot) {
           const mc = isMotionCompatibleWithLine({
@@ -1426,6 +1556,10 @@ function repairActingHygieneInvariants(
     const content = str(data.content)
     const emotion = str(data.emotion)
     const isMonologue = isThinkingTalkSnippet(snippet)
+    const talkPos = talkPosBySnippet.get(i) ?? -1
+    const cheerfulScene =
+      talkPos >= 0 ? isCheerfulComedyContext(comedyProbeLines, talkPos) : false
+    const effectivePrevTense = tenseTracker.tense && !cheerfulScene
 
     const fixTarget = (target: JsonRecord, actorId: number, isListener: boolean): void => {
       if (actorId === -1) return
@@ -1437,11 +1571,12 @@ function repairActingHygieneInvariants(
       if (isListener) {
         const lState = actorState.get(actorId) ?? null
         const isLockedTenseListener =
-          lState === 'angry' ||
-          lState === 'sad' ||
-          lState === 'cry' ||
-          lState === 'serious' ||
-          (lState === 'trouble' && tenseTracker.tense)
+          !cheerfulScene &&
+          (lState === 'angry' ||
+            lState === 'sad' ||
+            lState === 'cry' ||
+            lState === 'serious' ||
+            (lState === 'trouble' && effectivePrevTense))
         if (isLockedTenseListener && lState) {
           const isListenerSmile =
             facial &&
@@ -1481,9 +1616,12 @@ function repairActingHygieneInvariants(
                   modelId: actorId,
                   content,
                   emotion,
+                  prevContent,
+                  prevEmotion,
                   prevTense: true,
                   isListener: true,
                   avoidMotion: motion,
+                  cheerfulScene,
                   fallbackMood:
                     lState === 'angry' || lState === 'serious' ? 'angry_frustration' : 'sad_regret'
                 },
@@ -1506,10 +1644,11 @@ function repairActingHygieneInvariants(
           modelPath: actorInfo.path,
           emotion,
           content,
-          prevTense: tenseTracker.tense,
+          prevTense: effectivePrevTense,
           isMonologue: !isListener && isMonologue,
           isListener,
-          restrainedRole: actorInfo.restrained
+          restrainedRole: actorInfo.restrained,
+          cheerfulScene
         }).ok
       ) {
         const rec = recommendActingForLine({
@@ -1518,7 +1657,9 @@ function repairActingHygieneInvariants(
           modelPath: actorInfo.path,
           content,
           emotion,
-          prevTense: tenseTracker.tense,
+          prevContent,
+          prevEmotion,
+          prevTense: effectivePrevTense,
           isMonologue: !isListener && isMonologue,
           isListener,
           restrainedRole: actorInfo.restrained,
@@ -1529,7 +1670,11 @@ function repairActingHygieneInvariants(
           (actorInfo.facials.length > 0
             ? pickMoodMatchedFacial(
                 actorInfo.facials,
-                tenseTracker.tense ? (emotion === '开心' && !isListener ? 'wry_smile' : 'serious') : 'neutral',
+                effectivePrevTense
+                  ? emotion === '开心' && !isListener
+                    ? 'wry_smile'
+                    : 'serious'
+                  : 'neutral',
                 actorInfo.path,
                 actorInfo.restrained
               )
@@ -1552,9 +1697,12 @@ function repairActingHygieneInvariants(
           modelPath: actorInfo.path,
           emotion,
           content,
-          prevTense: tenseTracker.tense,
+          prevContent,
+          prevEmotion,
+          prevTense: effectivePrevTense,
           isListener,
-          restrainedRole: actorInfo.restrained
+          restrainedRole: actorInfo.restrained,
+          cheerfulScene
         }).ok
       ) {
         const rep = pickVerifiedReplacementMotion(
@@ -1563,10 +1711,13 @@ function repairActingHygieneInvariants(
             modelId: actorId,
             content,
             emotion,
-            prevTense: tenseTracker.tense,
+            prevContent,
+            prevEmotion,
+            prevTense: effectivePrevTense,
             isListener,
             avoidMotion: curMotion,
-            fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
+            cheerfulScene,
+            fallbackMood: effectivePrevTense ? 'awkward' : 'neutral'
           },
           view
         )
@@ -1613,7 +1764,9 @@ function repairActingHygieneInvariants(
         }
       }
     }
-    updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+    prevContent = content
+    prevEmotion = emotion
+    updateSceneTenseAfterTalk(tenseTracker, content, emotion, { cheerfulScene })
   }
 
   if (repairedListenerSmiles > 0) {
@@ -1624,6 +1777,282 @@ function repairActingHygieneInvariants(
   }
   if (repairedFacials > 0) {
     warn(`[Linter] 已替换 ${repairedFacials} 处语境不匹配的表情`)
+  }
+}
+
+function ensureEveryActorHasBodyMotion(
+  story: JsonRecord,
+  view: CatalogView,
+  warn: (message: string) => void
+): void {
+  const snippets = Array.isArray(story.snippets) ? (story.snippets as JsonRecord[]) : []
+  const models = Array.isArray(story.models) ? (story.models as JsonRecord[]) : []
+  if (models.length === 0) return
+
+  const bodyCounts = new Map<number, number>()
+  for (const m of models) {
+    const id = num(m.id, -1)
+    if (id !== -1) bodyCounts.set(id, 0)
+  }
+
+  let talkCount = 0
+  let cursorSec = 0
+  let runningEndSec = 0
+  let windowOpen = false
+  const lastAppearMotion = new Map<number, { timeSec: number; snippetIndex: number }>()
+  const onStage = new Set<number>()
+  const talkCandidates = new Map<
+    number,
+    Array<{
+      snippetIndex: number
+      clashesAppearIdx: number | null
+      hasListenerMotionAtZero: boolean
+      content: string
+      emotion: string
+      prevContent: string
+      prevEmotion: string
+      prevTense: boolean
+    }>
+  >()
+  const stageFollowupCandidates = new Map<
+    number,
+    Array<{ insertAfterIndex: number; content: string; emotion: string; prevTense: boolean }>
+  >()
+
+  const tenseTracker: SceneTenseTracker = { tense: false, calmRun: 0 }
+  let prevContent = ''
+  let prevEmotion = ''
+
+  for (let i = 0; i < snippets.length; i++) {
+    const snippet = snippets[i]
+    if (!isRecord(snippet)) continue
+    const kind = str(snippet.type)
+    const data = isRecord(snippet.data) ? snippet.data : {}
+
+    if (
+      snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+    ) {
+      cursorSec = Math.max(cursorSec, runningEndSec)
+    }
+    const startSec = cursorSec + Math.max(0, num(snippet.delay, 0))
+    const durSec = estimateSnippetDurationSec(snippet, windowOpen)
+    runningEndSec = Math.max(runningEndSec, startSec + durSec)
+
+    if (isFadeOutOrClearTransition(snippet) || kind === 'ChangeBackgroundImage') {
+      tenseTracker.tense = false
+      tenseTracker.calmRun = 0
+      prevContent = ''
+      prevEmotion = ''
+    }
+
+    if (kind === 'LayoutAppear') {
+      const mid = num(data.modelId, -1)
+      if (mid !== -1) {
+        onStage.add(mid)
+        if (str(data.motion).trim()) {
+          lastAppearMotion.set(mid, { timeSec: startSec, snippetIndex: i })
+        } else {
+          lastAppearMotion.delete(mid)
+        }
+      }
+    } else if (kind === 'LayoutClear') {
+      const mid = num(data.modelId, -1)
+      onStage.delete(mid)
+      lastAppearMotion.delete(mid)
+    } else if (kind === 'Move') {
+      const mid = num(data.modelId, -1)
+      if (str(data.motion).trim() && bodyCounts.has(mid)) {
+        bodyCounts.set(mid, (bodyCounts.get(mid) ?? 0) + 1)
+      }
+    } else if (kind === 'Motion') {
+      const mid = num(data.modelId, -1)
+      if (str(data.motion).trim() && bodyCounts.has(mid)) {
+        bodyCounts.set(mid, (bodyCounts.get(mid) ?? 0) + 1)
+      }
+      if (Array.isArray(data.actions)) {
+        for (const act of data.actions) {
+          if (!isRecord(act)) continue
+          const aid = num(act.modelId, mid)
+          if (str(act.motion).trim() && bodyCounts.has(aid)) {
+            bodyCounts.set(aid, (bodyCounts.get(aid) ?? 0) + 1)
+          }
+        }
+      }
+    } else if (kind === 'HideTalk') {
+      windowOpen = false
+    } else if (kind === 'Talk') {
+      talkCount += 1
+      windowOpen = data.closeWindowOnFinish !== true
+      const speakerId = num(data.modelId, -1)
+      const content = str(data.content)
+      const emotion = str(data.emotion)
+      const acts = Array.isArray(data.actions) ? (data.actions as JsonRecord[]) : []
+      if (str(data.motion).trim() && bodyCounts.has(speakerId)) {
+        bodyCounts.set(speakerId, (bodyCounts.get(speakerId) ?? 0) + 1)
+      }
+      let hasListenerMotionAtZero = false
+      for (const act of acts) {
+        if (!isRecord(act)) continue
+        const aid = num(act.modelId, speakerId)
+        if (str(act.motion).trim()) {
+          if (bodyCounts.has(aid)) bodyCounts.set(aid, (bodyCounts.get(aid) ?? 0) + 1)
+          if (aid !== speakerId && num(act.at, 0) < 0.25) hasListenerMotionAtZero = true
+        }
+      }
+
+      if (speakerId !== -1 && bodyCounts.has(speakerId)) {
+        const appearInfo = lastAppearMotion.get(speakerId)
+        const clashesAppearIdx =
+          appearInfo && startSec - appearInfo.timeSec < 0.4 - 1e-6 ? appearInfo.snippetIndex : null
+        const list = talkCandidates.get(speakerId) ?? []
+        list.push({
+          snippetIndex: i,
+          clashesAppearIdx,
+          hasListenerMotionAtZero,
+          content,
+          emotion,
+          prevContent,
+          prevEmotion,
+          prevTense: tenseTracker.tense
+        })
+        talkCandidates.set(speakerId, list)
+      }
+
+      // 记录不马上退场/切幕的在场位置，供无台词龙套角色插入独立 Motion
+      if (!data.closeWindowOnFinish) {
+        const next = snippets[i + 1]
+        const nKind = str(next?.type)
+        if (nKind === 'Talk') {
+          for (const aid of onStage) {
+            if (!bodyCounts.has(aid)) continue
+            const list = stageFollowupCandidates.get(aid) ?? []
+            list.push({
+              insertAfterIndex: i,
+              content,
+              emotion,
+              prevTense: tenseTracker.tense
+            })
+            stageFollowupCandidates.set(aid, list)
+          }
+        }
+      }
+
+      prevContent = content
+      prevEmotion = emotion
+      updateSceneTenseAfterTalk(tenseTracker, content, emotion)
+    }
+  }
+
+  if (talkCount < 6) return
+
+  const zeroIds = [...bodyCounts.entries()].filter(([, cnt]) => cnt === 0).map(([id]) => id)
+  if (zeroIds.length === 0) return
+
+  let fixedActors = 0
+  const pendingInserts: Array<{ afterIdx: number; snippet: JsonRecord }> = []
+
+  for (const mid of zeroIds) {
+    const actorInfo = resolveActorCatalogInfo(story, mid, view)
+    const talksForActor = talkCandidates.get(mid) ?? []
+    const cleanTalk =
+      talksForActor.find((t) => t.clashesAppearIdx === null && !t.hasListenerMotionAtZero) ??
+      talksForActor.find((t) => !t.hasListenerMotionAtZero) ??
+      talksForActor[0]
+
+    if (cleanTalk) {
+      const motion = pickVerifiedReplacementMotion(
+        actorInfo,
+        {
+          modelId: mid,
+          content: cleanTalk.content,
+          emotion: cleanTalk.emotion,
+          prevContent: cleanTalk.prevContent,
+          prevEmotion: cleanTalk.prevEmotion,
+          prevTense: cleanTalk.prevTense,
+          isListener: false,
+          avoidMotion: '',
+          fallbackMood: cleanTalk.prevTense ? 'awkward' : 'neutral'
+        },
+        view
+      )
+      if (!motion) continue
+
+      if (cleanTalk.clashesAppearIdx !== null) {
+        const app = snippets[cleanTalk.clashesAppearIdx]
+        if (isRecord(app) && isRecord(app.data)) {
+          app.data.motion = ''
+        }
+      }
+      const talkSnippet = snippets[cleanTalk.snippetIndex]
+      if (!isRecord(talkSnippet) || !isRecord(talkSnippet.data)) continue
+      const tData = talkSnippet.data
+      if (Array.isArray(tData.actions) && tData.actions.length > 0) {
+        const speakerAct = (tData.actions as JsonRecord[]).find(
+          (a) => isRecord(a) && num(a.modelId, mid) === mid
+        )
+        if (speakerAct) {
+          speakerAct.motion = motion
+        } else {
+          ;(tData.actions as JsonRecord[]).unshift({ at: 0, modelId: mid, motion })
+        }
+      } else {
+        tData.actions = [
+          {
+            at: 0,
+            modelId: mid,
+            motion,
+            ...(str(tData.facial).trim() ? { facial: str(tData.facial).trim() } : {})
+          }
+        ]
+        if ('facial' in tData) delete tData.facial
+      }
+      fixedActors += 1
+      continue
+    }
+
+    const followups = stageFollowupCandidates.get(mid) ?? []
+    const spot = followups[0]
+    if (spot) {
+      const motion = pickVerifiedReplacementMotion(
+        actorInfo,
+        {
+          modelId: mid,
+          content: spot.content,
+          emotion: spot.emotion,
+          prevTense: spot.prevTense,
+          isListener: true,
+          avoidMotion: '',
+          fallbackMood: spot.prevTense ? 'awkward' : 'neutral'
+        },
+        view
+      )
+      if (motion) {
+        pendingInserts.push({
+          afterIdx: spot.insertAfterIndex,
+          snippet: {
+            type: 'Motion',
+            wait: false,
+            progressBehavior: 'Now',
+            delay: 0.35,
+            data: { modelId: mid, motion, facial: '', facialFirst: true }
+          }
+        })
+        fixedActors += 1
+      }
+    }
+  }
+
+  if (pendingInserts.length > 0) {
+    pendingInserts.sort((a, b) => b.afterIdx - a.afterIdx)
+    for (const item of pendingInserts) {
+      snippets.splice(item.afterIdx + 1, 0, item.snippet)
+    }
+  }
+
+  if (fixedActors > 0) {
+    warn(`[Linter] 已为 ${fixedActors} 名零动作在场角色补充贴合语境的身体动作（消除 actor_zero_motions）`)
   }
 }
 
@@ -1836,6 +2265,20 @@ export function enforceOfficialStoryInvariants(
         if (filtered.length > 0) data.actions = filtered
         else delete data.actions
       }
+    } else if (kind === 'Motion') {
+      const mid = num(data.modelId, -1)
+      if (str(data.motion).trim()) {
+        const appearInfo = lastAppearMotion.get(mid)
+        if (appearInfo && appearInfo.motion && startSec - appearInfo.timeSec < 0.4 - 1e-6) {
+          const neededDelay = appearInfo.timeSec + 0.45 - cursorSec
+          if (!snippetHasPreFence(snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }) && neededDelay <= 0.65) {
+            snippet.delay = Number(Math.max(num(snippet.delay, 0), neededDelay).toFixed(2))
+          } else {
+            data.motion = ''
+            dedupedClashes += 1
+          }
+        }
+      }
     } else if (kind === 'HideTalk') {
       windowOpen = false
     } else if (kind === 'FlashbackIn') {
@@ -1965,13 +2408,19 @@ export function enforceOfficialStoryInvariants(
     warn(`[Linter] 已在片尾自动补全 ${closers.length} 条未闭合特效/镜头复位指令`)
   }
 
-  // 3.5) 同步哭戏/悲伤对峙段落的 emotion 标签，防止掉回「平静」
-  syncTalkEmotionContinuity(snippets, {
+  // 3.5) 同步哭戏/悲伤对峙段落的 emotion 标签，防止掉回「平静」；若 emotion 发生变化则再同步一次表演兼容性
+  const syncedEmotions = syncTalkEmotionContinuity(snippets, {
     models: Array.isArray(story.models) ? (story.models as JsonRecord[]) : undefined,
     view,
     allowedLabels: options.emotionLabels,
     warn
   })
+  if (syncedEmotions > 0) {
+    repairActingHygieneInvariants(story, view, warn)
+  }
+
+  // 3.6) 确保长场次（>=6 句 Talk）中每位出场角色至少拥有 1 个非入场的身体动作（消除 actor_zero_motions）
+  ensureEveryActorHasBodyMotion(story, view, warn)
 
   // 后置清洗 Irodori 逐句语音导演字段（caption 去身份词、语速钳制、emoji 预算、specialScene <= 15%）
   {
@@ -2197,6 +2646,8 @@ export function auditStoryActingAndFidelity(
     if (isFadeOutOrClearTransition(snippet) || kind === 'ChangeBackgroundImage') {
       tenseTracker.tense = false
       tenseTracker.calmRun = 0
+      prevContent = ''
+      prevEmotion = ''
       actorState.clear()
       continue
     }
@@ -2239,7 +2690,12 @@ export function auditStoryActingAndFidelity(
       const mid = num(data.modelId, -1)
       if (mid !== -1) {
         onStage.delete(mid)
-        listenerState.delete(mid)
+        resetListenerState(mid)
+        const tracker = getTracker(mid)
+        tracker.prevFacial = ''
+        tracker.sameFacialCount = 0
+        tracker.prevMotion = ''
+        tracker.sameMotionCount = 0
       }
       continue
     }
@@ -2332,11 +2788,25 @@ export function auditStoryActingAndFidelity(
           }
         }
       }
+      const tracker = getTracker(mid)
+      if (kind === 'LayoutAppear') {
+        tracker.prevFacial = facial
+        tracker.sameFacialCount = facial ? 1 : 0
+        tracker.prevMotion = motion
+        tracker.sameMotionCount = motion ? 1 : 0
+      } else {
+        if (facial) {
+          tracker.sameFacialCount = tracker.prevFacial === facial ? tracker.sameFacialCount + 1 : 1
+          tracker.prevFacial = facial
+        }
+        if (motion) {
+          tracker.sameMotionCount = tracker.prevMotion === motion ? tracker.sameMotionCount + 1 : 1
+          tracker.prevMotion = motion
+        }
+      }
       if (facial) {
-        getTracker(mid).prevFacial = facial
         updateActorStateOnTalkOrStage(actorState, mid, meta?.path, facial)
       }
-      if (motion) getTracker(mid).prevMotion = motion
       continue
     }
 

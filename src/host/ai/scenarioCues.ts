@@ -359,10 +359,16 @@ export interface ScenarioCueRecommendation {
   transition: 'black' | 'sideFade' | 'flashback' | 'sekaiIn' | 'sekaiOut'
   seCues: ScenarioSeCue[]
   effects: CuratedScenarioEffect[]
+  cameraRestraint?: {
+    dramaticIntensity: 'calm' | 'dramatic'
+    maxCameraCues: number
+    allowCharacterShake: boolean
+    guidance: string
+  }
 }
 
 /**
- * 根据场景文本与剧情标签推荐贴合官方演出的时段环境色、转场、SE 音效与天气特效。
+ * 根据场景文本与剧情标签推荐贴合官方演出的时段环境色、转场、SE 音效、天气特效与镜头震动节制建议。
  */
 export function recommendScenarioCues(
   sceneText: string,
@@ -370,20 +376,20 @@ export function recommendScenarioCues(
 ): ScenarioCueRecommendation {
   const text = sceneText.trim()
   const ambient: 'normal' | 'evening' | 'night' =
-    /深夜|凌晨|半夜|25点|夜里|夜晚|今晚|熬夜|星空/.test(text)
+    /深夜|凌晨|半夜|25点|夜里|夜晚|今晚|熬夜|星空|流星/.test(text)
       ? 'night'
       : /黄昏|傍晚|夕阳|晚霞|放学后/.test(text)
         ? 'evening'
         : 'normal'
 
   const transition: ScenarioCueRecommendation['transition'] =
-    options.isFlashback || /回忆|闪回|以前|小时候|想起/.test(text)
+    options.isFlashback || /回忆|闪回|以前|小时候|想起|那时候/.test(text)
       ? 'flashback'
       : options.isSekai || /进入\s*sekai|进入世界|来到\s*sekai/i.test(text)
         ? 'sekaiIn'
         : /离开\s*sekai|回到现实/i.test(text)
           ? 'sekaiOut'
-          : /与此同时|换到|另一边|走廊|转眼|几天后/.test(text)
+          : /与此同时|换到|另一边|走廊|转眼|几天后|次日|第二天|午休|不久后|片刻后|回到/.test(text)
             ? 'sideFade'
             : 'black'
 
@@ -416,5 +422,22 @@ export function recommendScenarioCues(
     if (pauseSe) seCues.push(pauseSe)
   }
 
-  return { ambient, transition, seCues, effects }
+  const isDramaticAction =
+    /追逐|奔跑|冲突|争吵|对峙|崩溃|质问|决裂|揭示|惊变|事故|大喊|冲进|危机|高潮/.test(text)
+  const cameraRestraint: ScenarioCueRecommendation['cameraRestraint'] = isDramaticAction
+    ? {
+        dramaticIntensity: 'dramatic',
+        maxCameraCues: 3,
+        allowCharacterShake: /吓|惊|撞|摔|震|抓|推/.test(text),
+        guidance: '强冲突/动作高潮场可在关键爆点使用 1~3 次 CameraZoom/CameraMove，切忌日常句乱推镜头。'
+      }
+    : {
+        dramaticIntensity: 'calm',
+        maxCameraCues: 1,
+        allowCharacterShake: false,
+        guidance:
+          '日常/谈心/排练场默认不使用 CameraZoom/CameraMove 与 CharacterShake（最多在情绪拐点用 0~1 次轻推），靠单人 Center <-> 双人 Left/Right 原地淡入淡出切镜推进节奏。'
+      }
+
+  return { ambient, transition, seCues, effects, cameraRestraint }
 }
