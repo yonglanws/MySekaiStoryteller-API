@@ -1491,12 +1491,35 @@ export default class VideoExportManager {
               sceneSig !== '' &&
               sceneSig === prevSceneSig
 
-            if (canSkipStatic) {
-              skippedStaticFrames++
-              if (skippedStaticFrames % 16 === 0) {
-                await yieldMacrotask()
+            const timestampUs = Math.round(localFrame * (1_000_000 / encodeFps))
+            const durationUs = Math.round(1_000_000 / encodeFps)
+            // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
+            // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
+            const framesSinceEncoded = localFrame - lastEncodedLocalFrame
+            const keyFrame =
+              localFrame === 0 ||
+              framesSinceEncoded >= encodeFps * 4 ||
+              (inEndingTail ? frameIndex % 4 === 0 : localFrame % (encodeFps * 4) === 0)
+
+            let handledStaticRepeat = false
+            if (canSkipStatic && sinks.encoder?.repeatLastFrame) {
+              const captureStart = virtualClock.realTimeMs()
+              handledStaticRepeat = await sinks.encoder.repeatLastFrame(
+                timestampUs,
+                durationUs,
+                keyFrame
+              )
+              snapshotMs += virtualClock.realTimeMs() - captureStart
+              if (handledStaticRepeat) {
+                skippedStaticFrames++
+                lastEncodedLocalFrame = localFrame
+                if (skippedStaticFrames % 16 === 0) {
+                  await yieldMacrotask()
+                }
               }
-            } else {
+            }
+
+            if (!handledStaticRepeat) {
               let interpolatedTo: FrameSnapshot | null = null
               if (storyTween > 1e-9) {
                 if (frameInterpolator.active) {
@@ -1521,16 +1544,6 @@ export default class VideoExportManager {
               hasRenderedFrame = true
               prevWasVisuallyActive = isVisuallyActive
               prevSceneSig = sceneSig
-
-              const timestampUs = Math.round(localFrame * (1_000_000 / encodeFps))
-              const durationUs = Math.round(1_000_000 / encodeFps)
-              // 片尾淡出至黑时 4 秒一个关键帧会把近黑渐变做成大块。
-              // 最后约 0.6s 改为每 4 帧一个关键帧，硬件编码器也能跟上暗部变化。
-              const framesSinceEncoded = localFrame - lastEncodedLocalFrame
-              const keyFrame =
-                localFrame === 0 ||
-                framesSinceEncoded >= encodeFps * 4 ||
-                (inEndingTail ? frameIndex % 4 === 0 : localFrame % (encodeFps * 4) === 0)
               lastEncodedLocalFrame = localFrame
 
               const captureStart = virtualClock.realTimeMs()
@@ -2482,6 +2495,9 @@ export default class VideoExportManager {
         // 此时必须让宿主按统一 BT.709/tv 滤镜链重编码，不能直接 copy 容器。
         const needsColorConversion = sinks.encoder?.requiresColorConversion === true
         const encoderCodec = sinks.encoder?.encoderCodecKind ?? (options.codec === 'h265' ? 'hevc' : 'h264')
+        const targetCodec = options.codec === 'h265' ? 'hevc' : options.codec === 'h264' ? 'h264' : undefined
+        const needsCodecTranscode = !!targetCodec && !!sinks.encoder && encoderCodec !== targetCodec
+        const needsTranscode = needsColorConversion || needsCodecTranscode
         saveResult = await window.electron.ipcRenderer.invoke(
           'electron:api-remux-video-from-files',
           {
@@ -2491,9 +2507,10 @@ export default class VideoExportManager {
             audioBitrate,
             frameCount: finalFrameCount,
             fps: encodeFps,
+            ...(targetCodec ? { codec: targetCodec } : {}),
             ...(sinks.encoder
               ? {
-                  transcode: needsColorConversion,
+                  transcode: needsTranscode,
                   inputWidth: outW,
                   inputHeight: outH,
                   crf: options.apiCrf ?? options.crf ?? 23,
@@ -2504,8 +2521,9 @@ export default class VideoExportManager {
           }
         )
         if (sinks.encoder) {
-          this.lastEncoderLabel = needsColorConversion
-            ? `webcodecs-${encoderCodec}+ffmpeg`
+          const finalCodec = targetCodec ?? encoderCodec
+          this.lastEncoderLabel = needsTranscode
+            ? `webcodecs-${encoderCodec}+${finalCodec === 'hevc' ? 'hevc_qsv' : 'ffmpeg'}`
             : `webcodecs-${encoderCodec}`
           this.lastConvert = needsColorConversion ? 'ffmpeg' : 'browser'
         }

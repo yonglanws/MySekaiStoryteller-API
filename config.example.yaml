@@ -25,12 +25,13 @@ video:
   width: 1920         # 输出视频宽度
   height: 1080         # 输出视频高度
   fps: 60             # 帧率
-  crf: 26             # 质量因子（越小质量越高、体积越大；hevc_qsv -low_power 1 推荐 26–27）
+  crf: 27             # 质量因子（越小质量越高、体积越大；hevc_qsv -low_power 1 推荐 26–27）
   renderScale: 1    # 渲染倍率（相对 1280 宽逻辑坐标；1 = 按输出分辨率 1:1 渲染，
                       # 1.5 = 超采样抗锯齿更好、每帧成本 x2.25，
                       # <1 = 降渲染分辨率提速，画面变软。例：1080p 输出下
                       # 1 = 渲染 1080p，0.75 = 渲染 810p 再放大）
-  codec: h264         # 输出编码：h264（与 Edge WebCodecs I420 硬编对齐，走 -c:v copy + BT.709 VUI 零重编码，最快）| hevc
+  codec: hevc         # 输出编码：hevc（经 Rust hevc_qsv -low_power 1 约 670fps 压制，~63MB 兼顾小体积与无暗部宏块）
+                      # | h264（与 Edge WebCodecs I420 对齐，走 -c:v copy + BT.709 VUI 零重编码最快，~145MB）
   audioBitrate: 128k  # 音频码率
   encoder: auto       # 视频编码器：auto | nvidia | amd | intel | libx264
                       # auto 自动探测硬件编码器（NVIDIA→AMD→Intel），全部失败回退 libx264

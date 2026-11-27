@@ -518,3 +518,246 @@ test('ModelLayer.hasActiveModelsOrShaders protects visible models from static-fr
   layer.getContainer().children[0].visible = false
   assert.equal(layer.hasActiveModelsOrShaders(), false)
 })
+
+test('WebCodecsMp4Encoder.repeatLastFrame drains pending PBOs and emits CFR frames without GPU readback', async () => {
+  const encodedTimestamps = []
+  const encodedFirstBytes = []
+  let enqueueCount = 0
+  let drainCalls = 0
+  const frameLen = 1920 * 1080 * 1.5
+  const pending = []
+
+  class MockEncoder {
+    constructor(cb) {
+      this.cb = cb
+      this.encodeQueueSize = 0
+    }
+    configure() {}
+    encode(frame) {
+      encodedTimestamps.push(frame.timestamp)
+      encodedFirstBytes.push(frame.firstByte)
+    }
+    async flush() {}
+    close() {}
+  }
+
+  class MockFrame {
+    constructor(data, init) {
+      this.timestamp = init.timestamp
+      this.firstByte = data instanceof Uint8Array ? data[0] : -1
+    }
+    close() {}
+  }
+
+  const fakeConverter = {
+    frameByteLength: frameLen,
+    enqueueAsync: async () => {
+      enqueueCount++
+      const buf = new Uint8Array(frameLen)
+      buf[0] = enqueueCount
+      pending.push(buf)
+      if (pending.length >= 3) return pending.shift()
+      return null
+    },
+    drainAllAsync: async () => {
+      drainCalls++
+      return pending.splice(0)
+    },
+    dispose: () => {}
+  }
+
+  const { WebCodecsMp4Encoder } = loadRendererModule(
+    'managers/video-export/WebCodecsMp4Encoder.ts',
+    new Map([
+      [
+        'mp4-muxer',
+        {
+          Muxer: class {
+            addVideoChunk() {}
+            finalize() {}
+          },
+          StreamTarget: class {}
+        }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/ExportLogger.ts'),
+        { ExportLogger: class { info() {} warn() {} error() {} } }
+      ],
+      [
+        path.join(rendererRoot, 'managers/video-export/GpuYuv420Converter.ts'),
+        {
+          GpuYuv420Converter: {
+            create: () => fakeConverter
+          }
+        }
+      ]
+    ]),
+    {
+      VideoEncoder: MockEncoder,
+      VideoFrame: MockFrame,
+      window: { electron: { ipcRenderer: { invoke: async () => ({ success: true }) } } }
+    }
+  )
+
+  const enc = new WebCodecsMp4Encoder({
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrate: 5_500_000,
+    encoderConfig: {
+      codec: 'avc1.640028',
+      width: 1920,
+      height: 1080,
+      bitrate: 5_500_000,
+      framerate: 60,
+      avc: { format: 'avc' }
+    },
+    useGpuYuvReadback: true
+  })
+  await enc.initialize('C:\\temp\\repeat.mp4')
+  const fakeCanvas = { width: 1920, height: 1080 }
+
+  // 4 rendered frames: ring holds [3, 4], frames [1, 2] already encoded
+  for (let i = 0; i < 4; i++) {
+    await enc.encodeFrame(fakeCanvas, i * 16667, 16667, false)
+  }
+  // Static repeat frames 4 and 5 must drain [3, 4] first, then repeat frame 4 without calling enqueueAsync
+  const rep1 = await enc.repeatLastFrame(4 * 16667, 16667, false)
+  const rep2 = await enc.repeatLastFrame(5 * 16667, 16667, false)
+  assert.equal(rep1, true)
+  assert.equal(rep2, true)
+  assert.equal(enqueueCount, 4, 'repeatLastFrame does not submit new GPU readbacks')
+  assert.equal(drainCalls, 1, 'drains pending PBO ring once before repeating')
+  assert.deepEqual(encodedFirstBytes, [1, 2, 3, 4, 4, 4])
+  assert.deepEqual(encodedTimestamps, [0, 16667, 33334, 50001, 66668, 83335])
+  await enc.finish()
+
+  // Without GpuYuv420Converter (useGpuYuvReadback: false), repeatLastFrame returns false cleanly
+  const encNoGpu = new WebCodecsMp4Encoder({
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrate: 5_500_000,
+    encoderConfig: {
+      codec: 'avc1.640028',
+      width: 1920,
+      height: 1080,
+      bitrate: 5_500_000,
+      framerate: 60,
+      avc: { format: 'avc' }
+    },
+    useGpuYuvReadback: false
+  })
+  await encNoGpu.initialize('C:\\temp\\nogpu.mp4')
+  assert.equal(await encNoGpu.repeatLastFrame(0, 16667, true), false)
+  encNoGpu.dispose()
+})
+
+test('GpuYuv420Converter submits frame N DMA and flushes before harvesting oldest PBO slot', async () => {
+  const ops = []
+  let pboCounter = 0
+  const fakeGl = {
+    VERTEX_SHADER: 1,
+    FRAGMENT_SHADER: 2,
+    COMPILE_STATUS: 3,
+    LINK_STATUS: 4,
+    ARRAY_BUFFER: 5,
+    STATIC_DRAW: 6,
+    TEXTURE0: 7,
+    TEXTURE_2D: 8,
+    TEXTURE_MIN_FILTER: 9,
+    TEXTURE_MAG_FILTER: 10,
+    TEXTURE_WRAP_S: 11,
+    TEXTURE_WRAP_T: 12,
+    LINEAR: 13,
+    NEAREST: 14,
+    CLAMP_TO_EDGE: 15,
+    RGBA8: 16,
+    RGBA: 17,
+    UNSIGNED_BYTE: 18,
+    FRAMEBUFFER: 19,
+    COLOR_ATTACHMENT0: 20,
+    FRAMEBUFFER_COMPLETE: 21,
+    PIXEL_PACK_BUFFER: 22,
+    STREAM_READ: 23,
+    TRIANGLES_STRIP: 24,
+    TRIANGLE_STRIP: 24,
+    FLOAT: 25,
+    UNPACK_FLIP_Y_WEBGL: 26,
+    SYNC_GPU_COMMANDS_COMPLETE: 27,
+    ALREADY_SIGNALED: 28,
+    createShader: () => ({}),
+    shaderSource: () => {},
+    compileShader: () => {},
+    getShaderParameter: () => true,
+    deleteShader: () => {},
+    createProgram: () => ({}),
+    attachShader: () => {},
+    linkProgram: () => {},
+    getProgramParameter: () => true,
+    deleteProgram: () => {},
+    createVertexArray: () => ({}),
+    bindVertexArray: () => {},
+    deleteVertexArray: () => {},
+    createBuffer: () => ({ id: ++pboCounter }),
+    bindBuffer: () => {},
+    bufferData: () => {},
+    deleteBuffer: () => {},
+    getAttribLocation: () => 0,
+    enableVertexAttribArray: () => {},
+    vertexAttribPointer: () => {},
+    createTexture: () => ({}),
+    activeTexture: () => {},
+    bindTexture: () => {},
+    texParameteri: () => {},
+    texImage2D: () => {},
+    deleteTexture: () => {},
+    createFramebuffer: () => ({}),
+    bindFramebuffer: () => {},
+    framebufferTexture2D: () => {},
+    checkFramebufferStatus: () => 21,
+    deleteFramebuffer: () => {},
+    useProgram: () => {},
+    getUniformLocation: () => ({}),
+    uniform1i: () => {},
+    viewport: () => {},
+    pixelStorei: () => {},
+    drawArrays: () => {},
+    readPixels: (_x, _y, _w, _h, _f, _t, dstOrOffset) => {
+      if (typeof dstOrOffset === 'number') ops.push('readPixels_pbo')
+    },
+    fenceSync: () => {
+      ops.push('fenceSync')
+      return {}
+    },
+    flush: () => ops.push('flush'),
+    clientWaitSync: () => {
+      ops.push('clientWaitSync')
+      return 28
+    },
+    deleteSync: () => {},
+    getBufferSubData: (_t, _o, dst) => {
+      ops.push('getBufferSubData')
+      dst[0] = 42
+    }
+  }
+
+  const { GpuYuv420Converter } = loadRendererModule('managers/video-export/GpuYuv420Converter.ts', new Map(), {
+    OffscreenCanvas: class {
+      getContext() {
+        return fakeGl
+      }
+    }
+  })
+
+  const conv = GpuYuv420Converter.create(16, 16, 3)
+  assert.ok(conv)
+  assert.equal(await conv.enqueueAsync({}), null)
+  assert.equal(await conv.enqueueAsync({}), null)
+  ops.length = 0
+  const out = await conv.enqueueAsync({})
+  assert.ok(out)
+  assert.equal(out[0], 42)
+  assert.deepEqual(ops, ['readPixels_pbo', 'fenceSync', 'flush', 'clientWaitSync', 'getBufferSubData'])
+  conv.dispose()
+})

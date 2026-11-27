@@ -87,6 +87,7 @@ export class WebCodecsMp4Encoder {
   private readonly useGpuYuvReadback: boolean
   private pendingPboMeta: Array<{ timestampUs: number; durationUs: number; keyFrame: boolean }> = []
   private pboReusePool: Uint8Array[] = []
+  private lastCompletedYuv: Uint8Array | null = null
   private activeMuxerCodec: 'avc' | 'hevc' = 'avc'
   private totalWrittenBytes = 0
   private dequeueWaiter: (() => void) | null = null
@@ -363,6 +364,7 @@ export class WebCodecsMp4Encoder {
       config.codec.startsWith('hvc1') || config.codec.startsWith('hev1') ? 'hevc' : 'avc'
     this.pendingPboMeta = []
     this.pboReusePool = []
+    this.lastCompletedYuv = null
     this.totalWrittenBytes = 0
 
     // 优先连接原生 Rust / Node 二进制 WebSocket 流通道，消除 HTTP positioned write 序列化开销；
@@ -661,6 +663,49 @@ export class WebCodecsMp4Encoder {
     if (this.encodeError) throw this.encodeError
   }
 
+  private retainCompletedYuv(yuvBytes: Uint8Array): void {
+    const expectedLen = this.yuvConverter?.frameByteLength ?? 0
+    if (expectedLen === 0 || yuvBytes.byteLength !== expectedLen) return
+    if (this.lastCompletedYuv && this.lastCompletedYuv !== yuvBytes) {
+      this.pboReusePool.push(this.lastCompletedYuv)
+    }
+    this.lastCompletedYuv = yuvBytes
+  }
+
+  private async drainPendingYuv(): Promise<void> {
+    if (!this.yuvConverter || typeof this.yuvConverter.drainAllAsync !== 'function') return
+    const frameLen = this.yuvConverter.frameByteLength
+    const remaining = await this.yuvConverter.drainAllAsync(
+      () => this.pboReusePool.pop() ?? new Uint8Array(frameLen)
+    )
+    for (const yuvBytes of remaining) {
+      const meta = this.pendingPboMeta.shift()
+      if (meta) {
+        await this.encodeI420Buffer(yuvBytes, meta.timestampUs, meta.durationUs, meta.keyFrame)
+      }
+      this.retainCompletedYuv(yuvBytes)
+    }
+  }
+
+  /**
+   * 重复编码上一帧已转换的 BT.709 I420 缓冲，维持严格的固定帧率（CFR）时间轴
+   * 同时跳过 Pixi 渲染与 GPU 回读。无可用缓冲时返回 false 交由调用方常规渲染。
+   */
+  async repeatLastFrame(
+    timestampUs: number,
+    durationUs: number,
+    keyFrame: boolean
+  ): Promise<boolean> {
+    if (this.encodeError) throw this.encodeError
+    if (this.isDisposed || !this.encoder || !this.yuvConverter) return false
+    if (this.pendingPboMeta.length > 0) {
+      await this.drainPendingYuv()
+    }
+    if (!this.lastCompletedYuv) return false
+    await this.encodeI420Buffer(this.lastCompletedYuv, timestampUs, durationUs, keyFrame)
+    return true
+  }
+
   /**
    * 编码一帧。
    * @param source 画布（HTMLCanvasElement）
@@ -687,9 +732,7 @@ export class WebCodecsMp4Encoder {
           if (meta) {
             await this.encodeI420Buffer(completed, meta.timestampUs, meta.durationUs, meta.keyFrame)
           }
-          if (completed.byteLength === this.yuvConverter.frameByteLength) {
-            this.pboReusePool.push(completed)
-          }
+          this.retainCompletedYuv(completed)
         }
         return
       }
@@ -735,23 +778,10 @@ export class WebCodecsMp4Encoder {
     if (!this.encoder || !this.muxer) throw new Error('Encoder not initialized')
 
     if (this.yuvConverter) {
-      if (typeof this.yuvConverter.drainAllAsync === 'function') {
-        const frameLen = this.yuvConverter.frameByteLength
-        const remaining = await this.yuvConverter.drainAllAsync(
-          () => this.pboReusePool.pop() ?? new Uint8Array(frameLen)
-        )
-        for (const yuvBytes of remaining) {
-          const meta = this.pendingPboMeta.shift()
-          if (meta) {
-            await this.encodeI420Buffer(yuvBytes, meta.timestampUs, meta.durationUs, meta.keyFrame)
-          }
-          if (yuvBytes.byteLength === frameLen) {
-            this.pboReusePool.push(yuvBytes)
-          }
-        }
-      }
+      await this.drainPendingYuv()
       this.pendingPboMeta = []
       this.pboReusePool = []
+      this.lastCompletedYuv = null
       this.yuvConverter.dispose()
       this.yuvConverter = null
     }
@@ -817,6 +847,7 @@ export class WebCodecsMp4Encoder {
     this.wakeDequeueWaiter()
     this.pendingPboMeta = []
     this.pboReusePool = []
+    this.lastCompletedYuv = null
     this.yuvConverter?.dispose()
     this.yuvConverter = null
     try {
