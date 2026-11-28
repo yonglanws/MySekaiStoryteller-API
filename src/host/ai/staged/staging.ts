@@ -1,4 +1,10 @@
 import { resolveRegisteredSeFile } from '../../resources/resourceCatalog'
+import {
+  detectSceneSekaiContext,
+  guardSceneBgmSelection,
+  isBgmAllowedInScene,
+  type SceneContextInput
+} from '../bgmGuard'
 import { isInternalThoughtContent } from '../officialLinter'
 import { formatBgmPromptLine, formatImagePromptLine, type CatalogView } from '../prompt'
 import { CURATED_SCENARIO_EFFECTS, normalizeScenarioEffectName } from '../scenarioCues'
@@ -101,13 +107,67 @@ export function buildStagingPrompt(
     .map((detail) => formatImagePromptLine(detail))
     .join('\n')
 
-  const bgms = view
-    .bgmPromptChoices(36, stagingQuery)
-    .map((d) => formatBgmPromptLine(d))
-    .join('\n')
+  const plannedSceneContexts = (plan.scenes ?? []).map((ps) =>
+    detectSceneSekaiContext(
+      {
+        isSekaiFlag: ps.isSekai,
+        transitionIn: ps.transitionIn,
+        background: ps.background,
+        placeInfo: ps.placeInfo,
+        telop: ps.telop,
+        summary: ps.summary,
+        promptText: `${options.scene} ${plan.event}`
+      },
+      view
+    )
+  )
+  const primarySceneCtx =
+    plannedSceneContexts[0] ??
+    detectSceneSekaiContext(
+      {
+        background: plan.background,
+        promptText: `${options.scene} ${plan.event}`
+      },
+      view
+    )
+  const effectiveSceneContexts =
+    plannedSceneContexts.length > 0 ? plannedSceneContexts : [primarySceneCtx]
+  const rawBgmChoices = view.bgmPromptChoices(36, stagingQuery)
+  const filteredBgmChoices = rawBgmChoices.filter((d) =>
+    effectiveSceneContexts.some((ctx) => isBgmAllowedInScene(d.file, ctx, d))
+  )
+  const bgmPool = filteredBgmChoices.length > 0 ? [...filteredBgmChoices] : [...rawBgmChoices]
+  // 多幕剧情中若有分幕显式进入某 SEKAI（即使 stagingQuery 首段未写 SEKAI 词），补齐最多 4 首该分幕对应的 SEKAI 曲目供选择
+  const sekaiContexts = effectiveSceneContexts.filter((ctx) => ctx.isSekai)
+  if (sekaiContexts.length > 0) {
+    const seenFiles = new Set(bgmPool.map((d) => d.file.toLowerCase()))
+    let addedSekai = 0
+    for (const detail of view.bgmDetailsList()) {
+      if (addedSekai >= 4) break
+      if (seenFiles.has(detail.file.toLowerCase())) continue
+      if (
+        sekaiContexts.some(
+          (ctx) =>
+            isBgmAllowedInScene(detail.file, ctx, detail) &&
+            !isBgmAllowedInScene(
+              detail.file,
+              { isSekai: false, sekaiUnit: null, isSpecialEvent: false, reason: '' },
+              detail
+            )
+        )
+      ) {
+        bgmPool.push(detail)
+        seenFiles.add(detail.file.toLowerCase())
+        addedSekai += 1
+      }
+    }
+  }
+  const bgms = bgmPool.map((d) => formatBgmPromptLine(d)).join('\n')
 
-  const firstBgm = view.bgmPromptChoices(10)[0]?.file ?? ''
-  const secondBgm = view.bgmPromptChoices(10).find((b) => b.file !== firstBgm)?.file ?? ''
+  const primarySafeBgms = bgmPool.filter((d) => isBgmAllowedInScene(d.file, primarySceneCtx, d))
+  const exampleBgmPool = primarySafeBgms.length > 0 ? primarySafeBgms : view.bgmPromptChoices(10)
+  const firstBgm = exampleBgmPool[0]?.file ?? ''
+  const secondBgm = exampleBgmPool.find((b) => b.file !== firstBgm)?.file ?? ''
   const midLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.45)]?.id ?? 'l1'
   const peakLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.58)]?.id ?? midLine
   const lateLine = dialogue.lines[Math.floor(dialogue.lines.length * 0.72)]?.id ?? 'l1'
@@ -203,6 +263,7 @@ ${presenceRule}
   - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
 - **特效与转场**：跳时间/换场地优先善用 \`SideFade\`（\`transitionIn: "sideFade"\`），回忆段务必配 \`transitionIn: "flashback"\`, \`isFlashback: true\`（自动接 \`WhiteOut -> se00053_b -> FlashbackIn -> WhiteIn\`），时段/氛围变化用 \`ambient\`（\`normal\`/\`evening\`/\`night\`），出入 SEKAI 用 \`sekaiIn\`/\`sekaiOut\`，天候粒子用（${CURATED_SCENARIO_EFFECTS.join('/')}）。
 - **BGM 与停顿节奏**：首幕（s1）必须从可用 BGM 清单选定契合开场氛围的曲目（例如追逐/对峙/低落选戏剧或沉重曲，日常/喜剧选轻快日常曲）；若刻意做冷开场，最多留 2~4 句静音并在第 5 句（l5）前用 \`bgmCut\` 切入 BGM，**严禁前段大段无声**。大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。中后段转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
+- **严禁跨世界线误用 SEKAI 专属 BGM**：标注「仅限对应SEKAI场景 / 仅限SEKAI内使用 / SEKAI主题 / SEKAI氛围」的曲目（如无人「世界」主题曲 \`bgm_area00005\`/\`nightcode_untitled*\`、教室/舞台/街头/奇幻乐园「世界」主题曲 \`bgm_area00001..00004\`/\`*_untitled*\` 等）**绝对禁止**用于任何现实世界场景（卧室、客厅、家庭餐厅、教室、天台、涩谷街头、Nightcord 语音连线等）；进入某组合 SEKAI 时也只能选用该组合对应的 SEKAI 主题曲或通用 SEKAI 曲，严禁混用其他组合的 SEKAI 主题曲。
 - **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
 ## 输出 JSON
@@ -330,7 +391,8 @@ export function pickOpeningBgmForScene(
   view: CatalogView,
   plan: StagedCastPlan,
   dialogue: StagedDialogue,
-  sceneSummary = ''
+  sceneSummary = '',
+  sceneContextInput?: SceneContextInput
 ): string {
   const queryParts = [
     plan.event,
@@ -340,11 +402,40 @@ export function pickOpeningBgmForScene(
     ...dialogue.lines.slice(0, 12).map((l) => `${l.emotion ?? ''} ${l.content}`)
   ].filter(Boolean)
   const query = queryParts.join(' ')
-  const choices = view.bgmPromptChoices(36, query)
+  const sceneCtx = detectSceneSekaiContext(
+    sceneContextInput ?? {
+      isSekaiFlag: plan.scenes?.[0]?.isSekai,
+      transitionIn: plan.scenes?.[0]?.transitionIn,
+      background: plan.scenes?.[0]?.background || plan.background,
+      placeInfo: plan.scenes?.[0]?.placeInfo,
+      telop: plan.scenes?.[0]?.telop,
+      summary: sceneSummary || plan.scenes?.[0]?.summary,
+      promptText: `${plan.event} ${plan.logline}`,
+      dialogueText: dialogue.lines
+        .slice(0, 12)
+        .map((l) => l.content)
+        .join(' ')
+    },
+    view
+  )
+  const choices = view
+    .bgmPromptChoices(36, query)
+    .filter((item) => isBgmAllowedInScene(item.file, sceneCtx, item))
+  const allSafeDescribed = view
+    .bgmDetailsList()
+    .filter(
+      (detail) =>
+        (detail.description ?? '').trim().length > 0 &&
+        isBgmAllowedInScene(detail.file, sceneCtx, detail)
+    )
   const pool =
     choices.length > 0
       ? choices
-      : view.bgmDetailsList().filter((detail) => (detail.description ?? '').trim().length > 0)
+      : allSafeDescribed.length > 0
+        ? allSafeDescribed
+        : view
+            .bgmDetailsList()
+            .filter((detail) => isBgmAllowedInScene(detail.file, sceneCtx, detail))
   if (pool.length === 0) return ''
 
   const openingEmos = dialogue.lines.slice(0, 12).map((l) => (l.emotion ?? '').trim())
@@ -410,6 +501,65 @@ function enrichStagingBaseline(
     eventsByLine.set(ev.lineIndex, ev)
   }
 
+  const sceneContextAt = (sceneIndex: number): SceneContextInput => {
+    const scene = staging.scenes[sceneIndex]
+    const nextFrom =
+      sceneIndex + 1 < staging.scenes.length
+        ? staging.scenes[sceneIndex + 1].fromIndex
+        : lines.length
+    const sceneDialogue = lines
+      .slice(scene.fromIndex, Math.min(nextFrom, scene.fromIndex + 12))
+      .map((l) => l.content)
+      .join(' ')
+    const plannedScene = plan.scenes?.find((ps) => ps.id === scene.id) ?? plan.scenes?.[sceneIndex]
+    return {
+      isSekaiFlag: scene.isSekai,
+      transitionIn: scene.transitionIn,
+      background: scene.background,
+      placeInfo: scene.placeInfo,
+      telop: scene.telop,
+      summary: plannedScene?.summary ?? '',
+      promptText: `${plan.event} ${plan.logline}`,
+      dialogueText: sceneDialogue
+    }
+  }
+
+  const usedSafeBgms = new Set<string>()
+  // 确定性 SEKAI BGM 守卫：逐幕校验 scene.bgm 与 events[].bgmCut，严禁 SEKAI 专属曲泄漏到现实场景或跨团串台
+  for (let sIdx = 0; sIdx < staging.scenes.length; sIdx++) {
+    const scene = staging.scenes[sIdx]
+    if (scene.bgm && scene.bgm !== 'silence' && scene.bgm !== 'keep') {
+      const decision = guardSceneBgmSelection(view, scene.bgm, sceneContextAt(sIdx), {
+        excludeFiles: usedSafeBgms
+      })
+      if (decision.replaced) {
+        scene.bgm = decision.finalFile || undefined
+      }
+      if (decision.finalFile && decision.finalFile !== 'silence' && decision.finalFile !== 'keep') {
+        usedSafeBgms.add(decision.finalFile)
+      }
+    }
+  }
+  for (const ev of staging.events) {
+    if (ev.bgmCut?.action !== 'play' || !ev.bgmCut.file) continue
+    let ownerIdx = 0
+    for (let sIdx = 0; sIdx < staging.scenes.length; sIdx++) {
+      if (staging.scenes[sIdx].fromIndex <= ev.lineIndex) ownerIdx = sIdx
+      else break
+    }
+    const decision = guardSceneBgmSelection(view, ev.bgmCut.file, sceneContextAt(ownerIdx), {
+      excludeFiles: usedSafeBgms
+    })
+    if (decision.replaced) {
+      if (decision.finalFile) {
+        ev.bgmCut.file = decision.finalFile
+      } else {
+        delete ev.bgmCut
+      }
+    }
+    if (decision.finalFile) usedSafeBgms.add(decision.finalFile)
+  }
+
   // 开场首幕 BGM 兜底：长场次禁止因 scene0.bgm 留空或无效 silence 导致前几分钟全程无声；
   // 仅当刻意冷开场并在第 5 句（index <= 5）前显式切入 BGM 时才允许 scene0 静音开场。
   if (lines.length >= 6 && staging.scenes.length > 0) {
@@ -428,7 +578,8 @@ function enrichStagingBaseline(
         view,
         plan,
         dialogue,
-        plan.scenes?.[0]?.summary ?? ''
+        plan.scenes?.[0]?.summary ?? '',
+        sceneContextAt(0)
       )
       if (openingBgm) {
         scene0.bgm = openingBgm

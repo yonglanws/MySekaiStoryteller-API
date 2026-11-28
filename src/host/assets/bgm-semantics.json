@@ -262,10 +262,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "虚拟歌手",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 澄澈空灵的「世界」狭间异世界氛围曲，仅用于 SEKAI 空间与异象场景，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm00038": {
       "name": "紧绷的琴弦",
@@ -1725,10 +1725,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "虚拟歌手",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 澄澈空灵的 SEKAI 星光氛围曲，仅用于 SEKAI 空间与心愿交流，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm00169": {
       "name": "at 25:00",
@@ -2484,10 +2484,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "Leo/need",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Leo/need 剧情",
+      "scenes": ["教室「世界」", "SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限教室SEKAI内使用] Leo/need SEKAI 心愿氛围曲（What We Wish For），严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Leo/need"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Leo/need", "仅限对应SEKAI场景", "教室SEKAI"]
     },
     "bgm00239": {
       "name": "Seasons Roll Around",
@@ -3056,10 +3056,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "虚拟歌手",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 澄澈空灵的 SEKAI 异世界星旅氛围曲，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm00291": {
       "name": "欢快互动·元气欢快（虚拟歌手） (bgm00291)",
@@ -3243,10 +3243,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "Vivid BAD SQUAD",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "scenes": ["街头「世界」", "SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限街头SEKAI内使用] Vivid BAD SQUAD 街头「世界」氛围曲（Another Street），严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Vivid BAD SQUAD"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Vivid BAD SQUAD", "仅限对应SEKAI场景", "街头SEKAI"]
     },
     "bgm00308": {
       "name": "欢快互动·元气欢快（Wonderlands×Showtime） (bgm00308)",
@@ -3342,10 +3342,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "Vivid BAD SQUAD",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "scenes": ["街头「世界」", "SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限街头SEKAI内使用] Vivid BAD SQUAD 街头「世界」氛围曲（4-Way Intersection Street），严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Vivid BAD SQUAD"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Vivid BAD SQUAD", "仅限对应SEKAI场景", "街头SEKAI"]
     },
     "bgm00317": {
       "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm00317)",
@@ -3562,10 +3562,10 @@
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "虚拟歌手",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 虚拟歌手 剧情",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 心愿相连的「世界」氛围曲（A World Linked by Wishes），严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm00337": {
       "name": "きっとまた、会えるよね",
@@ -3910,58 +3910,58 @@
     },
     "bgm10001": {
       "name": "特别剧情·神秘空灵 (bgm10001)",
-      "category": "特别剧情",
+      "category": "SEKAI氛围",
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "通用",
-      "scenes": ["特别剧情", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 特别剧情异世界氛围曲，仅用于 SEKAI 异象与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "特别剧情", "通用"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "通用", "仅限对应SEKAI场景"]
     },
     "bgm10002": {
       "name": "特别剧情·神秘空灵 (bgm10002)",
-      "category": "特别剧情",
+      "category": "SEKAI氛围",
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "通用",
-      "scenes": ["特别剧情", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 特别剧情异世界氛围曲，仅用于 SEKAI 异象与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "特别剧情", "通用"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "通用", "仅限对应SEKAI场景"]
     },
     "bgm10003": {
       "name": "特别剧情·神秘空灵 (bgm10003)",
-      "category": "特别剧情",
+      "category": "SEKAI氛围",
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "通用",
-      "scenes": ["特别剧情", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 特别剧情异世界氛围曲，仅用于 SEKAI 异象与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "特别剧情", "通用"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "通用", "仅限对应SEKAI场景"]
     },
     "bgm10004": {
       "name": "特别剧情·神秘空灵 (bgm10004)",
-      "category": "特别剧情",
+      "category": "SEKAI氛围",
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "通用",
-      "scenes": ["特别剧情", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 特别剧情异世界氛围曲，仅用于 SEKAI 异象与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "特别剧情", "通用"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "通用", "仅限对应SEKAI场景"]
     },
     "bgm10005": {
       "name": "特别剧情·神秘空灵 (bgm10005)",
-      "category": "特别剧情",
+      "category": "SEKAI氛围",
       "mood": "神秘空灵",
       "tempo": "中慢",
       "unit": "通用",
-      "scenes": ["特别剧情", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流",
+      "scenes": ["SEKAI氛围", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 特别剧情异世界氛围曲，仅用于 SEKAI 异象与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "特别剧情", "通用"]
+      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "通用", "仅限对应SEKAI场景"]
     },
     "bgm90001": {
       "name": "欢快互动·元气欢快（Vivid BAD SQUAD） (bgm90001)",
@@ -4178,65 +4178,79 @@
       "tempo": "快板",
       "category": "特别活动",
       "unit": "通用",
-      "scenes": ["愚人节", "奇幻闹剧"],
-      "description": "奇幻活泼·快板 | 2026 愚人节限定主题曲，适合脑洞与喜剧场景",
+      "scenes": ["愚人节", "仅限特别活动场景"],
+      "description": "奇幻活泼·快板 | [仅限愚人节/特别活动使用] 2026 愚人节限定主题曲，严禁用于常规现实剧情",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["奇幻活泼", "快板", "特别活动", "通用"]
+      "tags": ["奇幻活泼", "快板", "特别活动", "通用", "仅限特别活动场景"]
     },
     "bgm_area00001": {
-      "name": "With Gratitude / Crystal Blessing",
-      "category": "催泪抒情",
-      "mood": "感伤忧郁",
-      "tempo": "慢板",
-      "unit": "通用",
-      "scenes": ["催泪抒情", "感伤忧郁"],
-      "description": "感伤忧郁·慢板 | 深沉细腻的抒情伤感配乐，适合低落倾诉、过往伤痛与真情流露",
+      "name": "教室「世界」区域主题曲（With Gratitude / Crystal Blessing）",
+      "category": "SEKAI主题",
+      "mood": "温暖治愈",
+      "tempo": "中慢",
+      "unit": "Leo/need",
+      "scenes": ["教室「世界」", "仅限对应SEKAI场景"],
+      "description": "温暖治愈·中慢 | [仅限教室SEKAI内使用] Leo/need 教室「世界」区域主题曲，严禁用于现实校园/室外/居家等非SEKAI场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["感伤忧郁", "慢板", "催泪抒情", "通用"]
+      "tags": ["温暖治愈", "中慢", "SEKAI主题", "Leo/need", "仅限对应SEKAI场景", "教室SEKAI"]
     },
     "bgm_area00002": {
-      "name": "笑顔をお届け！",
-      "category": "欢快日常",
+      "name": "舞台「世界」区域主题曲（笑顔をお届け！）",
+      "category": "SEKAI主题",
       "mood": "元气欢快",
       "tempo": "快板",
       "unit": "MORE MORE JUMP!",
-      "scenes": ["欢快日常", "元气欢快"],
-      "description": "元气欢快·快板 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 MORE MORE JUMP! 剧情",
+      "scenes": ["舞台「世界」", "仅限对应SEKAI场景"],
+      "description": "元气欢快·快板 | [仅限舞台SEKAI内使用] MORE MORE JUMP! 舞台「世界」区域主题曲，严禁用于现实练习室/街道/居家等非SEKAI场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["元气欢快", "快板", "欢快日常", "MORE MORE JUMP!"]
+      "tags": ["元气欢快", "快板", "SEKAI主题", "MORE MORE JUMP!", "仅限对应SEKAI场景", "舞台SEKAI"]
     },
     "bgm_area00003": {
-      "name": "Street Crews",
-      "category": "SEKAI氛围",
-      "mood": "神秘空灵",
-      "tempo": "中慢",
+      "name": "街头「世界」区域主题曲（Street Crews）",
+      "category": "SEKAI主题",
+      "mood": "律动街头",
+      "tempo": "中快",
       "unit": "Vivid BAD SQUAD",
-      "scenes": ["SEKAI氛围", "神秘空灵"],
-      "description": "神秘空灵·中慢 | 澄澈空灵的异世界氛围曲，适合 SEKAI 异象、星光与心愿交流，常见于 Vivid BAD SQUAD 剧情",
+      "scenes": ["街头「世界」", "Crase Cafe", "仅限对应SEKAI场景"],
+      "description": "律动街头·中快 | [仅限街头SEKAI内使用] Vivid BAD SQUAD 街头「世界」区域主题曲（含Crase Cafe），严禁用于现实涩谷街头/咖啡店等非SEKAI场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI氛围", "Vivid BAD SQUAD"]
+      "tags": ["律动街头", "中快", "SEKAI主题", "Vivid BAD SQUAD", "仅限对应SEKAI场景", "街头SEKAI"]
     },
     "bgm_area00004": {
-      "name": "音楽隊はどこまでも",
-      "category": "欢快互动",
-      "mood": "元气欢快",
+      "name": "奇幻乐园「世界」区域主题曲（音楽隊はどこまでも）",
+      "category": "SEKAI主题",
+      "mood": "奇幻活泼",
       "tempo": "中快",
       "unit": "Wonderlands×Showtime",
-      "scenes": ["欢快互动", "元气欢快"],
-      "description": "元气欢快·中快 | 活泼跳脱的喜剧明快配乐，适合热闹聚会、吐槽拌嘴与开心互动，常见于 Wonderlands×Showtime 剧情",
+      "scenes": ["奇幻乐园「世界」", "仅限对应SEKAI场景"],
+      "description": "奇幻活泼·中快 | [仅限奇幻SEKAI内使用] Wonderlands×Showtime 奇幻乐园「世界」区域主题曲，严禁用于现实游乐园/学校/排练室等非SEKAI场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["元气欢快", "中快", "欢快互动", "Wonderlands×Showtime"]
+      "tags": [
+        "奇幻活泼",
+        "中快",
+        "SEKAI主题",
+        "Wonderlands×Showtime",
+        "仅限对应SEKAI场景",
+        "奇幻SEKAI"
+      ]
     },
     "bgm_area00005": {
-      "name": "心景",
-      "category": "深夜思索",
+      "name": "无人「世界」区域主题曲（心景）",
+      "category": "SEKAI主题",
       "mood": "宁静深夜",
       "tempo": "慢板",
       "unit": "25时，Nightcord de.",
-      "scenes": ["深夜思索", "宁静深夜"],
-      "description": "宁静深夜·慢板 | 清冷静谧的夜晚独处配乐，适合深夜对话、25时连线与内心独白，常见于 25时，Nightcord de. 剧情",
+      "scenes": ["无人「世界」", "仅限对应SEKAI场景"],
+      "description": "宁静深夜·慢板 | [仅限无人SEKAI内使用] 25时，Nightcord de. 无人「世界」区域主题曲（心景），严禁用于现实卧室/客厅/家庭餐厅/25时连线等非SEKAI场景",
       "bundlePrefix": "sound/scenario/bgm/",
-      "tags": ["宁静深夜", "慢板", "深夜思索", "25时，Nightcord de."]
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "SEKAI主题",
+        "25时，Nightcord de.",
+        "仅限对应SEKAI场景",
+        "无人SEKAI"
+      ]
     },
     "bgm_area_aprilfool_2022": {
       "name": "愚人节特别区域主题曲",
@@ -4244,10 +4258,10 @@
       "tempo": "中快",
       "category": "特别活动",
       "unit": "通用",
-      "scenes": ["愚人节", "轻松整活", "跨团互动"],
-      "description": "奇幻活泼·中快 | 愚人节限定区域主题曲，适合轻松搞怪与跨团聚会",
+      "scenes": ["愚人节", "仅限特别活动场景"],
+      "description": "奇幻活泼·中快 | [仅限愚人节/特别活动使用] 愚人节限定区域主题曲，严禁用于常规现实剧情",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["奇幻活泼", "中快", "特别活动", "通用"]
+      "tags": ["奇幻活泼", "中快", "特别活动", "通用", "仅限特别活动场景"]
     },
     "bgm_area_bigtree": {
       "name": "心愿巨树主题曲",
@@ -4255,10 +4269,10 @@
       "tempo": "中慢",
       "category": "SEKAI主题",
       "unit": "虚拟歌手",
-      "scenes": ["心愿空间", "回忆交汇"],
-      "description": "神秘空灵·中慢 | 巨树主题环境曲，适合异世界探索与静谧思索",
+      "scenes": ["心愿巨树「世界」", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 心愿巨树「世界」区域主题曲，适合异世界探索与心愿空间，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI主题", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI主题", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm_area_e_collabo": {
       "name": "特别联动区域主题曲",
@@ -4266,10 +4280,10 @@
       "tempo": "中快",
       "category": "特别活动",
       "unit": "联动",
-      "scenes": ["特别活动", "联动舞台"],
-      "description": "奇幻活泼·中快 | 特别联动活动区域主题曲，节奏鲜明轻快",
+      "scenes": ["特别活动", "联动舞台", "仅限特别活动场景"],
+      "description": "奇幻活泼·中快 | [仅限联动/特别活动使用] 特别联动活动区域主题曲，严禁用于常规现实剧情",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["奇幻活泼", "中快", "特别活动", "联动"]
+      "tags": ["奇幻活泼", "中快", "特别活动", "联动", "仅限特别活动场景"]
     },
     "bgm_area_leoneed_untitled_2": {
       "name": "教室「世界」主题曲（区域版）",
@@ -4277,10 +4291,10 @@
       "tempo": "中拍",
       "category": "SEKAI主题",
       "unit": "Leo/need",
-      "scenes": ["教室「世界」", "乐队日常"],
-      "description": "温暖治愈·中拍 | 教室「世界」区域环境曲，适合 Leo/need 校园乐队日常",
+      "scenes": ["教室「世界」", "仅限对应SEKAI场景"],
+      "description": "温暖治愈·中拍 | [仅限教室SEKAI内使用] 教室「世界」区域环境曲，严禁用于现实校园/居家等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["温暖治愈", "中拍", "SEKAI主题", "Leo/need"]
+      "tags": ["温暖治愈", "中拍", "SEKAI主题", "Leo/need", "仅限对应SEKAI场景", "教室SEKAI"]
     },
     "bgm_area_moremore_untitled_2": {
       "name": "舞台「世界」主题曲（区域版）",
@@ -4288,21 +4302,21 @@
       "tempo": "中快",
       "category": "SEKAI主题",
       "unit": "MORE MORE JUMP!",
-      "scenes": ["舞台「世界」", "偶像日常"],
-      "description": "元气欢快·中快 | 舞台「世界」区域环境曲，清新明朗",
+      "scenes": ["舞台「世界」", "仅限对应SEKAI场景"],
+      "description": "元气欢快·中快 | [仅限舞台SEKAI内使用] 舞台「世界」区域环境曲，清新明朗，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!"]
+      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!", "仅限对应SEKAI场景", "舞台SEKAI"]
     },
     "bgm_area_movie_2025": {
       "name": "剧场版「世界」主题曲",
       "mood": "神秘空灵",
       "tempo": "中慢",
-      "category": "特别活动",
+      "category": "SEKAI主题",
       "unit": "虚拟歌手",
-      "scenes": ["剧场版「世界」", "相遇与歌声"],
-      "description": "神秘空灵·中慢 | 2025 剧场版特别「世界」氛围曲，适合特别篇与跨越时空的对话",
+      "scenes": ["剧场版「世界」", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 2025 剧场版特别「世界」主题曲，严禁用于普通现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["神秘空灵", "中慢", "特别活动", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI主题", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "bgm_area_wishtree": {
       "name": "心愿之树「世界」主题曲",
@@ -4310,10 +4324,10 @@
       "tempo": "中慢",
       "category": "SEKAI主题",
       "unit": "虚拟歌手",
-      "scenes": ["心愿之树", "世界交汇", "跨越成长"],
-      "description": "神秘空灵·中慢 | 心愿之树「世界」氛围曲，澄澈宏阔，适合心愿交流与重要转折",
+      "scenes": ["心愿之树「世界」", "仅限对应SEKAI场景"],
+      "description": "神秘空灵·中慢 | [仅限SEKAI内使用] 心愿之树「世界」区域主题曲，澄澈宏阔，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["神秘空灵", "中慢", "SEKAI主题", "虚拟歌手"]
+      "tags": ["神秘空灵", "中慢", "SEKAI主题", "虚拟歌手", "仅限对应SEKAI场景"]
     },
     "collaboration_akuno": {
       "name": "恶之大罪联动「世界」主题曲",
@@ -4321,10 +4335,10 @@
       "tempo": "慢板",
       "category": "特别活动",
       "unit": "联动",
-      "scenes": ["古典宫廷", "命运叙事", "联动剧场"],
-      "description": "神秘空灵·慢板 | 恶之大罪联动区域曲，带有古典歌剧般的宿命与庄严感",
+      "scenes": ["恶之大罪联动", "仅限特别活动场景"],
+      "description": "神秘空灵·慢板 | [仅限联动「世界」使用] 恶之大罪联动区域主题曲，严禁用于常规现实剧情",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["神秘空灵", "慢板", "特别活动", "联动"]
+      "tags": ["神秘空灵", "慢板", "特别活动", "联动", "仅限特别活动场景"]
     },
     "collaboration_sanrio": {
       "name": "三丽鸥联动「世界」主题曲",
@@ -4332,10 +4346,10 @@
       "tempo": "中快",
       "category": "特别活动",
       "unit": "联动",
-      "scenes": ["可爱互动", "游园聚会", "轻松日常"],
-      "description": "元气欢快·中快 | 三丽鸥联动可爱主题曲，甜美轻快，适合治愈互动",
+      "scenes": ["三丽鸥联动", "仅限特别活动场景"],
+      "description": "元气欢快·中快 | [仅限联动「世界」使用] 三丽鸥联动区域主题曲，严禁用于常规现实剧情",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["元气欢快", "中快", "特别活动", "联动"]
+      "tags": ["元气欢快", "中快", "特别活动", "联动", "仅限特别活动场景"]
     },
     "leoneed_untitled": {
       "name": "教室「世界」主题曲",
@@ -4343,10 +4357,10 @@
       "tempo": "中慢",
       "category": "SEKAI主题",
       "unit": "Leo/need",
-      "scenes": ["教室「世界」", "乐队谈心", "放学回忆"],
-      "description": "温暖治愈·中慢 | Leo/need 教室「世界」主题曲，带夕阳余韵与青春怀旧感",
+      "scenes": ["教室「世界」", "仅限对应SEKAI场景"],
+      "description": "温暖治愈·中慢 | [仅限教室SEKAI内使用] Leo/need 教室「世界」主题曲，带夕阳余韵与青春怀旧感，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["温暖治愈", "中慢", "SEKAI主题", "Leo/need"]
+      "tags": ["温暖治愈", "中慢", "SEKAI主题", "Leo/need", "仅限对应SEKAI场景", "教室SEKAI"]
     },
     "leoneed_untitled_2": {
       "name": "教室「世界」主题曲 II",
@@ -4354,10 +4368,10 @@
       "tempo": "中拍",
       "category": "SEKAI主题",
       "unit": "Leo/need",
-      "scenes": ["教室「世界」", "乐队排练", "希望前行"],
-      "description": "温暖治愈·中拍 | 教室「世界」新版主题曲，开朗清澈，适合团体讨论与积极推进",
+      "scenes": ["教室「世界」", "仅限对应SEKAI场景"],
+      "description": "温暖治愈·中拍 | [仅限教室SEKAI内使用] Leo/need 教室「世界」新版主题曲，开朗清澈，严禁用于现实校园/居家等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["温暖治愈", "中拍", "SEKAI主题", "Leo/need"]
+      "tags": ["温暖治愈", "中拍", "SEKAI主题", "Leo/need", "仅限对应SEKAI场景", "教室SEKAI"]
     },
     "moremore_untitled": {
       "name": "舞台「世界」主题曲",
@@ -4365,10 +4379,10 @@
       "tempo": "中快",
       "category": "SEKAI主题",
       "unit": "MORE MORE JUMP!",
-      "scenes": ["舞台「世界」", "偶像练习", "元气鼓励"],
-      "description": "元气欢快·中快 | MMJ 舞台「世界」主题曲，明亮偶像流行风格，适合活力与练习场景",
+      "scenes": ["舞台「世界」", "仅限对应SEKAI场景"],
+      "description": "元气欢快·中快 | [仅限舞台SEKAI内使用] MMJ 舞台「世界」主题曲，明亮偶像流行风格，严禁用于现实练习室/舞台等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!"]
+      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!", "仅限对应SEKAI场景", "舞台SEKAI"]
     },
     "moremore_untitled_2": {
       "name": "舞台「世界」主题曲 II",
@@ -4376,10 +4390,10 @@
       "tempo": "中快",
       "category": "SEKAI主题",
       "unit": "MORE MORE JUMP!",
-      "scenes": ["舞台「世界」", "直播策划", "偶像聚会"],
-      "description": "元气欢快·中快 | 舞台「世界」新版主题曲，闪耀轻快，适合偶像日常与企划讨论",
+      "scenes": ["舞台「世界」", "仅限对应SEKAI场景"],
+      "description": "元气欢快·中快 | [仅限舞台SEKAI内使用] MMJ 舞台「世界」新版主题曲，闪耀轻快，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!"]
+      "tags": ["元气欢快", "中快", "SEKAI主题", "MORE MORE JUMP!", "仅限对应SEKAI场景", "舞台SEKAI"]
     },
     "nightcode_untitled": {
       "name": "无人「世界」主题曲",
@@ -4387,10 +4401,17 @@
       "tempo": "慢板",
       "category": "SEKAI主题",
       "unit": "25时，Nightcord de.",
-      "scenes": ["无人「世界」", "深夜独处", "内心独白"],
-      "description": "宁静深夜·慢板 | 25时 无人「世界」主题曲，空灵清冷，适合深夜对话、内省与温柔安慰",
+      "scenes": ["无人「世界」", "仅限对应SEKAI场景"],
+      "description": "宁静深夜·慢板 | [仅限无人SEKAI内使用] 25时 无人「世界」主题曲，空灵清冷，严禁用于现实卧室/客厅/家庭餐厅/25时连线等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["宁静深夜", "慢板", "SEKAI主题", "25时，Nightcord de."]
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "SEKAI主题",
+        "25时，Nightcord de.",
+        "仅限对应SEKAI场景",
+        "无人SEKAI"
+      ]
     },
     "nightcode_untitled_2": {
       "name": "无人「世界」主题曲 II",
@@ -4398,10 +4419,17 @@
       "tempo": "慢板",
       "category": "SEKAI主题",
       "unit": "25时，Nightcord de.",
-      "scenes": ["无人「世界」", "深夜心绪", "坦诚倾诉"],
-      "description": "宁静深夜·慢板 | 无人「世界」新版主题曲，静谧而带微光，适合夜晚深谈与情绪余韵",
+      "scenes": ["无人「世界」", "仅限对应SEKAI场景"],
+      "description": "宁静深夜·慢板 | [仅限无人SEKAI内使用] 25时 无人「世界」新版主题曲，静谧而带微光，严禁用于现实卧室/客厅/25时连线等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["宁静深夜", "慢板", "SEKAI主题", "25时，Nightcord de."]
+      "tags": [
+        "宁静深夜",
+        "慢板",
+        "SEKAI主题",
+        "25时，Nightcord de.",
+        "仅限对应SEKAI场景",
+        "无人SEKAI"
+      ]
     },
     "normal_area": {
       "name": "涩谷街区日常主题曲",
@@ -4596,10 +4624,10 @@
       "tempo": "中快",
       "category": "SEKAI主题",
       "unit": "Vivid BAD SQUAD",
-      "scenes": ["街头「世界」", "Crase Cafe", "音乐交流"],
-      "description": "律动街头·中快 | VBS 街头「世界」主题曲，都市节拍感强，适合咖啡厅与街头音乐话题",
+      "scenes": ["街头「世界」", "Crase Cafe", "仅限对应SEKAI场景"],
+      "description": "律动街头·中快 | [仅限街头SEKAI内使用] VBS 街头「世界」主题曲（含Crase Cafe），都市节拍感强，严禁用于现实涩谷街头/咖啡店等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["律动街头", "中快", "SEKAI主题", "Vivid BAD SQUAD"]
+      "tags": ["律动街头", "中快", "SEKAI主题", "Vivid BAD SQUAD", "仅限对应SEKAI场景", "街头SEKAI"]
     },
     "vividbad_untitled_2": {
       "name": "街头「世界」主题曲 II",
@@ -4607,10 +4635,10 @@
       "tempo": "中快",
       "category": "SEKAI主题",
       "unit": "Vivid BAD SQUAD",
-      "scenes": ["街头「世界」", "挑战目标", "街头排练"],
-      "description": "律动街头·中快 | 街头「世界」新版主题曲，节奏利落，适合立志与伙伴对谈",
+      "scenes": ["街头「世界」", "Crase Cafe", "仅限对应SEKAI场景"],
+      "description": "律动街头·中快 | [仅限街头SEKAI内使用] VBS 街头「世界」新版主题曲，节奏利落，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["律动街头", "中快", "SEKAI主题", "Vivid BAD SQUAD"]
+      "tags": ["律动街头", "中快", "SEKAI主题", "Vivid BAD SQUAD", "仅限对应SEKAI场景", "街头SEKAI"]
     },
     "wonderlands_untitled": {
       "name": "奇幻乐园「世界」主题曲",
@@ -4618,10 +4646,17 @@
       "tempo": "快板",
       "category": "SEKAI主题",
       "unit": "Wonderlands×Showtime",
-      "scenes": ["奇幻乐园「世界」", "剧团闹剧", "创意演出"],
-      "description": "奇幻活泼·快板 | WxS 奇幻乐园「世界」主题曲，马戏团般跳脱欢快，适合热闹排戏",
+      "scenes": ["奇幻乐园「世界」", "仅限对应SEKAI场景"],
+      "description": "奇幻活泼·快板 | [仅限奇幻SEKAI内使用] WxS 奇幻乐园「世界」主题曲，马戏团般跳脱欢快，严禁用于现实游乐园/排练室等非SEKAI场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["奇幻活泼", "快板", "SEKAI主题", "Wonderlands×Showtime"]
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "SEKAI主题",
+        "Wonderlands×Showtime",
+        "仅限对应SEKAI场景",
+        "奇幻SEKAI"
+      ]
     },
     "wonderlands_untitled_2": {
       "name": "奇幻乐园「世界」主题曲 II",
@@ -4629,10 +4664,17 @@
       "tempo": "快板",
       "category": "SEKAI主题",
       "unit": "Wonderlands×Showtime",
-      "scenes": ["奇幻乐园「世界」", "Wonderhoy", "盛大演出"],
-      "description": "奇幻活泼·快板 | 奇幻乐园「世界」新版主题曲，充满梦想与剧场童话氛围",
+      "scenes": ["奇幻乐园「世界」", "仅限对应SEKAI场景"],
+      "description": "奇幻活泼·快板 | [仅限奇幻SEKAI内使用] WxS 奇幻乐园「世界」新版主题曲，充满剧场童话氛围，严禁用于现实场景",
       "bundlePrefix": "sound/area_bgm/",
-      "tags": ["奇幻活泼", "快板", "SEKAI主题", "Wonderlands×Showtime"]
+      "tags": [
+        "奇幻活泼",
+        "快板",
+        "SEKAI主题",
+        "Wonderlands×Showtime",
+        "仅限对应SEKAI场景",
+        "奇幻SEKAI"
+      ]
     }
   }
 }

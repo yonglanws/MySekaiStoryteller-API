@@ -55,6 +55,7 @@ import {
   type StagedVoiceDirectionLine
 } from './staged'
 import { validateAndFixStory, type ValidationResult } from './validate'
+import { sanitizeStorySekaiBgms } from './bgmGuard'
 import { lintDialogueFidelity, repairSpokenStageDirections } from './dialogueLinter'
 import {
   buildLocalizedDirectorReviewHints,
@@ -576,6 +577,13 @@ export class StoryWriter {
             emotionLabels: this.emotionLabels
           })
           alignStoryTtsEmotionsAndCaptions(validated.story, { emotionLabels: this.emotionLabels })
+        }
+        const singleBgmGuard = sanitizeStorySekaiBgms(validated.story, view, {
+          promptText: prompt,
+          logger: this.logger
+        })
+        if (singleBgmGuard.warnings.length > 0) {
+          validated.warnings.push(...singleBgmGuard.warnings)
         }
         return {
           story: validated.story,
@@ -1203,6 +1211,13 @@ export class StoryWriter {
       validated = validateAndFixStory(composed, view, this.logger, {
         emotionLabels: this.emotionLabels
       })
+      const initialBgmGuard = sanitizeStorySekaiBgms(validated.story, view, {
+        promptText: prompt,
+        logger: this.logger
+      })
+      if (initialBgmGuard.warnings.length > 0) {
+        warnings.push(...initialBgmGuard.warnings)
+      }
     } catch (error) {
       const message = errorMessage(error)
       this.logger.warn(`[AI] staged 合成校验失败，退回无动作版本：${message}`)
@@ -1221,6 +1236,13 @@ export class StoryWriter {
         validated = validateAndFixStory(fallbackComposed, view, this.logger, {
           emotionLabels: this.emotionLabels
         })
+        const fallbackBgmGuard = sanitizeStorySekaiBgms(validated.story, view, {
+          promptText: prompt,
+          logger: this.logger
+        })
+        if (fallbackBgmGuard.warnings.length > 0) {
+          warnings.push(...fallbackBgmGuard.warnings)
+        }
         warnings.push(`表演设计校验失败，已退回无动作版本：${message}`)
       } catch (fallbackError) {
         details.push(`合成回退：${errorMessage(fallbackError)}`)
@@ -1323,6 +1345,14 @@ export class StoryWriter {
       this.logger.info(
         `[TTS] 情绪对齐（staged）：emotion=${alignedStaged.updatedEmotions} caption=${alignedStaged.updatedCaptions} emoji=${alignedStaged.updatedEmojis} special=${alignedStaged.updatedSpecialScenes}`
       )
+    }
+
+    const finalBgmGuard = sanitizeStorySekaiBgms(validated.story, view, {
+      promptText: prompt,
+      logger: this.logger
+    })
+    if (finalBgmGuard.warnings.length > 0) {
+      warnings.push(...finalBgmGuard.warnings)
     }
 
     const activeIds = new Set(validated.story.models.map((entry) => entry.id))

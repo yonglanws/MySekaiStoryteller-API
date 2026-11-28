@@ -1,4 +1,10 @@
 import type { CatalogModel } from '../../resources/resourceCatalog'
+import {
+  classifyBgmSekaiScope,
+  detectSceneSekaiContext,
+  formatSekaiBgmBadge,
+  isBgmAllowedInScene
+} from '../bgmGuard'
 import * as corpusExamplesMod from '../corpusExamples'
 import * as facialSemanticsMod from '../facialSemantics'
 import * as personasMod from '../personas'
@@ -554,18 +560,46 @@ export async function executeResearchTool(
     }
     if (wantsAll || kindSet.has('bgm')) {
       const bgmMap = new Map<string, Record<string, unknown>>()
+      const fallbackRestrictedMap = new Map<string, Record<string, unknown>>()
+      const formatBgmEntry = (
+        b: ReturnType<typeof view.bgmPromptChoices>[number]
+      ): Record<string, unknown> => {
+        const cls = classifyBgmSekaiScope(b.file, b)
+        const badge = formatSekaiBgmBadge(b)
+        const description = badge ? `${badge} ${b.description}`.trim() : b.description
+        return {
+          file: b.file,
+          name: b.name,
+          mood: b.mood,
+          tempo: b.tempo,
+          description,
+          ...(cls.isSekaiExclusive
+            ? {
+                sekaiOnly: true,
+                sekaiScope: cls.label,
+                usageWarning: `[仅限${cls.label}内使用，现实场景禁用]`
+              }
+            : cls.isSpecialEventOnly
+              ? {
+                  specialEventOnly: true,
+                  sekaiScope: cls.label,
+                  usageWarning: `[仅限${cls.label}内使用，常规现实场景禁用]`
+                }
+              : {})
+        }
+      }
       for (const q of queryList) {
-        for (const b of view.bgmPromptChoices(limit, q)) {
-          if (!bgmMap.has(b.file)) {
-            bgmMap.set(b.file, {
-              file: b.file,
-              name: b.name,
-              mood: b.mood,
-              tempo: b.tempo,
-              description: b.description
-            })
+        const qCtx = detectSceneSekaiContext({ promptText: q })
+        for (const b of view.bgmPromptChoices(limit * 2, q)) {
+          if (isBgmAllowedInScene(b.file, qCtx, b)) {
+            if (!bgmMap.has(b.file)) bgmMap.set(b.file, formatBgmEntry(b))
+          } else if (!fallbackRestrictedMap.has(b.file)) {
+            fallbackRestrictedMap.set(b.file, formatBgmEntry(b))
           }
         }
+      }
+      if (bgmMap.size === 0 && fallbackRestrictedMap.size > 0) {
+        for (const [k, v] of fallbackRestrictedMap) bgmMap.set(k, v)
       }
       result.bgm = [...bgmMap.values()].slice(0, limit)
     }

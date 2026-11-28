@@ -25,6 +25,12 @@ import {
   type DramaticContextMood
 } from './facialSemantics'
 import { getOfficialActingGuidelines } from './corpusExamples'
+import {
+  classifyBgmSekaiScope,
+  detectSceneSekaiContext,
+  formatSekaiBgmBadge,
+  isBgmAllowedInScene
+} from './bgmGuard'
 import { CURATED_SCENARIO_SES, resolveScenarioSe } from './scenarioCues'
 
 // 单个角色的动作/表情提示词上限。云端角色普遍有 240+ 动作、50~140 表情，
@@ -369,12 +375,16 @@ export function formatBgmPromptLine(detail: CatalogBgm): string {
   const name = detail.name || detail.file
   const ref = detail.id ?? detail.file
   const moodTag = [detail.mood, detail.tempo].filter(Boolean).join('·')
+  const sekaiBadge = formatSekaiBgmBadge(detail)
+  const suffix = sekaiBadge ? ` ${sekaiBadge}` : ''
   if (moodTag) {
     return detail.description
-      ? `- ${name}（${ref}）[${moodTag}]：${detail.description}`
-      : `- ${name}（${ref}）[${moodTag}]`
+      ? `- ${name}（${ref}）[${moodTag}]${suffix}：${detail.description}`
+      : `- ${name}（${ref}）[${moodTag}]${suffix}`
   }
-  return detail.description ? `- ${name}（${ref}）：${detail.description}` : `- ${name}（${ref}）`
+  return detail.description
+    ? `- ${name}（${ref}）${suffix}：${detail.description}`
+    : `- ${name}（${ref}）${suffix}`
 }
 
 /** 判断动作名是否为默认站姿（入场/后续连招会优先避开这类静态名）。 */
@@ -705,20 +715,30 @@ export class CatalogView {
    * 全部情绪族，优先贴合当前场景关键词与核心经典曲目；校验用的 canonicalBgm 仍接受全部 ~421 首。
    */
   bgmPromptChoices(limit = 0, query = ''): CatalogBgm[] {
-    const choices = this.bgmDetailsList().filter(
+    const allDescribed = this.bgmDetailsList().filter(
       (detail) => (detail.description ?? '').trim().length > 0
     )
+    if (allDescribed.length === 0) return []
+    const trimmedQuery = query.trim()
+    if (limit <= 0 && !trimmedQuery) return allDescribed
+
+    const querySceneCtx = detectSceneSekaiContext({ promptText: trimmedQuery })
+    const allowedChoices = allDescribed.filter((detail) =>
+      isBgmAllowedInScene(detail.file, querySceneCtx, detail)
+    )
+    const choices = allowedChoices.length > 0 ? allowedChoices : allDescribed
     if (limit <= 0 || choices.length <= limit) return choices
 
-    const keywords = extractQueryKeywords(query)
-    const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
+    const keywords = extractQueryKeywords(trimmedQuery)
+    const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(trimmedQuery)).map(([, u]) => u)
     const isTenseQuery =
       /追|逃|对峙|冲突|吵|哭|泪|道歉|告别|压抑|低沉|沉重|紧张|不安|严肃|秘密|隐瞒|害怕|悬疑|暗涌|夜晚|深夜|暴雨|雨|伤心|生气/.test(
-        query
+        trimmedQuery
       )
     const isWarmQuery =
-      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(query) &&
-      !isTenseQuery
+      /日常|轻松|温馨|闲聊|笑|搞笑|玩笑|派对|排练|零食|下午茶|阳光|早安|开心|欢快/.test(
+        trimmedQuery
+      ) && !isTenseQuery
     const scoreOf = (detail: CatalogBgm): number => {
       let score = detail.source === 'local' ? 6 : 0
       const hay =
@@ -728,6 +748,17 @@ export class CatalogView {
       }
       for (const u of unitHints) {
         if (detail.unit === u) score += 6
+      }
+      const sekaiCls = classifyBgmSekaiScope(detail.file, detail)
+      if (!isBgmAllowedInScene(detail.file, querySceneCtx, detail)) {
+        score -= 100
+      } else if (
+        querySceneCtx.isSekai &&
+        querySceneCtx.sekaiUnit &&
+        querySceneCtx.sekaiUnit !== 'generic' &&
+        sekaiCls.sekaiUnit === querySceneCtx.sekaiUnit
+      ) {
+        score += 12
       }
       if (isTenseQuery) {
         if (
