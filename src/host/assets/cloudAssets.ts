@@ -21,7 +21,7 @@ import {
   markCanonicalOriginHealthy,
   orderCanonicalOrigins
 } from './http'
-import { MOTION_BUNDLES_SIDECAR } from './shared'
+import { mapPool, MOTION_BUNDLES_SIDECAR } from './shared'
 import type {
   CloudBackgroundEntry,
   CloudBgmEntry,
@@ -66,6 +66,26 @@ export interface CloudAssetResolution {
 }
 
 const modelLocks = new Map<string, Promise<string>>()
+const backgroundLocks = new Map<string, Promise<string>>()
+const bgmLocks = new Map<string, Promise<string>>()
+const seLocks = new Map<string, Promise<string | null>>()
+const inappFileLocks = new Map<string, Promise<boolean>>()
+
+function withSingleFlight<T>(
+  locks: Map<string, Promise<T>>,
+  key: string,
+  factory: () => Promise<T>
+): Promise<T> {
+  const existing = locks.get(key)
+  if (existing) return existing
+  const task = factory().finally(() => {
+    if (locks.get(key) === task) {
+      locks.delete(key)
+    }
+  })
+  locks.set(key, task)
+  return task
+}
 
 function stripResourcePrefix(
   value: unknown,
@@ -109,7 +129,7 @@ function keysOf(values: Array<string | undefined>): string[] {
 function existsWithExtensions(dir: string, base: string, extensions: string[]): string | null {
   for (const extension of extensions) {
     const candidate = path.join(dir, `${base}${extension}`)
-    if (fs.existsSync(candidate)) return candidate
+    if (isNonEmptyFile(candidate)) return candidate
   }
   return null
 }
@@ -369,22 +389,28 @@ async function ensureBackground(
   const existing = existsWithExtensions(imagesDir, entry.id, IMAGE_EXTENSIONS)
   if (existing) return `cloud/${path.basename(existing)}`
 
-  ctx.logger.info(`[Cloud] 下载背景 ${entry.id}（${entry.name}）…`)
-  const downloaded = await downloadMediaFile({
-    kind: 'background',
-    name: entry.id,
-    outDir: ctx.resourcesDir,
-    region: ctx.settings.region,
-    assetBase: ctx.settings.assetBase || undefined,
-    subdir: 'cloud',
-    timeoutMs: ctx.settings.timeoutMs,
-    retries: ctx.settings.retries
+  const lockKey = `${path.resolve(ctx.resourcesDir)}::bg::${entry.id}`
+  return withSingleFlight(backgroundLocks, lockKey, async () => {
+    const cached = existsWithExtensions(imagesDir, entry.id, IMAGE_EXTENSIONS)
+    if (cached) return `cloud/${path.basename(cached)}`
+
+    ctx.logger.info(`[Cloud] 下载背景 ${entry.id}（${entry.name}）…`)
+    const downloaded = await downloadMediaFile({
+      kind: 'background',
+      name: entry.id,
+      outDir: ctx.resourcesDir,
+      region: ctx.settings.region,
+      assetBase: ctx.settings.assetBase || undefined,
+      subdir: 'cloud',
+      timeoutMs: ctx.settings.timeoutMs,
+      retries: ctx.settings.retries
+    })
+    if (!downloaded) throw new Error(`cloud background not found: ${entry.id}`)
+    ctx.logger.info(
+      `[Cloud] 背景 ${entry.id} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
+    )
+    return `cloud/${path.basename(downloaded.file)}`
   })
-  if (!downloaded) throw new Error(`cloud background not found: ${entry.id}`)
-  ctx.logger.info(
-    `[Cloud] 背景 ${entry.id} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
-  )
-  return `cloud/${path.basename(downloaded.file)}`
 }
 
 export const DEFAULT_INAPP_VERSION = 'jp-7.0.0'
@@ -473,8 +499,6 @@ export interface EnsureInappAssetsResult {
   offlineFallback: boolean
 }
 
-const inappInflights = new Map<string, Promise<EnsureInappAssetsResult>>()
-
 export function resolveInappAssetPath(
   resourcesDir: string,
   relPath: string,
@@ -486,6 +510,7 @@ export function resolveInappAssetPath(
 
 /**
  * 拉取并缓存官方 `inapp/jp-7.0.0` UI/FX 贴图与通用 UI 音效到 `resources/inapp/<version>/`；
+ * 支持多文件并发拉取与逐文件 single-flight 去重；
  * 离线或单文件失败时绝不阻断流程，由渲染端矢量 fallback（A3）自动兜底。
  */
 export async function ensureInappUiAssets(
@@ -495,40 +520,34 @@ export async function ensureInappUiAssets(
   const version = options.version ?? DEFAULT_INAPP_VERSION
   const explicitBase = options.inappBase?.trim().replace(/\/+$/, '')
   const region = ctx.settings?.region ?? 'jp'
-  const paths = options.paths ?? INAPP_UI_ASSET_PATHS
-  const key = `${ctx.resourcesDir}::${version}::${paths.length}`
-  const existingLock = !options.force ? inappInflights.get(key) : undefined
-  if (existingLock) return existingLock
+  const paths = [...(options.paths ?? INAPP_UI_ASSET_PATHS)]
+  const rootDir = path.join(ctx.resourcesDir, 'inapp', version)
+  const resolvedRoot = path.resolve(ctx.resourcesDir)
+  const timeoutMs = options.timeoutMs ?? Math.min(ctx.settings.timeoutMs, 15_000)
+  const retries = options.retries ?? Math.min(ctx.settings.retries, 1)
+  const concurrency = Math.max(1, Math.min(6, ctx.settings?.concurrency || 4))
 
-  const work = (async (): Promise<EnsureInappAssetsResult> => {
-    const rootDir = path.join(ctx.resourcesDir, 'inapp', version)
-    const timeoutMs = options.timeoutMs ?? Math.min(ctx.settings.timeoutMs, 15_000)
-    const retries = options.retries ?? Math.min(ctx.settings.retries, 1)
-    let cached = 0
-    let downloaded = 0
-    const failed: string[] = []
-
-    for (const relPath of paths) {
-      const localPath = resolveInappAssetPath(ctx.resourcesDir, relPath, version)
-      if (!options.force && fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
-        cached++
-        continue
-      }
-      const cleanRel = relPath.replace(/^\/+/, '')
+  const outcomes = await mapPool(paths, concurrency, async (relPath) => {
+    const localPath = resolveInappAssetPath(ctx.resourcesDir, relPath, version)
+    if (!options.force && isNonEmptyFile(localPath)) {
+      return 'cached' as const
+    }
+    const cleanRel = relPath.replace(/^\/+/, '')
+    const downloadOne = async (): Promise<boolean> => {
+      if (!options.force && isNonEmptyFile(localPath)) return true
       const candidateUrls = explicitBase
         ? [`${explicitBase}/${cleanRel}`]
         : orderCanonicalOrigins([...CANONICAL_ASSET_SITES]).flatMap((site) =>
             canonicalInappUrls(site, region, cleanRel)
           )
 
-      let saved = false
       for (const url of candidateUrls) {
         try {
           const buffer = await fetchBuffer(url, { timeoutMs, retries })
           if (buffer.byteLength === 0) throw new Error('empty body')
           if (!explicitBase) markCanonicalOriginHealthy(url)
           if (localPath.toLowerCase().endsWith('.wav') && url.toLowerCase().endsWith('.mp3')) {
-            const mp3Temp = `${localPath}.tmp.mp3`
+            const mp3Temp = `${localPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp.mp3`
             atomicWrite(mp3Temp, buffer)
             try {
               fs.mkdirSync(path.dirname(localPath), { recursive: true })
@@ -541,8 +560,7 @@ export async function ensureInappUiAssets(
           } else {
             atomicWrite(localPath, buffer)
           }
-          saved = true
-          break
+          return true
         } catch (error) {
           if (!explicitBase && isLikelyOriginFailure(error)) {
             markCanonicalOriginFailed(url)
@@ -550,30 +568,41 @@ export async function ensureInappUiAssets(
           // try next candidate URL / backup mirror
         }
       }
-      if (saved) downloaded++
-      else failed.push(relPath)
+      return false
     }
 
-    if (downloaded > 0 || failed.length > 0) {
-      ctx.logger.info(
-        `[Cloud] inapp/${version}: cached=${cached}, downloaded=${downloaded}, fallback=${failed.length}`
-      )
-    }
-    return {
-      version,
-      rootDir,
-      cached,
-      downloaded,
-      failed,
-      offlineFallback: failed.length > 0
-    }
-  })()
+    const saved = options.force
+      ? await downloadOne()
+      : await withSingleFlight(
+          inappFileLocks,
+          `${resolvedRoot}::${version}::${cleanRel}`,
+          downloadOne
+        )
+    return saved ? ('downloaded' as const) : ('failed' as const)
+  })
 
-  inappInflights.set(key, work)
-  try {
-    return await work
-  } finally {
-    inappInflights.delete(key)
+  let cached = 0
+  let downloaded = 0
+  const failed: string[] = []
+  for (let i = 0; i < paths.length; i++) {
+    const outcome = outcomes[i]
+    if (outcome === 'cached') cached++
+    else if (outcome === 'downloaded') downloaded++
+    else failed.push(paths[i])
+  }
+
+  if (downloaded > 0 || failed.length > 0) {
+    ctx.logger.info(
+      `[Cloud] inapp/${version}: cached=${cached}, downloaded=${downloaded}, fallback=${failed.length}`
+    )
+  }
+  return {
+    version,
+    rootDir,
+    cached,
+    downloaded,
+    failed,
+    offlineFallback: failed.length > 0
   }
 }
 
@@ -611,36 +640,52 @@ async function ensureBgm(entry: CloudBgmEntry, ctx: CloudAssetContext): Promise<
     return `cloud/${path.basename(existing)}`
   }
 
-  ctx.logger.info(`[Cloud] 下载 BGM ${entry.id}（${entry.name}）…`)
-  const downloaded = await downloadMediaFile({
-    kind: 'bgm',
-    name: entry.id,
-    bundlePath: entry.bundlePath,
-    saveAsName: entry.id,
-    outDir: ctx.resourcesDir,
-    region: ctx.settings.region,
-    assetBase: ctx.settings.assetBase || undefined,
-    subdir: 'cloud',
-    timeoutMs: ctx.settings.timeoutMs,
-    retries: ctx.settings.retries
+  const lockKey = `${path.resolve(ctx.resourcesDir)}::bgm::${entry.id}`
+  const resolved = await withSingleFlight(bgmLocks, lockKey, async () => {
+    const cached = existsWithExtensions(bgmDir, entry.id, AUDIO_EXTENSIONS)
+    if (cached) return `cloud/${path.basename(cached)}`
+
+    ctx.logger.info(`[Cloud] 下载 BGM ${entry.id}（${entry.name}）…`)
+    const downloaded = await downloadMediaFile({
+      kind: 'bgm',
+      name: entry.id,
+      bundlePath: entry.bundlePath,
+      saveAsName: entry.id,
+      outDir: ctx.resourcesDir,
+      region: ctx.settings.region,
+      assetBase: ctx.settings.assetBase || undefined,
+      subdir: 'cloud',
+      timeoutMs: ctx.settings.timeoutMs,
+      retries: ctx.settings.retries
+    })
+    if (!downloaded) throw new Error(`cloud bgm not found: ${entry.id}`)
+    if (downloaded.loop) {
+      entry.loopStartMs = downloaded.loop.loopStartMs
+      entry.loopEndMs = downloaded.loop.loopEndMs
+    } else {
+      const localTarget = path.join(ctx.resourcesDir, ...downloaded.file.split('/'))
+      const loop = extractAudioLoopMetadata(localTarget)
+      if (loop) {
+        entry.loopStartMs = loop.loopStartMs
+        entry.loopEndMs = loop.loopEndMs
+        writeAudioLoopSidecar(localTarget, loop)
+      }
+    }
+    ctx.logger.info(
+      `[Cloud] BGM ${entry.id} → ${downloaded.file}（${(downloaded.bytes / 1024 / 1024).toFixed(1)} MB）`
+    )
+    return `cloud/${path.basename(downloaded.file)}`
   })
-  if (!downloaded) throw new Error(`cloud bgm not found: ${entry.id}`)
-  if (downloaded.loop) {
-    entry.loopStartMs = downloaded.loop.loopStartMs
-    entry.loopEndMs = downloaded.loop.loopEndMs
-  } else {
-    const localTarget = path.join(ctx.resourcesDir, ...downloaded.file.split('/'))
-    const loop = extractAudioLoopMetadata(localTarget)
+
+  if (entry.loopStartMs === undefined) {
+    const localAfter = path.join(ctx.resourcesDir, 'audio', 'bgm', ...resolved.split('/'))
+    const loop = extractAudioLoopMetadata(localAfter)
     if (loop) {
       entry.loopStartMs = loop.loopStartMs
       entry.loopEndMs = loop.loopEndMs
-      writeAudioLoopSidecar(localTarget, loop)
     }
   }
-  ctx.logger.info(
-    `[Cloud] BGM ${entry.id} → ${downloaded.file}（${(downloaded.bytes / 1024 / 1024).toFixed(1)} MB）`
-  )
-  return `cloud/${path.basename(downloaded.file)}`
+  return resolved
 }
 
 async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | null> {
@@ -650,42 +695,47 @@ async function ensureSe(file: string, ctx: CloudAssetContext): Promise<string | 
   const local = existsWithExtensions(seDir, stem(name), AUDIO_EXTENSIONS)
   if (local) return `cloud/${path.basename(local)}`
 
-  const inappCandidate = INAPP_UI_ASSET_PATHS.find(
-    (p) =>
-      p.startsWith('audio/') &&
-      stem(path.posix.basename(p)).toLowerCase() === stem(name).toLowerCase()
-  )
-  if (inappCandidate) {
-    await ensureInappUiAssets(ctx, {
-      paths: [inappCandidate],
-      timeoutMs: Math.min(ctx.settings.timeoutMs, 10_000)
-    })
-    const inappLocal = resolveInappAssetPath(ctx.resourcesDir, inappCandidate)
-    if (fs.existsSync(inappLocal)) {
-      fs.mkdirSync(seDir, { recursive: true })
-      const destName = path.basename(inappLocal)
-      fs.copyFileSync(inappLocal, path.join(seDir, destName))
-      return `cloud/${destName}`
-    }
-  }
-
   const catalogMatch = ctx.catalog ? findCloudSe(ctx.catalog, name) : undefined
   const targetCue = catalogMatch?.id ?? name
+  const lockKey = `${path.resolve(ctx.resourcesDir)}::se::${stem(targetCue).toLowerCase()}`
 
-  ctx.logger.info(`[Cloud] 下载 SE ${targetCue} …`)
-  const downloaded = await downloadSeFile({
-    name: targetCue,
-    outDir: ctx.resourcesDir,
-    region: ctx.settings.region,
-    assetBase: ctx.settings.assetBase || undefined,
-    timeoutMs: ctx.settings.timeoutMs,
-    retries: ctx.settings.retries
+  return withSingleFlight(seLocks, lockKey, async () => {
+    const cached = existsWithExtensions(seDir, stem(name), AUDIO_EXTENSIONS)
+    if (cached) return `cloud/${path.basename(cached)}`
+
+    const inappCandidate = INAPP_UI_ASSET_PATHS.find(
+      (p) =>
+        p.startsWith('audio/') &&
+        stem(path.posix.basename(p)).toLowerCase() === stem(name).toLowerCase()
+    )
+    if (inappCandidate) {
+      await ensureInappUiAssets(ctx, {
+        paths: [inappCandidate],
+        timeoutMs: Math.min(ctx.settings.timeoutMs, 10_000)
+      })
+      const inappLocal = resolveInappAssetPath(ctx.resourcesDir, inappCandidate)
+      if (isNonEmptyFile(inappLocal)) {
+        const destName = path.basename(inappLocal)
+        atomicWrite(path.join(seDir, destName), fs.readFileSync(inappLocal))
+        return `cloud/${destName}`
+      }
+    }
+
+    ctx.logger.info(`[Cloud] 下载 SE ${targetCue} …`)
+    const downloaded = await downloadSeFile({
+      name: targetCue,
+      outDir: ctx.resourcesDir,
+      region: ctx.settings.region,
+      assetBase: ctx.settings.assetBase || undefined,
+      timeoutMs: ctx.settings.timeoutMs,
+      retries: ctx.settings.retries
+    })
+    if (!downloaded) return null
+    ctx.logger.info(
+      `[Cloud] SE ${targetCue} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
+    )
+    return `cloud/${path.basename(downloaded.file)}`
   })
-  if (!downloaded) return null
-  ctx.logger.info(
-    `[Cloud] SE ${targetCue} → ${downloaded.file}（${(downloaded.bytes / 1024).toFixed(0)} KB）`
-  )
-  return `cloud/${path.basename(downloaded.file)}`
 }
 
 function isLegacyDefaultBgmRef(ref: string): boolean {
@@ -917,15 +967,17 @@ async function tryFallbackCharacterModel(
   return null
 }
 
-async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Promise<string> {
+async function ensureModel(
+  entry: CloudModelEntry,
+  ctx: CloudAssetContext,
+  concurrencyOverride?: number
+): Promise<string> {
   const modelsDir = path.join(ctx.resourcesDir, 'models', 'cloud')
   const modelJson = path.join(ctx.resourcesDir, 'models', ...entry.path.split('/'))
   if (!modelNeedsRepair(entry, modelJson)) return entry.path
 
   const lockKey = `${path.resolve(ctx.resourcesDir)}::${entry.id}`
-  const existing = modelLocks.get(lockKey)
-  if (existing) return existing
-  const task = (async () => {
+  return withSingleFlight(modelLocks, lockKey, async () => {
     if (!modelNeedsRepair(entry, modelJson)) return entry.path
     if (!ctx.catalog) throw new Error('cloud catalog unavailable')
     const repairing = fs.existsSync(modelJson)
@@ -947,7 +999,7 @@ async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Prom
       {
         timeoutMs: ctx.settings.timeoutMs,
         retries: ctx.settings.retries,
-        concurrency: ctx.settings.concurrency,
+        concurrency: concurrencyOverride ?? ctx.settings.concurrency,
         cacheDir: ctx.settings.cacheDir
       },
       (message) => ctx.logger.info(`[Cloud] ${message}`)
@@ -956,11 +1008,7 @@ async function ensureModel(entry: CloudModelEntry, ctx: CloudAssetContext): Prom
       `[Cloud] Live2D 模型 ${entry.id} → models/cloud/${result.path}（${result.motions} 动作 / ${result.facials} 表情）`
     )
     return `cloud/${result.path}`
-  })().finally(() => {
-    modelLocks.delete(lockKey)
   })
-  modelLocks.set(lockKey, task)
-  return task
 }
 
 function localModelExists(resourcesDir: string, ref: string): boolean {
@@ -1029,193 +1077,69 @@ export async function resolveStoryCloudAssets(
     return result
   }
 
-  for (const model of story.models) {
-    const rawRef = model.model
+  const catalog = ctx.catalog
+  const configuredConcurrency = Math.max(1, ctx.settings.concurrency || 4)
+  const modelConcurrency = Math.max(1, Math.min(4, configuredConcurrency))
+  const mediaConcurrency = Math.max(1, Math.min(6, configuredConcurrency))
+  const perModelFileConcurrency =
+    configuredConcurrency <= 1
+      ? 1
+      : Math.max(
+          2,
+          Math.ceil(
+            configuredConcurrency / Math.min(modelConcurrency, Math.max(1, story.models.length))
+          )
+        )
+
+  const modelMissing: string[] = []
+  const imageMissing: string[] = []
+  const snippetMissingByIndex = new Map<number, string>()
+
+  const resolveModelRef = (
+    rawRef: string
+  ): { normRef: string; isCloudRef: boolean; cloudEntry: CloudModelEntry | null } => {
     const normRef = stripResourcePrefix(rawRef, 'models')
     const isCloudRef = isCloudSubdirRef(rawRef, 'models')
     const cloudEntry = isCloudRef
-      ? (ctx.catalog.models.find(
+      ? (catalog.models.find(
           (item) =>
             normRef === item.path ||
             normRef === `cloud/${item.id}` ||
             normRef.startsWith(`cloud/${item.id}/`)
-        ) ?? findCloudModel(ctx.catalog, normRef))
-      : findCloudModel(ctx.catalog, normRef)
-
-    if ((!isCloudOnly || isCloudRef) && localModelExists(ctx.resourcesDir, normRef)) {
-      const localPath = path.join(ctx.resourcesDir, 'models', ...normRef.split('/'))
-      const coreComplete = !isCloudRef || isModelCoreComplete(localPath)
-      if (coreComplete) {
-        if (isCloudRef && rawRef !== normRef) {
-          model.model = normRef
-        }
-        if (isCloudRef && cloudEntry && modelNeedsRepair(cloudEntry, localPath)) {
-          try {
-            model.model = await ensureModel(cloudEntry, ctx)
-            result.models++
-          } catch (error) {
-            ctx.logger.warn(`[Cloud] 模型 ${rawRef} 动作补全失败，保留本地缓存：${String(error)}`)
-          }
-        }
-        continue
-      }
-      ctx.logger.warn(`[Cloud] 本地缓存模型 ${rawRef} 缺少核心文件或已损坏，将重新物化`)
-    }
-    if (!cloudEntry) {
-      result.missing.push(`model:${rawRef}`)
-      continue
-    }
-    try {
-      model.model = await ensureModel(cloudEntry, ctx)
-      result.models++
-    } catch (error) {
-      const fallback = await tryFallbackCharacterModel(cloudEntry, ctx)
-      if (fallback) {
-        ctx.logger.warn(
-          `[Cloud] 模型 ${rawRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
-        )
-        model.model = fallback.path
-        result.models++
-      } else {
-        ctx.logger.error(`[Cloud] 模型 ${rawRef} 物化失败：${String(error)}`)
-        result.missing.push(`model:${rawRef}`)
-      }
-    }
+        ) ?? findCloudModel(catalog, normRef))
+      : findCloudModel(catalog, normRef)
+    return { normRef, isCloudRef, cloudEntry }
   }
 
-  for (const image of story.images) {
-    const rawRef = image.image
-    const normRef = stripResourcePrefix(rawRef, 'images')
-    const isCloudRef = isCloudSubdirRef(rawRef, 'images')
-    if ((!isCloudOnly || isCloudRef) && localImageExists(ctx.resourcesDir, normRef)) {
-      if (isCloudRef && rawRef !== normRef) {
-        image.image = normRef
-      }
-      continue
-    }
-    const entry = findCloudBackground(ctx.catalog, normRef)
-    if (!entry) {
-      result.missing.push(`image:${rawRef}`)
-      continue
-    }
-    try {
-      image.image = await ensureBackground(entry, ctx)
-      result.images++
-    } catch (error) {
-      ctx.logger.error(`[Cloud] 背景 ${rawRef} 物化失败：${String(error)}`)
-      result.missing.push(`image:${rawRef}`)
-    }
-  }
-
-  const neededInapp = new Set<string>()
+  // 预先收集各类片段任务，使模型 / 背景 / BGM / SE / 换装 / inapp UI 贴图全链路并行物化
   const modelById = new Map(story.models.map((m) => [m.id, m]))
+  const bgmTasks: Array<{
+    snippetIndex: number
+    snippet: Extract<StoryData['snippets'][number], { type: 'ChangeBgm' }>
+  }> = []
+  const seTasks: Array<{
+    snippetIndex: number
+    snippet: Extract<StoryData['snippets'][number], { type: 'PlaySe' | 'StopSe' }>
+  }> = []
+  const costumeTasks: Array<{
+    snippetIndex: number
+    snippet: Extract<StoryData['snippets'][number], { type: 'CostumeChange' }>
+  }> = []
+  const neededInapp = new Set<string>()
 
-  for (const snippet of story.snippets) {
+  for (let i = 0; i < story.snippets.length; i++) {
+    const snippet = story.snippets[i]
     if (snippet.type === 'ChangeBgm') {
-      if (snippet.data.stop) continue
-      const rawRef = snippet.data.file
-      if (!rawRef) continue
-      const normRef = stripResourcePrefix(rawRef, 'audio/bgm')
-      const isCloudRef = isCloudSubdirRef(rawRef, 'audio/bgm')
-      if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'bgm', normRef)) {
-        if (isCloudRef && rawRef !== normRef) {
-          snippet.data.file = normRef
-        }
-        continue
+      if (!snippet.data.stop && snippet.data.file) {
+        bgmTasks.push({ snippetIndex: i, snippet })
       }
-      let entry =
-        findCloudBgm(ctx.catalog, normRef) ?? findCloudBgm(ctx.catalog, path.basename(normRef))
-      if (!entry && isCloudOnly && isLegacyDefaultBgmRef(rawRef)) {
-        entry = findDefaultCloudBgmEntry(ctx.catalog)
+    } else if (snippet.type === 'PlaySe' || snippet.type === 'StopSe') {
+      if (snippet.data.file) {
+        seTasks.push({ snippetIndex: i, snippet })
       }
-      if (!entry) {
-        result.missing.push(`bgm:${rawRef}`)
-        continue
-      }
-      try {
-        snippet.data.file = await ensureBgm(entry, ctx)
-        result.bgm++
-      } catch (error) {
-        ctx.logger.error(`[Cloud] BGM ${rawRef} 物化失败：${String(error)}`)
-        result.missing.push(`bgm:${rawRef}`)
-      }
-      continue
-    }
-
-    if (snippet.type === 'PlaySe' || snippet.type === 'StopSe') {
-      const rawRef = snippet.data.file
-      if (!rawRef) continue
-      const normRef = stripResourcePrefix(rawRef, 'audio/se')
-      const isCloudRef = isCloudSubdirRef(rawRef, 'audio/se')
-      if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'se', normRef)) {
-        if (isCloudRef && rawRef !== normRef) {
-          snippet.data.file = normRef
-        }
-        continue
-      }
-      try {
-        const resolved = await ensureSe(normRef, ctx)
-        if (resolved) {
-          snippet.data.file = resolved
-          result.se++
-        } else {
-          result.missing.push(`se:${rawRef}`)
-        }
-      } catch (error) {
-        ctx.logger.error(`[Cloud] SE ${rawRef} 物化失败：${String(error)}`)
-        result.missing.push(`se:${rawRef}`)
-      }
-      continue
-    }
-
-    if (snippet.type === 'CostumeChange') {
-      const targetModel = modelById.get(snippet.data.modelId)
-      const costumeRef = targetModel?.costumes?.[snippet.data.costume] ?? snippet.data.costume
-      if (costumeRef) {
-        const normCostume = stripResourcePrefix(costumeRef, 'models')
-        const isCloudRef = isCloudSubdirRef(costumeRef, 'models')
-        const entry = findCloudModel(ctx.catalog, normCostume)
-        const canReuseLocal =
-          (!isCloudOnly || isCloudRef) && localModelExists(ctx.resourcesDir, normCostume)
-        if (
-          entry &&
-          (!canReuseLocal ||
-            (isCloudRef &&
-              modelNeedsRepair(
-                entry,
-                path.join(ctx.resourcesDir, 'models', ...normCostume.split('/'))
-              )))
-        ) {
-          try {
-            const resolved = await ensureModel(entry, ctx)
-            if (targetModel) {
-              targetModel.costumes = {
-                ...(targetModel.costumes ?? {}),
-                [snippet.data.costume]: resolved
-              }
-            }
-            result.models++
-          } catch (error) {
-            const fallback = await tryFallbackCharacterModel(entry, ctx)
-            if (fallback && targetModel) {
-              ctx.logger.warn(
-                `[Cloud] 服装模型 ${costumeRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
-              )
-              targetModel.costumes = {
-                ...(targetModel.costumes ?? {}),
-                [snippet.data.costume]: fallback.path
-              }
-              result.models++
-            } else {
-              ctx.logger.error(`[Cloud] 服装模型 ${costumeRef} 物化失败：${String(error)}`)
-            }
-          }
-        }
-      }
-      continue
-    }
-
-    if (snippet.type === 'SekaiIn' || snippet.type === 'SekaiOut') {
+    } else if (snippet.type === 'CostumeChange') {
+      costumeTasks.push({ snippetIndex: i, snippet })
+    } else if (snippet.type === 'SekaiIn' || snippet.type === 'SekaiOut') {
       neededInapp.add('player/loose/Texture2D/tex_common_tri_01.png')
       neededInapp.add('audio/MenuCommon/SE_AREA_TRANSITION_SEKAI.wav')
     } else if (snippet.type === 'SideFade') {
@@ -1243,16 +1167,204 @@ export async function resolveStoryCloudAssets(
     }
   }
 
+  const modelsWork = mapPool(story.models, modelConcurrency, async (model, idx) => {
+    const rawRef = model.model
+    const { normRef, isCloudRef, cloudEntry } = resolveModelRef(rawRef)
+
+    if ((!isCloudOnly || isCloudRef) && localModelExists(ctx.resourcesDir, normRef)) {
+      const localPath = path.join(ctx.resourcesDir, 'models', ...normRef.split('/'))
+      const coreComplete = !isCloudRef || isModelCoreComplete(localPath)
+      if (coreComplete) {
+        if (isCloudRef && rawRef !== normRef) {
+          model.model = normRef
+        }
+        if (isCloudRef && cloudEntry && modelNeedsRepair(cloudEntry, localPath)) {
+          try {
+            model.model = await ensureModel(cloudEntry, ctx, perModelFileConcurrency)
+            result.models++
+          } catch (error) {
+            ctx.logger.warn(`[Cloud] 模型 ${rawRef} 动作补全失败，保留本地缓存：${String(error)}`)
+          }
+        }
+        return null
+      }
+      ctx.logger.warn(`[Cloud] 本地缓存模型 ${rawRef} 缺少核心文件或已损坏，将重新物化`)
+    }
+    if (!cloudEntry) {
+      return { idx, missing: `model:${rawRef}` }
+    }
+    try {
+      model.model = await ensureModel(cloudEntry, ctx, perModelFileConcurrency)
+      result.models++
+    } catch (error) {
+      const fallback = await tryFallbackCharacterModel(cloudEntry, ctx)
+      if (fallback) {
+        ctx.logger.warn(
+          `[Cloud] 模型 ${rawRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
+        )
+        model.model = fallback.path
+        result.models++
+      } else {
+        ctx.logger.error(`[Cloud] 模型 ${rawRef} 物化失败：${String(error)}`)
+        return { idx, missing: `model:${rawRef}` }
+      }
+    }
+    return null
+  })
+
+  const imagesWork = mapPool(story.images, mediaConcurrency, async (image, idx) => {
+    const rawRef = image.image
+    const normRef = stripResourcePrefix(rawRef, 'images')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'images')
+    if ((!isCloudOnly || isCloudRef) && localImageExists(ctx.resourcesDir, normRef)) {
+      if (isCloudRef && rawRef !== normRef) {
+        image.image = normRef
+      }
+      return null
+    }
+    const entry = findCloudBackground(catalog, normRef)
+    if (!entry) {
+      return { idx, missing: `image:${rawRef}` }
+    }
+    try {
+      image.image = await ensureBackground(entry, ctx)
+      result.images++
+    } catch (error) {
+      ctx.logger.error(`[Cloud] 背景 ${rawRef} 物化失败：${String(error)}`)
+      return { idx, missing: `image:${rawRef}` }
+    }
+    return null
+  })
+
+  const bgmWork = mapPool(bgmTasks, mediaConcurrency, async ({ snippetIndex, snippet }) => {
+    const rawRef = snippet.data.file
+    if (!rawRef) return
+    const normRef = stripResourcePrefix(rawRef, 'audio/bgm')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'audio/bgm')
+    if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'bgm', normRef)) {
+      if (isCloudRef && rawRef !== normRef) {
+        snippet.data.file = normRef
+      }
+      return
+    }
+    let entry = findCloudBgm(catalog, normRef) ?? findCloudBgm(catalog, path.basename(normRef))
+    if (!entry && isCloudOnly && isLegacyDefaultBgmRef(rawRef)) {
+      entry = findDefaultCloudBgmEntry(catalog)
+    }
+    if (!entry) {
+      snippetMissingByIndex.set(snippetIndex, `bgm:${rawRef}`)
+      return
+    }
+    try {
+      snippet.data.file = await ensureBgm(entry, ctx)
+      result.bgm++
+    } catch (error) {
+      ctx.logger.error(`[Cloud] BGM ${rawRef} 物化失败：${String(error)}`)
+      snippetMissingByIndex.set(snippetIndex, `bgm:${rawRef}`)
+    }
+  })
+
+  const seWork = mapPool(seTasks, mediaConcurrency, async ({ snippetIndex, snippet }) => {
+    const rawRef = snippet.data.file
+    if (!rawRef) return
+    const normRef = stripResourcePrefix(rawRef, 'audio/se')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'audio/se')
+    if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'se', normRef)) {
+      if (isCloudRef && rawRef !== normRef) {
+        snippet.data.file = normRef
+      }
+      return
+    }
+    try {
+      const resolved = await ensureSe(normRef, ctx)
+      if (resolved) {
+        snippet.data.file = resolved
+        result.se++
+      } else {
+        snippetMissingByIndex.set(snippetIndex, `se:${rawRef}`)
+      }
+    } catch (error) {
+      ctx.logger.error(`[Cloud] SE ${rawRef} 物化失败：${String(error)}`)
+      snippetMissingByIndex.set(snippetIndex, `se:${rawRef}`)
+    }
+  })
+
+  const costumeWork = mapPool(costumeTasks, modelConcurrency, async ({ snippet }) => {
+    const targetModel = modelById.get(snippet.data.modelId)
+    const costumeRef = targetModel?.costumes?.[snippet.data.costume] ?? snippet.data.costume
+    if (!costumeRef) return
+    const normCostume = stripResourcePrefix(costumeRef, 'models')
+    const isCloudRef = isCloudSubdirRef(costumeRef, 'models')
+    const entry = findCloudModel(catalog, normCostume)
+    const canReuseLocal =
+      (!isCloudOnly || isCloudRef) && localModelExists(ctx.resourcesDir, normCostume)
+    if (
+      entry &&
+      (!canReuseLocal ||
+        (isCloudRef &&
+          modelNeedsRepair(
+            entry,
+            path.join(ctx.resourcesDir, 'models', ...normCostume.split('/'))
+          )))
+    ) {
+      try {
+        const resolved = await ensureModel(entry, ctx, perModelFileConcurrency)
+        if (targetModel) {
+          targetModel.costumes = {
+            ...(targetModel.costumes ?? {}),
+            [snippet.data.costume]: resolved
+          }
+        }
+        result.models++
+      } catch (error) {
+        const fallback = await tryFallbackCharacterModel(entry, ctx)
+        if (fallback && targetModel) {
+          ctx.logger.warn(
+            `[Cloud] 服装模型 ${costumeRef} 物化失败（${String(error)}），已自动回退为同角色模型 ${fallback.id}（${fallback.path}）`
+          )
+          targetModel.costumes = {
+            ...(targetModel.costumes ?? {}),
+            [snippet.data.costume]: fallback.path
+          }
+          result.models++
+        } else {
+          ctx.logger.error(`[Cloud] 服装模型 ${costumeRef} 物化失败：${String(error)}`)
+        }
+      }
+    }
+  })
+
   const isLocalTestMock = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(
     ctx.settings.assetBase || ''
   )
-  if (neededInapp.size > 0 && !isLocalTestMock) {
-    await ensureInappUiAssets(ctx, {
-      paths: [...neededInapp],
-      timeoutMs: Math.min(ctx.settings.timeoutMs, 5_000),
-      retries: 0
-    }).catch(() => undefined)
+  const inappWork =
+    neededInapp.size > 0 && !isLocalTestMock
+      ? ensureInappUiAssets(ctx, {
+          paths: [...neededInapp],
+          timeoutMs: Math.min(ctx.settings.timeoutMs, 5_000),
+          retries: 0
+        }).catch(() => undefined)
+      : Promise.resolve(undefined)
+
+  const [modelOutcomes, imageOutcomes] = await Promise.all([
+    modelsWork,
+    imagesWork,
+    bgmWork,
+    seWork,
+    costumeWork,
+    inappWork
+  ])
+
+  for (const item of modelOutcomes) {
+    if (item?.missing) modelMissing.push(item.missing)
   }
+  for (const item of imageOutcomes) {
+    if (item?.missing) imageMissing.push(item.missing)
+  }
+  const snippetMissing = [...snippetMissingByIndex.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, missing]) => missing)
+  result.missing.push(...modelMissing, ...imageMissing, ...snippetMissing)
 
   if (result.models + result.images + result.bgm + result.se > 0) {
     ctx.logger.info(
@@ -1261,6 +1373,174 @@ export async function resolveStoryCloudAssets(
   }
   if (result.missing.length > 0) {
     ctx.logger.warn(`[Cloud] unresolved cloud refs: ${result.missing.join(', ')}`)
+  }
+  return result
+}
+
+export interface CloudAssetPrewarmRefs {
+  models?: string[]
+  backgrounds?: string[]
+  bgms?: string[]
+  ses?: string[]
+  inapp?: string[]
+  globalBgm?: { enabled: boolean; path: string }
+  signal?: AbortSignal
+}
+
+/**
+ * 后台无副作用预热云端资源（不改写任何 StoryData / 全局配置对象）。
+ *
+ * 与 `resolveStoryCloudAssets` / `resolveGlobalBgm` 共用同一组进程内 single-flight 锁：
+ * - 在 AI `cast` / `staging` 锁定模型、背景、BGM、SE 后立即启动，与后续 110s+ LLM 阶段重叠；
+ * - 导出前 `resolveStoryCloudAssets` 调用时，已下完的直接命中本地缓存（<1ms），仍在途的
+ *   自动复用同一 Promise，绝不重复下载或产生写盘竞态。
+ */
+export async function prewarmCloudAssets(
+  refs: CloudAssetPrewarmRefs,
+  ctx: CloudAssetContext
+): Promise<CloudAssetResolution> {
+  const result: CloudAssetResolution = { models: 0, images: 0, bgm: 0, se: 0, missing: [] }
+  const catalog = ctx.catalog
+  if (!catalog || refs.signal?.aborted) return result
+
+  const isCloudOnly = Boolean(ctx.cloudOnly ?? ctx.settings?.cloudOnly)
+  const configuredConcurrency = Math.max(1, ctx.settings.concurrency || 4)
+  const modelConcurrency = Math.max(1, Math.min(3, configuredConcurrency))
+  const mediaConcurrency = Math.max(1, Math.min(6, configuredConcurrency))
+
+  const uniqueStrings = (list?: string[]): string[] => {
+    if (!list || list.length === 0) return []
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const raw of list) {
+      const trimmed = typeof raw === 'string' ? raw.trim() : ''
+      if (!trimmed || seen.has(trimmed)) continue
+      seen.add(trimmed)
+      out.push(trimmed)
+    }
+    return out
+  }
+
+  const modelRefs = uniqueStrings(refs.models)
+  const bgRefs = uniqueStrings(refs.backgrounds)
+  const bgmRefs = uniqueStrings(refs.bgms)
+  const seRefs = uniqueStrings(refs.ses)
+  const inappRefs = uniqueStrings(refs.inapp)
+
+  const perModelFileConcurrency =
+    configuredConcurrency <= 1
+      ? 1
+      : Math.max(
+          2,
+          Math.ceil(
+            configuredConcurrency / Math.min(modelConcurrency, Math.max(1, modelRefs.length))
+          )
+        )
+
+  const modelsWork = mapPool(modelRefs, modelConcurrency, async (rawRef) => {
+    if (refs.signal?.aborted) return
+    const normRef = stripResourcePrefix(rawRef, 'models')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'models')
+    const entry = isCloudRef
+      ? (catalog.models.find(
+          (item) =>
+            normRef === item.path ||
+            normRef === `cloud/${item.id}` ||
+            normRef.startsWith(`cloud/${item.id}/`)
+        ) ?? findCloudModel(catalog, normRef))
+      : findCloudModel(catalog, normRef)
+    if (!entry) return
+    if (
+      (!isCloudOnly || isCloudRef) &&
+      localModelExists(ctx.resourcesDir, normRef) &&
+      !modelNeedsRepair(entry, path.join(ctx.resourcesDir, 'models', ...normRef.split('/')))
+    ) {
+      return
+    }
+    try {
+      await ensureModel(entry, ctx, perModelFileConcurrency)
+      result.models++
+    } catch (error) {
+      ctx.logger.debug?.(`[Cloud] 后台预热模型 ${entry.id} 跳过：${String(error)}`)
+    }
+  })
+
+  const bgsWork = mapPool(bgRefs, mediaConcurrency, async (rawRef) => {
+    if (refs.signal?.aborted) return
+    const normRef = stripResourcePrefix(rawRef, 'images')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'images')
+    if ((!isCloudOnly || isCloudRef) && localImageExists(ctx.resourcesDir, normRef)) return
+    const entry = findCloudBackground(catalog, normRef)
+    if (!entry) return
+    try {
+      await ensureBackground(entry, ctx)
+      result.images++
+    } catch (error) {
+      ctx.logger.debug?.(`[Cloud] 后台预热背景 ${entry.id} 跳过：${String(error)}`)
+    }
+  })
+
+  const bgmCandidateRefs = [...bgmRefs]
+  if (refs.globalBgm?.enabled && refs.globalBgm.path) {
+    const raw = refs.globalBgm.path.trim()
+    if (
+      raw &&
+      !/^https?:\/\//i.test(raw) &&
+      !raw.startsWith('/') &&
+      !bgmCandidateRefs.includes(raw)
+    ) {
+      bgmCandidateRefs.push(raw)
+    }
+  }
+
+  const bgmsWork = mapPool(bgmCandidateRefs, mediaConcurrency, async (rawRef) => {
+    if (refs.signal?.aborted) return
+    const normRef = stripResourcePrefix(rawRef, 'audio/bgm')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'audio/bgm')
+    if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'bgm', normRef)) return
+    let entry = findCloudBgm(catalog, normRef) ?? findCloudBgm(catalog, path.basename(normRef))
+    if (!entry && isCloudOnly && isLegacyDefaultBgmRef(rawRef)) {
+      entry = findDefaultCloudBgmEntry(catalog)
+    }
+    if (!entry) return
+    try {
+      await ensureBgm(entry, ctx)
+      result.bgm++
+    } catch (error) {
+      ctx.logger.debug?.(`[Cloud] 后台预热 BGM ${entry.id} 跳过：${String(error)}`)
+    }
+  })
+
+  const sesWork = mapPool(seRefs, mediaConcurrency, async (rawRef) => {
+    if (refs.signal?.aborted) return
+    const normRef = stripResourcePrefix(rawRef, 'audio/se')
+    const isCloudRef = isCloudSubdirRef(rawRef, 'audio/se')
+    if ((!isCloudOnly || isCloudRef) && localAudioExists(ctx.resourcesDir, 'se', normRef)) return
+    try {
+      const resolved = await ensureSe(normRef, ctx)
+      if (resolved) result.se++
+    } catch (error) {
+      ctx.logger.debug?.(`[Cloud] 后台预热 SE ${normRef} 跳过：${String(error)}`)
+    }
+  })
+
+  const isLocalTestMock = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(
+    ctx.settings.assetBase || ''
+  )
+  const inappWork =
+    inappRefs.length > 0 && !isLocalTestMock && !refs.signal?.aborted
+      ? ensureInappUiAssets(ctx, {
+          paths: inappRefs,
+          timeoutMs: Math.min(ctx.settings.timeoutMs, 5_000),
+          retries: 0
+        }).catch(() => undefined)
+      : Promise.resolve(undefined)
+
+  await Promise.all([modelsWork, bgsWork, bgmsWork, sesWork, inappWork])
+  if (result.models + result.images + result.bgm + result.se > 0) {
+    ctx.logger.info(
+      `[Cloud] background prewarm complete: models=${result.models}, images=${result.images}, bgm=${result.bgm}, se=${result.se}`
+    )
   }
   return result
 }

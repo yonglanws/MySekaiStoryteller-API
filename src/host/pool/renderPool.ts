@@ -44,6 +44,8 @@ interface WorkerState {
   wsConnected: boolean
   busy: boolean
   busyTaskId: string | null
+  /** 当前任务是否为轻量 segmentPrepareOnly（不做帧渲染/编码，不计入浏览器回收次数） */
+  busyIsPrep: boolean
   exportsCompleted: number
   webglRenderer: string | null
   launching: boolean
@@ -152,18 +154,28 @@ export class RenderPool implements ExportDispatcher {
       dispatchSubTask: (subTask) => this.dispatchSubTask(subTask),
       cancelSubTask: (subTaskId) => this.cancel(subTaskId),
       readyWorkerCount: () => Array.from(this.workers.values()).filter((w) => w.ready).length,
+      idleWorkerCount: () =>
+        Array.from(this.workers.values()).filter((w) => w.ready && !w.busy).length,
+      canUseParallelSegments: () => this.hasEnoughFreeMemory(),
       onTaskComplete: (taskId, result) => this.onExportResult?.(taskId, result)
     })
   }
 
   async start(): Promise<void> {
     const launchArgs = baseLaunchArgs(this.config)
-
+    const workerStates: WorkerState[] = []
     for (let i = 0; i < this.config.render.workers; i++) {
       const workerId = `w${i + 1}`
-      this.workers.set(workerId, this.createWorkerState(workerId))
-      // 串行启动，避免并发启动争抢
-      await this.launchWorker(this.workers.get(workerId)!, launchArgs)
+      const state = this.createWorkerState(workerId)
+      this.workers.set(workerId, state)
+      workerStates.push(state)
+    }
+
+    // 有界并发启动（每批最多 2 个），保留 w1..wN 顺序且大幅缩短多 worker 冷启动等待
+    const LAUNCH_CONCURRENCY = 2
+    for (let i = 0; i < workerStates.length; i += LAUNCH_CONCURRENCY) {
+      const batch = workerStates.slice(i, i + LAUNCH_CONCURRENCY)
+      await Promise.all(batch.map((worker) => this.launchWorker(worker, launchArgs)))
     }
 
     // 看门狗：渲染端挂起（不返回 export-result 也不崩溃）时强制回收 worker，
@@ -219,6 +231,7 @@ export class RenderPool implements ExportDispatcher {
 
   stats(): Record<string, unknown> {
     const all = Array.from(this.workers.values())
+    const availMb = this.getAvailableMemoryMb()
     return {
       configuredWorkers: this.config.render.workers,
       readyWorkers: all.filter((w) => w.ready).length,
@@ -226,7 +239,8 @@ export class RenderPool implements ExportDispatcher {
       busyTaskIds: all.filter((w) => w.busyTaskId).map((w) => w.busyTaskId),
       bufferedTasks: this.bufferedTasks.length,
       webglRenderers: all.map((w) => ({ workerId: w.workerId, renderer: w.webglRenderer })),
-      exportsCompleted: all.reduce((sum, w) => sum + w.exportsCompleted, 0)
+      exportsCompleted: all.reduce((sum, w) => sum + w.exportsCompleted, 0),
+      ...(availMb !== null ? { availableMemoryMb: Math.round(availMb) } : {})
     }
   }
 
@@ -241,6 +255,7 @@ export class RenderPool implements ExportDispatcher {
       wsConnected: false,
       busy: false,
       busyTaskId: null,
+      busyIsPrep: false,
       exportsCompleted: 0,
       webglRenderer: null,
       launching: false,
@@ -281,6 +296,7 @@ export class RenderPool implements ExportDispatcher {
     const taskId = worker.busyTaskId
     worker.busy = false
     worker.busyTaskId = null
+    worker.busyIsPrep = false
     this.emitExportResult(taskId, { taskId, success: false, error })
   }
 
@@ -710,24 +726,30 @@ export class RenderPool implements ExportDispatcher {
   /** 释放 worker（含按导出次数回收），并冲刷排队的任务 */
   private releaseWorker(worker: WorkerState): void {
     this.clearWsReconnectTimer(worker)
+    const wasPrep = worker.busyIsPrep
     worker.busy = false
     worker.busyTaskId = null
+    worker.busyIsPrep = false
     worker.taskDeadline = null
     worker.abortSent = false
-    worker.exportsCompleted++
     this.onWorkerCleanup?.(worker.workerId)
 
-    // 页面回收：按导出次数重建，防止 Live2D/Cubism 内存累积
-    if (
-      this.config.render.workerRecycleExports > 0 &&
-      worker.exportsCompleted % this.config.render.workerRecycleExports === 0
-    ) {
-      this.logger.info(
-        `[Pool] Recycling worker ${worker.workerId} after ${worker.exportsCompleted} exports`
-      )
-      void this.recoverWorker(worker).catch((err) =>
-        this.logger.error(`[Pool] Worker ${worker.workerId} recycle relaunch failed`, err)
-      )
+    // segmentPrepareOnly 仅执行 TTS 与虚拟时间线烘焙（零帧渲染/编码），
+    // 不计入 exportsCompleted，避免准备阶段刚结束就触发浏览器回收导致 Phase 2 失去并行 worker。
+    if (!wasPrep) {
+      worker.exportsCompleted++
+      // 页面回收：按导出次数重建，防止 Live2D/Cubism 内存累积
+      if (
+        this.config.render.workerRecycleExports > 0 &&
+        worker.exportsCompleted % this.config.render.workerRecycleExports === 0
+      ) {
+        this.logger.info(
+          `[Pool] Recycling worker ${worker.workerId} after ${worker.exportsCompleted} exports`
+        )
+        void this.recoverWorker(worker).catch((err) =>
+          this.logger.error(`[Pool] Worker ${worker.workerId} recycle relaunch failed`, err)
+        )
+      }
     }
 
     this.flushBufferedTasks()
@@ -771,6 +793,7 @@ export class RenderPool implements ExportDispatcher {
 
     worker.busy = true
     worker.busyTaskId = task.taskId
+    worker.busyIsPrep = task.videoConfig?.segmentPrepareOnly === true
     worker.abortSent = false
     worker.taskDeadline = task.addedAt + task.timeoutMs
     this.taskHooks?.onTaskStart?.(worker.workerId, task.taskId)
@@ -800,6 +823,7 @@ export class RenderPool implements ExportDispatcher {
       worker.wsConnected = false
       worker.busy = false
       worker.busyTaskId = null
+      worker.busyIsPrep = false
       worker.taskDeadline = null
       worker.abortSent = false
       this.onWorkerCleanup?.(worker.workerId)
@@ -882,6 +906,7 @@ export class RenderPool implements ExportDispatcher {
         worker.ready = false
         worker.busy = false
         worker.busyTaskId = null
+        worker.busyIsPrep = false
         worker.taskDeadline = null
         worker.abortSent = false
         if (taskId) {
@@ -930,15 +955,18 @@ export class RenderPool implements ExportDispatcher {
     if (!this.catalog || characters.length === 0) return characters
 
     const models = this.catalog.get().models
+    const shortNameByFullName = new Map<string, string>()
+    for (const model of models) {
+      if (model.shortName && !shortNameByFullName.has(model.name)) {
+        shortNameByFullName.set(model.name, model.shortName)
+      }
+    }
+    const existingNames = new Set(characters.map((c) => c.characterName))
     const expanded = [...characters]
     for (const entry of characters) {
-      const model = models.find((m) => m.name === entry.characterName)
-      const shortName = model?.shortName
-      if (
-        shortName &&
-        shortName !== entry.characterName &&
-        !expanded.some((c) => c.characterName === shortName)
-      ) {
+      const shortName = shortNameByFullName.get(entry.characterName)
+      if (shortName && shortName !== entry.characterName && !existingNames.has(shortName)) {
+        existingNames.add(shortName)
         expanded.push({ ...entry, characterName: shortName })
       }
     }
@@ -950,19 +978,107 @@ export class RenderPool implements ExportDispatcher {
     return expanded
   }
 
+  /**
+   * 优先选择已完成导出次数最少的空闲 worker（次数相同时按 w1..wN 顺序），
+   * 使多 worker 均匀分摊内存与回收节奏，避免所有 worker 同时进入回收或单个 worker 过载。
+   */
   private pickIdleWorker(): WorkerState | null {
     let idle: WorkerState | null = null
-    let idleIndex = Number.MAX_SAFE_INTEGER
-    const ids = Array.from(this.workers.keys())
+    let bestExports = Number.MAX_SAFE_INTEGER
 
-    for (let i = 0; i < ids.length; i++) {
-      const worker = this.workers.get(ids[i])!
-      if (worker.ready && !worker.busy && i < idleIndex) {
+    for (const worker of this.workers.values()) {
+      if (worker.ready && !worker.busy && worker.exportsCompleted < bestExports) {
         idle = worker
-        idleIndex = i
+        bestExports = worker.exportsCompleted
       }
     }
     return idle
+  }
+
+  /**
+   * 计算当前可用内存（MB），在 Linux Docker 容器中同时感知宿主机 `/proc/meminfo` 与 cgroup v2/v1 限额，
+   * 取两者较小值，防止容器 cgroup 接近上限时误判内存充足导致 OOM kill。
+   */
+  private getAvailableMemoryMb(): number | null {
+    try {
+      if (process.platform === 'linux') {
+        let availMb: number | null = null
+        try {
+          const meminfo = fs.readFileSync('/proc/meminfo', 'utf-8')
+          const match = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/)
+          if (match) {
+            availMb = Number(match[1]) / 1024
+          }
+        } catch {
+          // ignore
+        }
+
+        const cgroupAvailMb = this.readLinuxCgroupAvailableMb()
+        if (cgroupAvailMb !== null) {
+          availMb = availMb !== null ? Math.min(availMb, cgroupAvailMb) : cgroupAvailMb
+        }
+        return availMb ?? os.freemem() / (1024 * 1024)
+      }
+      return os.freemem() / (1024 * 1024)
+    } catch {
+      return null
+    }
+  }
+
+  private readLinuxCgroupAvailableMb(): number | null {
+    // cgroup v2
+    try {
+      const maxRaw = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf-8').trim()
+      if (maxRaw && maxRaw !== 'max') {
+        const limitBytes = Number(maxRaw)
+        if (Number.isFinite(limitBytes) && limitBytes > 0 && limitBytes < 1e15) {
+          const currentBytes = Number(
+            fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf-8').trim()
+          )
+          if (Number.isFinite(currentBytes) && currentBytes >= 0) {
+            let inactiveFileBytes = 0
+            try {
+              const stat = fs.readFileSync('/sys/fs/cgroup/memory.stat', 'utf-8')
+              const match = stat.match(/^inactive_file\s+(\d+)/m)
+              if (match) inactiveFileBytes = Number(match[1]) || 0
+            } catch {
+              // ignore
+            }
+            const workingSet = Math.max(0, currentBytes - inactiveFileBytes)
+            return Math.max(0, limitBytes - workingSet) / (1024 * 1024)
+          }
+        }
+      }
+    } catch {
+      // not cgroup v2 or unreadable
+    }
+
+    // cgroup v1 fallback
+    try {
+      const limitBytes = Number(
+        fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf-8').trim()
+      )
+      if (Number.isFinite(limitBytes) && limitBytes > 0 && limitBytes < 1e15) {
+        const usageBytes = Number(
+          fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf-8').trim()
+        )
+        if (Number.isFinite(usageBytes) && usageBytes >= 0) {
+          let inactiveFileBytes = 0
+          try {
+            const stat = fs.readFileSync('/sys/fs/cgroup/memory/memory.stat', 'utf-8')
+            const match = stat.match(/^total_inactive_file\s+(\d+)/m)
+            if (match) inactiveFileBytes = Number(match[1]) || 0
+          } catch {
+            // ignore
+          }
+          const workingSet = Math.max(0, usageBytes - inactiveFileBytes)
+          return Math.max(0, limitBytes - workingSet) / (1024 * 1024)
+        }
+      }
+    } catch {
+      // not cgroup v1 or unreadable
+    }
+    return null
   }
 
   /**
@@ -973,19 +1089,8 @@ export class RenderPool implements ExportDispatcher {
   private hasEnoughFreeMemory(): boolean {
     const minMb = this.config.render.minFreeMemoryMb
     if (minMb <= 0) return true
-
-    try {
-      if (process.platform === 'linux') {
-        const meminfo = fs.readFileSync('/proc/meminfo', 'utf-8')
-        const match = meminfo.match(/MemAvailable:\s+(\d+)\s+kB/)
-        if (match) {
-          return Number(match[1]) / 1024 >= minMb
-        }
-      }
-      return os.freemem() / (1024 * 1024) >= minMb
-    } catch {
-      return true
-    }
+    const availMb = this.getAvailableMemoryMb()
+    return availMb === null ? true : availMb >= minMb
   }
 
   private flushBufferedTasks(): void {

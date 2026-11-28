@@ -33,20 +33,10 @@ uniform int uHeight;
 
 out vec4 fragColor;
 
-vec3 sampleRgb(int px, int py) {
-  vec2 uv = vec2((float(px) + 0.5) / float(uWidth), (float(py) + 0.5) / float(uHeight));
+vec3 sampleChromaAvg(int cx, int cy, vec2 invSize) {
+  // srcTexture 使用 GL_LINEAR，在 2x2 像素块几何中心单次采样等价于 4 点盒式平均，减少 75% 色度纹理带宽。
+  vec2 uv = vec2((float(cx * 2) + 1.0) * invSize.x, (float(cy * 2) + 1.0) * invSize.y);
   return texture(uTex, uv).rgb;
-}
-
-vec3 sampleChromaAvg(int cx, int cy) {
-  int x0 = cx * 2;
-  int y0 = cy * 2;
-  return 0.25 * (
-    sampleRgb(x0, y0) +
-    sampleRgb(x0 + 1, y0) +
-    sampleRgb(x0, y0 + 1) +
-    sampleRgb(x0 + 1, y0 + 1)
-  );
 }
 
 float calcY(vec3 c) {
@@ -61,33 +51,51 @@ float calcV(vec3 c) {
   return (128.0 + 224.0 * clamp(dot(c, vec3(0.5, -0.45415290830582, -0.04584709169418)), -0.5, 0.5)) / 255.0;
 }
 
-float evalPlaneByte(int ix, int iy, int k) {
-  int bIdx = ix * 4 + k;
-  if (iy < uHeight) {
-    return calcY(sampleRgb(bIdx, iy));
-  }
-  int uRows = uHeight / 4;
-  int halfW = uWidth / 2;
-  if (iy < uHeight + uRows) {
-    int b = (iy - uHeight) * uWidth + bIdx;
-    int uy = b / halfW;
-    int ux = b - uy * halfW;
-    return calcU(sampleChromaAvg(ux, uy));
-  }
-  int b = (iy - uHeight - uRows) * uWidth + bIdx;
-  int vy = b / halfW;
-  int vx = b - vy * halfW;
-  return calcV(sampleChromaAvg(vx, vy));
-}
-
 void main() {
   ivec2 fc = ivec2(gl_FragCoord.xy);
-  fragColor = vec4(
-    evalPlaneByte(fc.x, fc.y, 0),
-    evalPlaneByte(fc.x, fc.y, 1),
-    evalPlaneByte(fc.x, fc.y, 2),
-    evalPlaneByte(fc.x, fc.y, 3)
-  );
+  int ix = fc.x;
+  int iy = fc.y;
+  vec2 invSize = vec2(1.0 / float(uWidth), 1.0 / float(uHeight));
+  int bIdx0 = ix * 4;
+
+  if (iy < uHeight) {
+    float v = (float(iy) + 0.5) * invSize.y;
+    fragColor = vec4(
+      calcY(texture(uTex, vec2((float(bIdx0) + 0.5) * invSize.x, v)).rgb),
+      calcY(texture(uTex, vec2((float(bIdx0 + 1) + 0.5) * invSize.x, v)).rgb),
+      calcY(texture(uTex, vec2((float(bIdx0 + 2) + 0.5) * invSize.x, v)).rgb),
+      calcY(texture(uTex, vec2((float(bIdx0 + 3) + 0.5) * invSize.x, v)).rgb)
+    );
+    return;
+  }
+
+  int uRows = uHeight >> 2;
+  int halfW = uWidth >> 1;
+  bool isU = iy < uHeight + uRows;
+  int relY = isU ? (iy - uHeight) : (iy - uHeight - uRows);
+  int base = relY * uWidth + bIdx0;
+  int cy0 = base / halfW;
+  int cx0 = base - cy0 * halfW;
+
+  vec3 c0 = sampleChromaAvg(cx0, cy0, invSize);
+  int cx1 = cx0 + 1;
+  int cy1 = cy0;
+  if (cx1 >= halfW) { cx1 = 0; cy1 += 1; }
+  vec3 c1 = sampleChromaAvg(cx1, cy1, invSize);
+  int cx2 = cx1 + 1;
+  int cy2 = cy1;
+  if (cx2 >= halfW) { cx2 = 0; cy2 += 1; }
+  vec3 c2 = sampleChromaAvg(cx2, cy2, invSize);
+  int cx3 = cx2 + 1;
+  int cy3 = cy2;
+  if (cx3 >= halfW) { cx3 = 0; cy3 += 1; }
+  vec3 c3 = sampleChromaAvg(cx3, cy3, invSize);
+
+  if (isU) {
+    fragColor = vec4(calcU(c0), calcU(c1), calcU(c2), calcU(c3));
+  } else {
+    fragColor = vec4(calcV(c0), calcV(c1), calcV(c2), calcV(c3));
+  }
 }
 `
 
@@ -414,6 +422,16 @@ export class GpuYuv420Converter {
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
     slot.inUse = false
     return out
+  }
+
+  /**
+   * 下一次 `enqueueAsync()` 是否会产出已完成帧并写入 `reuseBuffer`。
+   * PBO 环预热阶段（前 `pboRingSize - 1` 帧）返回 `false`，调用方可跳过缓冲池借出/分配，
+   * 既避免预热空转消耗池内 3.11 MB 缓冲，也绝不干扰自定义/测试转换器对 `reuseBuffer` 的持有语义。
+   */
+  public get willYieldOnNextEnqueue(): boolean {
+    if (this.disposed) return false
+    return this.pboSlots.length === 0 || this.pendingSlots.length + 1 >= this.pboSlots.length
   }
 
   /**
