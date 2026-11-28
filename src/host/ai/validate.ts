@@ -11,7 +11,12 @@ import {
 import { repairSpokenStageDirections } from './dialogueLinter'
 import * as facialSemanticsMod from './facialSemantics'
 import * as personasMod from './personas'
-import { isStandingMotion, type CatalogView } from './prompt'
+import {
+  isExplicitDarkVoidContext,
+  isSolidOrCurtainBackground,
+  isStandingMotion,
+  type CatalogView
+} from './prompt'
 import { normalizeScenarioEffectName } from './scenarioCues'
 import { resolveRegisteredSeFile } from '../resources/resourceCatalog'
 import * as ttsTextMod from './ttsText'
@@ -3226,10 +3231,13 @@ export interface ValidationResult {
 }
 
 /**
- * 补齐最基本的开场/收尾镜头：AI 偶尔会漏掉 ChangeLayoutMode 或 ChangeBackgroundImage，
- * 结果整片白底或直接黑屏结束。这里只在完全缺失时补一条，不覆盖模型已经写好的演出。
+ * 补齐最基本的开场/收尾镜头与幕布配对守卫：
+ * 1. 确保存在 ChangeLayoutMode；
+ * 2. 确保在首个 Talk / LayoutAppear 之前一定有 ChangeBackgroundImage，避免开场黑底/白底；
+ * 3. 确保任何 Talk 播放前不存在未闭合的 BlackOut / SideFade Out / SekaiOut 幕布，避免整段对白被黑幕遮死；
+ * 4. 确保末尾有 BlackOut 收尾。
  */
-function ensureOpeningAndEnding(story: JsonRecord): void {
+function ensureOpeningAndEnding(story: JsonRecord, warn?: (message: string) => void): void {
   const snippets = story.snippets as JsonRecord[]
   if (!snippets.some((snippet) => snippet.type === 'ChangeLayoutMode')) {
     snippets.unshift({
@@ -3241,15 +3249,111 @@ function ensureOpeningAndEnding(story: JsonRecord): void {
   }
 
   const images = Array.isArray(story.images) ? (story.images as JsonRecord[]) : []
-  if (images.length > 0 && !snippets.some((snippet) => snippet.type === 'ChangeBackgroundImage')) {
-    const imageId = toNumber(images[0].id, 1)
-    const firstScene = snippets.findIndex((snippet) => snippet.type !== 'ChangeLayoutMode')
-    snippets.splice(firstScene < 0 ? snippets.length : firstScene, 0, {
-      type: 'ChangeBackgroundImage',
-      wait: false,
-      delay: 0,
-      data: { imageId }
-    })
+  if (images.length > 0) {
+    const firstBgIdx = snippets.findIndex((snippet) => snippet.type === 'ChangeBackgroundImage')
+    const firstStageIdx = snippets.findIndex(
+      (snippet) => snippet.type === 'Talk' || snippet.type === 'LayoutAppear'
+    )
+    const missingOpeningBg = firstBgIdx < 0 || (firstStageIdx >= 0 && firstBgIdx > firstStageIdx)
+    if (missingOpeningBg) {
+      const imageId = toNumber(images[0].id, 1)
+      let insertAt = snippets.findIndex((snippet) => snippet.type !== 'ChangeLayoutMode')
+      if (insertAt < 0) insertAt = snippets.length
+      // 若开场是 ChangeLayoutMode -> BlackOut(0ms)，把背景切换插在 BlackOut 之后、人物入场/开场对白之前
+      if (
+        insertAt < snippets.length &&
+        snippets[insertAt].type === 'BlackOut' &&
+        (firstStageIdx < 0 || insertAt < firstStageIdx)
+      ) {
+        insertAt += 1
+      }
+      if (firstStageIdx >= 0 && insertAt > firstStageIdx) {
+        insertAt = firstStageIdx
+      }
+      snippets.splice(insertAt, 0, {
+        type: 'ChangeBackgroundImage',
+        wait: false,
+        delay: 0,
+        data: { imageId }
+      })
+      if (firstBgIdx >= 0) {
+        warn?.(
+          `首条 ChangeBackgroundImage 出现在开场演出之后，已在开头自动补齐背景 imageId=${imageId}`
+        )
+      }
+    }
+  }
+
+  // 幕布配对守卫：严禁 BlackOut / SideFade(Out) / SekaiOut 后漏写对应淡入而让后续 Talk 一直在黑幕下播放
+  let blackClosed: { color: string } | null = null
+  let sideFadeClosed: { direction: string; edge: string } | null = null
+  let sekaiClosed: { variant: string } | null = null
+  for (let i = 0; i < snippets.length; i++) {
+    const snippet = snippets[i]
+    if (!isRecord(snippet)) continue
+    const kind = toStr(snippet.type)
+    const data = isRecord(snippet.data) ? snippet.data : {}
+    if (kind === 'BlackOut') {
+      blackClosed = { color: toStr(data.color, 'black') === 'white' ? 'white' : 'black' }
+    } else if (kind === 'BlackIn') {
+      blackClosed = null
+    } else if (kind === 'SideFade') {
+      const mode = toStr(data.mode, 'Out').toLowerCase()
+      if (mode === 'out') {
+        const direction = toStr(data.direction, 'Left')
+        sideFadeClosed = { direction, edge: toStr(data.edge, direction.toLowerCase()) }
+      } else {
+        sideFadeClosed = null
+      }
+    } else if (kind === 'SekaiOut') {
+      sekaiClosed = { variant: toStr(data.variant, 'v1') === 'v2' ? 'v2' : 'v1' }
+    } else if (kind === 'SekaiIn') {
+      sekaiClosed = null
+    } else if (kind === 'Talk') {
+      const inserted: JsonRecord[] = []
+      if (blackClosed) {
+        inserted.push({
+          type: 'BlackIn',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: { duration: 400, color: blackClosed.color }
+        })
+        warn?.(`snippets[${i}] Talk 前存在未闭合的 BlackOut，已自动补齐 BlackIn 防止黑屏`)
+        blackClosed = null
+      }
+      if (sideFadeClosed) {
+        inserted.push({
+          type: 'SideFade',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: {
+            direction: sideFadeClosed.direction,
+            edge: sideFadeClosed.edge,
+            mode: 'In',
+            duration: 450
+          }
+        })
+        warn?.(`snippets[${i}] Talk 前存在未闭合的 SideFade Out，已自动补齐 SideFade In 防止黑屏`)
+        sideFadeClosed = null
+      }
+      if (sekaiClosed) {
+        inserted.push({
+          type: 'SekaiIn',
+          wait: true,
+          progressBehavior: 'WaitFinished',
+          delay: 0,
+          data: { duration: 500, variant: sekaiClosed.variant }
+        })
+        warn?.(`snippets[${i}] Talk 前存在未闭合的 SekaiOut，已自动补齐 SekaiIn 防止遮挡`)
+        sekaiClosed = null
+      }
+      if (inserted.length > 0) {
+        snippets.splice(i, 0, ...inserted)
+        i += inserted.length
+      }
+    }
   }
 
   const hasEnding = snippets.slice(-3).some((snippet) => snippet.type === 'BlackOut')
@@ -3471,25 +3575,105 @@ export function validateAndFixStory(
   }
 
   // ---- images -----------------------------------------------------------------------------------------------
-  const fixImage = (value: unknown): string => {
+  // 提前从标题/地点/字幕/首段对白与出场角色中收集场景语境，用于纠正无效背景及误选的纯黑幕布（bg_a000000 等）
+  const contextParts: string[] = []
+  for (const m of modelEntries) {
+    const cat = view.modelById(toNumber(m.id, -1))
+    if (cat) contextParts.push(cat.name, cat.shortName ?? '', cat.path)
+  }
+  if (Array.isArray(story.snippets)) {
+    let talkSamples = 0
+    for (const rawSnip of story.snippets as unknown[]) {
+      if (!isRecord(rawSnip) || !isRecord(rawSnip.data)) continue
+      if (rawSnip.type === 'Telop') {
+        const txt = toStr(rawSnip.data.content).trim()
+        if (txt) contextParts.push(txt)
+      } else if (rawSnip.type === 'PlaceInfo') {
+        const txt = toStr(rawSnip.data.text).trim()
+        if (txt) contextParts.push(txt)
+      } else if (rawSnip.type === 'Talk' && talkSamples < 12) {
+        const txt = toStr(rawSnip.data.content).trim()
+        if (txt) {
+          contextParts.push(txt)
+          talkSamples += 1
+        }
+      }
+    }
+  }
+  const storySceneContext = contextParts.filter(Boolean).join(' ')
+  const allowSolidStory = isExplicitDarkVoidContext(storySceneContext)
+  const pickScenicFallback = (hint = ''): string =>
+    view.pickScenicFallbackImage([hint, storySceneContext].filter(Boolean).join(' ')) ||
+    view.defaultImage()
+
+  const fixImage = (value: unknown, label: string): string => {
     // 背景可以写本地文件名、云端 id（bg_a000301）或可读名（教室）；
-    // canonicalImage 统一收束到目录里的 file。
-    return view.canonicalImage(cleanPath(value)) ?? view.defaultImage()
+    // canonicalImageEntry 统一收束到目录里的 file，并拦截误选的纯黑/纯色转场幕布。
+    const rawPath = cleanPath(value)
+    const entry = rawPath ? view.canonicalImageEntry(rawPath) : null
+    if (entry) {
+      if (
+        isSolidOrCurtainBackground(entry) &&
+        !allowSolidStory &&
+        !isExplicitDarkVoidContext(rawPath)
+      ) {
+        const replacement = pickScenicFallback()
+        if (replacement && replacement !== entry.file) {
+          warn(
+            `${label} 使用了纯黑/纯色转场幕布 '${entry.file}'（${entry.name}），已按场景语义替换为 '${replacement}'`
+          )
+          return replacement
+        }
+      }
+      return entry.file
+    }
+    const fallback = pickScenicFallback(rawPath)
+    if (rawPath && fallback) {
+      warn(`${label} 背景 '${rawPath}' 未在背景目录命中，已回退为 '${fallback}'`)
+    }
+    return fallback
   }
 
-  if (!Array.isArray(story.images) || story.images.length === 0) {
-    story.images = [{ id: 1, image: view.defaultImage() }]
-  } else {
-    story.images = (story.images as unknown[]).map((raw, index) => {
-      if (!isRecord(raw)) return { id: index + 1, image: view.defaultImage() }
-      return {
-        id: toNumber(raw.id, index + 1),
-        image: fixImage(raw.image)
-      }
-    })
+  const normalizedImages: Array<{ id: number; image: string }> = []
+  const usedImageIds = new Set<number>()
+  const nextImageId = (): number => {
+    let candidate = normalizedImages.length + 1
+    while (usedImageIds.has(candidate)) candidate += 1
+    return candidate
   }
-  if (!view.defaultImage()) {
-    story.images = []
+
+  if (view.defaultImage()) {
+    if (!Array.isArray(story.images) || story.images.length === 0) {
+      const fallback = pickScenicFallback()
+      normalizedImages.push({ id: 1, image: fallback })
+      usedImageIds.add(1)
+    } else {
+      for (const [index, raw] of (story.images as unknown[]).entries()) {
+        if (!isRecord(raw)) {
+          const id = nextImageId()
+          usedImageIds.add(id)
+          normalizedImages.push({ id, image: pickScenicFallback() })
+          continue
+        }
+        const parsedId = Math.floor(toNumber(raw.id, index + 1))
+        const id = parsedId > 0 && !usedImageIds.has(parsedId) ? parsedId : nextImageId()
+        usedImageIds.add(id)
+        normalizedImages.push({
+          id,
+          image: fixImage(raw.image, `images[${index}]`)
+        })
+      }
+    }
+  }
+  story.images = normalizedImages
+
+  const ensureImageRegistered = (file: string): number => {
+    const existing = normalizedImages.find((item) => item.image === file)
+    if (existing) return existing.id
+    const id = nextImageId()
+    usedImageIds.add(id)
+    normalizedImages.push({ id, image: file })
+    return id
   }
 
   // ---- snippets ---------------------------------------------------------------------------------------------
@@ -3994,7 +4178,24 @@ export function validateAndFixStory(
     }
 
     if (kind === 'ChangeBackgroundImage') {
-      data.imageId = toNumber(data.imageId, 1)
+      const requestedId = toNumber(data.imageId, Number.NaN)
+      if (Number.isInteger(requestedId) && usedImageIds.has(requestedId)) {
+        data.imageId = requestedId
+      } else if (typeof data.image === 'string' && cleanPath(data.image)) {
+        const fixed = fixImage(data.image, `snippets[${index}] ChangeBackgroundImage`)
+        data.imageId = fixed ? ensureImageRegistered(fixed) : (normalizedImages[0]?.id ?? 1)
+      } else if (normalizedImages.length > 0) {
+        const fallbackId = normalizedImages[0].id
+        if (data.imageId !== undefined) {
+          warn(
+            `snippets[${index}] ChangeBackgroundImage imageId=${String(data.imageId)} 不在 images 清单中，已回退为 ${fallbackId}`
+          )
+        }
+        data.imageId = fallbackId
+      } else {
+        data.imageId = 1
+      }
+      delete data.image
       if ('duration' in data)
         data.duration = Math.min(30000, Math.max(0, toNumber(data.duration, 0)))
       snippet.data = data
@@ -4143,7 +4344,7 @@ export function validateAndFixStory(
     }
   }
 
-  ensureOpeningAndEnding(story)
+  ensureOpeningAndEnding(story, warn)
   compileStoryBgm(story, view, warn)
   dedupeConsecutiveChangeBgm(story, warn)
   enforceCameraShakeOpeningRestraint(story, warn)

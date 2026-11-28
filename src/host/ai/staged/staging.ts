@@ -6,7 +6,13 @@ import {
   type SceneContextInput
 } from '../bgmGuard'
 import { isInternalThoughtContent } from '../officialLinter'
-import { formatBgmPromptLine, formatImagePromptLine, type CatalogView } from '../prompt'
+import {
+  formatBgmPromptLine,
+  formatImagePromptLine,
+  isExplicitDarkVoidContext,
+  isSolidOrCurtainBackground,
+  type CatalogView
+} from '../prompt'
 import { CURATED_SCENARIO_EFFECTS, normalizeScenarioEffectName } from '../scenarioCues'
 import {
   formatDialogueLineForPrompt,
@@ -235,7 +241,7 @@ ${castList}${formatWorldviewCueBlock(options.ragContext)}
 ${plannedScenes ? `## 一阶段分幕参考\n${plannedScenes}\n` : ''}## 定稿台词（仅引用 lineId）
 ${lineList}
 
-## 可用背景（时段白天/黄昏/夜晚与情景一致）
+## 可用背景（必须选真实场景背景，时段白天/黄昏/夜晚与情景一致；严禁选纯黑/纯色过渡幕布 bg_a000000）
 ${backgrounds || '（无）'}
 
 ## 可用 BGM（填 file/id，静音切停写 "silence"）
@@ -335,6 +341,7 @@ export function fallbackStaging(
   const lines = dialogue.lines
   const scenes: StagedStagingScene[] = []
   const starts = inferSceneStartsFromDialogue(plan, dialogue)
+  const castHint = plan.cast.map((c) => c.name).join(' ')
   const plannedScenes =
     plan.scenes && plan.scenes.length > 0
       ? plan.scenes
@@ -342,7 +349,9 @@ export function fallbackStaging(
           {
             id: 's1',
             summary: plan.event,
-            background: plan.background || view.defaultImage(),
+            background:
+              plan.background ||
+              view.pickScenicFallbackImage(`${plan.event} ${plan.logline} ${castHint}`),
             ambient: 'normal' as const,
             transitionIn: 'black' as const,
             activeCast: plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.name)
@@ -362,7 +371,11 @@ export function fallbackStaging(
     if (activeCast.length === 0) {
       activeCast = plan.cast.slice(0, Math.min(2, plan.cast.length)).map((c) => c.modelId)
     }
-    const bgDetail = view.canonicalImageEntry(ps.background)
+    const sceneBgHint = [ps.placeInfo, ps.telop, ps.summary, plan.event, plan.logline, castHint]
+      .filter(Boolean)
+      .join(' ')
+    const bg = normalizeBackground(view, ps.background, sceneBgHint)
+    const bgDetail = view.canonicalImageEntry(bg)
     const ambient =
       bgDetail?.timeOfDay === '白天' && ps.ambient === 'evening' && !ps.isFlashback
         ? 'normal'
@@ -371,7 +384,7 @@ export function fallbackStaging(
       id: ps.id,
       fromLineId: lines[fromIndex]?.id ?? 'l1',
       fromIndex,
-      background: normalizeBackground(view, ps.background),
+      background: bg,
       ambient,
       ...(ps.telop ? { telop: ps.telop } : {}),
       ...(ps.placeInfo ? { placeInfo: ps.placeInfo } : {}),
@@ -521,6 +534,42 @@ function enrichStagingBaseline(
       summary: plannedScene?.summary ?? '',
       promptText: `${plan.event} ${plan.logline}`,
       dialogueText: sceneDialogue
+    }
+  }
+
+  const castHint = plan.cast.map((c) => c.name).join(' ')
+  // 确定性背景守卫：严禁 bg_a000000 等纯黑/纯色转场幕布或空背景泄漏到常规场景
+  for (let sIdx = 0; sIdx < staging.scenes.length; sIdx++) {
+    const scene = staging.scenes[sIdx]
+    const ctxInput = sceneContextAt(sIdx)
+    const sceneBgHint = [
+      ctxInput.placeInfo,
+      ctxInput.telop,
+      ctxInput.summary,
+      ctxInput.promptText,
+      ctxInput.dialogueText,
+      castHint
+    ]
+      .filter(Boolean)
+      .join(' ')
+    const currentEntry = scene.background ? view.canonicalImageEntry(scene.background) : null
+    const forbiddenSolidOrMissing =
+      !scene.background ||
+      !currentEntry ||
+      (isSolidOrCurtainBackground(currentEntry) && !isExplicitDarkVoidContext(sceneBgHint))
+    if (forbiddenSolidOrMissing) {
+      const repaired = normalizeBackground(view, '', sceneBgHint)
+      if (repaired) {
+        scene.background = repaired
+        const repairedEntry = view.canonicalImageEntry(repaired)
+        if (
+          repairedEntry?.timeOfDay === '白天' &&
+          scene.ambient === 'evening' &&
+          !scene.isFlashback
+        ) {
+          scene.ambient = 'normal'
+        }
+      }
     }
   }
 
@@ -755,7 +804,29 @@ export function normalizeStaging(
     const hologramCast = resolveCastIds(item.hologramCast, plan, view)
     const effect = normalizeScenarioEffectName(item.scenarioEffect ?? item.effect)
 
-    const bg = normalizeBackground(view, item.background ?? item.image ?? plan.background)
+    const telop = oneLine(item.telop, 40)
+    const placeInfo = oneLine(item.placeInfo ?? item.place, 40)
+    const plannedScene = plan.scenes?.[i]
+    const sceneDialogueHint = lines
+      .slice(idx, Math.min(lines.length, idx + 8))
+      .map((l) => l.content)
+      .join(' ')
+    const sceneBgHint = [
+      placeInfo,
+      telop,
+      plannedScene?.summary,
+      plan.event,
+      plan.logline,
+      plan.cast.map((c) => c.name).join(' '),
+      sceneDialogueHint
+    ]
+      .filter(Boolean)
+      .join(' ')
+    const bg = normalizeBackground(
+      view,
+      item.background ?? item.image ?? plan.background,
+      sceneBgHint
+    )
     const bgDetail = view.canonicalImageEntry(bg)
     let ambient = normalizeAmbient(item.ambient ?? item.timeOfDay)
     if (bgDetail?.timeOfDay === '白天' && ambient === 'evening' && !isFlashback) {
@@ -767,10 +838,8 @@ export function normalizeStaging(
       fromIndex: idx,
       background: bg,
       ambient,
-      ...(oneLine(item.telop, 40) ? { telop: oneLine(item.telop, 40) } : {}),
-      ...(oneLine(item.placeInfo ?? item.place, 40)
-        ? { placeInfo: oneLine(item.placeInfo ?? item.place, 40) }
-        : {}),
+      ...(telop ? { telop } : {}),
+      ...(placeInfo ? { placeInfo } : {}),
       transitionIn,
       ...(isFlashback ? { isFlashback: true } : {}),
       ...(isSekai ? { isSekai: true } : {}),
