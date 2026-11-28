@@ -268,8 +268,8 @@ const MOTION_CLASS_TABLE: Array<{
   { re: /tilthead|tilt/i, role: 'tilthead', label: '歪头疑惑/思考' },
   { re: /shakehead/i, role: 'shakehead', label: '摇头否定' },
   { re: /glad|happy|cheer|joy/i, role: 'glad', label: '开心欢呼' },
-  { re: /wink|smug|doya|pose|sing/i, role: 'playful', label: '俏皮/得意/摆姿势' },
-  { re: /shy|blush|fidget/i, role: 'shy', label: '害羞/局促' },
+  { re: /wink|smug|doya|pose|sing|plan/i, role: 'playful', label: '俏皮/得意/摆姿势' },
+  { re: /shy|blush|fidget|armescape/i, role: 'shy', label: '害羞/局促' },
   { re: /trouble|worry/i, role: 'trouble', label: '为难/困扰' },
   { re: /sad|sigh|lookdown|cry/i, role: 'sad', label: '低落/叹气' },
   { re: /angry|disgust/i, role: 'angry', label: '生气/不满' },
@@ -277,7 +277,11 @@ const MOTION_CLASS_TABLE: Array<{
   { re: /think|lookaway|lookup/i, role: 'think', label: '思考/移开视线' },
   { re: /surprise|shock|scared/i, role: 'surprise', label: '惊讶/受惊' },
   { re: /relief/i, role: 'relief', label: '松一口气' },
-  { re: /greeting|wave/i, role: 'greeting', label: '打招呼/挥手' },
+  {
+    re: /greeting|shakehand|handshake|wave|byebye|salute/i,
+    role: 'greeting',
+    label: '大挥手/打招呼（仅限招呼/告别）'
+  },
   { re: /delicious|eat|drink/i, role: 'special', label: '吃喝/品尝（仅限食物饮品场景）' },
   { re: /sleep|stretch/i, role: 'special', label: '倦意/睡眠（仅限困倦睡眠场景）' }
 ]
@@ -439,6 +443,12 @@ export function checkMotionCompatibility(params: {
   }
   if (/sleep/i.test(params.motion) && !SLEEP_CUE_RE.test(params.content)) {
     return { ok: false, reason: 'sleep_motion_without_sleep_cue' }
+  }
+  if (
+    /greeting|shakehand|handshake|wave|byebye|salute/i.test(params.motion) &&
+    !facialSemanticsMod.GREETING_CONTEXT_TEXT_RE.test(params.content)
+  ) {
+    return { ok: false, reason: 'greeting_motion_without_greeting_context' }
   }
   if (typeof facialApi.isMotionCompatibleWithLine === 'function') {
     return facialApi.isMotionCompatibleWithLine(params)

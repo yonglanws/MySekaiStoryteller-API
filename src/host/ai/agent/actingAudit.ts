@@ -126,10 +126,10 @@ export function recommendForLine(
     shy_hesitation: ['shy', 'think', 'trouble', 'tilthead'],
     angry_frustration: ['angry', 'shakehead', 'forward'],
     sad_regret: ['sad', 'trouble', 'think'],
-    cheerful_banter: ['glad', 'nod', 'playful', 'relief', 'greeting'],
+    cheerful_banter: ['glad', 'nod', 'playful', 'relief'],
     attentive_listen: ['nod', 'think', 'forward', 'trouble'],
     thinking_monologue: ['think', 'sad', 'trouble'],
-    entry_exit: ['greeting', 'nod', 'tilthead'],
+    entry_exit: ['nod', 'tilthead', 'relief', 'think'],
     neutral: ['nod', 'tilthead', 'think', 'forward', 'relief']
   }
   const wantedRoles = desiredRolesByMood[ctx.mood] ?? desiredRolesByMood.neutral

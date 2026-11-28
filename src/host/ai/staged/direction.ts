@@ -191,7 +191,7 @@ ${castLines}${formatWorldviewCueBlock(options.ragContext)}
 ${dialogueLines}
 
 ## 动作/表情关键词（名称由英文语义 + 编号组成；直接输出完整名称）
-- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / greeting 打招呼 / smug 得意 / wink 眨眼 / pose 摆姿势 / default 默认站姿（sleep 困倦 / delicious 好吃 仅限真实睡眠或吃喝台词，平时禁用）
+- 动作：nod 点头 / tilthead 歪头 / shakehead 摇头 / glad 高兴 / sad 难过 / trouble 为难 / shy 害羞 / blushed 脸红 / sigh 叹气 / relief 松口气 / think 思考 / lookaway 移开视线 / angry 生气 / forward 前倾 / fidget 局促 / smug 得意 / wink 眨眼 / pose 摆姿势 / default 默认站姿（**greeting / shakehand / wave 属于大挥手打招呼，仅限明确问好/告别/远距离招手呼喊时使用，严禁用于日常拌嘴、生气、普通入场或听者反应**；plan 仅限得意谋划；sleep 困倦 / delicious 好吃 仅限真实睡眠或吃喝台词，平时禁用）
 - 表情：face_smile 微笑 / face_sad 难过 / face_angry 生气 / face_surprise 惊讶 / face_shy 害羞 / face_trouble 为难 / face_closeeye 闭眼 / face_cry 哭 / face_serious 认真 / face_sleepy 困 / face_sparkling 闪闪发光 / face_disgust 厌恶 / face_smug 得意 / face_wink 眨眼 / face_shock 震惊 / face_worry 担心 / face_lookaway 移开视线 / face_smallmouth 抿嘴
 
 ## 可用动作（必须使用对应角色的完整名称）
@@ -210,7 +210,7 @@ ${
 - **官方单拍节奏（at=0）与动作密度**：
   - 官方 PJSK 剧本中约四分之三的台词在句首（at=0）触发 1 个自然身体动作 + 表情；不要主动拆分人工双拍（at2）。
   - 约 22% 的句子可以完全没有动作（全量官方剧本 22.2%，多数集在 10%~35%）：平稳承接、情绪延续或刚演过动作的过渡句只换表情、只给 listener 或留空都可以，静止是正常的，不必为每句硬补动作。
-- **入场去重**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。
+- **入场去重与禁无故挥手/双人撞拍**：标有 \`[刚入场首句]\` 的台词因为紧接在 LayoutAppear 后，**不要再派发重覆的 body motion**（只写 \`facial\` 或留空即可）。**严禁在非问好/非告别/非招手呼喊语境下使用 \`greeting\` / \`shakehand\` / \`wave\` 等大幅挥手动作**；双人同场时严禁两名角色同时做相同动作或同时做大幅挥手/夸张姿势（听者只做克制的倾听/点头/思索或纯切表情）。生气争执、疲惫抱怨或普通对话中严禁错用 \`blushed\` / \`fidget\` / \`armescape\`（害羞局促）或 \`plan\`（谋划）。
 - **短促反应也要有神态动作**：像「……嗯？」「啊。」「真的吗？」等短反应句**必须保留适合的身体动作与表情**（如轻点头、歪头、惊讶小动作 + facial），绝不因句短剥夺动作！
 - **静默反应**：官方全量剧本里，台词之外的独立 Motion 约每 2 句 1 个；本场每 2~4 句可安排 1 个 \`silentMotion\`（听者反应、环境小动作或停顿），让双方表演自然接力。
 - **听者反应对齐官方 PJSK（禁止句中错峰刷屏与情绪倒错）**：同一句 \`Talk\` 绝不同时触发说话者与听者的身体动作；当 A 连续说话时，听者 B 优先仅切 **纯表情（只写 \`facial\`，不写 \`motion\`）** 在 \`at: 0\` 自然过渡，或仅在真正情绪转折点通过 \`silentMotion\` / 独立 \`Motion\` 片段表现听者身体反应。**必须从听者自身视角出发**（如认真倾听、担忧、为难、若有所思、温和回应），绝不把说话者的「生气」「害怕」直接复制到挨骂或被倾诉的听者脸上；**若听者刚才还处于「生气」或「伤心」，即使说话者强颜欢笑打岔，听者也严禁切回 \`face_smile_*\` 笑脸**。

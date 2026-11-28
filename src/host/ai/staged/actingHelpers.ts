@@ -51,7 +51,7 @@ const MOTION_LABEL_FALLBACK: Array<[RegExp, string]> = [
   [/think|lookaway|lookup/i, '思考'],
   [/surprise|shock|scared/i, '惊讶'],
   [/relief/i, '松口气'],
-  [/greeting|wave/i, '打招呼'],
+  [/greeting|shakehand|handshake|wave|byebye|bye|salute/i, '大挥手/打招呼(仅限招呼告别)'],
   [/delicious|eat|drink/i, '吃喝/美味(仅限食物饮品)'],
   [/sleep/i, '困倦(仅限犯困睡眠)']
 ]
@@ -106,6 +106,12 @@ export function isMotionCompatibleWithContext(params: {
   const text = (params.line.content ?? '').trim()
   if (/delicious|eat|drink/i.test(lower) && !FOOD_DRINK_CUE_RE.test(text)) return false
   if (/sleep/i.test(lower) && !SLEEP_CUE_RE.test(text)) return false
+  if (
+    /greeting|shakehand|handshake|wave|byebye|salute/i.test(lower) &&
+    !facialSemanticsMod.GREETING_CONTEXT_TEXT_RE.test(text)
+  ) {
+    return false
+  }
   if (typeof facialStagedApi.isMotionCompatibleWithLine === 'function') {
     if (
       !facialStagedApi.isMotionCompatibleWithLine({
@@ -127,7 +133,7 @@ export function isMotionCompatibleWithContext(params: {
   const monologue = /^[（(]/.test(text) && /[）)]$/.test(text)
   const isTense = params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble'
   const isJoyful =
-    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(
+    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|shakehand|handshake|wave/.test(
       lower
     )
   const isNegative = /angry|disgust|sad|cry|sigh/.test(lower)
@@ -144,7 +150,7 @@ export function isMotionCompatibleWithContext(params: {
   const isQuestionLine = /[？?]|难道|为什么|怎么|吗/.test(text)
   const isAcuteDespair = /(?:窒息|受不了|绝望|崩溃|再见|别走)/.test(text)
   if ((mood === 'sad' || monologue) && emo !== '惊讶') {
-    if (/greeting|wave|surprise|shock|angry|disgust/.test(lower)) {
+    if (/greeting|shakehand|handshake|wave|surprise|shock|angry|disgust/.test(lower)) {
       return false
     }
     if (/relief/.test(lower) && isAcuteDespair) {
@@ -154,7 +160,10 @@ export function isMotionCompatibleWithContext(params: {
       return false
     }
   }
-  if (mood === 'angry' && /tilthead|tilt|greeting|wave/.test(lower)) {
+  if (
+    mood === 'angry' &&
+    /tilthead|tilt|greeting|shakehand|handshake|wave|blushed|fidget|shy|armescape/.test(lower)
+  ) {
     return false
   }
   return true
@@ -214,6 +223,15 @@ export function pickFollowupMotion(
     const lineText = moodContext?.line?.content ?? ''
     if (/delicious|eat|drink/i.test(m) && !FOOD_DRINK_CUE_RE.test(lineText)) return false
     if (/sleep/i.test(m) && !SLEEP_CUE_RE.test(lineText)) return false
+    if (
+      /greeting|shakehand|handshake|wave|byebye|salute/i.test(m) &&
+      !facialSemanticsMod.GREETING_CONTEXT_TEXT_RE.test(lineText)
+    ) {
+      return false
+    }
+    if (/plan/i.test(m) && !/(?:计划|主意|策略|点子|秘密|偷偷|嘿嘿|哼哼)/.test(lineText)) {
+      return false
+    }
     return true
   })
   const moodKey = inferMotionMoodKey(moodContext?.line, Boolean(moodContext?.prevTense))
@@ -222,7 +240,10 @@ export function pickFollowupMotion(
   )
   const safeNonStanding = isTense
     ? nonStanding.filter(
-        (m) => !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)
+        (m) =>
+          !/glad|happy|cheer|joy|wink|smug|doya|greeting|shakehand|handshake|wave|playful|plan|blushed|fidget|armescape/i.test(
+            m
+          )
       )
     : nonStanding
   const baseList = safeNonStanding.length > 0 ? safeNonStanding : nonStanding
@@ -245,9 +266,9 @@ export function pickFollowupMotion(
     trouble: /trouble|think|lookaway|sigh/i,
     surprise: /surprise|tilthead|forward|nod/i,
     shy: /shy|blush|fidget|tilthead|lookaway/i,
-    smile: /glad|nod|tilthead|relief|greeting|playful/i,
+    smile: /glad|nod|tilthead|relief|playful/i,
     thinking: /think|lookaway|sigh|trouble|sad/i,
-    neutral: /nod|tilthead|relief|think|lookaway|forward|shy|sigh/i
+    neutral: /nod|tilthead|relief|think|lookaway|forward|sigh/i
   }
   const calmRe = moodHints[moodKey] ?? moodHints.neutral
   const compatiblePool = moodContext?.line
@@ -278,7 +299,8 @@ export function pickAppearFallbackMotion(
   modelId: number,
   usedInEntry?: ReadonlySet<string>,
   avoidMotion?: string,
-  tense = false
+  tense = false,
+  options: { avoidStems?: ReadonlySet<string>; subtleOnly?: boolean } = {}
 ): string {
   const model = view.modelById(modelId)
   if (!model) {
@@ -290,15 +312,34 @@ export function pickAppearFallbackMotion(
     )
   }
   const nonStanding = collectModelNonStandingMotions(view, modelId).filter(
-    (m) => !/delicious|eat|drink|sleep/i.test(m)
+    (m) =>
+      !/delicious|eat|drink|sleep|greeting|shakehand|handshake|wave|byebye|salute|blushed|fidget|armescape|plan/i.test(
+        m
+      )
   )
   const entryRe = tense
-    ? /trouble|sad|cry|sigh|think|lookaway/i
-    : /tilthead|lookaway|greeting|nod|forward|relief|think|shy/i
-  const isSafe = (name: string): boolean =>
-    !tense || !/glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful|tilthead/i.test(name)
+    ? /trouble|sad|cry|sigh|think|lookaway|lookdown/i
+    : options.subtleOnly
+      ? /nod|think|lookaway|relief|lookdown|tilthead/i
+      : /tilthead|lookaway|nod|forward|relief|think/i
+  const isSafe = (name: string): boolean => {
+    if (options.subtleOnly && facialSemanticsMod.isWavingOrBigTheatricalMotion(name, model.path)) {
+      return false
+    }
+    return (
+      !tense ||
+      !/glad|happy|cheer|joy|wink|smug|doya|greeting|shakehand|handshake|wave|playful|tilthead|plan/i.test(
+        name
+      )
+    )
+  }
+  const distinctStem = (name: string): boolean => {
+    if (!options.avoidStems || options.avoidStems.size === 0) return true
+    const stem = facialSemanticsMod.parseMotionStem(name).stem
+    return !stem || !options.avoidStems.has(stem)
+  }
   const distinctAndAvoided = (name: string): boolean =>
-    !usedInEntry?.has(name) && name !== avoidMotion
+    !usedInEntry?.has(name) && name !== avoidMotion && distinctStem(name)
   const pick =
     nonStanding.find((name) => distinctAndAvoided(name) && isSafe(name) && entryRe.test(name)) ??
     nonStanding.find((name) => distinctAndAvoided(name) && isSafe(name)) ??
@@ -307,8 +348,10 @@ export function pickAppearFallbackMotion(
     nonStanding[0]
   return (
     ensureRealModelAnim(view, modelId, 'motion', pick) ||
-    ensureRealModelAnim(view, modelId, 'motion', view.exampleMotion(modelId)) ||
-    ensureRealModelAnim(view, modelId, 'motion', view.defaultMotion(modelId))
+    (options.subtleOnly
+      ? ''
+      : ensureRealModelAnim(view, modelId, 'motion', view.exampleMotion(modelId)) ||
+        ensureRealModelAnim(view, modelId, 'motion', view.defaultMotion(modelId)))
   )
 }
 
