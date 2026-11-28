@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { loadHostConfig, validateConfigHints } from '../../out-host/host/config.js'
+import {
+  loadHostConfig,
+  normalizeWatermarkText,
+  validateConfigHints
+} from '../../out-host/host/config.js'
 import { loadDotEnv, parseDotEnv } from '../../out-host/host/env.js'
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -27,6 +31,9 @@ const MANAGED_ENV_KEYS = [
   'MSS_VIDEO_FPS',
   'MSS_FAST_FPS',
   'MSS_VIDEO_RENDER_SCALE',
+  'MSS_VIDEO_WATERMARK',
+  'MSS_VIDEO_WATERMARK_TEXT',
+  'MSS_WATERMARK_TEXT',
   'MSS_LLM_PERSONA_DIRS',
   'MSS_LLM_POLISH_DIALOGUE',
   'MSS_LLM_API_KEY',
@@ -522,4 +529,57 @@ test('loadDotEnv loads .env into env without overwriting existing values and sup
   const missingRes = loadDotEnv(dir, { env: {}, envFile: 'does-not-exist.env' })
   assert.equal(missingRes.loaded, false)
   assert.deepEqual(missingRes.loadedKeys, [])
+})
+
+test('watermarkText supports YAML multiline, CRLF, and escaped \\n via MSS_WATERMARK_TEXT / MSS_VIDEO_WATERMARK_TEXT', (t) => {
+  // 1. YAML block scalar `|` (strips trailing block newline, preserves interior lines)
+  withIsolatedConfig(
+    t,
+    ['video:', '  watermarkText: |', '    第一行水印', '    第二行水印', '    第三行水印', ''].join(
+      '\n'
+    )
+  )
+  assert.equal(loadHostConfig().video.watermarkText, '第一行水印\n第二行水印\n第三行水印')
+
+  // 2. YAML double-quoted "\n" and single-quoted literal '\n'
+  withIsolatedConfig(t, 'video:\n  watermarkText: "Quoted1\\nQuoted2"\n')
+  assert.equal(loadHostConfig().video.watermarkText, 'Quoted1\nQuoted2')
+
+  withIsolatedConfig(t, "video:\n  watermarkText: 'Single1\\nSingle2'\n")
+  assert.equal(loadHostConfig().video.watermarkText, 'Single1\nSingle2')
+
+  // 3. Env var MSS_WATERMARK_TEXT with literal \n and \r\n
+  withIsolatedConfig(t, 'video:\n  watermarkText: ""\n')
+  process.env.MSS_WATERMARK_TEXT = 'Line1\\nLine2'
+  assert.equal(loadHostConfig().video.watermarkText, 'Line1\nLine2')
+
+  process.env.MSS_WATERMARK_TEXT = 'Win1\r\nWin2\\r\\nWin3'
+  assert.equal(loadHostConfig().video.watermarkText, 'Win1\nWin2\nWin3')
+
+  // 4. MSS_VIDEO_WATERMARK_TEXT takes precedence over MSS_WATERMARK_TEXT
+  process.env.MSS_VIDEO_WATERMARK_TEXT = 'Primary1\\nPrimary2'
+  assert.equal(loadHostConfig().video.watermarkText, 'Primary1\nPrimary2')
+
+  // 5. Explicit empty MSS_VIDEO_WATERMARK_TEXT clears YAML watermarkText
+  withIsolatedConfig(t, 'video:\n  watermarkText: "FromYaml"\n')
+  process.env.MSS_VIDEO_WATERMARK_TEXT = ''
+  assert.equal(loadHostConfig().video.watermarkText, '')
+
+  // 6. .env parsing integration (unquoted, single-quoted, double-quoted)
+  const parsedEnv = parseDotEnv(
+    [
+      'MSS_WATERMARK_TEXT=第一行\\n第二行',
+      "SINGLE_WM='甲\\n乙'",
+      'DOUBLE_WM="丙\\n丁"',
+      'DOUBLE_ESCAPED_WM="戊\\\\n己"'
+    ].join('\n')
+  )
+  assert.equal(normalizeWatermarkText(parsedEnv.MSS_WATERMARK_TEXT), '第一行\n第二行')
+  assert.equal(normalizeWatermarkText(parsedEnv.SINGLE_WM), '甲\n乙')
+  assert.equal(normalizeWatermarkText(parsedEnv.DOUBLE_WM), '丙\n丁')
+  assert.equal(normalizeWatermarkText(parsedEnv.DOUBLE_ESCAPED_WM), '戊\n己')
+
+  // 7. Double-escaped \\n preserves literal \n; blank input normalizes to ''
+  assert.equal(normalizeWatermarkText('Keep \\\\n literal'), 'Keep \\n literal')
+  assert.equal(normalizeWatermarkText('  \r\n  '), '')
 })

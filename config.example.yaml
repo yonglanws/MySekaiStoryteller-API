@@ -64,9 +64,8 @@ video:
   watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
                       # 本视频由 MySekaiStoryteller-API 生成
                       # Designed by GuangChen2333 & 慵懒午睡
-  watermarkText: ""   # 自定义水印文字：右对齐显示在自带两行水印的下一行，
-                      # 支持最多 2 行（\n 换行），留空则只显示自带水印
-                      # （env: MSS_VIDEO_WATERMARK_TEXT）
+  watermarkText: ""   # 自定义水印文字：右对齐显示在自带水印下方，留空则显示默认两行水印；
+                      # 支持多行换行（YAML 多行块 | 或 \n；env: MSS_VIDEO_WATERMARK_TEXT / MSS_WATERMARK_TEXT）
   exportMode: fast    # 导出管线：fast | record（env: MSS_EXPORT_MODE；record 已废弃，自动回落 fast）
                       # fast   = 虚拟时钟逐帧渲染 + WebGL2 批处理 + WebCodecs 直编 + 原生 Rust 混音/合流
   recordTargetSizeMb: 0    # [已废弃] 仅向后兼容保留；fast 模式请通过 exportBitrate 控制体积

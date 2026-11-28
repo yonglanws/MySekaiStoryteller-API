@@ -781,7 +781,7 @@ test('AdvancedModel multiplies every eye param by EyeOpening and respects autoBl
   assert.equal(paramValues.get('ParamEyeROpen'), 0.8)
 })
 
-test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWatermark caps stacked lines at 2', async (t) => {
+test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWatermark deduplicates built-in line while preserving multiline custom text', async (t) => {
   const f = createFixture(t)
   f.mocks.set('pixi-live2d-display-advanced', {
     Cubism4InternalModel: f.Cubism4InternalModel,
@@ -827,9 +827,7 @@ test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWaterma
   const wm = new UIWatermark(1920, 1080)
   wm.setCustomText('本视频由 MySekaiStoryteller-API 生成\nLine A\nLine B\nLine C')
   const lines = wm.text.split('\n')
-  assert.equal(lines.length, 2, `Expected deduplicated <=2 lines, got ${JSON.stringify(lines)}`)
-  assert.equal(lines[0], '本视频由 MySekaiStoryteller-API 生成')
-  assert.equal(lines[1], 'Line A · Line B')
+  assert.deepEqual(lines, ['本视频由 MySekaiStoryteller-API 生成', 'Line A', 'Line B', 'Line C'])
 })
 
 test('stageTiming.getMotionSettledEndMs excludes cleared/hidden characters when isModelShown is provided', async (t) => {

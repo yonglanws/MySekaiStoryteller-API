@@ -67,7 +67,7 @@ const VideoSchema = z.object({
   audioBitrate: z.string().default('192k'),
   encoder: z.string().default('auto'),
   watermark: z.boolean().default(true),
-  /** 自定义水印文字：显示在自带水印下一行；空 = 不追加 */
+  /** 自定义水印文字：显示在自带水印下方，支持多行（真实换行或 \n）；空 = 使用默认两行水印 */
   watermarkText: z.string().default(''),
   /**
    * 导出管线：
@@ -187,6 +187,31 @@ const TtsSchema = z.object({
 export const DEFAULT_LOCAL_BGM_PATH = 'audio/bgm/bg1.mp3'
 export const DEFAULT_CLOUD_BGM_ID = 'bgm00003'
 export const DEFAULT_BGM_VOLUME = 0.35
+
+/**
+ * 归一化自定义水印文案中的换行符：
+ * - 统一真实换行 `\r\n` / `\r` 为 `\n`
+ * - 解码单层转义的 `\n` / `\r\n` 为真实换行（兼容 `.env` / 单行 YAML / CLI 参数）
+ * - 保留双反斜杠转义的 `\\n` 为字面 `\n`
+ * - 去除首尾空行（例如 YAML `|` 多行块末尾自带的换行）与纯空白输入
+ */
+export function normalizeWatermarkText(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0) return ''
+  const decoded = raw
+    .replace(/\r\n?/g, '\n')
+    .replace(/(\\+)(r\\n|n)/g, (_match, slashes: string, token: string) => {
+      const preserved = '\\'.repeat(Math.floor(slashes.length / 2))
+      if (slashes.length % 2 === 1) {
+        return `${preserved}\n`
+      }
+      return `${preserved}${token}`
+    })
+
+  const lines = decoded.split('\n').map((line) => line.trim())
+  while (lines.length > 0 && lines[0] === '') lines.shift()
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  return lines.join('\n')
+}
 
 /**
  * cloudOnly=true 时归一化全局 BGM 路径：
@@ -680,8 +705,10 @@ function applyEnvOverrides(
       env.MSS_VIDEO_WATERMARK.toLowerCase()
     )
   }
-  if (env.MSS_VIDEO_WATERMARK_TEXT !== undefined) {
-    config.video.watermarkText = env.MSS_VIDEO_WATERMARK_TEXT
+  // MSS_WATERMARK_TEXT 是 MSS_VIDEO_WATERMARK_TEXT 的便捷别名；两者同时设置时优先 MSS_VIDEO_WATERMARK_TEXT
+  const watermarkTextEnv = env.MSS_VIDEO_WATERMARK_TEXT ?? env.MSS_WATERMARK_TEXT
+  if (watermarkTextEnv !== undefined) {
+    config.video.watermarkText = watermarkTextEnv
   }
   if (env.MSS_EXPORT_MODE) {
     const mode = env.MSS_EXPORT_MODE.toLowerCase()
@@ -1043,6 +1070,7 @@ export function loadHostConfig(options?: LoadHostConfigOptions): HostConfig {
   }
 
   applyEnvOverrides(config, platform)
+  config.video.watermarkText = normalizeWatermarkText(config.video.watermarkText)
 
   // 4:2:0 编码要求宽高为偶数；在启动时就拒绝而不是等导出半程失败
   const { width: encodeWidth, height: encodeHeight } = config.video
