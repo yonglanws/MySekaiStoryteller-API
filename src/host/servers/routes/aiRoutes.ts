@@ -1,13 +1,16 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type express from 'express'
+import { Logger, type ILogObj } from 'tslog'
 import type { HostConfig } from '../../config'
 import type { LlmClient } from '../../ai/llm'
 import {
   StoryGenerationError,
   type GenerateStoryResult,
+  type PlannedStoryAssetsHint,
   type StoryWriter
 } from '../../ai/storyWriter'
+import { prewarmCloudAssets } from '../../assets/cloudAssets'
 import type { CloudCatalogService } from '../../assets/cloudCatalog'
 import type { StoryData } from '../../../common/types/Story'
 import type { VideoApiServer } from '../VideoApiServer'
@@ -19,11 +22,14 @@ export interface AiRoutesDeps {
   useCloudCatalog: boolean
   cloudCatalog: CloudCatalogService
   maxConcurrent?: number
+  /** 允许排队等待 AI 槽位的最大请求数（默认 max(8, maxConcurrent * 4)） */
+  maxQueueSize?: number
 }
 
 export interface AiRoutesHandle {
   getActiveCount: () => number
   getMaxConcurrent: () => number
+  getQueuedCount: () => number
   abortAndDrain: (timeoutMs?: number) => Promise<void>
 }
 
@@ -41,22 +47,96 @@ interface GenerateRequestBody {
   agentMaxSteps?: unknown
 }
 
+interface AiSlotWaiter {
+  resolve: (acquired: boolean) => void
+  signal: AbortSignal
+  cleanup: () => void
+}
+
+function resolveAiMaxConcurrent(deps: AiRoutesDeps): number {
+  if (typeof deps.maxConcurrent === 'number' && Number.isFinite(deps.maxConcurrent)) {
+    return Math.max(1, Math.floor(deps.maxConcurrent))
+  }
+  const cfgMax = (deps.config.llm as { maxConcurrent?: unknown } | undefined)?.maxConcurrent
+  if (typeof cfgMax === 'number' && Number.isFinite(cfgMax) && cfgMax >= 1) {
+    return Math.min(32, Math.floor(cfgMax))
+  }
+  const envRaw = process.env.MSS_LLM_MAX_CONCURRENT?.trim()
+  if (envRaw) {
+    const parsed = parseInt(envRaw, 10)
+    if (Number.isFinite(parsed) && parsed >= 1) {
+      return Math.min(32, parsed)
+    }
+  }
+  // LLM 生成为纯网络 I/O（几乎不占内存/GPU），不再被 render.workers=1 锁死为单并发
+  const workers = Math.max(1, deps.config.render?.workers ?? 1)
+  return Math.min(8, Math.max(4, workers * 2))
+}
+
+function resolveAiMaxQueueSize(deps: AiRoutesDeps, maxConcurrent: number): number {
+  if (typeof deps.maxQueueSize === 'number' && Number.isFinite(deps.maxQueueSize)) {
+    return Math.max(0, Math.floor(deps.maxQueueSize))
+  }
+  const envRaw = process.env.MSS_LLM_MAX_QUEUE?.trim()
+  if (envRaw) {
+    const parsed = parseInt(envRaw, 10)
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.min(128, parsed)
+    }
+  }
+  return Math.max(8, maxConcurrent * 4)
+}
+
 export function registerAiRoutes(
   app: express.Application,
   server: VideoApiServer,
   deps: AiRoutesDeps
 ): AiRoutesHandle {
   const { config, llmClient, storyWriter, useCloudCatalog, cloudCatalog } = deps
-  const maxConcurrent = Math.max(
-    1,
-    deps.maxConcurrent ?? Math.min(4, Math.max(1, config.render.workers))
-  )
+  const maxConcurrent = resolveAiMaxConcurrent(deps)
+  const maxQueueSize = resolveAiMaxQueueSize(deps, maxConcurrent)
   let aiActive = 0
+  const aiWaitQueue: AiSlotWaiter[] = []
   const activeControllers = new Set<AbortController>()
+  const prewarmLogger: Logger<ILogObj> = new Logger({
+    name: 'ai-prewarm',
+    type: config.logLevel ? 'pretty' : 'hidden',
+    minLevel: 3
+  })
+
+  const createPrewarmCallback = (
+    signal: AbortSignal
+  ): ((hint: PlannedStoryAssetsHint) => void) | undefined => {
+    if (!useCloudCatalog || !config.assets || !config.paths?.resources) return undefined
+    return (hint) => {
+      if (signal.aborted) return
+      const catalog = cloudCatalog.get()
+      if (!catalog) return
+      void prewarmCloudAssets(
+        {
+          models: hint.models,
+          backgrounds: hint.backgrounds,
+          bgms: hint.bgms,
+          ses: hint.ses,
+          inapp: hint.inapp,
+          globalBgm: config.bgm,
+          signal
+        },
+        {
+          settings: config.assets,
+          resourcesDir: config.paths.resources,
+          catalog,
+          logger: prewarmLogger,
+          cloudOnly: config.assets.cloudOnly
+        }
+      ).catch(() => undefined)
+    }
+  }
 
   const runGenerate = async (
     body: GenerateRequestBody,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onAssetsPlanned?: (hint: PlannedStoryAssetsHint) => void
   ): Promise<GenerateStoryResult> => {
     if (!llmClient.enabled) {
       throw new StoryGenerationError('宿主未启用 LLM（llm.enabled=false）', [])
@@ -135,6 +215,7 @@ export function registerAiRoutes(
       agentic,
       directorReview: typeof body.directorReview === 'boolean' ? body.directorReview : undefined,
       maxToolTurns,
+      onAssetsPlanned,
       signal
     })
   }
@@ -176,22 +257,66 @@ export function registerAiRoutes(
     return true
   }
 
-  const acquireAiSlot = (res: express.Response): boolean => {
-    if (aiActive >= maxConcurrent) {
+  const acquireAiSlot = (signal: AbortSignal, res: express.Response): Promise<boolean> => {
+    if (signal.aborted || server.isDraining()) {
+      return Promise.resolve(false)
+    }
+    if (aiActive < maxConcurrent) {
+      aiActive += 1
+      return Promise.resolve(true)
+    }
+    if (aiWaitQueue.length >= maxQueueSize) {
+      res.setHeader('Retry-After', '10')
       res.status(429).json({
         success: false,
-        message: `Too many concurrent AI generations (max ${maxConcurrent})`
+        message: `Too many concurrent AI generations (max ${maxConcurrent}, queue ${maxQueueSize})`
       })
-      return false
+      return Promise.resolve(false)
     }
-    aiActive += 1
-    return true
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const onAbort = (): void => {
+        if (settled) return
+        settled = true
+        const idx = aiWaitQueue.indexOf(waiter)
+        if (idx >= 0) aiWaitQueue.splice(idx, 1)
+        signal.removeEventListener('abort', onAbort)
+        resolve(false)
+      }
+      const waiter: AiSlotWaiter = {
+        signal,
+        cleanup: () => {
+          signal.removeEventListener('abort', onAbort)
+        },
+        resolve: (acquired: boolean) => {
+          if (settled) return
+          settled = true
+          signal.removeEventListener('abort', onAbort)
+          resolve(acquired)
+        }
+      }
+      aiWaitQueue.push(waiter)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  const releaseAiSlot = (): void => {
+    aiActive = Math.max(0, aiActive - 1)
+    while (aiActive < maxConcurrent && aiWaitQueue.length > 0) {
+      const next = aiWaitQueue.shift()!
+      next.cleanup()
+      if (next.signal.aborted || server.isDraining()) {
+        next.resolve(false)
+        continue
+      }
+      aiActive += 1
+      next.resolve(true)
+    }
   }
 
   app.post('/api/v1/script/generate', async (req, res) => {
     if (rejectIfDraining(res)) return
     if (!server.enforceRateLimit(req, res)) return
-    if (!acquireAiSlot(res)) return
     const body = (req.body ?? {}) as GenerateRequestBody & { timeout?: unknown }
     const timeoutMs =
       typeof body.timeout === 'number' && Number.isFinite(body.timeout)
@@ -207,8 +332,26 @@ export function registerAiRoutes(
       if (!res.writableEnded) controller.abort(new Error('client disconnected'))
     }
     res.on('close', onClose)
+    let slotHeld = false
+    const releaseSlotOnce = (): void => {
+      if (!slotHeld) return
+      slotHeld = false
+      releaseAiSlot()
+    }
     try {
+      slotHeld = await acquireAiSlot(controller.signal, res)
+      if (!slotHeld) {
+        if (!res.headersSent && !res.writableEnded) {
+          if (server.isDraining()) {
+            res.status(503).json({ success: false, message: 'Server is shutting down' })
+          } else {
+            res.status(504).json({ success: false, message: 'AI script generation timed out' })
+          }
+        }
+        return
+      }
       const result = await runGenerate(body, controller.signal)
+      releaseSlotOnce()
       const scriptPath = await writeScript(result.story)
       res.json({ success: true, story: result.story, meta: result.meta, scriptPath })
     } catch (error) {
@@ -228,7 +371,7 @@ export function registerAiRoutes(
       clearTimeout(timer)
       res.off('close', onClose)
       activeControllers.delete(controller)
-      aiActive -= 1
+      releaseSlotOnce()
     }
   })
 
@@ -252,7 +395,6 @@ export function registerAiRoutes(
       })
       return
     }
-    if (!acquireAiSlot(res)) return
     const scriptTimeoutMs =
       typeof body.scriptTimeout === 'number' && Number.isFinite(body.scriptTimeout)
         ? Math.min(Math.max(1, body.scriptTimeout), 1_800_000)
@@ -270,11 +412,34 @@ export function registerAiRoutes(
     }
     res.on('close', onClose)
 
+    let slotHeld = false
+    const releaseSlotOnce = (): void => {
+      if (!slotHeld) return
+      slotHeld = false
+      releaseAiSlot()
+    }
+
     let generated: GenerateStoryResult | null = null
     try {
-      generated = await runGenerate(body, controller.signal)
-      // 生成阶段结束：脚本超时闸不再适用于渲染阶段
+      slotHeld = await acquireAiSlot(controller.signal, res)
+      if (!slotHeld) {
+        if (!res.headersSent && !res.writableEnded) {
+          if (server.isDraining()) {
+            res.status(503).json({ success: false, message: 'Server is shutting down' })
+          } else {
+            res.status(504).json({ success: false, message: 'AI script generation timed out' })
+          }
+        }
+        return
+      }
+      generated = await runGenerate(
+        body,
+        controller.signal,
+        createPrewarmCallback(controller.signal)
+      )
+      // 生成阶段结束：立即释放 AI 并发槽位与脚本超时闸，使渲染阶段与后续 AI 请求流水线并行
       clearTimeout(timer)
+      releaseSlotOnce()
       const scriptPath = await writeScript(generated.story)
       const exported = await server.exportStory(generated.story, exportTimeoutMs, controller.signal)
       res.json({
@@ -311,18 +476,24 @@ export function registerAiRoutes(
       clearTimeout(timer)
       res.off('close', onClose)
       activeControllers.delete(controller)
-      aiActive -= 1
+      releaseSlotOnce()
     }
   })
 
   return {
     getActiveCount: () => aiActive,
     getMaxConcurrent: () => maxConcurrent,
+    getQueuedCount: () => aiWaitQueue.length,
     abortAndDrain: async (timeoutMs = 15_000): Promise<void> => {
       for (const controller of activeControllers) {
         if (!controller.signal.aborted) {
           controller.abort(new Error('Server is shutting down'))
         }
+      }
+      while (aiWaitQueue.length > 0) {
+        const waiter = aiWaitQueue.shift()!
+        waiter.cleanup()
+        waiter.resolve(false)
       }
       const deadline = Date.now() + Math.max(0, timeoutMs)
       while (aiActive > 0 && Date.now() < deadline) {

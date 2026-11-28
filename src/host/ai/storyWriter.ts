@@ -82,6 +82,28 @@ export interface StoryHistoryMessage {
   content: string
 }
 
+export interface PlannedStoryAssetsHint {
+  stage: 'cast' | 'staging' | 'director-review' | 'single'
+  models: string[]
+  backgrounds: string[]
+  bgms: string[]
+  ses: string[]
+  inapp: string[]
+}
+
+const DEFAULT_TALK_INAPP_ASSETS = [
+  'player/loose/Sprite/bg_story_adv.png',
+  'player/loose/Sprite/bg_base_half_r8_wh.png',
+  'player/loose/Sprite/bg_base_round_h48_wh.png',
+  'player/loose/Sprite/icon_triangle_h22_wh.png',
+  'player/loose/Sprite/btn_circle_h80_wh.png',
+  'player/loose/Sprite/icon_menu_story_wh.png',
+  'player/loose/Sprite/icon_pageForward_gn.png'
+] as const
+
+const TTS_TRANSLATE_CHUNK_SIZE = 12
+const TTS_TRANSLATE_CONCURRENCY = 4
+
 export interface GenerateStoryOptions {
   prompt: string
   mode?: StoryMode
@@ -98,6 +120,11 @@ export interface GenerateStoryOptions {
   maxToolTurns?: number
   /** 是否在 staged 流水线成稿后执行导演终审（缺省时仅在 polishDialogue=true 且台词>=12句时自动启用） */
   directorReview?: boolean
+  /**
+   * 选角 / 舞台调度锁定所需云端资源后触发（早于 direction 与 director-review），
+   * 供宿主在后台并行预热 Live2D 模型、背景、BGM、SE，与后续 LLM 阶段重叠。
+   */
+  onAssetsPlanned?: (hint: PlannedStoryAssetsHint) => void
   signal?: AbortSignal
 }
 
@@ -203,6 +230,86 @@ function mergeUsage(total: ChatUsage | null, next: ChatUsage | null): ChatUsage 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function uniqueNonEmptyStrings(values: Array<string | undefined | null>): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of values) {
+    const trimmed = typeof raw === 'string' ? raw.trim() : ''
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
+function collectInappAssetsFromStaging(staging: StagedStaging): string[] {
+  const inapp = new Set<string>(DEFAULT_TALK_INAPP_ASSETS)
+  for (const scene of staging.scenes) {
+    if (scene.transitionIn === 'sekaiIn' || scene.transitionIn === 'sekaiOut') {
+      inapp.add('player/loose/Texture2D/tex_common_tri_01.png')
+      inapp.add('audio/MenuCommon/SE_AREA_TRANSITION_SEKAI.wav')
+    } else if (scene.transitionIn === 'sideFade') {
+      inapp.add('player/loose/Texture2D/tex_transition_left.png')
+      inapp.add('player/loose/Texture2D/tex_transition_top.png')
+    }
+    if (scene.hologramCast && scene.hologramCast.length > 0) {
+      inapp.add('player/loose/Texture2D/holo.png')
+    }
+  }
+  for (const event of staging.events) {
+    if (event.hologram?.enabled) {
+      inapp.add('player/loose/Texture2D/holo.png')
+    }
+  }
+  return [...inapp]
+}
+
+function extractAssetHintFromStory(
+  stage: PlannedStoryAssetsHint['stage'],
+  story: StoryData
+): PlannedStoryAssetsHint {
+  const models = uniqueNonEmptyStrings(story.models.map((m) => m.model))
+  const backgrounds = uniqueNonEmptyStrings(story.images.map((img) => img.image))
+  const bgms: string[] = []
+  const ses: string[] = []
+  const inapp = new Set<string>(DEFAULT_TALK_INAPP_ASSETS)
+  for (const snippet of story.snippets) {
+    if (snippet.type === 'ChangeBgm' && !snippet.data.stop && snippet.data.file) {
+      bgms.push(snippet.data.file)
+    } else if ((snippet.type === 'PlaySe' || snippet.type === 'StopSe') && snippet.data.file) {
+      ses.push(snippet.data.file)
+    } else if (snippet.type === 'SekaiIn' || snippet.type === 'SekaiOut') {
+      inapp.add('player/loose/Texture2D/tex_common_tri_01.png')
+      inapp.add('audio/MenuCommon/SE_AREA_TRANSITION_SEKAI.wav')
+    } else if (snippet.type === 'SideFade') {
+      inapp.add('player/loose/Texture2D/tex_transition_left.png')
+      inapp.add('player/loose/Texture2D/tex_transition_top.png')
+    } else if (
+      snippet.type === 'AttachCharacterShader' &&
+      (snippet.data.shader === 'hologram' || snippet.data.shader === 'monitor')
+    ) {
+      inapp.add('player/loose/Texture2D/holo.png')
+    }
+  }
+  return {
+    stage,
+    models,
+    backgrounds,
+    bgms: uniqueNonEmptyStrings(bgms),
+    ses: uniqueNonEmptyStrings(ses),
+    inapp: [...inapp]
+  }
+}
+
+function emitAssetsPlanned(options: GenerateStoryOptions, hint: PlannedStoryAssetsHint): void {
+  if (!options.onAssetsPlanned || options.signal?.aborted) return
+  try {
+    options.onAssetsPlanned(hint)
+  } catch {
+    // 后台资源预热钩子绝不阻断或破坏剧本生成
+  }
 }
 
 /**
@@ -562,6 +669,7 @@ export class StoryWriter {
         let validated = validateAndFixStory(parsed, view, this.logger, {
           emotionLabels: this.emotionLabels
         })
+        emitAssetsPlanned(options, extractAssetHintFromStory('single', validated.story))
         const alignedBefore = alignStoryTtsEmotionsAndCaptions(validated.story, {
           emotionLabels: this.emotionLabels
         })
@@ -751,6 +859,19 @@ export class StoryWriter {
     if (!plan.understanding) {
       this.logger.warn('[AI] cast 阶段没有返回深度理解，台词阶段将只依赖用户原文与官方参考')
     }
+
+    // 选角锁定后立刻在后台预热 Live2D 模型与初始背景/BGM，与后续对话/调度/表演/终审阶段完全重叠
+    emitAssetsPlanned(options, {
+      stage: 'cast',
+      models: uniqueNonEmptyStrings(plan.cast.map((m) => m.path)),
+      backgrounds: uniqueNonEmptyStrings([
+        plan.background,
+        ...(plan.scenes ?? []).map((s) => s.background)
+      ]),
+      bgms: uniqueNonEmptyStrings((plan.scenes ?? []).map((s) => s.bgm)),
+      ses: [],
+      inapp: [...DEFAULT_TALK_INAPP_ASSETS]
+    })
 
     // ---- 1.5 Pass B：选角后多面自适应检索（结合入选角色、微事件与 Stage 1 retrievalQueries） -------------------
     let postCastRag: RagRetrieveResult | null = preCastRag
@@ -1121,32 +1242,57 @@ export class StoryWriter {
         return fallbackStaging(view, plan, finalDialogue)
       }
     })()
+    // 语音导演一完成立即启动上下文感知日文翻译（不等待 staging，进一步与 staging 尾段 + direction 全段重叠）
+    const translationPersonas = resolvedCastPersonas.length > 0 ? resolvedCastPersonas : personas
+    const voicedDialogueTask: Promise<StagedDialogue> = emotionTask.then((voiceDirectionPlan) =>
+      applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
+    )
+    void voicedDialogueTask.catch(() => undefined)
+
+    let dialogueTts: Promise<Map<string, string> | null> | null = null
+    if (translateForTts) {
+      dialogueTts = voicedDialogueTask
+        .then((voiced) =>
+          this.translateDialogue(
+            voiced,
+            translationPersonas,
+            options.signal,
+            plan.pairwiseAddress,
+            postCastRag,
+            dialogueLookupOptions
+          )
+        )
+        .catch((error) => {
+          if (options.signal?.aborted) throw error
+          this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
+          return null
+        })
+      void dialogueTts.catch(() => undefined)
+    }
+
     // 任一前置并行任务取消/报错时避免未捕获拒绝。
     void emotionTask.catch(() => undefined)
     void stagingTask.catch(() => undefined)
 
     // ---- 3. 等待语音导演与舞台调度完成，并回填情绪与逐句韵律指令 --------------------------------------------
-    const [voiceDirectionPlan, staging] = await Promise.all([emotionTask, stagingTask])
-    dialogue = applyVoiceDirectionPlan(finalDialogue, voiceDirectionPlan, this.emotionLabels)
+    const [voicedDialogue, staging] = await Promise.all([voicedDialogueTask, stagingTask])
+    dialogue = voicedDialogue
 
-    // 在语音导演完成后启动日文翻译（仍与 Stage 4 演技导演并行），让翻译能看到说话人、人设口吻、称呼表、emotion 与 ttsCaption。
-    const translationPersonas = resolvedCastPersonas.length > 0 ? resolvedCastPersonas : personas
-    let dialogueTts: Promise<Map<string, string> | null> | null = null
-    if (translateForTts) {
-      dialogueTts = this.translateDialogue(
-        dialogue,
-        translationPersonas,
-        options.signal,
-        plan.pairwiseAddress,
-        postCastRag,
-        dialogueLookupOptions
-      ).catch((error) => {
-        if (options.signal?.aborted) throw error
-        this.logger.warn(`[AI] 台词日文翻译失败，合成后再补：${errorMessage(error)}`)
-        return null
-      })
-      void dialogueTts.catch(() => undefined)
-    }
+    // 舞台调度完成后所有幕次背景/BGM/SE/转场贴图已锁定：立即触发第二波后台预热，与 direction + director-review 重叠
+    emitAssetsPlanned(options, {
+      stage: 'staging',
+      models: uniqueNonEmptyStrings(plan.cast.map((m) => m.path)),
+      backgrounds: uniqueNonEmptyStrings([
+        plan.background,
+        ...staging.scenes.map((s) => s.background)
+      ]),
+      bgms: uniqueNonEmptyStrings([
+        ...staging.scenes.map((s) => s.bgm),
+        ...staging.events.map((e) => (e.bgmCut?.action === 'play' ? e.bgmCut.file : undefined))
+      ]),
+      ses: uniqueNonEmptyStrings(staging.events.map((e) => e.se?.file)),
+      inapp: collectInappAssetsFromStaging(staging)
+    })
 
     // ---- 4. 精细演技导演（带完整情绪段与舞台/分镜上下文） -------------------------------------------------
     let direction: StagedDirection = fallbackDirection(view, plan)
@@ -1292,6 +1438,10 @@ export class StoryWriter {
                 validated = revalidated
                 appliedCount = patched.appliedCount
                 this.logger.info(`[AI] director-review 采纳 ${appliedCount} 项导演修补`)
+                emitAssetsPlanned(
+                  options,
+                  extractAssetHintFromStory('director-review', validated.story)
+                )
               } catch (patchErr) {
                 this.logger.warn(
                   `[AI] director-review 修补未通过舞台校验，保留原成稿：${errorMessage(patchErr)}`
@@ -1450,7 +1600,8 @@ export class StoryWriter {
     const { translated } = await ensureJapaneseTtsText(
       story,
       this.ttsTranslator(signal, personas, pairwiseAddress, ragContext, lookupOptions),
-      this.logger
+      this.logger,
+      { chunkSize: TTS_TRANSLATE_CHUNK_SIZE, concurrency: TTS_TRANSLATE_CONCURRENCY }
     )
     const result = new Map<string, string>()
     for (const slot of slots) {
@@ -1603,7 +1754,8 @@ export class StoryWriter {
     const { translated } = await ensureJapaneseTtsText(
       story,
       this.ttsTranslator(signal, personas, pairwiseAddress, ragContext, inferredLookup),
-      this.logger
+      this.logger,
+      { chunkSize: TTS_TRANSLATE_CHUNK_SIZE, concurrency: TTS_TRANSLATE_CONCURRENCY }
     )
     return translated
   }
@@ -1617,7 +1769,11 @@ export class StoryWriter {
       story,
       this.ttsTranslator(signal),
       this.logger,
-      { strict: true }
+      {
+        strict: true,
+        chunkSize: TTS_TRANSLATE_CHUNK_SIZE,
+        concurrency: TTS_TRANSLATE_CONCURRENCY
+      }
     )
     return translated
   }

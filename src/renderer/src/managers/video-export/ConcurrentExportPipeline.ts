@@ -129,7 +129,7 @@ export class ConcurrentExportPipeline {
 
   private ttsResults: Map<number, PipelineTTSResult> = new Map()
   private ttsReadyFlags: Map<number, boolean> = new Map()
-  private ttsWaitResolvers: Map<number, TTSWaitResolver> = new Map()
+  private ttsWaitResolvers: Map<number, Set<TTSWaitResolver>> = new Map()
 
   private isRunning: boolean = false
   private isAborted: boolean = false
@@ -269,7 +269,14 @@ export class ConcurrentExportPipeline {
     const total = talkSnippets.length
     let completed = 0
     const synthesizedDurations: Map<number, number> = new Map()
-    const concurrency = Math.min(Math.max(1, this.config.maxConcurrentTts), Math.max(1, total))
+    const provider = ttsManager.getConfig?.()?.provider
+    // GPT-SoVITS 服务端权重全局互斥（TtsLeaseManager 串行化），限制为 <=2 流水线预取即可避免无意义连接堆积；
+    // IrodoriTTS 等无状态服务按完整 maxConcurrentTts 并发合成。
+    const effectiveMaxConcurrency =
+      provider === 'gpt-sovits'
+        ? Math.min(Math.max(1, this.config.maxConcurrentTts), 2)
+        : Math.max(1, this.config.maxConcurrentTts)
+    const concurrency = Math.min(effectiveMaxConcurrency, Math.max(1, total))
 
     this.logger.info(
       `TTS pipeline: ${total} Talk snippets to synthesize (concurrency=${concurrency})`
@@ -379,10 +386,12 @@ export class ConcurrentExportPipeline {
       }
 
       this.ttsReadyFlags.set(talk.index, true)
-      const resolver = this.ttsWaitResolvers.get(talk.index)
-      if (resolver) {
-        resolver()
+      const resolvers = this.ttsWaitResolvers.get(talk.index)
+      if (resolvers) {
         this.ttsWaitResolvers.delete(talk.index)
+        for (const resolver of resolvers) {
+          resolver()
+        }
       }
 
       completed++
@@ -425,17 +434,25 @@ export class ConcurrentExportPipeline {
     }
 
     // 事件驱动：合成完成时 runTTSPipeline 调用 ttsWaitResolvers 里注册的
-    // resolver 立即唤醒。此前这里是 10ms 轮询且从未注册 resolver（死代码），
-    // 每条 Talk 等待会把录制主线程唤醒约 100 次/秒。
+    // resolver 立即唤醒；支持同 snippetIndex 多并发等待者，且仅在超时路径按低频/可取消定时器兜底。
     return new Promise<PipelineTTSResult | null>((resolve) => {
       const startTime = this.now()
       const maxWaitTime = this.config.ttsTimeoutMs
       let settled = false
+      let nativeTimer: ReturnType<typeof setTimeout> | null = null
 
       const finish = (result: PipelineTTSResult | null): void => {
         if (settled) return
         settled = true
-        this.ttsWaitResolvers.delete(snippetIndex)
+        if (nativeTimer !== null) {
+          clearTimeout(nativeTimer)
+          nativeTimer = null
+        }
+        const set = this.ttsWaitResolvers.get(snippetIndex)
+        if (set) {
+          set.delete(onReady)
+          if (set.size === 0) this.ttsWaitResolvers.delete(snippetIndex)
+        }
         resolve(result)
       }
 
@@ -443,7 +460,12 @@ export class ConcurrentExportPipeline {
         finish(this.ttsResults.get(snippetIndex) ?? { success: false, duration: 0 })
       }
 
-      this.ttsWaitResolvers.set(snippetIndex, onReady)
+      let resolverSet = this.ttsWaitResolvers.get(snippetIndex)
+      if (!resolverSet) {
+        resolverSet = new Set()
+        this.ttsWaitResolvers.set(snippetIndex, resolverSet)
+      }
+      resolverSet.add(onReady)
 
       // 注册与合成完成存在竞态：JS 单线程下注册后的同步复检可覆盖
       // 「先置 ready 标志、后找到 resolver」的交替顺序
@@ -452,11 +474,40 @@ export class ConcurrentExportPipeline {
         return
       }
 
+      const triggerTimeout = (): void => {
+        if (settled) return
+        if (this.isAborted) {
+          finish({ success: false, duration: 0 })
+          return
+        }
+        if (this.ttsReadyFlags.get(snippetIndex)) {
+          onReady()
+          return
+        }
+        this.metrics.ttsTimeoutCount++
+        this.logger.warn(
+          `TTS wait timeout for snippet ${snippetIndex} (${this.config.ttsTimeoutMs}ms)`
+        )
+        this.ttsReadyFlags.set(snippetIndex, true)
+        this.ttsResults.set(snippetIndex, { success: false, duration: 0 })
+        finish({ success: false, duration: 0 })
+      }
+
+      if (!this.config.waitMs) {
+        nativeTimer = setTimeout(triggerTimeout, Math.max(0, maxWaitTime))
+        return
+      }
+
       // 低频兜底轮询：fast 模式下 this.wait 走真实时钟（虚拟时钟不会推进它），
       // 覆盖 resolver 丢失/中止/超时三类情况
       void (async () => {
         while (!settled) {
-          await this.wait(250)
+          const remaining = maxWaitTime - (this.now() - startTime)
+          if (remaining <= 0) {
+            triggerTimeout()
+            return
+          }
+          await this.wait(Math.min(1000, remaining))
           if (settled) return
           if (this.isAborted) {
             finish({ success: false, duration: 0 })
@@ -467,14 +518,7 @@ export class ConcurrentExportPipeline {
             return
           }
           if (this.now() - startTime >= maxWaitTime) {
-            // 超时处理
-            this.metrics.ttsTimeoutCount++
-            this.logger.warn(
-              `TTS wait timeout for snippet ${snippetIndex} (${this.config.ttsTimeoutMs}ms)`
-            )
-            this.ttsReadyFlags.set(snippetIndex, true)
-            this.ttsResults.set(snippetIndex, { success: false, duration: 0 })
-            finish({ success: false, duration: 0 })
+            triggerTimeout()
             return
           }
         }
@@ -560,10 +604,12 @@ export class ConcurrentExportPipeline {
     this.isAborted = true
     this.logger.info('Concurrent pipeline abort requested')
 
-    for (const [index, resolver] of this.ttsWaitResolvers) {
+    for (const [index, resolvers] of this.ttsWaitResolvers) {
       this.ttsReadyFlags.set(index, true)
       this.ttsResults.set(index, { success: false, duration: 0 })
-      resolver()
+      for (const resolver of Array.from(resolvers)) {
+        resolver()
+      }
     }
     this.ttsWaitResolvers.clear()
   }

@@ -78,6 +78,8 @@ export interface ExportTask {
   addedAt: number
   /** 本任务的超时上限（毫秒），渲染池看门狗以此推导强制回收 deadline */
   timeoutMs: number
+  /** 派发瞬间队列/在途中与本任务竞争 worker 的其他并发任务数（供分段协调器动态决策） */
+  queuedPeers?: number
 }
 
 /**
@@ -1432,6 +1434,11 @@ export class VideoApiServer {
         this.pendingExports.delete(task.taskId)
         pending?.reject(new Error('No render worker available'))
         continue
+      }
+
+      const otherDemand = Math.max(0, this.activeExports.size - 1) + this.exportQueue.length
+      if (otherDemand > 0) {
+        task.queuedPeers = otherDemand
       }
 
       this.logger.info(`[API] Starting export task: ${task.taskId}`)

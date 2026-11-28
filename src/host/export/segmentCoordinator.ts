@@ -20,6 +20,10 @@ export interface SegmentPoolAdapter {
   dispatchSubTask(task: ExportTask): Promise<ExportResultPayload>
   cancelSubTask(taskId: string): Promise<void>
   readyWorkerCount(): number
+  /** 当前空闲（ready 且非 busy）的 worker 数；省略时回退 readyWorkerCount() */
+  idleWorkerCount?: () => number
+  /** 内存护栏是否允许并发分段渲染；省略时默认 true */
+  canUseParallelSegments?: () => boolean
   onTaskComplete(taskId: string, result: ExportResultPayload): void
 }
 
@@ -82,7 +86,16 @@ export class SegmentCoordinator {
   shouldUseParallelSegments(task: ExportTask): boolean {
     const requestedJobs = Math.max(1, task.videoConfig.exportJobs ?? 1)
     if (requestedJobs <= 1) return false
-    if (this.pool.readyWorkerCount() < 2) return false
+    if (task.videoConfig.useRustExporter === false) return false
+    if (this.pool.canUseParallelSegments && !this.pool.canUseParallelSegments()) return false
+    const availableWorkers = this.pool.idleWorkerCount
+      ? this.pool.idleWorkerCount()
+      : this.pool.readyWorkerCount()
+    if (availableWorkers < 2) return false
+    // 多用户并发导出优先整片并行（1 worker / 1 任务），避免多任务同时走 __prep 互相争抢 worker；
+    // 只有当前空闲 worker 按并发需求平分仍 >= 2 时才做单片拆段加速。
+    const concurrentDemand = 1 + Math.max(0, task.queuedPeers ?? 0)
+    if (Math.floor(availableWorkers / concurrentDemand) < 2) return false
     const snippets = task.story?.snippets ?? []
     if (snippets.length < 4) return false
     const estimatedSec = snippets.reduce((sum, s) => {
@@ -172,7 +185,15 @@ export class SegmentCoordinator {
       const totalFrames = Math.max(1, prepared.totalFrames)
       const encodeFps = Math.max(1, prepared.encodeFps)
       const requestedJobs = Math.max(1, task.videoConfig.exportJobs ?? 1)
-      const effectiveJobs = Math.max(1, Math.min(requestedJobs, this.pool.readyWorkerCount()))
+      const canParallel = this.pool.canUseParallelSegments
+        ? this.pool.canUseParallelSegments()
+        : true
+      const availableWorkers = this.pool.idleWorkerCount
+        ? this.pool.idleWorkerCount()
+        : this.pool.readyWorkerCount()
+      const effectiveJobs = canParallel
+        ? Math.max(1, Math.min(requestedJobs, Math.max(1, availableWorkers)))
+        : 1
 
       const planned =
         (await planRustSegments(0, totalFrames, effectiveJobs, encodeFps)) ??
@@ -350,6 +371,15 @@ export class SegmentCoordinator {
       })
     } catch (error) {
       const wasCancelled = job.cancelled
+      job.cancelled = true
+      const danglingSubIds = Array.from(job.subTaskIds)
+      if (danglingSubIds.length > 0) {
+        await Promise.allSettled(danglingSubIds.map((subId) => this.pool.cancelSubTask(subId)))
+        for (const subId of danglingSubIds) {
+          job.subTaskIds.delete(subId)
+          this.subTaskToParent.delete(subId)
+        }
+      }
       this.jobs.delete(task.taskId)
       if (!wasCancelled) {
         this.pool.onTaskComplete(task.taskId, {

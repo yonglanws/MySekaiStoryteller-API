@@ -515,7 +515,10 @@ export class JpegFrameSink {
         await this.flushPendingRepeats()
       }
       if (this.rustWsClient) {
-        const reuse = this.acquireRustPacketPayload(this.yuvConverter.frameByteLength)
+        const willYield = this.yuvConverter.willYieldOnNextEnqueue !== false
+        const reuse = willYield
+          ? this.acquireRustPacketPayload(this.yuvConverter.frameByteLength)
+          : undefined
         const completed = await this.yuvConverter.enqueueAsync(canvas, reuse)
         this.frameCount++
         if (completed) {
@@ -523,7 +526,8 @@ export class JpegFrameSink {
         }
         return
       }
-      const reuse = this.rawBufferPool.pop()
+      const willYield = this.yuvConverter.willYieldOnNextEnqueue !== false
+      const reuse = willYield ? this.rawBufferPool.pop() : undefined
       const completed = await this.yuvConverter.enqueueAsync(canvas, reuse)
       this.frameCount++
       if (completed) {
