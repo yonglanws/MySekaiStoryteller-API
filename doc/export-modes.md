@@ -44,7 +44,7 @@
 | `encoder`                     | `auto`           | `auto`                       | 硬件编码探测顺序：`nvidia` → `amd` → `intel` → 回退 CPU (`libx265`/`libx264`)。旧版写 `libx264` 强制用 CPU H.264 |
 | `exportFastEncoder`           | `auto`           | `auto`                       | `auto`（推荐） / `webcodecs`（强制）/ `frames`（跳过 WebCodecs 直接走 GPU `rawvideo` 管道）                      |
 | `audioBitrate`                | `192k`           | `128k`                       | 有音轨时的 AAC 码率                                                                                              |
-| `watermark` / `watermarkText` | `true` / `""`    | `true` / `""`                | 右上角水印开关及自定义补充文字（最多 2 行，`\n` 换行）                                                           |
+| `watermark` / `watermarkText` | `true` / `""`    | `true` / `""`                | 右上角水印开关及自定义文字（`\n` 换行，非空时整段替换默认两行）                                   |
 | `ttsMode`                     | `concurrent`     | `concurrent`                 | `concurrent` = 边渲染边并发合成最多 3 句；`serial` = 全合成完再渲染                                              |
 | `idleChainGapSec`             | `0`              | `0`                          | 动作播完后行为：`0` = 保持末帧姿势+呼吸眨眼；`>0` = 按此间隔接同情绪动作                                         |
 | `exportMode`                  | `fast`           | `fast`                       | 只支持 `fast`（`record` 与 `recordTargetSizeMb` 均已废弃）                                                       |

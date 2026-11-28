@@ -152,9 +152,9 @@ test('UIWatermark keeps default and single-line rendering visually identical wit
     assert.equal(wm.style.lineHeight, expectedLineHeight)
     assert.equal(Number.isInteger(wm.style.lineHeight), true)
 
-    // Single custom line renders identically in position/font/lineHeight
+    // Single custom line replaces both default lines
     wm.setCustomText('B站 @某UP主')
-    assert.equal(wm.text, `${WATERMARK_LINE_1}\nB站 @某UP主`)
+    assert.equal(wm.text, 'B站 @某UP主')
     assert.equal(wm.x, w - w / 48)
     assert.equal(wm.y, h / 36)
     assert.equal(wm.style.align, 'right')
@@ -162,7 +162,7 @@ test('UIWatermark keeps default and single-line rendering visually identical wit
     assert.equal(wm.style.lineHeight, expectedLineHeight)
 
     const bounds = wm.getLayoutBounds()
-    assert.equal(bounds.lineCount, 2)
+    assert.equal(bounds.lineCount, 1)
     assert.ok(
       bounds.left >= 0 && bounds.right <= w,
       `horizontal bounds out of canvas: ${JSON.stringify(bounds)}`
@@ -183,19 +183,19 @@ test('UIWatermark supports 1-line, 2-line, and 4-line watermarks from real and e
   ]) {
     const wm = new UIWatermark(w, h)
 
-    // 1-line custom
+    // 1-line custom replaces defaults
     wm.setCustomText('第一行')
-    assert.deepEqual(wm.text.split('\n'), [WATERMARK_LINE_1, '第一行'])
+    assert.deepEqual(wm.text.split('\n'), ['第一行'])
     let bounds = wm.getLayoutBounds()
-    assert.equal(bounds.lineCount, 2)
+    assert.equal(bounds.lineCount, 1)
     assert.ok(bounds.left >= 0 && bounds.right <= w)
     assert.ok(bounds.top >= 0 && bounds.bottom <= h)
 
-    // 2-line custom via literal \n
+    // 2-line custom via literal \n replaces defaults
     wm.setCustomText('第一行\\n第二行')
-    assert.deepEqual(wm.text.split('\n'), [WATERMARK_LINE_1, '第一行', '第二行'])
+    assert.deepEqual(wm.text.split('\n'), ['第一行', '第二行'])
     bounds = wm.getLayoutBounds()
-    assert.equal(bounds.lineCount, 3)
+    assert.equal(bounds.lineCount, 2)
     assert.equal(wm.style.align, 'right')
     assert.equal(wm.style.lineHeight, Math.round((h / 48) * 1.3))
     assert.ok(bounds.left >= 0 && bounds.right <= w)
@@ -204,22 +204,23 @@ test('UIWatermark supports 1-line, 2-line, and 4-line watermarks from real and e
     // 4-line custom via mixed \r\n and literal \n
     wm.setCustomText('作者：测试君\r\n二创剧情 仅供娱乐\\nBGM: Project SEKAI\n2026-11-28')
     assert.deepEqual(wm.text.split('\n'), [
-      WATERMARK_LINE_1,
       '作者：测试君',
       '二创剧情 仅供娱乐',
       'BGM: Project SEKAI',
       '2026-11-28'
     ])
     bounds = wm.getLayoutBounds()
-    assert.equal(bounds.lineCount, 5)
+    assert.equal(bounds.lineCount, 4)
     assert.equal(wm.style.align, 'right')
     assert.equal(wm.style.lineHeight, Math.round((h / 48) * 1.3))
     assert.ok(bounds.left >= 0 && bounds.right <= w, `4-line horizontal overflow on ${w}x${h}`)
     assert.ok(bounds.top >= 0 && bounds.bottom <= h, `4-line vertical overflow on ${w}x${h}`)
 
-    // Deduplicates built-in header lines and falls back on blank input
+    // Custom text replaces defaults; echoing only the built-in lines falls back
     wm.setCustomText(`${WATERMARK_LINE_1}\\n自定义A\\n自定义B`)
     assert.deepEqual(wm.text.split('\n'), [WATERMARK_LINE_1, '自定义A', '自定义B'])
+    wm.setCustomText(`${WATERMARK_LINE_1}\\n${WATERMARK_LINE_2}`)
+    assert.deepEqual(wm.text.split('\n'), [WATERMARK_LINE_1, WATERMARK_LINE_2])
 
     wm.setCustomText('  \\n  \r\n  ')
     assert.deepEqual(wm.text.split('\n'), [WATERMARK_LINE_1, WATERMARK_LINE_2])
@@ -279,7 +280,7 @@ test('UIWatermark syncs align with anchor and clamps extreme multi-line/edge pla
   const manyLines = Array.from({ length: 45 }, (_, i) => `第 ${i + 1} 行水印内容`).join('\n')
   wm.setCustomText(manyLines)
   bounds = wm.getLayoutBounds()
-  assert.equal(bounds.lineCount, 46)
+  assert.equal(bounds.lineCount, 45)
   assert.ok(wm.style.fontSize < 720 / 48, 'extreme line count should shrink fontSize to fit')
   assert.ok(
     bounds.top >= 0 && bounds.bottom <= 720,

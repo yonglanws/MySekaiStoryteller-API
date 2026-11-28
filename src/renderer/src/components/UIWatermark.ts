@@ -1,8 +1,8 @@
 import { Text, TextStyle } from 'pixi.js'
 import { GAME_FONT_BODY_STACK, GAME_FONT_BODY_WEIGHT } from '../utils/FontLoader'
 
-export const WATERMARK_LINE_1 = '本视频由 MySekaiStoryteller-API 生成'
-export const WATERMARK_LINE_2 = 'Designed by GuangChen2333 & 慵懒午睡'
+export const WATERMARK_LINE_1 = '本视频由QQBot mzkbot生成 | 请勿进行盈利制作'
+export const WATERMARK_LINE_2 = '该剧本由AI生成'
 
 export type WatermarkAlign = 'left' | 'center' | 'right'
 
@@ -101,7 +101,8 @@ export default class UIWatermark extends Text {
   /**
    * 设置自定义水印：
    * - 支持真实换行（`\n` / `\r\n`）及转义 `\n` 的多行文案
-   * - 过滤空行及与自带标题重复的文案，保留每行独立换行展示
+   * - 非空自定义文案整段替换默认两行（不再把默认第一行叠在上面）
+   * - 过滤空行；仅含默认文案或旧内置标题时仍回落到默认两行
    * - 自动同步文本对齐方式并将多行文本块约束在画布安全边距内，避免裁切
    */
   public setCustomText(customText: string): void {
@@ -110,18 +111,20 @@ export default class UIWatermark extends Text {
       ? normalized
           .split('\n')
           .map((line) => line.trim())
-          .filter((line) => {
-            if (!line) return false
-            const lower = line.toLowerCase()
-            if (line === WATERMARK_LINE_1 || line === WATERMARK_LINE_2) return false
-            if (lower.includes('mysekaistoryteller') && lower.includes('生成')) return false
-            return true
-          })
+          .filter((line) => line.length > 0)
       : []
+    const builtin = new Set([WATERMARK_LINE_1, WATERMARK_LINE_2])
+    const onlyBuiltin =
+      customLines.length > 0 &&
+      customLines.every((line) => {
+        if (builtin.has(line)) return true
+        const lower = line.toLowerCase()
+        return lower.includes('mysekaistoryteller') && lower.includes('生成')
+      })
 
     this.lines =
-      customLines.length > 0
-        ? [WATERMARK_LINE_1, ...customLines]
+      customLines.length > 0 && !onlyBuiltin
+        ? customLines
         : [WATERMARK_LINE_1, WATERMARK_LINE_2]
     this.text = this.lines.join('\n')
     this.updateLayout()

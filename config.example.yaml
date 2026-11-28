@@ -62,9 +62,9 @@ video:
                       # （env: MSS_FFMPEG_ENCODER，便捷别名 MSS_VIDEO_ENCODER；两者同时设置时优先 MSS_FFMPEG_ENCODER；
                       #   也可由 MSS_GPU_PROFILE / MSS_GPU_MODE 预设：intel|nvidia|amd|cpu）
   watermark: true     # 右上角水印（env: MSS_VIDEO_WATERMARK）
-                      # 本视频由 MySekaiStoryteller-API 生成
-                      # Designed by GuangChen2333 & 慵懒午睡
-  watermarkText: ""   # 自定义水印文字：右对齐显示在自带水印下方，留空则显示默认两行水印；
+                      # 本视频由QQBot mzkbot生成 | 请勿进行盈利制作
+                      # 该剧本由AI生成
+  watermarkText: ""   # 自定义水印文字：右对齐整段替换默认两行，留空则显示默认两行；
                       # 支持多行换行（YAML 多行块 | 或 \n；env: MSS_VIDEO_WATERMARK_TEXT / MSS_WATERMARK_TEXT）
   exportMode: fast    # 导出管线：fast | record（env: MSS_EXPORT_MODE；record 已废弃，自动回落 fast）
                       # fast   = 虚拟时钟逐帧渲染 + WebGL2 批处理 + WebCodecs 直编 + 原生 Rust 混音/合流

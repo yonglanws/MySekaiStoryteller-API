@@ -67,7 +67,7 @@ const VideoSchema = z.object({
   audioBitrate: z.string().default('192k'),
   encoder: z.string().default('auto'),
   watermark: z.boolean().default(true),
-  /** 自定义水印文字：显示在自带水印下方，支持多行（真实换行或 \n）；空 = 使用默认两行水印 */
+  /** 自定义水印文字：非空时整段替换默认两行，支持多行（真实换行或 \n）；空 = 使用默认两行水印 */
   watermarkText: z.string().default(''),
   /**
    * 导出管线：

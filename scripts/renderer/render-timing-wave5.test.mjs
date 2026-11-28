@@ -827,7 +827,7 @@ test('ModelLayer cancels stale ambient color tweens via ambientGen and UIWaterma
   const wm = new UIWatermark(1920, 1080)
   wm.setCustomText('本视频由 MySekaiStoryteller-API 生成\nLine A\nLine B\nLine C')
   const lines = wm.text.split('\n')
-  assert.deepEqual(lines, ['本视频由 MySekaiStoryteller-API 生成', 'Line A', 'Line B', 'Line C'])
+  assert.deepEqual(lines, ['Line A', 'Line B', 'Line C'])
 })
 
 test('stageTiming.getMotionSettledEndMs excludes cleared/hidden characters when isModelShown is provided', async (t) => {
