@@ -1,7 +1,9 @@
 import {
   inspectModelFacial,
   isFacialCompatibleWithLine,
-  isSmileLikeFacial
+  isSmileLikeFacial,
+  isWavingOrBigTheatricalMotion,
+  parseMotionStem
 } from '../facialSemantics'
 import {
   isInternalThoughtContent,
@@ -434,6 +436,8 @@ function appearActors(
   const directedAtEntry = lineAtEntry ? directionById.get(lineAtEntry.id) : undefined
   const incoming = validIds.filter((id) => !onStage.has(id))
   const usedEntryMotions = new Set<string>()
+  const usedEntryStems = new Set<string>()
+  let entryBigMotionUsed = false
   incoming.forEach((id, idx) => {
     const slot = desiredSlotFor.get(id)!
     const prevShiftState = slotShiftedStates.get(id)
@@ -463,9 +467,16 @@ function appearActors(
       .slice(Math.max(0, lineIndex - 2), Math.min(dialogue.lines.length, lineIndex + 6))
       .some((l) => TENSE_EMOTION_SET.has(l.emotion ?? ''))
     const entryMemberPath = view.modelById(id)?.path
+    const directedStem = directedMotion ? parseMotionStem(directedMotion).stem : ''
+    const directedBigCollision =
+      Boolean(directedMotion) &&
+      entryBigMotionUsed &&
+      isWavingOrBigTheatricalMotion(directedMotion!, entryMemberPath)
     const directedMotionOk =
       Boolean(directedMotion) &&
       !isStandingMotion(directedMotion!) &&
+      !directedBigCollision &&
+      (!directedStem || !usedEntryStems.has(directedStem)) &&
       isMotionCompatibleWithContext({
         motion: directedMotion!,
         modelPath: entryMemberPath,
@@ -473,6 +484,7 @@ function appearActors(
         prevTense: surroundingTense,
         restrainedRole: isRestrainedRole(member?.role ?? '') || isRestrainedRole(member?.name ?? '')
       })
+    const subtleSecondary = incoming.length >= 2 && (!isEntrySpeaker || entryBigMotionUsed)
     const entryMotion = directedMotionOk
       ? directedMotion!
       : pickAppearFallbackMotion(
@@ -480,9 +492,17 @@ function appearActors(
           id,
           getOverusedMotions(ctx, id, [...usedEntryMotions]),
           firstFutureTalkMotion,
-          surroundingTense
+          surroundingTense,
+          { avoidStems: usedEntryStems, subtleOnly: subtleSecondary }
         )
-    if (entryMotion) usedEntryMotions.add(entryMotion)
+    if (entryMotion) {
+      usedEntryMotions.add(entryMotion)
+      const eStem = parseMotionStem(entryMotion).stem
+      if (eStem) usedEntryStems.add(eStem)
+      if (isWavingOrBigTheatricalMotion(entryMotion, entryMemberPath)) {
+        entryBigMotionUsed = true
+      }
+    }
     const firstLineIdx = firstLineForMember ? dialogue.lines.indexOf(firstLineForMember) : -1
     const entryPrecededByTense =
       firstLineIdx >= 0 ? isPrecededByTenseBeat(dialogue.lines, firstLineIdx) : surroundingTense
@@ -1156,9 +1176,29 @@ function buildLineActions(
       ctx.lastSilentReactionTargetId === directed.listener.modelId &&
       index === ctx.lastSilentReactionLine + 1 &&
       talkDelay < 0.8
-    const listenerMotion: string | undefined =
-      listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
     const listenerPrecededByTense = precededByTense || TENSE_EMOTION_SET.has(line.emotion ?? '')
+    const rawListenerMotion: string | undefined =
+      listenerJustAppeared || listenerJustHadStandalone ? undefined : directed.listener.motion
+    const speakerLineMotion = actions.find(
+      (a) => a.modelId === member.modelId && typeof a.motion === 'string' && a.motion.trim()
+    )?.motion as string | undefined
+    const speakerLineStem = speakerLineMotion ? parseMotionStem(speakerLineMotion).stem : ''
+    const listenerMotionStem = rawListenerMotion ? parseMotionStem(rawListenerMotion).stem : ''
+    const listenerMotion: string | undefined =
+      rawListenerMotion &&
+      !isWavingOrBigTheatricalMotion(rawListenerMotion, listenerModelPath) &&
+      (!speakerLineStem || listenerMotionStem !== speakerLineStem) &&
+      isMotionCompatibleWithContext({
+        motion: rawListenerMotion,
+        modelPath: listenerModelPath,
+        line,
+        prevTense: listenerPrecededByTense,
+        isListener: true,
+        restrainedRole: listenerRestrained,
+        cheerfulScene
+      })
+        ? rawListenerMotion
+        : undefined
     const listenerPrevEmo = lastEmotionByActor.get(directed.listener.modelId) ?? ''
     const listenerPrevFacialRole = listenerState?.lastFacial
       ? inspectModelFacial(listenerModelPath ?? '', listenerState.lastFacial).role
@@ -1489,20 +1529,22 @@ function emitSilentReactionSnippet(
   const targetPrevEmo = lastEmotionByActor.get(targetId) ?? ''
   const targetRestrained =
     isRestrainedRole(targetMember?.role ?? '') || isRestrainedRole(targetMember?.name ?? '')
+  const isListenerTarget = targetId !== member.modelId
   const rawSilentMotion = ev?.silentReaction?.motion || fromPendingListener?.motion || ''
   const safeSilentMotion =
     rawSilentMotion &&
+    (!isListenerTarget || !isWavingOrBigTheatricalMotion(rawSilentMotion, targetModelPath)) &&
     isMotionCompatibleWithContext({
       motion: rawSilentMotion,
       modelPath: targetModelPath,
       line,
       prevTense: silentPrecededByTense,
-      isListener: targetId !== member.modelId,
+      isListener: isListenerTarget,
       restrainedRole: targetRestrained
     })
       ? rawSilentMotion
       : ''
-  const motion =
+  const rawPickedSilentMotion =
     safeSilentMotion ||
     pickFollowupMotion(
       view,
@@ -1511,6 +1553,11 @@ function emitSilentReactionSnippet(
       getOverusedMotions(ctx, targetId, targetState.recentBodyMotions),
       { line, prevTense: silentPrecededByTense, restrained: targetRestrained }
     )
+  const motion =
+    rawPickedSilentMotion &&
+    (!isListenerTarget || !isWavingOrBigTheatricalMotion(rawPickedSilentMotion, targetModelPath))
+      ? rawPickedSilentMotion
+      : ''
   const rawSilentFacial = ev?.silentReaction?.facial || fromPendingListener?.facial || ''
   const targetHadTense =
     silentPrecededByTense ||

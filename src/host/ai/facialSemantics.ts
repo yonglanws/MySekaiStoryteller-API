@@ -21,7 +21,7 @@ export type FacialSemanticRole =
   | 'sleepy'
   | 'other'
 
-export type MotionContextTag = 'food' | 'sleep' | 'sing'
+export type MotionContextTag = 'food' | 'sleep' | 'sing' | 'greeting'
 
 export interface FacialInspection {
   role: FacialSemanticRole
@@ -586,8 +586,24 @@ function classifyMotionByName(motionName: string): MotionInspection {
   if (stem === 'relief') {
     return { role: 'relief', label: '松一口气', style, fromMotion3: false }
   }
-  if (stem === 'greeting') {
-    return { role: 'greeting', label: '打招呼/致意', style, fromMotion3: false }
+  if (
+    stem === 'greeting' ||
+    stem === 'shakehand' ||
+    stem === 'handshake' ||
+    stem === 'wave' ||
+    stem === 'bye' ||
+    stem === 'byebye' ||
+    stem === 'salute' ||
+    stem.startsWith('wavehand')
+  ) {
+    return {
+      role: 'greeting',
+      contextTag: 'greeting',
+      label:
+        stem === 'shakehand' ? '大挥手/打招呼（仅限招呼/告别）' : '打招呼/挥手（仅限招呼/告别）',
+      style,
+      fromMotion3: false
+    }
   }
   if (FOOD_MOTION_STEM_RE.test(stem)) {
     return {
@@ -636,27 +652,20 @@ function classifyMotionByName(motionName: string): MotionInspection {
     stem === 'joke' ||
     stem === 'pride' ||
     stem === 'piece' ||
-    stem === 'pose'
-  ) {
-    return { role: 'playful', label: '得意/俏皮/摆姿', style, fromMotion3: false }
-  }
-  if (
-    stem === 'forward' ||
-    stem === 'poseforward' ||
-    stem === 'forwardnod' ||
-    stem === 'purpose' ||
-    stem === 'plan' ||
-    stem === 'handshake' ||
-    stem === 'shakehand'
+    stem === 'pose' ||
+    stem === 'plan'
   ) {
     return {
+      role: 'playful',
+      label: stem === 'plan' ? '盘算/得意谋划' : '得意/俏皮/摆姿',
+      style,
+      fromMotion3: false
+    }
+  }
+  if (stem === 'forward' || stem === 'poseforward' || stem === 'forwardnod' || stem === 'purpose') {
+    return {
       role: 'forward',
-      label:
-        stem === 'purpose'
-          ? '坚定/下定决心'
-          : stem.includes('hand')
-            ? '握手/呼应'
-            : '前倾/认真倾诉',
+      label: stem === 'purpose' ? '坚定/下定决心' : '前倾/认真倾诉',
       style,
       fromMotion3: false
     }
@@ -739,6 +748,32 @@ export function isSpecialOrStandingMotion(motionName: string): boolean {
   return role === 'standing' || role === 'special'
 }
 
+/** 判断动作是否为大幅挥手/打招呼或高幅度夸张表演动作（双人同场/听者反应/入场需防撞拍与防乱用）。 */
+export function isWavingOrBigTheatricalMotion(
+  motionName: string,
+  modelPath?: string,
+  modelsRoot?: string
+): boolean {
+  const clean = motionName.trim()
+  if (!clean) return false
+  const info = inspectModelMotion(modelPath, clean, modelsRoot)
+  if (info.role === 'greeting' || info.role === 'glad' || info.role === 'playful') return true
+  const { stem } = parseMotionStem(clean)
+  return (
+    stem === 'shakehand' ||
+    stem === 'handshake' ||
+    stem === 'greeting' ||
+    stem === 'wave' ||
+    stem === 'bye' ||
+    stem === 'byebye' ||
+    stem === 'salute' ||
+    stem === 'wandahoi' ||
+    stem === 'guts' ||
+    stem === 'plan' ||
+    stem.startsWith('pose')
+  )
+}
+
 export function isSmileLikeFacial(
   facialName: string,
   modelPath?: string,
@@ -783,7 +818,7 @@ export function isSadOrAngryFacial(
 const POSITIVE_TEXT_CUE_RE =
   /(开心|高兴|太好了|好耶|太棒了|哈哈|呵呵|嘿嘿|嘻嘻|太幸运|真期待|好期待|好温柔|真漂亮|好喜欢|最喜欢|不愧是|Wonderhoy|真可爱|辛苦啦|♪)/
 const NEGATIVE_TEXT_CUE_RE =
-  /(难过|伤心|痛苦|抱歉|对不起|对不住|失落|害怕|恐惧|担心|不安|烦死|气死|讨厌|委屈|眼泪|哭|叹气|沉默|沉重|糟糕|惨了|完蛋|不行|做不到|算了|别管|没空|冷漠|无聊|疲惫|累了|苦恼|烦恼|头疼|纠结|勉强|搞砸|后悔|愧疚|窒息|受不了|没办法面对|不可能一样|不一样了|绝望|崩溃|煎熬|无能为力|没能说出口|什么都没能|不敢|顾虑|推开|逃走|别走)/
+  /(难过|伤心|痛苦|抱歉|对不起|对不住|失落|害怕|恐惧|担心|不安|烦死|气死|讨厌|委屈|眼泪|哭|叹气|沉默|沉重|糟糕|惨了|完蛋|不行|做不到|算了|别管|没空|冷漠|无聊|疲惫|累了|好酸|肩膀.{0,3}酸|不对劲|苦恼|烦恼|头疼|纠结|勉强|搞砸|后悔|愧疚|窒息|受不了|没办法面对|不可能一样|不一样了|绝望|崩溃|煎熬|无能为力|没能说出口|什么都没能|不敢|顾虑|推开|逃走|别走)/
 const APOLOGY_REGRET_RE = /(对不起|抱歉|对不住|都是我的错|搞砸|愧疚|后悔|不好意思让你)/
 const SELF_BLAME_REGRET_RE =
   /(?:对不起|抱歉|对不住|都是我的错|搞砸|愧疚|后悔|不好意思让你|为什么我.{0,8}(?:没能|没有|什么都没|说不出口|做不到)|明明只要|是我不好|我真没用|怪我自己)/
@@ -917,6 +952,10 @@ const SLEEP_CONTEXT_TEXT_RE =
   /(?:好困|犯困|想睡|睡觉|午睡|小睡|打盹|瞌睡|打哈欠|哈欠|好累|累了|疲惫|疲倦|熬夜|失眠|通宵|没睡|睡着|睡意|困意|晚安|闭目养神|寝|眠|あくび|うとうと|おやすみ)/i
 const SING_CONTEXT_TEXT_RE =
   /(?:唱歌|唱|歌声|清唱|合唱|主唱|副歌|旋律|曲子|乐曲|歌曲|歌词|演出|舞台|live|演唱会|麦克风|话筒|排练|练歌|试唱|哼歌|哼唱|うた|歌|ライブ|マイク)/i
+export const GREETING_CONTEXT_TEXT_RE =
+  /(?:你好|您好|早安|早上好|午安|晚上好|哈喽|嗨[！!～~\s，,]|拜拜|明天见|回头见|一会儿见|下回见|路上小心|欢迎|好久不见|初次见面|我回来|我出门|先走一步|告辞|挥手|招手|在这边|这边这边|喂——|喂～|おーい|おはよ|こんに|こんば|またね|ばいばい|バイバイ|さよなら|ただいま|いってら|やっほ|こっち|再见(?!.*(?:别走|不要|窒息|绝望|崩溃)))/i
+const FATIGUE_COMPLAINT_TEXT_RE =
+  /(?:肩膀.{0,3}酸|好酸|好累|累死|累了|疲惫|疲倦|没干劲|一点干劲都没|不想动|烦死|唉……|真麻烦|不对劲|回房了|去睡|早点睡)/
 
 function isContextTagCompatibleWithText(
   tag: MotionContextTag | undefined,
@@ -931,6 +970,9 @@ function isContextTagCompatibleWithText(
   }
   if (tag === 'sing' && !SING_CONTEXT_TEXT_RE.test(content)) {
     return { ok: false, reason: 'sing_motion_without_sing_context' }
+  }
+  if (tag === 'greeting' && !GREETING_CONTEXT_TEXT_RE.test(content)) {
+    return { ok: false, reason: 'greeting_motion_without_greeting_context' }
   }
   return { ok: true }
 }
@@ -1308,6 +1350,50 @@ export function isMotionCompatibleWithLine(params: {
     return { ok: false, reason: 'angry_motion_on_sad_or_regret' }
   }
 
+  // 9) 生气争执、听者非害羞反应或普通非害羞台词禁止乱配害羞/局促动作（blushed / fidget / armescape）
+  const { stem } = parseMotionStem(clean)
+  if (info.role === 'shy') {
+    if (ctx.mood === 'angry_frustration' || emo === '生气' || ANGRY_TEXT_RE.test(text)) {
+      return { ok: false, reason: 'shy_motion_on_angry_line' }
+    }
+    if (Boolean(params.isListener) && emo !== '害羞' && !SHY_TEXT_RE.test(text)) {
+      return { ok: false, reason: 'shy_motion_on_non_shy_listener' }
+    }
+    if (
+      (stem === 'blushed' || stem === 'fidget' || stem.startsWith('armescape')) &&
+      emo !== '害羞' &&
+      !SHY_TEXT_RE.test(text) &&
+      ctx.mood !== 'shy_hesitation' &&
+      ctx.mood !== 'awkward'
+    ) {
+      return { ok: false, reason: 'shy_motion_without_shy_context' }
+    }
+  }
+
+  // 10) 疲惫/酸痛/抱怨台词（非明确疑问句）禁止可爱摆姿歪头（如 posetilthead）
+  if (info.role === 'tilthead' && !/[？?]/.test(text) && FATIGUE_COMPLAINT_TEXT_RE.test(text)) {
+    return { ok: false, reason: 'tilthead_motion_on_fatigue_line' }
+  }
+
+  // 11) 强烈愤怒吼叫句禁止用轻缓叹气（sigh）泄气动作
+  if (
+    (emo === '生气' || ctx.mood === 'angry_frustration') &&
+    /[！!]{2}|？！|\?!/.test(text) &&
+    stem === 'sigh'
+  ) {
+    return { ok: false, reason: 'sigh_motion_on_angry_shout' }
+  }
+
+  // 12) 谋划/盘算动作（plan）仅限明确谋划/得意打趣语境，禁止用于普通回房/日常/疲惫台词
+  if (
+    stem === 'plan' &&
+    ctx.mood !== 'cheerful_banter' &&
+    emo !== '开心' &&
+    !/(?:计划|主意|策略|点子|秘密|偷偷|嘿嘿|哼哼|谋划)/.test(text)
+  ) {
+    return { ok: false, reason: 'plan_motion_without_scheming_context' }
+  }
+
   return { ok: true }
 }
 
@@ -1625,10 +1711,10 @@ const MOTION_ROLES_BY_DRAMATIC_MOOD: Record<DramaticContextMood, MotionSemanticR
   shy_hesitation: ['shy', 'trouble', 'think', 'tilthead'],
   angry_frustration: ['angry', 'shakehead', 'forward', 'trouble'],
   sad_regret: ['sad', 'trouble', 'shakehead', 'think', 'nod', 'relief', 'forward'],
-  cheerful_banter: ['glad', 'playful', 'nod', 'tilthead', 'greeting', 'relief'],
+  cheerful_banter: ['glad', 'playful', 'nod', 'tilthead', 'relief'],
   attentive_listen: ['nod', 'think', 'tilthead', 'relief', 'trouble'],
   thinking_monologue: ['think', 'trouble', 'sad', 'nod', 'relief'],
-  entry_exit: ['nod', 'tilthead', 'greeting', 'relief', 'forward'],
+  entry_exit: ['nod', 'tilthead', 'relief', 'forward', 'think'],
   neutral: ['nod', 'tilthead', 'relief', 'forward', 'think']
 }
 
@@ -1690,16 +1776,33 @@ export function pickMoodMatchedMotion(
     MOTION_ROLES_BY_DRAMATIC_MOOD[dramaticMood] ?? MOTION_ROLES_BY_DRAMATIC_MOOD.neutral
 
   const isOppositeRole = (role: MotionSemanticRole): boolean => {
-    if (
-      dramaticMood === 'sad_regret' ||
-      dramaticMood === 'angry_frustration' ||
-      dramaticMood === 'awkward' ||
-      dramaticMood === 'shy_hesitation'
-    ) {
-      return role === 'glad' || role === 'playful'
+    if (role === 'greeting') return true
+    if (dramaticMood === 'angry_frustration') {
+      return (
+        role === 'glad' ||
+        role === 'playful' ||
+        role === 'shy' ||
+        role === 'tilthead' ||
+        role === 'relief'
+      )
+    }
+    if (dramaticMood === 'sad_regret') {
+      return role === 'glad' || role === 'playful' || role === 'shy' || role === 'angry'
+    }
+    if (dramaticMood === 'awkward' || dramaticMood === 'shy_hesitation') {
+      return role === 'glad' || role === 'playful' || role === 'angry'
     }
     if (dramaticMood === 'cheerful_banter') {
-      return role === 'sad' || role === 'angry'
+      return role === 'sad' || role === 'angry' || role === 'trouble'
+    }
+    if (
+      dramaticMood === 'neutral' ||
+      dramaticMood === 'attentive_listen' ||
+      dramaticMood === 'inner_resolve' ||
+      dramaticMood === 'gentle_reassure' ||
+      dramaticMood === 'entry_exit'
+    ) {
+      return role === 'shy' || role === 'angry' || role === 'playful'
     }
     return false
   }
@@ -1707,23 +1810,30 @@ export function pickMoodMatchedMotion(
   if (diversity?.motionCounts || diversity?.stemCounts) {
     const mCounts = diversity.motionCounts
     const sCounts = diversity.stemCounts
-    const scored = pool
+    const eligible = pool
       .map((m, idx) => {
         const info = inspectModelMotion(modelPath, m, modelsRoot)
         if (info.contextTag || isOppositeRole(info.role)) return null
+        if (restrainedRole && info.role === 'playful') return null
         const roleIdx = wantedRoles.indexOf(info.role)
-        let score = roleIdx >= 0 ? 30 - roleIdx * 4 : 4
-        if (restrainedRole && info.role === 'playful') score -= 40
+        let score = roleIdx >= 0 ? 30 - roleIdx * 3 : 0
         const { style, stem } = parseMotionStem(m)
         if (style.startsWith('normal')) score += 1.5
-        if (avoid?.has(m)) score -= 25
-        score -= (mCounts?.get(m) ?? 0) * 40
-        score -= (sCounts?.get(stem) ?? 0) * 16
-        return { m, score, idx }
+        if (avoid?.has(m)) score -= 10
+        score -= (mCounts?.get(m) ?? 0) * 12
+        score -= (sCounts?.get(stem) ?? 0) * 5
+        return { m, score, idx, inMood: roleIdx >= 0 }
       })
-      .filter((entry): entry is { m: string; score: number; idx: number } => entry !== null)
-      .sort((a, b) => b.score - a.score || a.idx - b.idx)
-    if (scored.length > 0) return scored[0].m
+      .filter(
+        (entry): entry is { m: string; score: number; idx: number; inMood: boolean } =>
+          entry !== null
+      )
+    // 严格保证同情绪角色（inMood）永远优先于跨情绪/无关角色，绝不因去重惩罚把生气/平静动作挤成害羞或无关动作
+    const inMoodOnly = eligible.filter((e) => e.inMood)
+    const ranked = (inMoodOnly.length > 0 ? inMoodOnly : eligible).sort(
+      (a, b) => b.score - a.score || a.idx - b.idx
+    )
+    if (ranked.length > 0) return ranked[0].m
   }
 
   const pickFromRoles = (allowAvoided: boolean): string => {
@@ -1731,7 +1841,8 @@ export function pickMoodMatchedMotion(
       if (restrainedRole && wantedRole === 'playful') continue
       const hit = pool.find((m) => {
         if (!allowAvoided && avoid?.has(m)) return false
-        return inspectModelMotion(modelPath, m, modelsRoot).role === wantedRole
+        const info = inspectModelMotion(modelPath, m, modelsRoot)
+        return !info.contextTag && info.role === wantedRole
       })
       if (hit) return hit
     }
@@ -1747,6 +1858,7 @@ export function pickMoodMatchedMotion(
     }) ||
     pickFromRoles(true) ||
     pool.find((m) => !avoid?.has(m) && !inspectModelMotion(modelPath, m, modelsRoot).contextTag) ||
+    pool.find((m) => !inspectModelMotion(modelPath, m, modelsRoot).contextTag) ||
     pool.find((m) => !avoid?.has(m)) ||
     pool[0] ||
     ''
@@ -1789,12 +1901,16 @@ export function recommendActingForLine(params: {
     restrainedRole: params.restrainedRole
   })
   const targetMood = dramaticMoodToTargetMood(ctx.mood)
-  const wantedFacialRoles =
+  const hasCryCue =
+    SERIOUS_CRY_OR_HURT_RE.test(params.content) || DESPAIR_TEXT_RE.test(params.content)
+  const wantedFacialRoles: FacialSemanticRole[] =
     targetMood === 'neutral' && params.restrainedRole
-      ? (['neutral', 'serious', 'cold_hollow', 'closed_neutral'] as FacialSemanticRole[])
+      ? ['neutral', 'serious', 'cold_hollow', 'closed_neutral']
       : targetMood === 'smile' && params.restrainedRole
-        ? (['wry_smile', 'neutral', 'genuine_smile'] as FacialSemanticRole[])
-        : FACIAL_ROLES_BY_MOOD[targetMood]
+        ? ['wry_smile', 'neutral', 'genuine_smile']
+        : targetMood === 'sad' && !hasCryCue
+          ? ['sad', 'closed_troubled', 'trouble', 'cold_hollow', 'neutral', 'cry']
+          : FACIAL_ROLES_BY_MOOD[targetMood]
 
   const compatibleFacials = params.facials.filter(
     (f) =>

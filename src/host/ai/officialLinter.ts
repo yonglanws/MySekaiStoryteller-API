@@ -42,6 +42,8 @@ import {
   isPositiveOnlyFacial,
   isSmileLikeFacial,
   isSpecialOrStandingMotion,
+  isWavingOrBigTheatricalMotion,
+  parseMotionStem,
   pickListenerFallbackFacial,
   pickMoodMatchedFacial,
   pickMoodMatchedMotion,
@@ -97,7 +99,14 @@ const GENUINE_CALM_RESOLUTION_RE =
   /～♪|♪|太好了|好耶|哈哈|嘻嘻|松了口气|雨过天晴|终于放心|よかった|和好吧/
 const SELF_BLAME_REGRET_TEXT_RE =
   /(?:为什么我|没能说出口|没能|对不起|抱歉|后悔|搞砸|都是我的错|别走|言い返せば|言えなかった)/
+const NON_SAD_TSUNDERE_OR_PRACTICAL_RE =
+  /(?:^……?啧|啧[。！]?$|少啰嗦|烦死了|算我理亏|理亏|好吧好吧|行了吧|发我手机|顺路|帮你排|买错了|原谅你|芝士蛋糕|回房了|吵死了|干嘛|胡说什么)/
+const CRY_TEXT_CUE_RE = /[哭泣泪呜咽嗚咽崩溃绝望窒息]/
 const STANDARD_CHINESE_EMOTIONS = new Set(['平静', '开心', '生气', '伤心', '害羞', '惊讶'])
+
+function isTiredOnlyFacial(facial: string): boolean {
+  return /^face_(?:tired|exhaustion)/i.test(facial.trim())
+}
 
 /** 判断文本是否为整句括号内心独白（已排除舞台动作括号如「（微笑）」「（叹气）」）。 */
 export function isInternalThoughtContent(content: string): boolean {
@@ -406,13 +415,29 @@ function inferPromotedEmotionForTalk(
     ? inspectModelFacial(rec.speakerPath, rec.speakerFacial).role
     : 'other'
   if (emo === '' && speakerRole !== 'cry' && speakerRole !== 'sad') return null
+  if (
+    speakerRole !== 'cry' &&
+    speakerRole !== 'tearful_smile' &&
+    NON_SAD_TSUNDERE_OR_PRACTICAL_RE.test(rec.content.trim())
+  ) {
+    return null
+  }
+  if (isTiredOnlyFacial(rec.speakerFacial)) {
+    return null
+  }
 
+  const hasPartnerCry = rec.partnerFacials.some((pf) => {
+    const r = inspectModelFacial(pf.path, pf.facial).role
+    return r === 'cry' || r === 'tearful_smile'
+  })
   const hasPartnerCryOrSad = rec.partnerFacials.some((pf) => {
+    if (isTiredOnlyFacial(pf.facial)) return false
     const r = inspectModelFacial(pf.path, pf.facial).role
     return r === 'cry' || r === 'sad'
   })
 
   let hasSadBefore = false
+  let hasCryBefore = false
   let sameSpeakerSadBefore = false
   for (let b = talkPos - 1; b >= Math.max(0, talkPos - 5); b--) {
     const prev = talks[b]
@@ -420,15 +445,20 @@ function inferPromotedEmotionForTalk(
     const pRole = prev.speakerFacial
       ? inspectModelFacial(prev.speakerPath, prev.speakerFacial).role
       : 'other'
-    const isSadBeat = prev.emotion === '伤心' || pRole === 'cry' || pRole === 'sad'
+    const isCryBeat = pRole === 'cry' || pRole === 'tearful_smile'
+    const isSadBeat =
+      prev.emotion === '伤心' ||
+      isCryBeat ||
+      (pRole === 'sad' && !isTiredOnlyFacial(prev.speakerFacial))
     if (isSadBeat) {
       hasSadBefore = true
+      if (isCryBeat) hasCryBefore = true
       if (prev.speakerId === rec.speakerId) sameSpeakerSadBefore = true
-      break
     }
   }
 
   let hasSadAfter = false
+  let hasCryAfter = false
   let sameSpeakerSadAfter = false
   for (let f = talkPos + 1; f <= Math.min(talks.length - 1, talkPos + 5); f++) {
     const nxt = talks[f]
@@ -436,15 +466,20 @@ function inferPromotedEmotionForTalk(
     const nRole = nxt.speakerFacial
       ? inspectModelFacial(nxt.speakerPath, nxt.speakerFacial).role
       : 'other'
-    const isSadBeat = nxt.emotion === '伤心' || nRole === 'cry' || nRole === 'sad'
+    const isCryBeat = nRole === 'cry' || nRole === 'tearful_smile'
+    const isSadBeat =
+      nxt.emotion === '伤心' ||
+      isCryBeat ||
+      (nRole === 'sad' && !isTiredOnlyFacial(nxt.speakerFacial))
     if (isSadBeat) {
       hasSadAfter = true
+      if (isCryBeat) hasCryAfter = true
       if (nxt.speakerId === rec.speakerId) sameSpeakerSadAfter = true
-      break
     }
   }
 
   const inSadArc = hasSadBefore && hasSadAfter
+  const hasCryContext = hasCryBefore || hasCryAfter || hasPartnerCry
   const hasSadTextCue =
     SELF_BLAME_REGRET_TEXT_RE.test(rec.content) ||
     /(?:哭|泪|呜|窒息|受不了|害怕|难过|伤心|痛苦|逃避|现实|再见|安心|笑出来|温柔|顾虑)/.test(
@@ -461,7 +496,7 @@ function inferPromotedEmotionForTalk(
     return null
   }
   if (speakerRole === 'angry') {
-    if (SELF_BLAME_REGRET_TEXT_RE.test(rec.content) || inSadArc) {
+    if (SELF_BLAME_REGRET_TEXT_RE.test(rec.content) || (inSadArc && hasCryContext)) {
       return canUse('伤心') ? '伤心' : null
     }
     return canUse('生气') ? '生气' : null
@@ -476,11 +511,16 @@ function inferPromotedEmotionForTalk(
   }
   if (
     (speakerRole === 'trouble' || speakerRole === 'closed_neutral' || speakerRole === 'other') &&
-    inSadArc
+    inSadArc &&
+    (hasCryContext || sameSpeakerSadBefore || hasSadTextCue)
   ) {
     return canUse('伤心') ? '伤心' : null
   }
-  if (sameSpeakerSadBefore && (sameSpeakerSadAfter || hasPartnerCryOrSad)) {
+  if (
+    sameSpeakerSadBefore &&
+    (sameSpeakerSadAfter || hasPartnerCry) &&
+    (hasCryContext || hasSadTextCue || speakerRole === 'trouble')
+  ) {
     return canUse('伤心') ? '伤心' : null
   }
   if (
@@ -1459,6 +1499,23 @@ function repairActingHygieneInvariants(
       }
       const mot = str(data.motion).trim()
       if (mot) {
+        const prevSnap = i > 0 ? snippets[i - 1] : undefined
+        const prevAppearData =
+          kind === 'LayoutAppear' &&
+          isRecord(prevSnap) &&
+          str(prevSnap.type) === 'LayoutAppear' &&
+          isRecord(prevSnap.data)
+            ? prevSnap.data
+            : null
+        const prevAppearMot = prevAppearData ? str(prevAppearData.motion).trim() : ''
+        const dualAppearCollision =
+          Boolean(prevAppearMot) &&
+          (parseMotionStem(mot).stem === parseMotionStem(prevAppearMot).stem ||
+            (isWavingOrBigTheatricalMotion(mot, actorInfo.path) &&
+              isWavingOrBigTheatricalMotion(
+                prevAppearMot,
+                resolveActorCatalogInfo(story, num(prevAppearData?.modelId, -1), view).path
+              )))
         const mc = isMotionCompatibleWithLine({
           motion: mot,
           modelPath: actorInfo.path,
@@ -1467,20 +1524,26 @@ function repairActingHygieneInvariants(
           prevTense: tenseTracker.tense,
           restrainedRole: actorInfo.restrained
         })
-        if (!mc.ok) {
-          data.motion = pickVerifiedReplacementMotion(
+        if (!mc.ok || dualAppearCollision) {
+          const rep = pickVerifiedReplacementMotion(
             actorInfo,
             {
               modelId: mid,
               content: surrounding?.content ?? '',
               emotion: surrounding?.emotion ?? '',
               prevTense: tenseTracker.tense,
-              isListener: false,
+              isListener: Boolean(prevAppearData),
               avoidMotion: mot,
               fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
             },
             view
           )
+          data.motion =
+            rep &&
+            (!prevAppearMot || parseMotionStem(rep).stem !== parseMotionStem(prevAppearMot).stem) &&
+            (!prevAppearData || !isWavingOrBigTheatricalMotion(rep, actorInfo.path))
+              ? rep
+              : ''
           repairedMotions += 1
         }
       }
@@ -1491,8 +1554,70 @@ function repairActingHygieneInvariants(
     if (kind === 'Motion') {
       const mid = num(data.modelId, -1)
       const surrounding = findSurroundingTalkContext(snippets, i, mid, false)
+      // 非阻塞 concurrent Motion（wait=false）紧跟在已有身体动作的 Talk / LayoutAppear 后时，会截断或与另一角色撞拍
+      const isNonBlockingOverlay = !snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+      if (isNonBlockingOverlay && !Array.isArray(data.actions) && str(data.motion).trim()) {
+        let prevTalkIdx = -1
+        for (let b = i - 1; b >= Math.max(0, i - 3); b--) {
+          const bt = str(snippets[b]?.type)
+          if (bt === 'Talk') {
+            prevTalkIdx = b
+            break
+          }
+          if (bt === 'LayoutClear' || bt === 'BlackOut' || bt === 'Wait') break
+        }
+        if (prevTalkIdx >= 0) {
+          const ptData = isRecord(snippets[prevTalkIdx]?.data)
+            ? (snippets[prevTalkIdx].data as JsonRecord)
+            : {}
+          const ptSpeaker = num(ptData.modelId, -1)
+          const ptActs = Array.isArray(ptData.actions) ? (ptData.actions as JsonRecord[]) : []
+          const talkBodyActors = new Set<number>()
+          if (str(ptData.motion).trim() && ptSpeaker !== -1) talkBodyActors.add(ptSpeaker)
+          for (const a of ptActs) {
+            if (isRecord(a) && str(a.motion).trim()) {
+              const aid = num(a.modelId, ptSpeaker)
+              if (aid !== -1) talkBodyActors.add(aid)
+            }
+          }
+          // 同时检查紧邻 Talk 之前的 LayoutAppear 是否刚触发过未结束的大幅/身体动作
+          const appearBodyActors = new Set<number>()
+          for (let b = prevTalkIdx - 1; b >= Math.max(0, prevTalkIdx - 3); b--) {
+            const bs = snippets[b]
+            const bt = str(bs?.type)
+            if (bt === 'LayoutAppear' && isRecord(bs.data) && str(bs.data.motion).trim()) {
+              const amid = num(bs.data.modelId, -1)
+              if (amid !== -1) appearBodyActors.add(amid)
+            } else if (bt === 'Talk' || bt === 'LayoutClear' || bt === 'BlackOut') {
+              break
+            }
+          }
+          const motStr = str(data.motion).trim()
+          const targetInfo = resolveActorCatalogInfo(story, mid, view)
+          const selfOverlap = talkBodyActors.has(mid) || appearBodyActors.has(mid)
+          const crossBigOverlap =
+            (talkBodyActors.size > 0 || appearBodyActors.size > 0) &&
+            isWavingOrBigTheatricalMotion(motStr, targetInfo.path)
+          if (selfOverlap || crossBigOverlap) {
+            if (!str(data.facial).trim()) {
+              snippets.splice(i, 1)
+              i -= 1
+              repairedMotions += 1
+              continue
+            } else {
+              data.motion = ''
+              repairedMotions += 1
+            }
+          }
+        }
+      }
       const checkMotionTarget = (target: JsonRecord, targetId: number): void => {
         const info = resolveActorCatalogInfo(story, targetId, view)
+        const isMotionListener = Boolean(
+          surrounding && surrounding.modelId !== -1 && surrounding.modelId !== targetId
+        )
         const tf = str(target.facial).trim()
         if (tf && surrounding) {
           const fc = isFacialCompatibleWithLine({
@@ -1502,7 +1627,7 @@ function repairActingHygieneInvariants(
             content: surrounding.content,
             prevTense: tenseTracker.tense,
             isMonologue: false,
-            isListener: false,
+            isListener: isMotionListener,
             restrainedRole: info.restrained
           })
           if (!fc.ok) {
@@ -1513,14 +1638,20 @@ function repairActingHygieneInvariants(
               content: surrounding.content,
               emotion: surrounding.emotion,
               prevTense: tenseTracker.tense,
+              isListener: isMotionListener,
               restrainedRole: info.restrained,
               prevFacial: tf
             })
+            const allowCry = CRY_TEXT_CUE_RE.test(surrounding.content)
             let rep =
-              rec.facials.find((f) => f !== tf) ??
+              rec.facials.find(
+                (f) => f !== tf && (allowCry || inspectModelFacial(info.path, f).role !== 'cry')
+              ) ??
               (info.facials.length > 0
                 ? pickMoodMatchedFacial(
-                    info.facials,
+                    allowCry
+                      ? info.facials
+                      : info.facials.filter((f) => inspectModelFacial(info.path, f).role !== 'cry'),
                     tenseTracker.tense ? 'serious' : 'neutral',
                     info.path,
                     info.restrained
@@ -1538,15 +1669,18 @@ function repairActingHygieneInvariants(
         }
         const mot = str(target.motion).trim()
         if (mot) {
+          const listenerBigForbidden =
+            isMotionListener && isWavingOrBigTheatricalMotion(mot, info.path)
           const mc = isMotionCompatibleWithLine({
             motion: mot,
             modelPath: info.path,
             emotion: surrounding?.emotion ?? '',
             content: surrounding?.content ?? '',
             prevTense: tenseTracker.tense,
+            isListener: isMotionListener,
             restrainedRole: info.restrained
           })
-          if (!mc.ok) {
+          if (!mc.ok || listenerBigForbidden) {
             const rep = pickVerifiedReplacementMotion(
               info,
               {
@@ -1554,14 +1688,19 @@ function repairActingHygieneInvariants(
                 content: surrounding?.content ?? '',
                 emotion: surrounding?.emotion ?? '',
                 prevTense: tenseTracker.tense,
-                isListener: false,
+                isListener: isMotionListener,
                 avoidMotion: mot,
                 fallbackMood: tenseTracker.tense ? 'awkward' : 'neutral'
               },
               view
             )
-            if (rep) target.motion = rep
-            else delete target.motion
+            if (rep && (!isMotionListener || !isWavingOrBigTheatricalMotion(rep, info.path))) {
+              target.motion = rep
+            } else if (target === data) {
+              target.motion = ''
+            } else {
+              delete target.motion
+            }
             repairedMotions += 1
           }
         }
@@ -1716,20 +1855,23 @@ function repairActingHygieneInvariants(
       }
 
       const curMotion = str(target.motion).trim()
+      const listenerBigGesture =
+        isListener && Boolean(curMotion) && isWavingOrBigTheatricalMotion(curMotion, actorInfo.path)
       if (
         curMotion &&
-        !isMotionCompatibleWithLine({
-          motion: curMotion,
-          modelPath: actorInfo.path,
-          emotion,
-          content,
-          prevContent,
-          prevEmotion,
-          prevTense: effectivePrevTense,
-          isListener,
-          restrainedRole: actorInfo.restrained,
-          cheerfulScene
-        }).ok
+        (listenerBigGesture ||
+          !isMotionCompatibleWithLine({
+            motion: curMotion,
+            modelPath: actorInfo.path,
+            emotion,
+            content,
+            prevContent,
+            prevEmotion,
+            prevTense: effectivePrevTense,
+            isListener,
+            restrainedRole: actorInfo.restrained,
+            cheerfulScene
+          }).ok)
       ) {
         const rep = pickVerifiedReplacementMotion(
           actorInfo,
@@ -1747,7 +1889,11 @@ function repairActingHygieneInvariants(
           },
           view
         )
-        if (rep && rep !== curMotion) {
+        if (
+          rep &&
+          rep !== curMotion &&
+          (!isListener || !isWavingOrBigTheatricalMotion(rep, actorInfo.path))
+        ) {
           target.motion = rep
         } else if (target === data) {
           target.motion = ''
@@ -2788,6 +2934,81 @@ export function auditStoryActingAndFidelity(
           recommendedFacials: evalRes.recommendedFacials,
           recommendedMotions: evalRes.recommendedMotions
         })
+      } else if (motion) {
+        const surrounding = findSurroundingTalkContext(snippets, i, mid, kind === 'LayoutAppear')
+        const mc = isMotionCompatibleWithLine({
+          motion,
+          modelPath: meta?.path,
+          emotion: surrounding?.emotion ?? '',
+          content: surrounding?.content ?? '',
+          prevTense: tenseTracker.tense,
+          restrainedRole: meta?.restrained
+        })
+        const allowSubtleAppearTilt =
+          kind === 'LayoutAppear' && mc.reason === 'tilthead_motion_on_sad_line'
+        if (!mc.ok && !allowSubtleAppearTilt) {
+          const rec = recommendActingForLine({
+            facials: meta?.facials ?? [],
+            motions: meta?.motions ?? [],
+            modelPath: meta?.path,
+            content: surrounding?.content ?? '',
+            emotion: surrounding?.emotion ?? '',
+            prevTense: tenseTracker.tense,
+            restrainedRole: meta?.restrained,
+            prevMotion: motion
+          })
+          motionMismatchCount += 1
+          diagnostics.push({
+            snippetIndex: i,
+            lineNumber: talkCount,
+            modelId: mid,
+            speaker: meta?.name ?? `model${mid}`,
+            content: surrounding?.content ?? '',
+            emotion: surrounding?.emotion ?? '',
+            facial,
+            motion,
+            inferredMood: rec.mood,
+            field: 'motion',
+            code: mc.reason ?? 'stage_motion_mood_mismatch',
+            severity: 'high',
+            message: `${kind} 动作 ${motion} 与前后语境冲突（${mc.reason ?? 'mismatch'}）`,
+            recommendedFacials: rec.facials,
+            recommendedMotions: rec.motions
+          })
+        }
+        if (kind === 'LayoutAppear' && i > 0 && str(snippets[i - 1]?.type) === 'LayoutAppear') {
+          const prevData = isRecord(snippets[i - 1]?.data)
+            ? (snippets[i - 1].data as JsonRecord)
+            : {}
+          const prevMot = str(prevData.motion).trim()
+          const prevId = num(prevData.modelId, -1)
+          const prevMeta = modelMeta.get(prevId)
+          if (
+            prevMot &&
+            (parseMotionStem(motion).stem === parseMotionStem(prevMot).stem ||
+              (isWavingOrBigTheatricalMotion(motion, meta?.path) &&
+                isWavingOrBigTheatricalMotion(prevMot, prevMeta?.path)))
+          ) {
+            simultaneousCollisionCount += 1
+            diagnostics.push({
+              snippetIndex: i,
+              lineNumber: talkCount,
+              modelId: mid,
+              speaker: meta?.name ?? `model${mid}`,
+              content: surrounding?.content ?? '',
+              emotion: surrounding?.emotion ?? '',
+              facial,
+              motion,
+              inferredMood: 'entry_exit',
+              field: 'staging',
+              code: 'dual_appear_motion_collision',
+              severity: 'high',
+              message: `双人同时 LayoutAppear 触发相同或双重大动作（${prevMot} 与 ${motion}），次角色应改为克制站姿或轻微倾听动作`,
+              recommendedFacials: [],
+              recommendedMotions: []
+            })
+          }
+        }
       }
       if (facial) {
         const surrounding = findSurroundingTalkContext(snippets, i, mid, kind === 'LayoutAppear')
@@ -2859,6 +3080,173 @@ export function auditStoryActingAndFidelity(
     if (kind === 'Motion') {
       const mid = num(data.modelId, -1)
       const actions = Array.isArray(data.actions) ? (data.actions as JsonRecord[]) : []
+      const surrounding = findSurroundingTalkContext(snippets, i, mid, false)
+      const isNonBlockingMotion = !snippetHasPreFence(
+        snippet as { type?: string; wait?: boolean; progressBehavior?: 'Now' | 'WaitFinished' }
+      )
+      const auditStandaloneTarget = (target: JsonRecord, targetId: number): void => {
+        if (targetId === -1) return
+        const tMeta = modelMeta.get(targetId)
+        const tMot = str(target.motion).trim()
+        const tFac = str(target.facial).trim()
+        const isListenerMotion = Boolean(
+          surrounding && surrounding.modelId !== -1 && surrounding.modelId !== targetId
+        )
+        if (tMot && surrounding) {
+          const mc = isMotionCompatibleWithLine({
+            motion: tMot,
+            modelPath: tMeta?.path,
+            emotion: surrounding.emotion,
+            content: surrounding.content,
+            prevTense: tenseTracker.tense,
+            isListener: isListenerMotion,
+            restrainedRole: tMeta?.restrained
+          })
+          if (!mc.ok) {
+            const rec = recommendActingForLine({
+              facials: tMeta?.facials ?? [],
+              motions: tMeta?.motions ?? [],
+              modelPath: tMeta?.path,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              prevTense: tenseTracker.tense,
+              isListener: isListenerMotion,
+              restrainedRole: tMeta?.restrained,
+              prevMotion: tMot
+            })
+            motionMismatchCount += 1
+            diagnostics.push({
+              snippetIndex: i,
+              lineNumber: talkCount,
+              modelId: targetId,
+              speaker: tMeta?.name ?? `model${targetId}`,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              facial: tFac,
+              motion: tMot,
+              inferredMood: rec.mood,
+              field: 'motion',
+              code: mc.reason ?? 'motion_mood_mismatch',
+              severity: 'high',
+              message: `独立 Motion 动作 ${tMot} 与周边「${rec.mood}」语境冲突（${mc.reason ?? 'mismatch'}）`,
+              recommendedFacials: rec.facials,
+              recommendedMotions: rec.motions
+            })
+          }
+        }
+        if (tFac && surrounding) {
+          const fc = isFacialCompatibleWithLine({
+            facial: tFac,
+            modelPath: tMeta?.path,
+            emotion: surrounding.emotion,
+            content: surrounding.content,
+            prevTense: tenseTracker.tense,
+            isMonologue: false,
+            isListener: isListenerMotion,
+            restrainedRole: tMeta?.restrained
+          })
+          if (!fc.ok) {
+            const rec = recommendActingForLine({
+              facials: tMeta?.facials ?? [],
+              motions: tMeta?.motions ?? [],
+              modelPath: tMeta?.path,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              prevTense: tenseTracker.tense,
+              isListener: isListenerMotion,
+              restrainedRole: tMeta?.restrained,
+              prevFacial: tFac
+            })
+            facialMismatchCount += 1
+            diagnostics.push({
+              snippetIndex: i,
+              lineNumber: talkCount,
+              modelId: targetId,
+              speaker: tMeta?.name ?? `model${targetId}`,
+              content: surrounding.content,
+              emotion: surrounding.emotion,
+              facial: tFac,
+              motion: tMot,
+              inferredMood: rec.mood,
+              field: 'facial',
+              code: fc.reason ?? 'motion_facial_mood_mismatch',
+              severity: 'high',
+              message: `独立 Motion 表情 ${tFac} 与周边「${rec.mood}」语境冲突（${fc.reason ?? 'mismatch'}）`,
+              recommendedFacials: rec.facials,
+              recommendedMotions: rec.motions
+            })
+          }
+        }
+        if (isNonBlockingMotion && tMot) {
+          let prevTalkIdx = -1
+          for (let b = i - 1; b >= Math.max(0, i - 3); b--) {
+            const bt = str(snippets[b]?.type)
+            if (bt === 'Talk') {
+              prevTalkIdx = b
+              break
+            }
+            if (bt === 'LayoutClear' || bt === 'BlackOut' || bt === 'Wait') break
+          }
+          if (prevTalkIdx >= 0) {
+            const ptData = isRecord(snippets[prevTalkIdx]?.data)
+              ? (snippets[prevTalkIdx].data as JsonRecord)
+              : {}
+            const ptSpeaker = num(ptData.modelId, -1)
+            const ptActs = Array.isArray(ptData.actions) ? (ptData.actions as JsonRecord[]) : []
+            const activeMots: Array<{ id: number; motion: string }> = []
+            if (str(ptData.motion).trim() && ptSpeaker !== -1) {
+              activeMots.push({ id: ptSpeaker, motion: str(ptData.motion).trim() })
+            }
+            for (const a of ptActs) {
+              if (isRecord(a) && str(a.motion).trim()) {
+                const aid = num(a.modelId, ptSpeaker)
+                if (aid !== -1) activeMots.push({ id: aid, motion: str(a.motion).trim() })
+              }
+            }
+            for (let b = prevTalkIdx - 1; b >= Math.max(0, prevTalkIdx - 3); b--) {
+              const bs = snippets[b]
+              const bt = str(bs?.type)
+              if (bt === 'LayoutAppear' && isRecord(bs.data) && str(bs.data.motion).trim()) {
+                const amid = num(bs.data.modelId, -1)
+                if (amid !== -1) activeMots.push({ id: amid, motion: str(bs.data.motion).trim() })
+              } else if (bt === 'Talk' || bt === 'LayoutClear' || bt === 'BlackOut') {
+                break
+              }
+            }
+            const selfClash = activeMots.some((m) => m.id === targetId)
+            const crossBigClash =
+              isWavingOrBigTheatricalMotion(tMot, tMeta?.path) &&
+              activeMots.some(
+                (m) =>
+                  m.id !== targetId &&
+                  isWavingOrBigTheatricalMotion(m.motion, modelMeta.get(m.id)?.path)
+              )
+            if (selfClash || crossBigClash) {
+              simultaneousCollisionCount += 1
+              diagnostics.push({
+                snippetIndex: i,
+                lineNumber: talkCount,
+                modelId: targetId,
+                speaker: tMeta?.name ?? `model${targetId}`,
+                content: surrounding?.content ?? '',
+                emotion: surrounding?.emotion ?? '',
+                facial: tFac,
+                motion: tMot,
+                inferredMood: 'neutral',
+                field: 'staging',
+                code: 'simultaneous_motion_overlap',
+                severity: 'high',
+                message: selfClash
+                  ? `非阻塞 Motion(${tMot}) 在上一动作未结束时直接打断同角色动作`
+                  : `非阻塞 Motion(${tMot}) 与另一在场角色的同步大动作撞拍`,
+                recommendedFacials: [],
+                recommendedMotions: []
+              })
+            }
+          }
+        }
+      }
+      auditStandaloneTarget(data, mid)
       if (str(data.motion).trim()) {
         bodyMotionCounts.set(mid, (bodyMotionCounts.get(mid) ?? 0) + 1)
         if (mid !== -1) resetListenerState(mid)
@@ -2876,6 +3264,7 @@ export function auditStoryActingAndFidelity(
       for (const act of actions) {
         if (!isRecord(act)) continue
         const aid = num(act.modelId, mid)
+        auditStandaloneTarget(act, aid)
         if (str(act.motion).trim()) {
           bodyMotionCounts.set(aid, (bodyMotionCounts.get(aid) ?? 0) + 1)
         }

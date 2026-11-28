@@ -285,20 +285,26 @@ function isMotionMoodCompatible(params: {
   cheerfulScene?: boolean
 }): boolean {
   if (!params.motion.trim()) return true
+  const lower = params.motion.toLowerCase()
+  const text = params.content.trim()
+  if (
+    /greeting|shakehand|handshake|wave|byebye|salute/i.test(lower) &&
+    !facialSemanticsMod.GREETING_CONTEXT_TEXT_RE.test(text)
+  ) {
+    return false
+  }
   if (typeof facialValidationApi.isMotionCompatibleWithLine === 'function') {
     if (!facialValidationApi.isMotionCompatibleWithLine(params).ok) return false
   }
-  const lower = params.motion.toLowerCase()
   const mood = inferValidationMood(params.content, params.emotion)
   const emo = params.emotion.trim()
-  const text = params.content.trim()
   const monologue = isInnerMonologueText(text)
   const isSadOrDespair = mood === 'sad' || emo === '伤心' || DESPAIR_SAD_TEXT_RE.test(text)
   const isGenuineShock = emo === '惊讶' || (GENUINE_SHOCK_TEXT_RE.test(text) && emo !== '伤心')
   const isTense =
     params.prevTense || mood === 'sad' || mood === 'angry' || mood === 'trouble' || emo === '害怕'
   const isJoyfulMotion =
-    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|wave/.test(
+    /glad|happy|cheer|joy|wandahoi|wink|smug|doya|pose(?!sad)|delicious|sing|greeting|shakehand|handshake|wave|plan/.test(
       lower
     )
   const isNegativeMotion = /angry|disgust|sad|cry|sigh/.test(lower)
@@ -317,7 +323,7 @@ function isMotionMoodCompatible(params: {
   const isQuestionLine = /[？?]|难道|为什么|怎么|吗/.test(text)
   const isAcuteDespair = /(?:窒息|受不了|绝望|崩溃|再见|别走)/.test(text)
   if ((isSadOrDespair || monologue) && !isGenuineShock) {
-    if (/greeting|wave|surprise|shock|angry|disgust/.test(lower)) {
+    if (/greeting|shakehand|handshake|wave|surprise|shock|angry|disgust/.test(lower)) {
       return false
     }
     if (/relief/.test(lower) && isAcuteDespair) {
@@ -327,7 +333,10 @@ function isMotionMoodCompatible(params: {
       return false
     }
   }
-  if (mood === 'angry' && /tilthead|tilt|greeting|wave/.test(lower)) {
+  if (
+    mood === 'angry' &&
+    /tilthead|tilt|greeting|shakehand|handshake|wave|blushed|fidget|shy|armescape/.test(lower)
+  ) {
     return false
   }
   return true
@@ -367,7 +376,14 @@ function pickCompatibleMotionFallback(
   const isTenseMood = mood === 'sad' || mood === 'angry' || mood === 'trouble'
   const safeFilter = (m: string): boolean => {
     if (facialSemanticsMod.inspectModelMotion(model.path, m).contextTag) return false
-    if (isTenseMood && /glad|happy|cheer|joy|wink|smug|doya|greeting|wave|playful/i.test(m)) {
+    if (/greeting|shakehand|handshake|wave|byebye|salute|plan/i.test(m)) return false
+    if (
+      isTenseMood &&
+      /glad|happy|cheer|joy|wink|smug|doya|playful|blushed|fidget|armescape/i.test(m)
+    ) {
+      return false
+    }
+    if (mood === 'neutral' && /blushed|fidget|armescape|angry|disgust/i.test(m)) {
       return false
     }
     return true
@@ -394,7 +410,7 @@ function pickCompatibleMotionFallback(
     angry: [/angry|disgust|shakehead/i, /forward|serious/i],
     surprise: [/surprise|tilthead|forward/i, /nod/i],
     shy: [/shy|blush|fidget|lookaway/i, /tilthead/i],
-    smile: [/glad|happy|cheer|joy|relief/i, /nod|tilthead|greeting|playful/i],
+    smile: [/glad|happy|cheer|joy|relief/i, /nod|tilthead|playful/i],
     gentle: [/relief|nod|tilthead|soft/i, /glad/i],
     wry_smile: [/trouble|relief|sigh/i, /nod|shy/i],
     serious: [/forward|think|shakehead|nod/i, /serious|trouble/i],
@@ -417,7 +433,7 @@ function pickCompatibleMotionFallback(
       (m) =>
         m !== avoidMotion &&
         !facialSemanticsMod.inspectModelMotion(model.path, m).contextTag &&
-        !/glad|happy|cheer|joy|angry|sad|cry|greeting|tilthead|delicious|eat|drink|sleep|yawn|sing|mic/i.test(
+        !/glad|happy|cheer|joy|angry|sad|cry|greeting|shakehand|handshake|wave|plan|blushed|fidget|armescape|tilthead|delicious|eat|drink|sleep|yawn|sing|mic/i.test(
           m
         )
     ) ?? pool[0]
@@ -2627,28 +2643,40 @@ function diversifyActingAndPreTalkMotions(
     prevTense: boolean,
     isListener: boolean,
     currentMotion: string,
-    cheerfulScene: boolean
+    cheerfulScene: boolean,
+    options: { subtleOnly?: boolean; avoidStems?: ReadonlySet<string> } = {}
   ): string => {
     const model = view.modelById(modelId)
     if (!model) return ''
     const restrained = isRestrainedActor(model.name, model.path)
     const allMotions = fullMotionsFor(modelId)
-    const compat = allMotions.filter(
-      (m) =>
-        m !== currentMotion &&
-        isMotionMoodCompatible({
-          motion: m,
-          modelPath: model.path,
-          emotion,
-          content,
-          prevContent,
-          prevEmotion,
-          prevTense,
-          isListener,
-          restrainedRole: restrained,
-          cheerfulScene
-        })
-    )
+    const compat = allMotions.filter((m) => {
+      if (m === currentMotion) return false
+      const info = facialSemanticsMod.inspectModelMotion(model.path, m)
+      if (info.contextTag) return false
+      if (
+        (isListener || options.subtleOnly) &&
+        facialSemanticsMod.isWavingOrBigTheatricalMotion(m, model.path)
+      ) {
+        return false
+      }
+      if (options.avoidStems && options.avoidStems.size > 0) {
+        const stem = facialSemanticsMod.parseMotionStem(m).stem
+        if (stem && options.avoidStems.has(stem)) return false
+      }
+      return isMotionMoodCompatible({
+        motion: m,
+        modelPath: model.path,
+        emotion,
+        content,
+        prevContent,
+        prevEmotion,
+        prevTense,
+        isListener,
+        restrainedRole: restrained,
+        cheerfulScene
+      })
+    })
     if (compat.length === 0) return ''
     const mCounts = getMap(motionCountsByActor, modelId)
     const sCounts = getMap(stemCountsByActor, modelId)
@@ -2719,29 +2747,69 @@ function diversifyActingAndPreTalkMotions(
           const mCounts = getMap(motionCountsByActor, mid)
           const sCounts = getMap(stemCountsByActor, mid)
           const stem = facialSemanticsMod.parseMotionStem(appMot).stem
+          const nextTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
+          const nd = nextTalk && isRecord(nextTalk.data) ? nextTalk.data : {}
+          const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
+          const prevSnip = i > 0 ? snippets[i - 1] : undefined
+          const prevAppearData =
+            isRecord(prevSnip) && prevSnip.type === 'LayoutAppear' && isRecord(prevSnip.data)
+              ? prevSnip.data
+              : null
+          const prevAppearMot = prevAppearData ? toStr(prevAppearData.motion).trim() : ''
+          const prevAppearStem = prevAppearMot
+            ? facialSemanticsMod.parseMotionStem(prevAppearMot).stem
+            : ''
+          const prevAppearModel = prevAppearData
+            ? view.modelById(toNumber(prevAppearData.modelId, -1))
+            : null
+          const dualAppearClash =
+            Boolean(prevAppearMot) &&
+            (stem === prevAppearStem ||
+              (facialSemanticsMod.isWavingOrBigTheatricalMotion(appMot, model?.path) &&
+                facialSemanticsMod.isWavingOrBigTheatricalMotion(
+                  prevAppearMot,
+                  prevAppearModel?.path
+                )))
+          const compatAppMot = isMotionMoodCompatible({
+            motion: appMot,
+            modelPath: model?.path,
+            emotion: toStr(nd.emotion),
+            content: toStr(nd.content),
+            prevTense: tenseTracker.tense && !cheerfulScene,
+            isListener: Boolean(prevAppearData),
+            restrainedRole: model ? isRestrainedActor(model.name, model.path) : false,
+            cheerfulScene
+          })
           const forbiddenAppMot =
             !facialSemanticsMod.isCharacterSignatureMotionAllowed(appMot, model?.path) ||
-            /animal/i.test(appMot)
-          if (forbiddenAppMot || (mCounts.get(appMot) ?? 0) >= 1 || (sCounts.get(stem) ?? 0) >= 2) {
-            const nextTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
-            const nd = nextTalk && isRecord(nextTalk.data) ? nextTalk.data : {}
-            const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
+            /animal/i.test(appMot) ||
+            !compatAppMot ||
+            dualAppearClash
+          if (forbiddenAppMot || (mCounts.get(appMot) ?? 0) >= 2 || (sCounts.get(stem) ?? 0) >= 3) {
             const freshM = pickFreshMotion(
               mid,
               toStr(nd.content),
               toStr(nd.emotion),
               tenseTracker.tense && !cheerfulScene,
-              false,
+              Boolean(prevAppearData),
               appMot,
-              cheerfulScene
+              cheerfulScene,
+              {
+                subtleOnly: Boolean(prevAppearData),
+                avoidStems: prevAppearStem ? new Set([prevAppearStem]) : undefined
+              }
             )
             if (freshM && freshM !== appMot) {
               data.motion = freshM
               appMot = freshM
               diversifiedMotions += 1
+            } else if (forbiddenAppMot) {
+              data.motion = ''
+              appMot = ''
+              diversifiedMotions += 1
             }
           }
-          recordMotion(mid, appMot)
+          if (appMot) recordMotion(mid, appMot)
         }
       }
       continue
@@ -2770,34 +2838,55 @@ function diversifyActingAndPreTalkMotions(
         const stem = facialSemanticsMod.parseMotionStem(mot).stem
         const prevM = lastBodyMotionByActor.get(actorId)
         const actorModel = view.modelById(actorId)
+        const nearTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
+        const nd = nearTalk && isRecord(nearTalk.data) ? nearTalk.data : {}
+        const ctxContent = prevContent || toStr(nd.content)
+        const ctxEmotion = prevEmotion || toStr(nd.emotion)
+        const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
+        const isListenerMot = prevContent ? false : toNumber(nd.modelId, -1) !== actorId
+        const compatMot = isMotionMoodCompatible({
+          motion: mot,
+          modelPath: actorModel?.path,
+          emotion: ctxEmotion,
+          content: ctxContent,
+          prevTense: tenseTracker.tense && !cheerfulScene,
+          isListener: isListenerMot,
+          restrainedRole: actorModel ? isRestrainedActor(actorModel.name, actorModel.path) : false,
+          cheerfulScene
+        })
         const forbiddenMot =
           !facialSemanticsMod.isCharacterSignatureMotionAllowed(mot, actorModel?.path) ||
-          /animal/i.test(mot)
+          /animal/i.test(mot) ||
+          !compatMot ||
+          (isListenerMot && facialSemanticsMod.isWavingOrBigTheatricalMotion(mot, actorModel?.path))
         if (
           forbiddenMot ||
           mot === prevM ||
-          (mCounts.get(mot) ?? 0) >= 1 ||
-          (sCounts.get(stem) ?? 0) >= 2
+          (mCounts.get(mot) ?? 0) >= 2 ||
+          (sCounts.get(stem) ?? 0) >= 3
         ) {
-          const nearTalk = snippets.slice(i + 1).find((x) => isRecord(x) && x.type === 'Talk')
-          const nd = nearTalk && isRecord(nearTalk.data) ? nearTalk.data : {}
-          const cheerfulScene = isCheerfulComedySnippetContext(snippets, i)
           const freshM = pickFreshMotion(
             actorId,
-            toStr(nd.content) || prevContent,
-            toStr(nd.emotion) || prevEmotion,
+            ctxContent,
+            ctxEmotion,
             tenseTracker.tense && !cheerfulScene,
-            toNumber(nd.modelId, -1) !== actorId,
+            isListenerMot,
             mot,
-            cheerfulScene
+            cheerfulScene,
+            { subtleOnly: isListenerMot }
           )
           if (freshM && freshM !== mot) {
             target.motion = freshM
             mot = freshM
             diversifiedMotions += 1
+          } else if (forbiddenMot) {
+            if (target === data) target.motion = ''
+            else delete target.motion
+            mot = ''
+            diversifiedMotions += 1
           }
         }
-        recordMotion(actorId, mot)
+        if (mot) recordMotion(actorId, mot)
       }
       diversifyMotionTarget(data, mid)
       if (Array.isArray(data.actions)) {
@@ -2892,10 +2981,23 @@ function diversifyActingAndPreTalkMotions(
           usedExact < 2
         const forbiddenMot =
           !facialSemanticsMod.isCharacterSignatureMotionAllowed(motion, model.path) ||
-          /animal/i.test(motion)
+          /animal/i.test(motion) ||
+          (isListener && facialSemanticsMod.isWavingOrBigTheatricalMotion(motion, model.path)) ||
+          !isMotionMoodCompatible({
+            motion,
+            modelPath: model.path,
+            emotion,
+            content,
+            prevContent,
+            prevEmotion,
+            prevTense: effectivePrevTense,
+            isListener,
+            restrainedRole: restrained,
+            cheerfulScene
+          })
         const needsVariety =
           forbiddenMot ||
-          (!isSignatureComedy && (motion === prevM || usedExact >= 1 || usedStem >= 2))
+          (!isSignatureComedy && (motion === prevM || usedExact >= 2 || usedStem >= 3))
         if (needsVariety) {
           const freshM = pickFreshMotion(
             actorId,
@@ -2904,15 +3006,21 @@ function diversifyActingAndPreTalkMotions(
             effectivePrevTense,
             isListener,
             motion,
-            cheerfulScene
+            cheerfulScene,
+            { subtleOnly: isListener }
           )
           if (freshM && freshM !== motion) {
             target.motion = freshM
             motion = freshM
             diversifiedMotions += 1
+          } else if (forbiddenMot) {
+            if (target === data) target.motion = ''
+            else delete target.motion
+            motion = ''
+            diversifiedMotions += 1
           }
         }
-        recordMotion(actorId, motion)
+        if (motion) recordMotion(actorId, motion)
       }
     }
 
@@ -2939,6 +3047,7 @@ function diversifyActingAndPreTalkMotions(
     if (existingMotions < targetMotions) {
       const needed = targetMotions - existingMotions
       const stageActorsNow = new Set<number>()
+      const recentAppearMotionActors = new Set<number>()
       const inserts: Array<{ afterIdx: number; snippet: JsonRecord }> = []
       const lastMotionAtTalk = new Map<number, number>()
       let tIdx = 0
@@ -2956,15 +3065,21 @@ function diversifyActingAndPreTalkMotions(
           tTracker.calmRun = 0
           pContent = ''
           pEmotion = ''
+          recentAppearMotionActors.clear()
           continue
         }
         if (k === 'LayoutAppear') {
           const mid = toNumber(d.modelId, -1)
-          if (mid !== -1) stageActorsNow.add(mid)
+          if (mid !== -1) {
+            stageActorsNow.add(mid)
+            if (toStr(d.motion).trim()) recentAppearMotionActors.add(mid)
+          }
           continue
         }
         if (k === 'LayoutClear') {
-          stageActorsNow.delete(toNumber(d.modelId, -1))
+          const mid = toNumber(d.modelId, -1)
+          stageActorsNow.delete(mid)
+          recentAppearMotionActors.delete(mid)
           continue
         }
         if (k === 'Motion') {
@@ -2977,24 +3092,75 @@ function diversifyActingAndPreTalkMotions(
         const content = toStr(d.content)
         const emotion = toStr(d.emotion)
         const next = snippets[i + 1]
+        const acts = Array.isArray(d.actions) ? (d.actions as JsonRecord[]) : []
+        const talkBodyActors = new Set<number>()
+        if (toStr(d.motion).trim() && speakerId !== -1) talkBodyActors.add(speakerId)
+        for (const a of acts) {
+          if (isRecord(a) && toStr(a.motion).trim()) {
+            const aid = toNumber(a.modelId, speakerId)
+            if (aid !== -1) talkBodyActors.add(aid)
+          }
+        }
+        // 若本句 Talk 或刚入场的 LayoutAppear 已有身体动作，严禁打断说话者自身或在双人大动作/刚入场时发射并发叠加 Motion；
+        // 对听者：若下一句不会 <400ms 立即打断该听者，优先用 wait=true 顺承静默拍；否则仅在非大动作/非刚入场时发射轻柔句中反应。
+        const hasActiveConcurrentMotion =
+          talkBodyActors.size > 0 || recentAppearMotionActors.size > 0
+        const talkHasBigMotion =
+          (toStr(d.motion).trim() &&
+            facialSemanticsMod.isWavingOrBigTheatricalMotion(
+              toStr(d.motion).trim(),
+              view.modelById(speakerId)?.path
+            )) ||
+          acts.some((a) => {
+            if (!isRecord(a) || !toStr(a.motion).trim()) return false
+            const aid = toNumber(a.modelId, speakerId)
+            return facialSemanticsMod.isWavingOrBigTheatricalMotion(
+              toStr(a.motion).trim(),
+              view.modelById(aid)?.path
+            )
+          })
         const canInsertAfter =
           speakerId !== -1 &&
           d.closeWindowOnFinish !== true &&
           isRecord(next) &&
           next.type === 'Talk'
         if (canInsertAfter) {
-          const acts = Array.isArray(d.actions) ? (d.actions as JsonRecord[]) : []
+          const nextData = isRecord(next.data) ? next.data : {}
+          const nextDelay = toNumber(next.delay, 0)
+          const nextSpeaker = toNumber(nextData.modelId, -1)
+          const nextActs = Array.isArray(nextData.actions) ? (nextData.actions as JsonRecord[]) : []
+          const willNextTalkInterrupt = (actorId: number): boolean => {
+            if (nextDelay >= 0.8) return false
+            if (nextSpeaker === actorId && toStr(nextData.motion).trim()) return true
+            return nextActs.some(
+              (a) =>
+                isRecord(a) &&
+                toNumber(a.modelId, nextSpeaker) === actorId &&
+                Boolean(toStr(a.motion).trim()) &&
+                toNumber(a.at, 0) < 0.35
+            )
+          }
           const partners = [...stageActorsNow].filter((id) => id !== speakerId)
           const partnerWithoutAction = partners.find(
-            (pid) => !acts.some((a) => isRecord(a) && toNumber(a.modelId, speakerId) === pid)
+            (pid) =>
+              !acts.some((a) => isRecord(a) && toNumber(a.modelId, speakerId) === pid) &&
+              !recentAppearMotionActors.has(pid) &&
+              (!willNextTalkInterrupt(pid) ||
+                (recentAppearMotionActors.size === 0 && !talkHasBigMotion))
           )
           const isPivotOrLong = Array.from(content).length >= 16 || /[……——！？!?]/.test(content)
+          const speakerCanReact =
+            !talkBodyActors.has(speakerId) &&
+            !recentAppearMotionActors.has(speakerId) &&
+            !willNextTalkInterrupt(speakerId)
           const chosenId =
             partnerWithoutAction !== undefined &&
             tIdx - (lastMotionAtTalk.get(partnerWithoutAction) ?? -10) >= 2 &&
             !isInnerMonologueText(content)
               ? partnerWithoutAction
-              : isPivotOrLong && tIdx - (lastMotionAtTalk.get(speakerId) ?? -10) >= 2
+              : speakerCanReact &&
+                  isPivotOrLong &&
+                  tIdx - (lastMotionAtTalk.get(speakerId) ?? -10) >= 2
                 ? speakerId
                 : -1
           if (chosenId !== -1) {
@@ -3007,16 +3173,19 @@ function diversifyActingAndPreTalkMotions(
               tTracker.tense && !cheerfulScene,
               isListener,
               lastBodyMotionByActor.get(chosenId) ?? '',
-              cheerfulScene
+              cheerfulScene,
+              { subtleOnly: true }
             )
             if (freshM) {
+              const useSequentialBeat =
+                hasActiveConcurrentMotion && !willNextTalkInterrupt(chosenId)
               inserts.push({
                 afterIdx: i,
                 snippet: {
                   type: 'Motion',
-                  wait: false,
-                  progressBehavior: 'Now',
-                  delay: 0.3,
+                  wait: useSequentialBeat,
+                  progressBehavior: useSequentialBeat ? 'WaitFinished' : 'Now',
+                  delay: useSequentialBeat ? 0.25 : 0.3,
                   data: { modelId: chosenId, motion: freshM, facial: '', facialFirst: true }
                 }
               })
@@ -3026,6 +3195,7 @@ function diversifyActingAndPreTalkMotions(
             }
           }
         }
+        recentAppearMotionActors.clear()
         pContent = content
         pEmotion = emotion
         facialSemanticsMod.updateSceneTenseAfterTalk(tTracker, content, emotion)
@@ -3678,16 +3848,19 @@ export function validateAndFixStory(
         }
         data.duration = duration
       }
-      const motion = fixAnimation(view, modelId, 'motion', data.motion)
-      const facial = fixAnimation(view, modelId, 'facial', data.facial)
+      const rawMotion = cleanPath(data.motion)
+      const rawFacial = cleanPath(data.facial)
+      const motion = rawMotion ? fixAnimation(view, modelId, 'motion', rawMotion) : null
+      const facial = rawFacial ? fixAnimation(view, modelId, 'facial', rawFacial) : null
+      // 保留刻意留空的 facial: ""（避免二次 validate 把纯动作反应片段的空表情误覆写为 defaultFacial=face_smile_01！）
       data.motion =
         motion ??
-        (hasActions
+        (hasActions || rawFacial
           ? ''
           : ensureRealCatalogAnimation(view, modelId, 'motion', view.defaultMotion(modelId)))
       data.facial =
         facial ??
-        (hasActions
+        (hasActions || !rawFacial
           ? ''
           : ensureRealCatalogAnimation(view, modelId, 'facial', view.defaultFacial(modelId)))
       data.facialFirst = toBool(data.facialFirst, true)

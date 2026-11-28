@@ -81,8 +81,14 @@ export function buildDirectorReviewPrompt(
       compactTimeline.push(
         `[${i}] Talk(${str(d.speaker)}${emo ? `/${emo}` : ''}${delayTag}): ${text}${acts ? ` | ${acts}` : ''}`
       )
+    } else if (kind === 'LayoutAppear') {
+      const mStr = str(d.motion)
+      const fStr = str(d.facial)
+      const to = isRecord(d.to) ? str(d.to.side) : ''
+      compactTimeline.push(
+        `[${i}] LayoutAppear(m=${num(d.modelId, -1)}${to ? `@${to}` : ''}${mStr || fStr ? `, ${mStr}/${fStr}` : ''})`
+      )
     } else if (
-      kind === 'LayoutAppear' ||
       kind === 'LayoutClear' ||
       kind === 'BlackOut' ||
       kind === 'BlackIn' ||
@@ -153,7 +159,7 @@ export function buildDirectorReviewPrompt(
       '2. 情绪连贯与人物口吻',
       '3. 音频设计（开场 BGM、高潮静音切停 ChangeBgm stop:true、PlaySe 物理/情绪音效）',
       '4. 舞台节奏（Wait 呼吸留白、独立 Motion 静默反应、原地单双人焦点淡入淡出切镜；日常/谈心保持 CameraZoom 与 CharacterShake 克制不滥用）',
-      '5. 表情与动作自然度（避免机械循环，也不要无故频繁乱动；自然不死板）',
+      '5. 表情与动作自然度（重点排查：非打招呼/告别时误用 greeting/shakehand 大挥手、双人同时大挥手或同步大动作撞拍、生气时误用 blushed/fidget/armescape、疲惫/回房时误用 face_smile/plan、非哭泣拌嘴误用 face_cry；避免机械循环，也不要无故频繁乱动）',
       '若发现具体薄弱处，请在 operations 中输出精准局部修补（最多 12 条）；若成稿已经精良，operations 可为空数组。严禁编造不在清单中的动作/表情/音效，严禁输出 markdown。',
       '若通过 update_talk 修改台词正文，多行换行统一使用 \\n，严禁用 / 或 " / " 表示换行。'
     ].join('\n'),
