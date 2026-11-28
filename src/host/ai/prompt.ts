@@ -303,21 +303,21 @@ const UNIT_QUERY_KEYWORDS: Array<[RegExp, string]> = [
 function extractQueryTimeHint(query: string): string | null {
   if (/深夜|25点|凌晨|半夜|熬夜/.test(query)) return '深夜'
   if (/黄昏|傍晚|夕阳|晚霞|放学后/.test(query)) return '黄昏'
-  if (/夜晚|晚上|今晚|夜里|夜景|夜空/.test(query)) return '夜晚'
-  if (/白天|上午|清晨|早上|中午|午休/.test(query)) return '白天'
+  if (/夜晚|晚上|今晚|夜里|夜景|夜空|暗灯|关灯/.test(query)) return '夜晚'
+  if (/白天|上午|清晨|早上|中午|午休|早课|上午考/.test(query)) return '白天'
   return null
 }
 
 function extractQueryIndoorHint(query: string): string | null {
   if (
-    /教室|房间|卧室|客厅|厨房|医院|病房|排练室|休息室|咖啡厅|餐厅|室内|家里|家中|语音|通话|电脑/.test(
+    /教室|考场|考试|补考|测验|课堂|上课|下课|课室|自习|房间|卧室|客厅|厨房|医院|病房|排练室|休息室|咖啡厅|咖啡店|餐厅|室内|家里|家中|语音|通话|电脑/.test(
       query
     )
   ) {
     return '室内'
   }
   if (
-    /天台|屋顶|屋上|街头|十字路口|街道|中庭|校门|公园|游乐园|乐园|海边|沙滩|广场|室外|户外|山上/.test(
+    /天台|屋顶|屋上|街头|十字路口|街道|中庭|校门|操场|公园|游乐园|乐园|海边|沙滩|广场|室外|户外|山上/.test(
       query
     )
   ) {
@@ -325,6 +325,182 @@ function extractQueryIndoorHint(query: string): string | null {
   }
   return null
 }
+
+const SOLID_OR_CURTAIN_BG_ID_RE = /^(?:bg_a0000\d{2}|bg_black(?:_\w+)?|bg_white(?:_\w+)?)$/i
+const SOLID_OR_CURTAIN_BG_NAME_RE = /(?:纯黑|纯白|过渡幕布|纯色\/光影|氛围幕布|黑屏|白屏)/
+
+/**
+ * 判断背景是否为纯黑/纯白/纯色转场幕布（如 bg_a000000..bg_a000099、bg_white、category="特效与纯色"）。
+ * 正常剧情绝不允许把这类幕布当成默认背景或未命中兜底背景，避免成片整段黑底。
+ */
+export function isSolidOrCurtainBackground(
+  detailOrRef: CatalogImage | string | null | undefined
+): boolean {
+  if (!detailOrRef) return false
+  if (typeof detailOrRef === 'string') {
+    const clean = detailOrRef.trim().replace(/\\/g, '/')
+    if (!clean) return false
+    const stem = (clean.split('/').pop() ?? clean).replace(/\.[^.]+$/, '')
+    return SOLID_OR_CURTAIN_BG_ID_RE.test(stem) || SOLID_OR_CURTAIN_BG_NAME_RE.test(clean)
+  }
+  if (detailOrRef.category === '特效与纯色') return true
+  const id = (detailOrRef.id ?? '').trim()
+  const stem = (detailOrRef.file.split('/').pop() ?? detailOrRef.file).replace(/\.[^.]+$/, '')
+  if (SOLID_OR_CURTAIN_BG_ID_RE.test(id) || SOLID_OR_CURTAIN_BG_ID_RE.test(stem)) return true
+  if (SOLID_OR_CURTAIN_BG_NAME_RE.test(detailOrRef.name ?? '')) return true
+  if (
+    Array.isArray(detailOrRef.tags) &&
+    detailOrRef.tags.some((t) => t === '黑屏' || t === '纯色' || t === '转场')
+  ) {
+    return true
+  }
+  return false
+}
+
+/** 判断上下文是否明确要求纯黑/虚无/纯色幕布（常规剧情一律返回 false；严禁用 bg_a000000 ID 自我放行）。 */
+export function isExplicitDarkVoidContext(contextText: string): boolean {
+  if (!contextText) return false
+  return /纯黑背景|纯黑幕布|全黑画面|黑屏独白|漆黑一片|黑暗空间|虚无空间|纯色幕布|纯白幕布/i.test(
+    contextText
+  )
+}
+
+interface SemanticBgHintRule {
+  pattern: RegExp
+  tokens: string[]
+  indoor?: '室内' | '室外'
+}
+
+const SEMANTIC_BG_HINT_RULES: SemanticBgHintRule[] = [
+  {
+    pattern:
+      /考场|考试|补考|测验|期中|期末|随堂|课堂|上课|下课|课室|自习|讲台|黑板|课桌|抄答案|答卷|试卷|监考|教室|班里|班级|三年一班|二年一班|一年一班/,
+    tokens: ['教室', '校园'],
+    indoor: '室内'
+  },
+  { pattern: /空教室|放学后的教室/, tokens: ['空教室', '教室', '校园'], indoor: '室内' },
+  { pattern: /神山高校|神山高中|神高|神山/, tokens: ['神山高校', '校园'] },
+  { pattern: /宫益坂|宮益坂|宫女|女子学园|女子高校/, tokens: ['宫益坂女子学园', '校园'] },
+  { pattern: /音乐教室|音乐室|部室|社团室/, tokens: ['音乐教室', '校园'], indoor: '室内' },
+  { pattern: /天台|屋顶|屋上/, tokens: ['天台'], indoor: '室外' },
+  { pattern: /走廊|楼道/, tokens: ['走廊', '校园'] },
+  { pattern: /操场|运动场|体育课/, tokens: ['操场', '校园'], indoor: '室外' },
+  { pattern: /中庭|校园中庭/, tokens: ['中庭', '校园'], indoor: '室外' },
+  { pattern: /校门|学校门口/, tokens: ['校门', '校园'], indoor: '室外' },
+  { pattern: /学校|校园|学园|高中|高校|校服|school/i, tokens: ['校园', '教室'] },
+  {
+    pattern: /卧室|房间|屋里|家里|家中|宿舍|床上|写字台|书桌/,
+    tokens: ['房间', '住宅与房间'],
+    indoor: '室内'
+  },
+  { pattern: /客厅|饭厅|厨房/, tokens: ['客厅', '住宅与房间'], indoor: '室内' },
+  {
+    pattern: /家庭餐厅|快餐店|汉堡店|餐厅|饭店|食堂/,
+    tokens: ['餐厅', '商业与餐饮'],
+    indoor: '室内'
+  },
+  {
+    pattern: /咖啡厅|咖啡店|咖啡馆|weekend garage|crase cafe/i,
+    tokens: ['咖啡', '商业与餐饮'],
+    indoor: '室内'
+  },
+  { pattern: /医院|病房|诊所|保健室/, tokens: ['医院', '医院与公共'], indoor: '室内' },
+  {
+    pattern: /排练室|练习室|录音室|工作室|练歌房|后台|乐屋/,
+    tokens: ['排练', '演出与排练'],
+    indoor: '室内'
+  },
+  { pattern: /舞台|演唱会|live\s*house|演出/i, tokens: ['舞台', '演出与排练'] },
+  {
+    pattern: /游乐园|奇幻乐园|凤凰奇幻乐园|乐园/,
+    tokens: ['奇幻乐园', '游乐园与休闲'],
+    indoor: '室外'
+  },
+  {
+    pattern: /涩谷|渋谷|十字路口|街头|街道|商业街|大街|马路|路口/,
+    tokens: ['涩谷', '街道', '涩谷街景'],
+    indoor: '室外'
+  },
+  { pattern: /公园|广场/, tokens: ['公园'], indoor: '室外' },
+  { pattern: /车站|电车站|月台|站台/, tokens: ['车站'] },
+  { pattern: /海边|沙滩|海滩|海岸/, tokens: ['海', '自然与旅行'], indoor: '室外' },
+  { pattern: /无人[的]?世界|无人sekai|空无一人/i, tokens: ['无人', 'SEKAI世界'] },
+  { pattern: /教室[的]?世界|教室sekai/i, tokens: ['教室「世界」', 'SEKAI世界'] },
+  { pattern: /舞台[的]?世界|舞台sekai/i, tokens: ['舞台「世界」', 'SEKAI世界'] },
+  { pattern: /街头[的]?世界|街头sekai/i, tokens: ['街头「世界」', 'SEKAI世界'] },
+  { pattern: /奇幻[的]?世界|乐园[的]?世界|奇幻sekai/i, tokens: ['奇幻「世界」', 'SEKAI世界'] }
+]
+
+const KAMIYAMA_SCHOOL_CAST_RE =
+  /白石杏|东云彰人|青柳冬弥|小豆泽心羽|天马司|神代类|草薙宁宁|晓山瑞希|杏|彰人|冬弥|心羽|宁宁|瑞希|\b(?:10an|11akito|12toya|09kohane|13tsukasa|16rui|15nene|20mizuki)\b/i
+const MIYAMASUZAKA_SCHOOL_CAST_RE =
+  /星乃一歌|天马咲希|望月穗波|日野森志步|花里实乃理|桐谷遥|桃井爱莉|日野森雫|凤笑梦|朝比奈真冬|东云绘名|一歌|咲希|穗波|志步|实乃理|爱莉|笑梦|真冬|绘名|\b(?:01ichika|02saki|03honami|04shiho|05minori|06haruka|07airi|08shizuku|14emu|18mafuyu|19ena)\b/i
+
+interface SemanticBgHints {
+  tokens: string[]
+  indoorHint: string | null
+  timeHint: string | null
+  schoolHint: '神山高校' | '宫益坂女子学园' | null
+  wantSekai: boolean
+  wantCall: boolean
+  wantIllustration: boolean
+}
+
+function extractSemanticBgHints(query: string): SemanticBgHints {
+  const tokens = new Set<string>()
+  let indoorHint = extractQueryIndoorHint(query)
+  const timeHint = extractQueryTimeHint(query)
+  for (const rule of SEMANTIC_BG_HINT_RULES) {
+    if (!rule.pattern.test(query)) continue
+    for (const tok of rule.tokens) tokens.add(tok.toLowerCase())
+    if (!indoorHint && rule.indoor) indoorHint = rule.indoor
+  }
+  const hasSchoolCue =
+    tokens.has('教室') ||
+    tokens.has('校园') ||
+    tokens.has('神山高校') ||
+    tokens.has('宫益坂女子学园') ||
+    tokens.has('天台') ||
+    tokens.has('走廊') ||
+    tokens.has('操场') ||
+    tokens.has('校门') ||
+    tokens.has('中庭')
+  let schoolHint: '神山高校' | '宫益坂女子学园' | null = null
+  if (/神山高校|神山高中|神高|神山/.test(query)) {
+    schoolHint = '神山高校'
+  } else if (/宫益坂|宮益坂|宫女|女子学园|女子高校/.test(query)) {
+    schoolHint = '宫益坂女子学园'
+  } else if (hasSchoolCue) {
+    const kami = KAMIYAMA_SCHOOL_CAST_RE.test(query)
+    const miya = MIYAMASUZAKA_SCHOOL_CAST_RE.test(query)
+    if (kami && !miya) schoolHint = '神山高校'
+    else if (miya && !kami) schoolHint = '宫益坂女子学园'
+  }
+  return {
+    tokens: [...tokens],
+    indoorHint,
+    timeHint,
+    schoolHint,
+    wantSekai:
+      /sekai|「世界」|无人[的]?世界|教室[的]?世界|舞台[的]?世界|街头[的]?世界|奇幻[的]?世界/i.test(
+        query
+      ),
+    wantCall: /通话|连线|语音通话|视频通话|nightcord通话/i.test(query),
+    wantIllustration: /插画|cg|卡面/i.test(query)
+  }
+}
+
+const PREFERRED_DAYTIME_DEFAULT_BG_IDS = [
+  'bg_a000301', // 神山高校 三年一班（白天/室内）
+  'bg_a000401', // 宫益坂女子学园 教室（白天/室内）
+  'bg_a000101', // 神山高校 中庭（白天/室外）
+  'bg_a000701', // 神山高校 天台（白天/室外）
+  'bg_a000501', // 神山高校（白天）
+  'bg00002', // 宫益坂女子高校（白天）
+  'bg00026' // 通用街道背景（白天）
+]
+
+const EVERYDAY_SCENIC_CATEGORIES = new Set(['校园', '涩谷街景', '住宅与房间', '商业与餐饮'])
 
 function extractQueryKeywords(query: string): string[] {
   const tokens = new Set<string>()
@@ -343,7 +519,7 @@ function extractQueryKeywords(query: string): string[] {
     '因为',
     '所以'
   ])
-  for (const part of query.split(/[\s,，。！？!?、：:；;（）()「」""'']+/).filter(Boolean)) {
+  for (const part of query.split(/[\s,，。！？!?、：:；;（）()「」""''·/]+/).filter(Boolean)) {
     const clean = part.trim().toLowerCase()
     if (clean.length >= 2 && !stopWords.has(clean)) tokens.add(clean)
   }
@@ -615,17 +791,21 @@ export class CatalogView {
     const named = this.imageDetailsList().filter(
       (detail) => detail.source !== 'cloud' || (detail.name && detail.name !== detail.id)
     )
-    if (limit <= 0 || named.length <= limit) return named
-
-    const wantSpecial = /纯色|黑屏|幕布|插画|cg|回忆画面/i.test(query)
-    const pool = wantSpecial
-      ? named
-      : named.filter((d) => d.category !== '特效与纯色' && d.category !== '剧情插画')
+    const hints = extractSemanticBgHints(query)
+    const allowSolid = isExplicitDarkVoidContext(query)
+    const pool = named.filter((d) => {
+      if (!allowSolid && isSolidOrCurtainBackground(d)) return false
+      if (!hints.wantIllustration && d.category === '剧情插画') return false
+      if (!hints.wantCall && d.category === '线上通话') return false
+      return true
+    })
     const effectivePool = pool.length > 0 ? pool : named
+    if (limit <= 0 || effectivePool.length <= limit) return effectivePool
 
-    const timeHint = extractQueryTimeHint(query)
-    const indoorHint = extractQueryIndoorHint(query)
-    const keywords = extractQueryKeywords(query)
+    const timeHint = hints.timeHint
+    const indoorHint = hints.indoorHint
+    const rawKeywords = extractQueryKeywords(query)
+    const keywords = [...new Set([...rawKeywords, ...hints.tokens])]
     const unitHints = UNIT_QUERY_KEYWORDS.filter(([re]) => re.test(query)).map(([, u]) => u)
 
     const scoreOf = (detail: CatalogImage): number => {
@@ -634,7 +814,14 @@ export class CatalogView {
         `${detail.name} ${(detail.aliases ?? []).join(' ')} ${(detail.tags ?? []).join(' ')} ${detail.category ?? ''}`.toLowerCase()
       for (const kw of keywords) {
         if (detail.name.toLowerCase().includes(kw)) score += 12
+        else if ((detail.tags ?? []).some((t) => t.toLowerCase() === kw)) score += 10
         else if (hay.includes(kw)) score += 6
+      }
+      if (hints.schoolHint) {
+        if (hay.includes(hints.schoolHint.toLowerCase())) score += 12
+      }
+      if (!hints.wantSekai && detail.category === 'SEKAI世界') {
+        score -= 14
       }
       if (timeHint && detail.timeOfDay) {
         if (detail.timeOfDay === timeHint) score += 6
@@ -646,6 +833,9 @@ export class CatalogView {
         } else if (detail.timeOfDay !== '通用') {
           score -= 3
         }
+      } else if (!timeHint && detail.timeOfDay) {
+        if (detail.timeOfDay === '白天') score += 3
+        else if (detail.timeOfDay === '夜晚' || detail.timeOfDay === '深夜') score -= 2
       }
       if (indoorHint && detail.indoor) {
         if (detail.indoor === indoorHint) score += 4
@@ -866,7 +1056,7 @@ export class CatalogView {
   }
 
   /**
-   * 背景选择：本地文件、云端 id（bg_a000301）与可读名（教室）及带时段变体（如「神山高校 天台·黄昏」）都接受。
+   * 背景选择：本地文件、云端 id（bg_a000301）与可读名（教室）及带时段/语义变体（如「神山高校 天台·黄昏」「考场」「神山高校教室」）都接受。
    * 返回登记项本身，调用方可拿到 file 与展示名。
    */
   canonicalImageEntry(value: unknown): CatalogImage | null {
@@ -887,8 +1077,20 @@ export class CatalogView {
     )
     if (exactId) return exactId
 
-    const timeHint = extractQueryTimeHint(raw)
+    const hints = extractSemanticBgHints(raw)
+    const allowSolid = isExplicitDarkVoidContext(raw) || /纯色|黑屏|白屏|幕布/i.test(raw)
+    const scenicPool = details.filter((detail) => {
+      if (!allowSolid && isSolidOrCurtainBackground(detail)) return false
+      if (!hints.wantIllustration && detail.category === '剧情插画') return false
+      return true
+    })
+    const effectiveDetails = scenicPool.length > 0 ? scenicPool : details
+
+    const timeHint = hints.timeHint
     const stripped = stripImageTimeHint(raw).toLowerCase()
+    const compactLower = lower.replace(/\s+/g, '')
+    const compactStripped = stripped.replace(/\s+/g, '')
+
     const timeRank = (entry: CatalogImage): number => {
       if (timeHint) {
         if (entry.timeOfDay === timeHint) return 0
@@ -906,9 +1108,101 @@ export class CatalogView {
       return 3
     }
 
-    const exactNames = details.filter((detail) => {
+    const entryHasSchool = (entry: CatalogImage, school: string): boolean => {
+      const target = school.toLowerCase()
+      const hay =
+        `${entry.name} ${(entry.aliases ?? []).join(' ')} ${(entry.tags ?? []).join(' ')}`.toLowerCase()
+      return hay.includes(target)
+    }
+
+    const bestSemanticMatch = (): {
+      entry: CatalogImage
+      matchedTokens: number
+      score: number
+    } | null => {
+      const rawKeywords = extractQueryKeywords(stripped || raw)
+      const searchTokens = [...new Set([...hints.tokens, ...rawKeywords])]
+      if (hints.schoolHint) {
+        const sTok = hints.schoolHint.toLowerCase()
+        if (!searchTokens.includes(sTok)) searchTokens.push(sTok)
+      }
+      if (searchTokens.length === 0) return null
+
+      let best: { entry: CatalogImage; matchedTokens: number; score: number } | null = null
+      for (const entry of effectiveDetails) {
+        const nameLower = entry.name.toLowerCase()
+        const compactName = nameLower.replace(/\s+/g, '')
+        const aliasesLower = (entry.aliases ?? []).map((a) => a.toLowerCase())
+        const tagsLower = (entry.tags ?? []).map((t) => t.toLowerCase())
+        const catLower = (entry.category ?? '').toLowerCase()
+
+        let matchedTokens = 0
+        let score = 0
+        for (const tok of searchTokens) {
+          const compactTok = tok.replace(/\s+/g, '')
+          if (!compactTok) continue
+          if (tagsLower.includes(tok) || tagsLower.includes(compactTok)) {
+            score += 14
+            matchedTokens += 1
+          } else if (nameLower.includes(tok) || compactName.includes(compactTok)) {
+            score += 12
+            matchedTokens += 1
+          } else if (
+            aliasesLower.some((a) => a.includes(tok) || a.replace(/\s+/g, '').includes(compactTok))
+          ) {
+            score += 11
+            matchedTokens += 1
+          } else if (catLower && catLower === tok) {
+            score += 6
+            matchedTokens += 1
+          }
+        }
+        if (matchedTokens === 0) continue
+
+        if (hints.schoolHint && entryHasSchool(entry, hints.schoolHint)) {
+          score += 12
+        }
+        if (!hints.wantSekai && entry.category === 'SEKAI世界') {
+          score -= 22
+        }
+        if (!hints.wantCall && entry.category === '线上通话') {
+          score -= 22
+        }
+        const tr = timeRank(entry)
+        if (tr === 0) score += 10
+        else if (tr === 1) score += 5
+        else if (tr >= 3) score -= 12
+
+        if (hints.indoorHint && entry.indoor) {
+          score += entry.indoor === hints.indoorHint ? 5 : -3
+        }
+        if (!entry.name.includes('#') && !entry.name.includes('衍生场景')) {
+          score += 4
+        }
+        const entryStem = (entry.id ?? entry.file.split('/').pop() ?? '')
+          .replace(/\.[^.]+$/, '')
+          .toLowerCase()
+        const prefIdx = PREFERRED_DAYTIME_DEFAULT_BG_IDS.indexOf(entryStem)
+        if (prefIdx >= 0) score += 4 - Math.min(3, prefIdx)
+        if (entry.source === 'local') score += 2
+
+        if (
+          !best ||
+          score > best.score ||
+          (score === best.score &&
+            (entry.id ?? entry.file).localeCompare(best.entry.id ?? best.entry.file) < 0)
+        ) {
+          best = { entry, matchedTokens, score }
+        }
+      }
+      return best
+    }
+
+    const exactNames = effectiveDetails.filter((detail) => {
+      const nameLower = detail.name.toLowerCase()
+      const compactName = nameLower.replace(/\s+/g, '')
       const candidates = [
-        detail.name.toLowerCase(),
+        nameLower,
         detail.timeOfDay ? `${detail.name}·${detail.timeOfDay}`.toLowerCase() : '',
         detail.timeOfDay ? `${detail.name}（${detail.timeOfDay}）`.toLowerCase() : '',
         detail.timeOfDay ? `${detail.name} ${detail.timeOfDay}`.toLowerCase() : '',
@@ -916,34 +1210,93 @@ export class CatalogView {
       ].filter(Boolean)
       return (
         candidates.includes(lower) ||
+        (compactLower.length >= 2 && compactName === compactLower) ||
         (stripped.length > 0 &&
-          (detail.name.toLowerCase() === stripped ||
-            (detail.aliases ?? []).some((a) => a.toLowerCase() === stripped)))
+          (nameLower === stripped ||
+            (compactStripped.length >= 2 && compactName === compactStripped) ||
+            (detail.aliases ?? []).some(
+              (a) =>
+                a.toLowerCase() === stripped ||
+                (compactStripped.length >= 2 &&
+                  a.toLowerCase().replace(/\s+/g, '') === compactStripped)
+            )))
       )
     })
     if (exactNames.length > 0) {
-      return exactNames.sort(
+      const sortedExact = exactNames.sort(
         (a, b) => timeRank(a) - timeRank(b) || (a.id ?? a.file).localeCompare(b.id ?? b.file)
-      )[0]
+      )
+      const topExact = sortedExact[0]
+      // 若精确名称只命中了时段明显不符的条目（如「神山高校 教室」仅登记了夜晚 bg_a000304，而场景需要白天/默认白天），
+      // 优先采用同地点的白天语义命中（如 bg_a000301 神山高校 三年一班）。
+      if (timeRank(topExact) >= 3) {
+        const semanticAlt = bestSemanticMatch()
+        if (
+          semanticAlt &&
+          timeRank(semanticAlt.entry) <= 1 &&
+          semanticAlt.matchedTokens >= Math.min(2, Math.max(1, hints.tokens.length))
+        ) {
+          return semanticAlt.entry
+        }
+      }
+      return topExact
     }
 
     const fuzzyQuery = stripped || lower
-    const byName = details
-      .filter(
-        (detail) =>
-          detail.name.toLowerCase().includes(fuzzyQuery) ||
-          (detail.aliases ?? []).some((alias) => alias.toLowerCase().includes(fuzzyQuery)) ||
+    const compactFuzzy = fuzzyQuery.replace(/\s+/g, '')
+    const byName = effectiveDetails
+      .filter((detail) => {
+        const nameLower = detail.name.toLowerCase()
+        const compactName = nameLower.replace(/\s+/g, '')
+        return (
+          nameLower.includes(fuzzyQuery) ||
+          (compactFuzzy.length >= 2 && compactName.includes(compactFuzzy)) ||
+          (detail.aliases ?? []).some(
+            (alias) =>
+              alias.toLowerCase().includes(fuzzyQuery) ||
+              (compactFuzzy.length >= 2 &&
+                alias.toLowerCase().replace(/\s+/g, '').includes(compactFuzzy))
+          ) ||
           (detail.tags ?? []).some((tag) => tag.toLowerCase() === fuzzyQuery)
-      )
+        )
+      })
       .sort(
         (a, b) =>
+          Number(!hints.wantSekai && a.category === 'SEKAI世界') -
+            Number(!hints.wantSekai && b.category === 'SEKAI世界') ||
+          Number(!hints.wantCall && a.category === '线上通话') -
+            Number(!hints.wantCall && b.category === '线上通话') ||
           timeRank(a) - timeRank(b) ||
+          Number(Boolean(hints.schoolHint && !entryHasSchool(a, hints.schoolHint))) -
+            Number(Boolean(hints.schoolHint && !entryHasSchool(b, hints.schoolHint))) ||
+          Number(Boolean(hints.indoorHint && a.indoor && a.indoor !== hints.indoorHint)) -
+            Number(Boolean(hints.indoorHint && b.indoor && b.indoor !== hints.indoorHint)) ||
+          Number(a.name.includes('#') || a.name.includes('衍生场景')) -
+            Number(b.name.includes('#') || b.name.includes('衍生场景')) ||
           a.name.length - b.name.length ||
           (a.id ?? a.file).localeCompare(b.id ?? b.file)
       )
-    if (byName.length > 0) return byName[0]
+    if (byName.length > 0) {
+      const topName = byName[0]
+      if (timeRank(topName) >= 3) {
+        const semanticAlt = bestSemanticMatch()
+        if (
+          semanticAlt &&
+          timeRank(semanticAlt.entry) <= 1 &&
+          semanticAlt.matchedTokens >= Math.min(2, Math.max(1, hints.tokens.length))
+        ) {
+          return semanticAlt.entry
+        }
+      }
+      return topName
+    }
 
-    const byFile = details.filter(
+    const semantic = bestSemanticMatch()
+    if (semantic && semantic.matchedTokens > 0 && semantic.score > 0) {
+      return semantic.entry
+    }
+
+    const byFile = effectiveDetails.filter(
       (detail) =>
         detail.file.toLowerCase().includes(lower) || lower.includes(detail.file.toLowerCase())
     )
@@ -954,8 +1307,143 @@ export class CatalogView {
     return this.canonicalImageEntry(value)?.file ?? null
   }
 
+  /**
+   * 语义兜底背景：按场景上下文（地点/考场/时段/出场角色所属学校等）挑选最贴合的非纯色场景图；
+   * 永远排除纯黑/纯色转场幕布（如 bg_a000000）与剧情插画，未命中时回落至安全的日常默认背景。
+   */
+  pickScenicFallbackImage(contextHint = ''): string {
+    const trimmed = contextHint.trim()
+    if (trimmed) {
+      const hints = extractSemanticBgHints(trimmed)
+      const direct = this.canonicalImageEntry(trimmed)
+      if (
+        direct &&
+        !isSolidOrCurtainBackground(direct) &&
+        (hints.wantIllustration || direct.category !== '剧情插画') &&
+        (hints.wantCall || direct.category !== '线上通话')
+      ) {
+        return direct.file
+      }
+
+      const scenicPool = this.imageDetailsList().filter((detail) => {
+        if (isSolidOrCurtainBackground(detail)) return false
+        if (!hints.wantIllustration && detail.category === '剧情插画') return false
+        if (!hints.wantCall && detail.category === '线上通话') return false
+        if (detail.source === 'cloud' && (!detail.name || detail.name === detail.id)) return false
+        return true
+      })
+      const keywords = [...new Set([...hints.tokens, ...extractQueryKeywords(trimmed)])]
+      if (scenicPool.length > 0 && (keywords.length > 0 || hints.schoolHint)) {
+        let best: { entry: CatalogImage; score: number; matched: number } | null = null
+        for (const entry of scenicPool) {
+          const hay =
+            `${entry.name} ${(entry.aliases ?? []).join(' ')} ${(entry.tags ?? []).join(' ')} ${entry.category ?? ''}`.toLowerCase()
+          let matched = 0
+          let score = entry.source === 'local' ? 4 : 0
+          for (const kw of keywords) {
+            if (entry.name.toLowerCase().includes(kw)) {
+              score += 12
+              matched += 1
+            } else if ((entry.tags ?? []).some((t) => t.toLowerCase() === kw)) {
+              score += 14
+              matched += 1
+            } else if (hay.includes(kw)) {
+              score += 6
+              matched += 1
+            }
+          }
+          if (hints.schoolHint && hay.includes(hints.schoolHint.toLowerCase())) {
+            score += 12
+            matched += 1
+          }
+          if (matched === 0) continue
+          if (!hints.wantSekai && entry.category === 'SEKAI世界') score -= 22
+          if (hints.timeHint && entry.timeOfDay) {
+            if (entry.timeOfDay === hints.timeHint) score += 8
+            else if (
+              (hints.timeHint === '夜晚' && entry.timeOfDay === '深夜') ||
+              (hints.timeHint === '深夜' && entry.timeOfDay === '夜晚')
+            ) {
+              score += 4
+            } else if (entry.timeOfDay !== '通用') {
+              score -= 8
+            }
+          } else if (!hints.timeHint && entry.timeOfDay) {
+            if (entry.timeOfDay === '白天') score += 6
+            else if (entry.timeOfDay === '夜晚' || entry.timeOfDay === '深夜') score -= 6
+          }
+          if (hints.indoorHint && entry.indoor) {
+            score += entry.indoor === hints.indoorHint ? 5 : -3
+          }
+          if (!entry.name.includes('#') && !entry.name.includes('衍生场景')) score += 4
+          const entryStem = (entry.id ?? entry.file.split('/').pop() ?? '')
+            .replace(/\.[^.]+$/, '')
+            .toLowerCase()
+          const prefIdx = PREFERRED_DAYTIME_DEFAULT_BG_IDS.indexOf(entryStem)
+          if (prefIdx >= 0) score += 4 - Math.min(3, prefIdx)
+
+          if (
+            !best ||
+            score > best.score ||
+            (score === best.score &&
+              (entry.id ?? entry.file).localeCompare(best.entry.id ?? best.entry.file) < 0)
+          ) {
+            best = { entry, score, matched }
+          }
+        }
+        if (best && best.score > 0) return best.entry.file
+      }
+    }
+    return this.defaultImage()
+  }
+
+  /**
+   * 默认兜底背景：严禁返回 bg_a000000 等纯黑/纯色转场幕布（云端字母序第 0 项即 bg_a000000），
+   * 优先选择本地非纯色场景图，其次选择白天常规校园/街景背景。
+   */
   defaultImage(): string {
-    return this.imageDetailsList()[0]?.file ?? this.images[0] ?? ''
+    const details = this.imageDetailsList()
+    const scenic = details.filter(
+      (detail) =>
+        !isSolidOrCurtainBackground(detail) &&
+        detail.category !== '剧情插画' &&
+        detail.category !== '线上通话' &&
+        (detail.source !== 'cloud' || Boolean(detail.name && detail.name !== detail.id))
+    )
+    const localScenic = scenic.find((detail) => detail.source !== 'cloud')
+    if (localScenic) return localScenic.file
+
+    if (scenic.length > 0) {
+      for (const preferredId of PREFERRED_DAYTIME_DEFAULT_BG_IDS) {
+        const hit = scenic.find((detail) => {
+          const stem = (detail.id ?? detail.file.split('/').pop() ?? '')
+            .replace(/\.[^.]+$/, '')
+            .toLowerCase()
+          return stem === preferredId
+        })
+        if (hit) return hit.file
+      }
+      const everydayDaytime = scenic.find(
+        (detail) =>
+          detail.timeOfDay === '白天' &&
+          EVERYDAY_SCENIC_CATEGORIES.has(detail.category ?? '') &&
+          !detail.name.includes('#') &&
+          !detail.name.includes('衍生场景')
+      )
+      if (everydayDaytime) return everydayDaytime.file
+
+      const anyDaytime = scenic.find((detail) => !detail.timeOfDay || detail.timeOfDay === '白天')
+      if (anyDaytime) return anyDaytime.file
+      return scenic[0].file
+    }
+
+    const anyNonSolid = details.find((detail) => !isSolidOrCurtainBackground(detail))
+    if (anyNonSolid) return anyNonSolid.file
+
+    const anyNonSolidRaw = this.images.find((file) => !isSolidOrCurtainBackground(file))
+    if (anyNonSolidRaw) return anyNonSolidRaw
+
+    return details[0]?.file ?? this.images[0] ?? ''
   }
 
   validImages(): Set<string> {

@@ -354,10 +354,118 @@ function pickFile(files: MediaFile[], extensions: string[]): MediaFile | null {
   return null
 }
 
-function existingMediaFile(dir: string, name: string, extensions: string[]): string | null {
+const HTML_OR_ERROR_PREFIXES = [
+  '<!doctype',
+  '<html',
+  '<head',
+  '<body',
+  '<?xml',
+  '<error',
+  '{"error"',
+  '{"message"',
+  '{"code"',
+  '404 not found',
+  '403 forbidden',
+  '502 bad gateway',
+  '503 service unavailable'
+]
+
+/** 检测响应/缓存内容是否为 HTML/XML/JSON 错误页，避免把上游错误页落盘成假图片或假音频。 */
+export function isHtmlOrErrorPayload(buffer: Buffer): boolean {
+  if (buffer.byteLength === 0) return true
+  const sample = buffer
+    .subarray(0, Math.min(buffer.byteLength, 256))
+    .toString('utf8')
+    .replace(/^\uFEFF/, '')
+    .trimStart()
+    .toLowerCase()
+  return HTML_OR_ERROR_PREFIXES.some((prefix) => sample.startsWith(prefix))
+}
+
+/** 校验常见图片魔数（WebP / PNG / JPEG）。 */
+export function hasValidImageMagic(buffer: Buffer): boolean {
+  if (
+    buffer.byteLength >= 12 &&
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return true
+  }
+  if (
+    buffer.byteLength >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return true
+  }
+  if (buffer.byteLength >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return true
+  }
+  return false
+}
+
+function validateDownloadedMediaBuffer(
+  buffer: Buffer,
+  kind: MediaKind,
+  url: string,
+  strictImageMagic: boolean
+): void {
+  if (buffer.byteLength === 0) {
+    throw new Error(`${url}: empty response body`)
+  }
+  if (isHtmlOrErrorPayload(buffer)) {
+    throw new Error(`${url}: received HTML/error payload instead of ${kind} binary`)
+  }
+  if (strictImageMagic && kind === 'background' && !hasValidImageMagic(buffer)) {
+    throw new Error(`${url}: invalid image signature for background payload`)
+  }
+}
+
+/**
+ * 校验磁盘缓存媒体文件是否可用：拒绝 0 字节、HTML/错误页以及（在严格模式下）魔数损坏的图片，
+ * 以便调用方自动重新下载自愈。
+ */
+export function isUsableCachedMediaFile(
+  filePath: string,
+  kind: MediaKind,
+  strictImageMagic = false
+): boolean {
+  try {
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile() || stat.size <= 0) return false
+    const readLen = Math.min(stat.size, 256)
+    const head = Buffer.alloc(readLen)
+    const fd = fs.openSync(filePath, 'r')
+    try {
+      const bytesRead = fs.readSync(fd, head, 0, readLen, 0)
+      const slice = head.subarray(0, bytesRead)
+      if (slice.byteLength === 0 || isHtmlOrErrorPayload(slice)) return false
+      if (strictImageMagic && kind === 'background' && !hasValidImageMagic(slice)) return false
+      return true
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return false
+  }
+}
+
+function existingMediaFile(
+  dir: string,
+  name: string,
+  extensions: string[],
+  kind: MediaKind,
+  strictImageMagic = false
+): string | null {
   for (const ext of extensions) {
     const candidate = path.join(dir, `${name}${ext}`)
-    if (fs.existsSync(candidate)) return candidate
+    if (isUsableCachedMediaFile(candidate, kind, strictImageMagic)) return candidate
   }
   return null
 }
@@ -396,9 +504,16 @@ async function fetchFiles(
   const extensions = (kind: MediaKind): string[] =>
     kind === 'background' ? BACKGROUND_EXTS : BGM_EXTS
 
+  const strictOriginMagic = isCanonicalAssetOrigin(origin)
   return mapPool(bundles, concurrency, async (bundle) => {
     const dir = targetDir(options.outDir, bundle.kind)
-    const existing = existingMediaFile(dir, bundle.name, extensions(bundle.kind))
+    const existing = existingMediaFile(
+      dir,
+      bundle.name,
+      extensions(bundle.kind),
+      bundle.kind,
+      strictOriginMagic
+    )
     if (existing && !options.force) {
       options.onProgress?.(`跳过已存在：${relativeTo(options.outDir, existing)}`)
       return {
@@ -429,7 +544,14 @@ async function fetchFiles(
       }
 
       options.onProgress?.(`下载 ${bundle.kind} ${bundle.name} …`)
-      const buffer = await fetchBuffer(new URL(picked.url, origin).href, requestOpts)
+      const downloadUrl = new URL(picked.url, origin).href
+      const buffer = await fetchBuffer(downloadUrl, requestOpts)
+      validateDownloadedMediaBuffer(
+        buffer,
+        bundle.kind,
+        downloadUrl,
+        isCanonicalAssetOrigin(apiOrigin(downloadUrl))
+      )
       atomicWrite(target, buffer)
       options.onProgress?.(
         `完成 ${relativeTo(options.outDir, target)}（${(buffer.byteLength / 1024 / 1024).toFixed(1)} MB）`
@@ -564,7 +686,10 @@ export async function downloadMediaFile(
     ? `${options.saveAsName}${path.extname(pickedBase)}`
     : pickedBase
   const target = path.join(dir, fileName)
-  if (fs.existsSync(target) && fs.statSync(target).size > 0 && !options.force) {
+  if (
+    !options.force &&
+    isUsableCachedMediaFile(target, options.kind, isCanonicalAssetOrigin(origin))
+  ) {
     const existingLoop = options.kind === 'bgm' ? extractAudioLoopMetadata(target) : null
     return {
       file: relativeTo(options.outDir, target),
@@ -596,7 +721,7 @@ export async function downloadMediaFile(
         ...requestOpts,
         retries: hasBackup ? Math.min(requestOpts.retries, 1) : requestOpts.retries
       })
-      if (buf.byteLength === 0) throw new Error(`${url}: empty response body`)
+      validateDownloadedMediaBuffer(buf, options.kind, url, isCanonicalAssetOrigin(apiOrigin(url)))
       buffer = buf
       activeOrigin = apiOrigin(url)
       if (downloadUrls.length > 1) markCanonicalOriginHealthy(url)

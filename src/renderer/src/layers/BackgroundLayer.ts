@@ -69,26 +69,111 @@ export default class BackgroundLayer extends BaseLayer {
     }
   }
 
+  /** 校验纹理是否可用：拒绝 Texture.EMPTY、已销毁或明确 0×0 无资源的空纹理，兼容测试桩对象。 */
+  private isUsableTexture(tex: unknown): tex is Texture {
+    if (!tex || typeof tex !== 'object') return false
+    if (tex === Texture.EMPTY) return false
+    const candidate = tex as {
+      valid?: boolean
+      destroyed?: boolean
+      baseTexture?: {
+        valid?: boolean
+        destroyed?: boolean
+        width?: number
+        height?: number
+        resource?: unknown
+      }
+    }
+    if (candidate.destroyed === true || candidate.baseTexture?.destroyed === true) return false
+    if (
+      candidate.baseTexture?.valid === true &&
+      typeof candidate.baseTexture.width === 'number' &&
+      typeof candidate.baseTexture.height === 'number' &&
+      (candidate.baseTexture.width <= 0 || candidate.baseTexture.height <= 0)
+    ) {
+      return false
+    }
+    if (candidate.valid === false && !candidate.baseTexture?.resource) return false
+    return true
+  }
+
   /** 官方背景固定铺进 2338×1440 的居中矩形，不按图片自身像素 cover。 */
   private applyStageRect(sprite: Sprite): void {
     const rect = backgroundStageRect(this.app.screen.width, this.app.screen.height)
+    sprite.position.set(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
+    const tex = sprite.texture as
+      | (Texture & {
+          orig?: { width?: number; height?: number }
+          baseTexture?: {
+            width?: number
+            height?: number
+            once?: (event: string, fn: () => void) => void
+          }
+        })
+      | undefined
+    const texW = tex?.orig?.width ?? tex?.baseTexture?.width ?? tex?.width
+    const texH = tex?.orig?.height ?? tex?.baseTexture?.height ?? tex?.height
+    if (typeof texW === 'number' && typeof texH === 'number' && (texW <= 0 || texH <= 0)) {
+      // 防止对未加载完成的 0×0 纹理写入 width/height 导致 PixiJS 把 scale 锁死成 0（整张背景不可见）
+      if (typeof tex?.baseTexture?.once === 'function') {
+        const targetTex = tex
+        tex.baseTexture.once('loaded', () => {
+          if (sprite.texture === targetTex) {
+            this.applyStageRect(sprite)
+          }
+        })
+      }
+      return
+    }
     sprite.width = rect.width
     sprite.height = rect.height
-    sprite.position.set(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5)
   }
 
   private async resolveTexture(imageOrUrl: Texture | string): Promise<Texture> {
-    if (imageOrUrl instanceof Texture) return imageOrUrl
-    try {
-      const loaded = await Assets.load(imageOrUrl)
-      if (loaded instanceof Texture) return loaded
-    } catch {
-      // fall through to Texture.from
+    if (typeof imageOrUrl !== 'string') return imageOrUrl
+    const trimmed = imageOrUrl.trim()
+    if (!trimmed) {
+      console.warn('[BackgroundLayer] Ignoring empty background URL')
+      return Texture.EMPTY
     }
-    return Texture.from(imageOrUrl)
+    try {
+      const loaded = await Assets.load(trimmed)
+      if (this.isUsableTexture(loaded)) return loaded
+      console.warn(
+        `[BackgroundLayer] Assets.load returned non-usable texture for "${trimmed}", falling back to Texture.from`
+      )
+    } catch (error) {
+      console.warn(
+        `[BackgroundLayer] Assets.load failed for "${trimmed}", falling back to Texture.from`,
+        error
+      )
+    }
+    try {
+      const fallback = Texture.from(trimmed)
+      const base = (
+        fallback as Texture & {
+          baseTexture?: { once?: (event: string, fn: (err?: unknown) => void) => void }
+        }
+      )?.baseTexture
+      if (typeof base?.once === 'function') {
+        base.once('error', (err?: unknown) => {
+          console.warn(`[BackgroundLayer] Background texture load error for "${trimmed}"`, err)
+        })
+      }
+      return fallback
+    } catch (error) {
+      console.warn(`[BackgroundLayer] Texture.from failed for "${trimmed}"`, error)
+      return Texture.EMPTY
+    }
   }
 
   public setBackground(texture: Texture): void {
+    if (!this.isUsableTexture(texture)) {
+      console.warn(
+        '[BackgroundLayer] Ignoring empty or invalid background texture; preserving current background'
+      )
+      return
+    }
     this.changeGeneration++
     this.fadeSprite.visible = false
     this.fadeSprite.alpha = 0
@@ -96,13 +181,35 @@ export default class BackgroundLayer extends BaseLayer {
     this.applyStageRect(this.sprite)
   }
 
-  /** 官方 `ChangeBackground`：支持平滑线性交叉淡化（durationMs=0 立即切换）。 */
+  /** 官方 `ChangeBackground`：支持平滑线性交叉淡化（durationMs=0 立即同步切换）。 */
   public async changeBackground(imageOrUrl: Texture | string, durationMs = 0): Promise<void> {
+    // 预加载纹理即时切换走同步快路径，避免首帧出现 1 tick 微任务空档
+    if (typeof imageOrUrl !== 'string') {
+      if (!this.isUsableTexture(imageOrUrl)) {
+        console.warn(
+          '[BackgroundLayer] changeBackground received empty or invalid texture; preserving current background'
+        )
+        return
+      }
+      if (durationMs <= 0 || !this.isUsableTexture(this.sprite.texture)) {
+        this.setBackground(imageOrUrl)
+        return
+      }
+    }
+
     const generation = ++this.changeGeneration
-    const nextTex = await this.resolveTexture(imageOrUrl)
+    const nextTex =
+      typeof imageOrUrl === 'string' ? await this.resolveTexture(imageOrUrl) : imageOrUrl
     if (generation !== this.changeGeneration) return
 
-    if (durationMs <= 0 || !this.sprite.texture || this.sprite.texture === Texture.EMPTY) {
+    if (!this.isUsableTexture(nextTex)) {
+      console.warn(
+        `[BackgroundLayer] Failed to resolve usable background texture${typeof imageOrUrl === 'string' ? ` for "${imageOrUrl}"` : ''}; preserving current background`
+      )
+      return
+    }
+
+    if (durationMs <= 0 || !this.isUsableTexture(this.sprite.texture)) {
       this.setBackground(nextTex)
       return
     }

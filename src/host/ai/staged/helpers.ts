@@ -12,7 +12,12 @@ import {
   type PersonaEntry,
   type PersonaLookupOptions
 } from '../personas'
-import { isBackViewModel, type CatalogView } from '../prompt'
+import {
+  isBackViewModel,
+  isExplicitDarkVoidContext,
+  isSolidOrCurtainBackground,
+  type CatalogView
+} from '../prompt'
 import { isVirtualSingerModel } from '../scenarioCues'
 import { normalizeDialogueLineBreaks } from '../validate'
 import type {
@@ -293,14 +298,33 @@ function activeRole(value: unknown): string {
   return oneLine(value, 80)
 }
 
-export function matchBackground(view: CatalogView, value: unknown): string {
+export function matchBackground(
+  view: CatalogView,
+  value: unknown,
+  options: { allowSolidCurtain?: boolean; contextHint?: string } = {}
+): string {
   const text = str(value).trim()
   if (!text) return ''
-  return view.canonicalImage(text) ?? ''
+  const entry = view.canonicalImageEntry(text)
+  if (!entry) return ''
+  const allowSolid =
+    Boolean(options.allowSolidCurtain) ||
+    isExplicitDarkVoidContext(`${text} ${options.contextHint ?? ''}`)
+  if (!allowSolid && isSolidOrCurtainBackground(entry)) {
+    return ''
+  }
+  return entry.file
 }
 
-export function normalizeBackground(view: CatalogView, value: unknown): string {
-  return matchBackground(view, value) || view.defaultImage()
+export function normalizeBackground(view: CatalogView, value: unknown, contextHint = ''): string {
+  const raw = str(value).trim()
+  const allowSolidCurtain = isExplicitDarkVoidContext(`${raw} ${contextHint}`)
+  const matched = matchBackground(view, raw, { allowSolidCurtain, contextHint })
+  if (matched) return matched
+  const combinedHint = [isSolidOrCurtainBackground(raw) ? '' : raw, contextHint.trim()]
+    .filter(Boolean)
+    .join(' ')
+  return view.pickScenicFallbackImage(combinedHint) || view.defaultImage()
 }
 
 export function matchBgm(view: CatalogView, value: unknown): string {

@@ -399,7 +399,7 @@ ${bgmList || '（可使用 keep 或 silence）'}
 - 给每个角色标明本场功能（谁发起、谁回应、谁吐槽、谁压轴）。
 - **自然分幕（1~3 幕 scenes，不强制凑数）**：
   - 同一地点、同一时段的连续对话只规划 **1 幕（s1）** 即可，切勿硬拆成 2~3 幕；仅当真正需要换地点、跳时间、插回忆或出入 SEKAI 时才拆出第 2~3 幕。
-  - 每幕写明 \`id\`（s1/s2/s3）、\`summary\`、\`background\`（必须来自可用背景清单）、\`ambient\`（normal/evening/night）、\`activeCast\`（1~2 名本幕起手在场角色名，Normal 模式每次最多 2 人）。
+  - 每幕写明 \`id\`（s1/s2/s3）、\`summary\`、\`background\`（必须来自可用背景清单中的真实场景背景，严禁使用纯黑/纯色过渡幕布如 \`bg_a000000\` 或 \`特效与纯色\`）、\`ambient\`（normal/evening/night）、\`activeCast\`（1~2 名本幕起手在场角色名，Normal 模式每次最多 2 人）。
   - 合理规划转场与标题条：首幕可用 \`telop\`（时间/气氛短标题，如「放学后」）或 \`placeInfo\`（左上角地点条）；后续幕次可用 \`transitionIn\`：\`sideFade\`（横向遮罩擦除）、\`flashback\`（白光闪入回忆：WhiteOut->FlashbackIn->WhiteIn）、\`sekaiIn\`/\`sekaiOut\`（出入 SEKAI）或 \`black\`。
   - 若场景涉及回忆，标注 \`isFlashback: true\`、\`transitionIn: "flashback"\`；若涉及出入 SEKAI，标注 \`isSekai: true\` 与 \`sekaiIn\`/\`sekaiOut\`。
   - 善用 BGM 弧光：首幕（s1）必须从可用 BGM 清单选择贴合气氛的开场配乐（严禁首幕大段无声，只有 2~4 句冷开场且第 5 句前切入 BGM 才可留空）；中后段情绪转折或坦白前一幕可写 \`bgm: "silence"\`（对应官方 \`bgm00000\` 静音停曲留白），之后再接入情绪曲。
@@ -522,7 +522,15 @@ export function normalizeCastPlan(
         .slice(0, 8)
     : []
 
-  const defaultBg = normalizeBackground(view, doc.background ?? doc.image ?? doc.scene)
+  const planBgHint = [
+    options.scene,
+    str(doc.event),
+    str(doc.logline),
+    cast.map((c) => c.name).join(' ')
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const defaultBg = normalizeBackground(view, doc.background ?? doc.image ?? doc.scene, planBgHint)
   const rawScenes = Array.isArray(doc.scenes) ? doc.scenes : []
   const scenes: StagedScenePlan[] = []
   for (const [index, item] of rawScenes.slice(0, 4).entries()) {
@@ -550,15 +558,23 @@ export function normalizeCastPlan(
           ? 'silence'
           : matchBgm(view, bgmRaw)
     const effect = normalizeScenarioEffectName(item.scenarioEffect ?? item.effect)
+    const scenePlaceInfo = oneLine(item.placeInfo ?? item.place, 40)
+    const sceneTelop = oneLine(item.telop, 40)
+    const sceneSummary = oneLine(item.summary ?? item.description, 160) || outline[index] || ''
+    const sceneBgHint = [scenePlaceInfo, sceneTelop, sceneSummary, planBgHint]
+      .filter(Boolean)
+      .join(' ')
     scenes.push({
       id: str(item.id).trim() || `s${index + 1}`,
-      summary: oneLine(item.summary ?? item.description, 160) || outline[index] || '',
-      background: normalizeBackground(view, item.background ?? item.image ?? defaultBg),
+      summary: sceneSummary,
+      background: normalizeBackground(
+        view,
+        item.background ?? item.image ?? defaultBg,
+        sceneBgHint
+      ),
       ambient: normalizeAmbient(item.ambient ?? item.timeOfDay),
-      ...(oneLine(item.telop, 40) ? { telop: oneLine(item.telop, 40) } : {}),
-      ...(oneLine(item.placeInfo ?? item.place, 40)
-        ? { placeInfo: oneLine(item.placeInfo ?? item.place, 40) }
-        : {}),
+      ...(sceneTelop ? { telop: sceneTelop } : {}),
+      ...(scenePlaceInfo ? { placeInfo: scenePlaceInfo } : {}),
       transitionIn,
       ...(isFlashback ? { isFlashback: true } : {}),
       ...(isSekai ? { isSekai: true } : {}),
@@ -706,7 +722,9 @@ export function fallbackCastPlan(view: CatalogView, options: StagedPromptOptions
   const models =
     mentioned.length >= 2 ? mentioned.slice(0, 5) : pool.slice(0, Math.min(2, pool.length))
   const cast = models.map((model) => castMemberFor(view, model))
-  const bg = view.defaultImage()
+  const bg =
+    view.pickScenicFallbackImage(`${options.scene} ${cast.map((c) => c.name).join(' ')}`) ||
+    view.defaultImage()
   const fallbackUnitHint = inferUnitFromText(options.scene)
   const pairwiseAddress = mergePairwiseAddresses(
     options.personas,

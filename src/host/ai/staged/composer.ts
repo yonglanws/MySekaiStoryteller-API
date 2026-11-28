@@ -127,7 +127,7 @@ interface ComposerContext {
   effectiveStaging: StagedStaging
   cast: StagedCastMember[]
   snippets: JsonRecord[]
-  registerImage: (file: string) => number
+  registerImage: (file: string, contextHint?: string) => number
   onStage: Map<number, StageActorState>
   preferredSide: Map<number, 'Left' | 'Right'>
   totalBodyMotions: Map<number, number>
@@ -614,7 +614,16 @@ function emitOpeningScene(ctx: ComposerContext, scene0: StagedStagingScene): voi
   }
   applyBgmDirective(ctx, initialBgm, 600)
   ensureNormalLayoutMode(ctx)
-  const bgId = ctx.registerImage(scene0.background)
+  const scene0Hint = [
+    scene0.placeInfo,
+    scene0.telop,
+    plan.event,
+    plan.logline,
+    ctx.cast.map((c) => c.name).join(' ')
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const bgId = ctx.registerImage(scene0.background, scene0Hint)
   snippets.push({
     type: 'BlackOut',
     wait: true,
@@ -701,7 +710,16 @@ function emitSceneTransition(
   }
   applyBgmDirective(ctx, nextScene.bgm, 900)
 
-  const bgId = ctx.registerImage(nextScene.background)
+  const nextSceneHint = [
+    nextScene.placeInfo,
+    nextScene.telop,
+    ctx.plan.event,
+    ctx.plan.logline,
+    ctx.cast.map((c) => c.name).join(' ')
+  ]
+    .filter(Boolean)
+    .join(' ')
+  const bgId = ctx.registerImage(nextScene.background, nextSceneHint)
   const enteringFlashback = Boolean(nextScene.isFlashback) && !ctx.flashbackActive
   const leavingFlashback = !nextScene.isFlashback && ctx.flashbackActive
   const tKind = nextScene.transitionIn
@@ -1702,8 +1720,9 @@ export function composeStory(
 
   const imageMap = new Map<string, number>()
   const images: Array<{ id: number; image: string }> = []
-  const registerImage = (file: string): number => {
-    const normalized = normalizeBackground(view, file)
+  const castHint = cast.map((c) => c.name).join(' ')
+  const registerImage = (file: string, contextHint = ''): number => {
+    const normalized = normalizeBackground(view, file, contextHint)
     if (!normalized) return 1
     const existing = imageMap.get(normalized)
     if (existing !== undefined) return existing
@@ -1713,9 +1732,17 @@ export function composeStory(
     return id
   }
   for (const scene of effectiveStaging.scenes) {
-    registerImage(scene.background)
+    const sceneHint = [scene.placeInfo, scene.telop, plan.event, plan.logline, castHint]
+      .filter(Boolean)
+      .join(' ')
+    registerImage(scene.background, sceneHint)
   }
-  if (images.length === 0) registerImage(direction.background || plan.background)
+  if (images.length === 0) {
+    registerImage(
+      direction.background || plan.background,
+      [plan.event, plan.logline, castHint].filter(Boolean).join(' ')
+    )
+  }
 
   const models = cast.map((member) => ({
     id: member.modelId,
