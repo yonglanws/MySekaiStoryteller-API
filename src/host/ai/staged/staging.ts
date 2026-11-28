@@ -266,9 +266,9 @@ ${presenceRule}
         : '**本场判定为日常/温和对话场**：请保持克制，`events` 中不要添加 `camera` 推拉或 `shake` 震动（保持 0/0）。'
     }
   - **开场 Telop / PlaceInfo 按需选用**：仅在时间/地点需要明确交代或跳幕时才写 \`telop\` / \`placeInfo\`，安静延续或私密谈心可直接入戏，不必每场千篇一律加 \`Telop + PlaceInfo\`。
-  - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器。
+  - 虚拟歌手在现实场景现身或远程通话时，在 \`hologramCast\` 或 \`hologram: { modelId, enabled: true }\` 启用 \`hologram\` 着色器；**非「世界」持有者（如普通家长/路人配角）不直接肉身 \`sekaiIn\` 进入 SEKAI**，若跨设定安排虚拟歌手与现实配角交锋，优先用手机全息投影（\`hologramCast\`）或梦境/错觉包装。
 - **特效与转场**：跳时间/换场地优先善用 \`SideFade\`（\`transitionIn: "sideFade"\`），回忆段务必配 \`transitionIn: "flashback"\`, \`isFlashback: true\`（自动接 \`WhiteOut -> se00053_b -> FlashbackIn -> WhiteIn\`），时段/氛围变化用 \`ambient\`（\`normal\`/\`evening\`/\`night\`），出入 SEKAI 用 \`sekaiIn\`/\`sekaiOut\`，天候粒子用（${CURATED_SCENARIO_EFFECTS.join('/')}）。
-- **BGM 与停顿节奏**：首幕（s1）必须从可用 BGM 清单选定契合开场氛围的曲目（例如追逐/对峙/低落选戏剧或沉重曲，日常/喜剧选轻快日常曲）；若刻意做冷开场，最多留 2~4 句静音并在第 5 句（l5）前用 \`bgmCut\` 切入 BGM，**严禁前段大段无声**。大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。中后段转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入第二首 BGM。
+- **BGM 与停顿节奏**：首幕（s1）必须从可用 BGM 清单选定契合开场氛围的曲目（例如追逐/对峙/低落选戏剧或沉重曲，日常/喜剧选轻快日常曲）；若刻意做冷开场，最多留 2~4 句静音并在第 5 句（l5）前用 \`bgmCut\` 切入 BGM，**严禁前段大段无声**。全场 BGM 切换务必克制：**30~35 句规模剧本全场控制在 2~4 首以内**（不含 1 次高潮静默 \`silence\`），避免每隔 4~5 句频繁换曲打断情绪沉淀。大部分台词 \`delay: 0\`，只把 1.0/1.5 秒停顿放在关键沉默句的 \`pauseBefore\`。中后段转折前可将幕次 \`bgm\` 或 \`bgmCut\` 设为 \`silence\`（\`bgm00000\` 静音），留白 2~4 句后再接入下一首 BGM。
 - **严禁跨世界线误用 SEKAI 专属 BGM**：标注「仅限对应SEKAI场景 / 仅限SEKAI内使用 / SEKAI主题 / SEKAI氛围」的曲目（如无人「世界」主题曲 \`bgm_area00005\`/\`nightcode_untitled*\`、教室/舞台/街头/奇幻乐园「世界」主题曲 \`bgm_area00001..00004\`/\`*_untitled*\` 等）**绝对禁止**用于任何现实世界场景（卧室、客厅、家庭餐厅、教室、天台、涩谷街头、Nightcord 语音连线等）；进入某组合 SEKAI 时也只能选用该组合对应的 SEKAI 主题曲或通用 SEKAI 曲，严禁混用其他组合的 SEKAI 主题曲。
 - **对齐 Stage 1 转折点**：把 BGM 静音切停、1.0/1.5 秒停顿、镜头推近/震动与 Move 峰值优先安排在转折点前后 1~3 句；开场意象句给一个安静的停顿或特写，收尾回扣句不要加大动作。
 
@@ -607,6 +607,105 @@ function enrichStagingBaseline(
       }
     }
     if (decision.finalFile) usedSafeBgms.add(decision.finalFile)
+  }
+
+  // BGM 切换频次软上限：30~35 句规模全场至多 4 首真实切曲（不含 silence/stop 留白），
+  // 优先保留分幕转场曲与静音留白后的恢复曲，过滤掉间隔 < 4 句或超预算的碎片化中段换曲。
+  const maxBgmPlays = Math.max(3, Math.min(5, Math.ceil(lines.length / 10)))
+  interface BgmDirectiveRef {
+    lineIndex: number
+    kind: 'scene' | 'event'
+    action: 'play' | 'stop'
+    file: string
+    scene?: StagedStagingScene
+    event?: StagedStagingEvent
+  }
+  const bgmTimeline: BgmDirectiveRef[] = []
+  for (const scene of staging.scenes) {
+    if (!scene.bgm || scene.bgm === 'keep') continue
+    bgmTimeline.push({
+      lineIndex: scene.fromIndex,
+      kind: 'scene',
+      action: scene.bgm === 'silence' ? 'stop' : 'play',
+      file: scene.bgm === 'silence' ? '' : scene.bgm,
+      scene
+    })
+  }
+  for (const ev of staging.events) {
+    if (!ev.bgmCut) continue
+    if (ev.bgmCut.action === 'stop') {
+      bgmTimeline.push({
+        lineIndex: ev.lineIndex,
+        kind: 'event',
+        action: 'stop',
+        file: '',
+        event: ev
+      })
+    } else if (ev.bgmCut.file) {
+      bgmTimeline.push({
+        lineIndex: ev.lineIndex,
+        kind: 'event',
+        action: 'play',
+        file: ev.bgmCut.file,
+        event: ev
+      })
+    }
+  }
+  bgmTimeline.sort(
+    (a, b) => a.lineIndex - b.lineIndex || (a.kind === 'scene' ? -1 : b.kind === 'scene' ? 1 : 0)
+  )
+  const totalBgmPlays = bgmTimeline.filter((item) => item.action === 'play').length
+  const keptPlayIndices = new Set<number>()
+  let lastActiveFile = ''
+  let lastPlayLine = -100
+  let wasStopped = true
+  // 先给分幕曲和静音后的恢复曲分配预算，再按顺序吸收间隔 >= 4 句的中段 bgmCut
+  const priorityIndices: number[] = []
+  const secondaryIndices: number[] = []
+  for (let idx = 0; idx < bgmTimeline.length; idx++) {
+    const item = bgmTimeline[idx]
+    if (item.action === 'stop') {
+      wasStopped = true
+      continue
+    }
+    if (item.kind === 'scene' || wasStopped) {
+      priorityIndices.push(idx)
+      wasStopped = false
+    } else {
+      secondaryIndices.push(idx)
+    }
+  }
+  for (const idx of priorityIndices) {
+    if (keptPlayIndices.size < maxBgmPlays) keptPlayIndices.add(idx)
+  }
+  for (const idx of secondaryIndices) {
+    if (keptPlayIndices.size < maxBgmPlays) keptPlayIndices.add(idx)
+  }
+  wasStopped = true
+  for (let idx = 0; idx < bgmTimeline.length; idx++) {
+    const item = bgmTimeline[idx]
+    if (item.action === 'stop') {
+      lastActiveFile = ''
+      wasStopped = true
+      continue
+    }
+    const tooCloseMidScene =
+      totalBgmPlays > maxBgmPlays &&
+      item.kind === 'event' &&
+      !wasStopped &&
+      item.lineIndex - lastPlayLine < 4
+    const duplicateActive = item.file === lastActiveFile
+    if (!keptPlayIndices.has(idx) || tooCloseMidScene || duplicateActive) {
+      if (item.kind === 'event' && item.event) {
+        delete item.event.bgmCut
+      } else if (item.kind === 'scene' && item.scene && item.scene.fromIndex > 0) {
+        item.scene.bgm = 'keep'
+      }
+      continue
+    }
+    lastActiveFile = item.file
+    lastPlayLine = item.lineIndex
+    wasStopped = false
   }
 
   // 开场首幕 BGM 兜底：长场次禁止因 scene0.bgm 留空或无效 silence 导致前几分钟全程无声；

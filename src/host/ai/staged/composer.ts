@@ -149,6 +149,7 @@ interface ComposerContext {
   lastSilentReactionTargetId: number | null
   silentReactionsEmitted: number
   thinkingSoloReturnCast: number[] | null
+  sceneHologramActors: Set<number>
   maxDelayedTalks: number
   delayedTalkCount: number
 }
@@ -545,7 +546,7 @@ function appearActors(
         : '') ||
       view.exampleFacial(id) ||
       view.defaultFacial(id)
-    const isHolo = hologramSet.has(id)
+    const isHolo = hologramSet.has(id) || ctx.sceneHologramActors.has(id)
     const waitFirst = idx === 0
     snippets.push({
       type: 'LayoutAppear',
@@ -682,6 +683,7 @@ function emitOpeningScene(ctx: ComposerContext, scene0: StagedStagingScene): voi
     })
     ctx.currentEffect = scene0.scenarioEffect
   }
+  ctx.sceneHologramActors = new Set(scene0.hologramCast ?? [])
   appearActors(ctx, scene0.activeCast, 0, {
     walkInSet: new Set(scene0.walkInCast ?? []),
     hologramSet: new Set(scene0.hologramCast ?? [])
@@ -695,6 +697,7 @@ function emitSceneTransition(
 ): void {
   const { snippets, onStage } = ctx
   ctx.thinkingSoloReturnCast = null
+  ctx.sceneHologramActors = new Set(nextScene.hologramCast ?? [])
   closeWindowBeforeBreak(ctx)
   stopShakeScreenIfNeeded(ctx)
   resetCameraIfNeeded(ctx)
@@ -885,6 +888,20 @@ function emitSceneTransition(
   }
 }
 
+function actorSpeaksAgainInCurrentScene(
+  ctx: ComposerContext,
+  fromIndex: number,
+  modelId: number
+): boolean {
+  const speakerName = ctx.cast.find((c) => c.modelId === modelId)?.name
+  if (!speakerName) return false
+  for (let i = fromIndex + 1; i < ctx.dialogue.lines.length; i++) {
+    if (ctx.sceneByStart.has(i)) break
+    if (ctx.dialogue.lines[i].speaker === speakerName) return true
+  }
+  return false
+}
+
 function ensureSpeakerOnStage(
   ctx: ComposerContext,
   index: number,
@@ -899,14 +916,24 @@ function ensureSpeakerOnStage(
       ? ev.stageGroup.activeCast.slice(0, 2)
       : [member.modelId, ...ev.stageGroup.activeCast.slice(0, 1)]
     const prevIds = [...onStage.keys()]
-    if (isThinkingLine && targetGroup.length === 1 && prevIds.length >= 2) {
+    const walkOutSet = new Set(ev.stageGroup.walkOut ?? [])
+    const removedIds = prevIds.filter((id) => !targetGroup.includes(id))
+    const canRestoreAfterThinking =
+      isThinkingLine &&
+      targetGroup.length === 1 &&
+      prevIds.length >= 2 &&
+      removedIds.length > 0 &&
+      removedIds.every(
+        (id) => !walkOutSet.has(id) && actorSpeaksAgainInCurrentScene(ctx, index, id)
+      )
+    if (canRestoreAfterThinking) {
       ctx.thinkingSoloReturnCast = prevIds
     } else {
       ctx.thinkingSoloReturnCast = null
     }
     appearActors(ctx, targetGroup, index, {
       walkInSet: new Set(ev.stageGroup.walkIn ?? []),
-      walkOutSet: new Set(ev.stageGroup.walkOut ?? [])
+      walkOutSet
     })
   } else if (!isThinkingLine && ctx.thinkingSoloReturnCast) {
     const restoreIds = ctx.thinkingSoloReturnCast.includes(member.modelId)
@@ -951,16 +978,20 @@ function emitPreTalkEvents(ctx: ComposerContext, ev: StagedStagingEvent | undefi
     })
   }
 
-  if (ev?.hologram && onStage.has(ev.hologram.modelId)) {
-    const st = onStage.get(ev.hologram.modelId)!
-    st.hologram = ev.hologram.enabled
-    snippets.push({
-      type: 'AttachCharacterShader',
-      wait: true,
-      progressBehavior: 'WaitFinished',
-      delay: 0,
-      data: { modelId: ev.hologram.modelId, shader: ev.hologram.enabled ? 'hologram' : 'none' }
-    })
+  if (ev?.hologram) {
+    if (ev.hologram.enabled) ctx.sceneHologramActors.add(ev.hologram.modelId)
+    else ctx.sceneHologramActors.delete(ev.hologram.modelId)
+    if (onStage.has(ev.hologram.modelId)) {
+      const st = onStage.get(ev.hologram.modelId)!
+      st.hologram = ev.hologram.enabled
+      snippets.push({
+        type: 'AttachCharacterShader',
+        wait: true,
+        progressBehavior: 'WaitFinished',
+        delay: 0,
+        data: { modelId: ev.hologram.modelId, shader: ev.hologram.enabled ? 'hologram' : 'none' }
+      })
+    }
   }
 
   // 禁止任何横向 Move 滑动/偏移（原地渐变切镜已由 stageGroup 的 LayoutClear + LayoutAppear 处理）
@@ -1788,6 +1819,7 @@ export function composeStory(
     lastSilentReactionTargetId: null,
     silentReactionsEmitted: 0,
     thinkingSoloReturnCast: null,
+    sceneHologramActors: new Set<number>(),
     // 控制停顿预算：保证 Talk.delay == 0 占比 >= 88%，满足官方 >=85% 节奏基线
     maxDelayedTalks: Math.max(1, Math.floor(dialogue.lines.length * 0.12)),
     delayedTalkCount: 0

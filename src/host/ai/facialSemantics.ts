@@ -529,7 +529,7 @@ function classifyMotionByName(motionName: string): MotionInspection {
   if (
     /^(?:front|left|right)clear$/.test(stem) ||
     lower.startsWith('still_') ||
-    lower.startsWith('s-')
+    (lower.startsWith('s-') && !lower.startsWith('s-common-'))
   ) {
     return { role: 'special', label: '特殊演出姿势', style, fromMotion3: false }
   }
@@ -1484,6 +1484,29 @@ function dramaticMoodToTargetMood(mood: DramaticContextMood | TargetMood): Targe
   }
 }
 
+/** 同语义角色下优先选用与当前模型分团变体匹配的专属表情（如 26kaito_night 优先 face_night_*）。 */
+function preferredFacialPrefixForModel(modelPath?: string): string {
+  const lower = (modelPath ?? '').toLowerCase()
+  if (!lower) return ''
+  if (/(?:_night\b|nightcord|25ji)/.test(lower)) return 'face_night_'
+  if (/(?:_band\b|leoneed)/.test(lower)) return 'face_band_'
+  if (/(?:_idol\b|moremore)/.test(lower)) return 'face_idol_'
+  if (/(?:_street\b|vividbad)/.test(lower)) return 'face_street_'
+  if (/(?:_wonder\b|wonderland)/.test(lower)) return 'face_wonder_'
+  return ''
+}
+
+function sortFacialsByVariantPreference(facials: string[], modelPath?: string): string[] {
+  const prefix = preferredFacialPrefixForModel(modelPath)
+  if (!prefix) return facials
+  const hasPreferred = facials.some((f) => f.toLowerCase().startsWith(prefix))
+  if (!hasPreferred) return facials
+  return facials
+    .map((f, idx) => ({ f, idx, rank: f.toLowerCase().startsWith(prefix) ? 0 : 1 }))
+    .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+    .map((entry) => entry.f)
+}
+
 /** 根据目标情绪从角色实际拥有的表情集合中选择最贴切的表情。 */
 export function pickMoodMatchedFacial(
   facials: string[],
@@ -1492,6 +1515,7 @@ export function pickMoodMatchedFacial(
   restrainedRole?: boolean,
   modelsRoot?: string
 ): string {
+  const orderedFacials = sortFacialsByVariantPreference(facials, modelPath)
   const targetMood = dramaticMoodToTargetMood(mood)
   const roles =
     targetMood === 'neutral' && restrainedRole
@@ -1503,7 +1527,7 @@ export function pickMoodMatchedFacial(
           : FACIAL_ROLES_BY_MOOD[targetMood]
 
   for (const wantedRole of roles) {
-    const hit = facials.find((f) => {
+    const hit = orderedFacials.find((f) => {
       const info = inspectModelFacial(modelPath, f, modelsRoot)
       return !info.contextTag && info.role === wantedRole
     })
@@ -1516,7 +1540,7 @@ export function pickMoodMatchedFacial(
     targetMood === 'wry_smile' ||
     targetMood === 'gentle'
   ) {
-    const safeFallback = facials.find((f) => {
+    const safeFallback = orderedFacials.find((f) => {
       const info = inspectModelFacial(modelPath, f, modelsRoot)
       const role = info.role
       return (
@@ -1530,7 +1554,7 @@ export function pickMoodMatchedFacial(
     })
     if (safeFallback) return safeFallback
   }
-  return pickNeutralFacial(facials, undefined, modelPath, restrainedRole, modelsRoot)
+  return pickNeutralFacial(orderedFacials, undefined, modelPath, restrainedRole, modelsRoot)
 }
 
 export type ActorTenseState = 'angry' | 'sad' | 'cry' | 'serious' | 'trouble' | null
@@ -1723,8 +1747,8 @@ function sortMotionsByStyleConsistency(motions: string[], preferredStyle?: strin
   const pref = (preferredStyle ?? '').toLowerCase()
   const rankOf = (m: string): number => {
     const style = parseMotionStem(m).style
-    if (pref && pref.startsWith('normal') && style === pref) return 0
-    if (style.startsWith('normal')) return 1
+    if (pref && (pref.startsWith('normal') || pref === 'common') && style === pref) return 0
+    if (style.startsWith('normal') || style === 'common') return 1
     if (pref && style === pref) return 2
     if (!style) return 3
     return 4
@@ -1926,7 +1950,10 @@ export function recommendActingForLine(params: {
         modelsRoot: params.modelsRoot
       }).ok
   )
-  const facialPool = compatibleFacials.length > 0 ? compatibleFacials : params.facials
+  const facialPool = sortFacialsByVariantPreference(
+    compatibleFacials.length > 0 ? compatibleFacials : params.facials,
+    params.modelPath
+  )
   const rankedFacials: string[] = []
   for (const role of wantedFacialRoles) {
     for (const f of facialPool) {

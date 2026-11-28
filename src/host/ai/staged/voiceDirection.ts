@@ -367,6 +367,35 @@ const isEmotionPivotCue = (text: string, emotion: string): boolean => {
   return false
 }
 
+const HUSHED_WARNING_COMMAND_RE =
+  /(?:^|[，。…\s「『（])(?:停|别动|闭嘴|住口|嘘|别出声|别说话|小声点)(?:[。！!…，,\s」』）]|$)/
+const COLD_SCOFF_TEXT_RE = /^(?:[（(]?[…\s]*)(?:呵|哼|啧)[…，。,.\s]/
+const SAD_OR_CRY_GUARD_RE =
+  /(?:哭|泪|泣|呜|痛|对不起|抱歉|对不住|难过|伤心|寂寞|孤独|害怕|绝望|窒息|弄丢|失去|后悔|没能|不要走|别走|求你|ごめん|ダメ)/
+
+function sanitizeMismatchedEmotion(content: string, emotion: string, allowed: string[]): string {
+  const clean = content.trim()
+  const calm = allowed.includes('平静') ? '平静' : (allowed[0] ?? '')
+  if (
+    emotion === '开心' &&
+    HUSHED_WARNING_COMMAND_RE.test(clean) &&
+    !/哈哈|嘿嘿|嘻嘻|太好了|好耶|♪/.test(clean)
+  ) {
+    return /[！!]{2}/.test(clean) && allowed.includes('生气') ? '生气' : calm
+  }
+  if (emotion === '伤心' && isGenuineCalmResolution(clean) && !SAD_OR_CRY_GUARD_RE.test(clean)) {
+    return calm
+  }
+  if (
+    emotion === '惊讶' &&
+    COLD_SCOFF_TEXT_RE.test(clean) &&
+    !/[？?]|怎么会|什么|居然|竟然/.test(clean)
+  ) {
+    return calm
+  }
+  return emotion
+}
+
 export function stabilizeEmotions(
   dialogue: StagedDialogue,
   plan: Map<string, string> | null,
@@ -379,7 +408,7 @@ export function stabilizeEmotions(
 
   const rawValues = lines.map((line) => {
     const value = plan?.get(line.id)?.trim() ?? ''
-    return allowed.includes(value) ? value : ''
+    return allowed.includes(value) ? sanitizeMismatchedEmotion(line.content, value, allowed) : ''
   })
 
   // 1) 未知/缺失标签优先继承相邻句有效情绪，避免突然插入孤立的 fallback 断层
